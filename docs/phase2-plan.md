@@ -4166,8 +4166,11 @@ Expected: PASS（9 件）
 | `claim_for_merge` を `_merge` の後に呼ぶ | `test_a_changed_digest_is_refused_before_anything_runs`（work が作られる） |
 | 入力の実在確認を消す | `test_a_missing_input_stops_the_job_and_fails_the_group` |
 | `TS_PEAK_FACTOR` を 1 にする | `test_the_space_check_covers_the_ts_peak` |
-| `probed_parts` を先頭パートの複製にする | **落ちない**。統合テストのクリップは全パートが同じ並びだから。**並びの違う入力での確認は Task 6 の `test_each_part_is_mapped_by_its_own_indexes` が受け持つ**（検出できない変異として記録する） |
-| `outcome.dropped_by_route` を `verify` へ渡さない | **落ちない**。統合テストは concat 経路しか通らない（`dropped_by_route` は空）。Task 6 の `test_the_ts_route_drops_what_mpegts_cannot_carry_and_records_it` が受け持つ |
+| `probed_parts` を先頭パートの複製にする | 計画では「落ちない」としていたが、**並びの違うクリップを使う統合テストを 1 つ足せば検出できる**（`test_parts_with_a_different_stream_order_go_through_the_ts_route`）。複製にすると preflight が並びの違いに気づかず concat 経路を通ってしまうので、`route == "ts"` で捕まる |
+| `outcome.dropped_by_route` を `verify` へ渡さない | 同じテストで検出できる。上のクリップに `-timecode` を付けておくと、TS 経路が外した `tmcd` が `verification_json.route_dropped_streams` に載るので、渡していないと空になる |
+| 公開の直前のキャンセル再確認を消す | `test_a_cancel_between_the_verification_and_the_publish_is_observed`（**追加**）。`record_verification` の後にジョブを `cancelling` にする。消すと公開の走査中に気づくので、例外が `MergeCancelled` ではなく `PublishCancelled` になる |
+| `_captured_of(members[0])` を `members[-1]` にする | `test_the_derived_file_keeps_the_first_part_capture_time`（**追加**） |
+| 入力の `missing_at` の確認だけ消す | `test_a_member_marked_missing_stops_the_job`（**追加**）。実体が残っていても、欠損として記録されていれば信用しない |
 | `record_verification` を公開の後に移す | `test_the_verification_is_recorded_before_the_publish` |
 | `except PublishInterrupted` を消して `mark_failed` に落とす | 同上（`status` が `failed` になる） |
 | `except MergeCancelled` の `release` を消す | `test_a_cancelled_merge_releases_the_group` |
