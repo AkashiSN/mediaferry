@@ -5690,18 +5690,31 @@ def a_video(tmp_path):
         pytest.skip("ffmpeg が無い")
     path = tmp_path / "clip.mp4"
     subprocess.run(  # noqa: S603
-        ["ffmpeg", "-nostdin", "-f", "lavfi", "-i", "testsrc=duration=2:size=64x64:rate=10",  # noqa: S607
-         "-c:v", "libx264", "-pix_fmt", "yuv420p", "-y", str(path)],
+        [  # noqa: S607
+            "ffmpeg",
+            "-nostdin",
+            "-f",
+            "lavfi",
+            "-i",
+            "testsrc=duration=2:size=64x64:rate=10",
+            "-c:v",
+            "libx264",
+            "-pix_fmt",
+            "yuv420p",
+            "-y",
+            str(path),
+        ],
         check=True,
         capture_output=True,
     )
     return path
 
 
-def test_photos_are_not_probed(tmp_path):
+@pytest.mark.parametrize("extension", ["JPG", "jpg", "Jpg"])
+def test_photos_are_not_probed(tmp_path, extension):
     path = tmp_path / "a.JPG"
     path.write_bytes(b"not really a jpeg")
-    got = MediaProbe(ffprobe_path="/nonexistent").describe(path, "JPG")
+    got = MediaProbe(ffprobe_path="/nonexistent").describe(path, extension)
     assert got.kind == "photo"
     assert got.probe_state == "not_applicable"
     assert got.duration_seconds is None
@@ -5737,8 +5750,10 @@ def test_the_command_is_an_argument_array(monkeypatch, tmp_path):
 
     def fake_run(args, **kwargs):
         seen["args"] = args
-        return subprocess.CompletedProcess(args, 0, json.dumps({"format": {"duration": "1.0"},
-                                                                "streams": []}), "")
+        seen["kwargs"] = kwargs
+        return subprocess.CompletedProcess(
+            args, 0, json.dumps({"format": {"duration": "1.0"}, "streams": []}), ""
+        )
 
     monkeypatch.setattr(subprocess, "run", fake_run)
     path = tmp_path / "a.MP4"
@@ -5746,6 +5761,32 @@ def test_the_command_is_an_argument_array(monkeypatch, tmp_path):
     MediaProbe().describe(path, "MP4")
     assert isinstance(seen["args"], list)
     assert str(path) in seen["args"]
+    # 終了ステータスを見る。壊れた入力でも JSON らしきものを出しうるので、
+    # パースが通ったことを成功の判定に使わない。
+    assert seen["kwargs"]["check"] is True
+    # 16GiB のファイルで ffprobe が固まったままワーカーを止めない。
+    assert seen["kwargs"]["timeout"] > 0
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        subprocess.CalledProcessError(1, ["ffprobe"]),
+        subprocess.TimeoutExpired(["ffprobe"], 60),
+    ],
+)
+def test_subprocess_failures_are_reported_as_failed(monkeypatch, tmp_path, error):
+    """非ゼロ終了もタイムアウトも failed にする。ワーカーごと落とさない."""
+
+    def fake_run(args, **kwargs):
+        raise error
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    path = tmp_path / "a.MP4"
+    path.write_bytes(b"\x00")
+    got = MediaProbe().describe(path, "MP4")
+    assert got.probe_state == "failed"
+    assert got.duration_seconds is None
 ```
 
 - [ ] **Step 2: 失敗を確認する**
@@ -5802,8 +5843,10 @@ class MediaProbe:
             completed = subprocess.run(  # noqa: S603
                 [
                     self._ffprobe,
-                    "-v", "error",
-                    "-print_format", "json",
+                    "-v",
+                    "error",
+                    "-print_format",
+                    "json",
                     "-show_format",
                     "-show_streams",
                     str(path),
@@ -5831,7 +5874,16 @@ class MediaProbe:
 Run: `uv run pytest app/tests/test_adapter_ffprobe.py -v`
 Expected: すべて PASS（ffmpeg が無い環境では 1 件 skip）
 
-- [ ] **Step 5: コミット**
+- [ ] **Step 5: 変異試験**
+
+`check=True` を `check=False` に、`timeout` を外して
+`test_the_command_is_an_argument_array` が落ちること、`except` から
+`subprocess.SubprocessError` を外して
+`test_subprocess_failures_are_reported_as_failed` が落ちることを確認してから
+戻す。**壊れた動画は JSON のパースで先に落ちるので、それだけでは
+`check=True` の有無を検出できない。**
+
+- [ ] **Step 6: コミット**
 
 ```bash
 git add app/src/mediaferry/adapters/ffprobe.py app/tests/test_adapter_ffprobe.py
