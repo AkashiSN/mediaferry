@@ -4604,7 +4604,7 @@ async def test_a_job_claimed_while_stopping_is_cancelled(db, database, monkeypat
     async with anyio.create_task_group() as tg:
         tg.start_soon(runner.run_forever)
         with anyio.fail_after(5):
-            await anyio.to_thread.run_sync(lambda: claimed.wait(5))
+            assert await anyio.to_thread.run_sync(lambda: claimed.wait(5))
         await runner.stop()  # _current はまだ None
         release.set()
         with anyio.fail_after(5):
@@ -8035,16 +8035,28 @@ def test_the_volume_is_closed_after_probing(db, broker):
 
 
 def test_open_and_release_manage_the_dirfd(db, broker):
-    """release は参照を返すだけ. 次のジョブが同じ handle を使えるよう残す."""
+    """release でその場で閉じる. 次のジョブのために取っておかない."""
+    import os
+
     svc = service(db, broker)
     view = svc.refresh()[0]
     handle = svc.open(view.selection)
     assert svc.opened() == [view.volume_instance_id]
-    assert "DCIM" in __import__("os").listdir(handle.dirfd)
+    assert "DCIM" in os.listdir(handle.dirfd)
     svc.release(view.selection)
-    assert svc.opened() == [view.volume_instance_id]
-    svc.close(view.volume_instance_id)
     assert svc.opened() == []
+    with pytest.raises(OSError):
+        os.listdir(handle.dirfd)
+
+
+def test_opening_the_same_volume_twice_is_refused(db, broker):
+    """observation は媒体の同一性を保証しないので、黙って共有しない."""
+    svc = service(db, broker)
+    selection = svc.refresh()[0].selection
+    svc.open(selection)
+    with pytest.raises(VolumeBusy):
+        svc.open(selection)
+    svc.release(selection)
 
 
 def test_a_selection_from_an_older_generation_is_refused(db, broker):
@@ -8149,17 +8161,12 @@ def test_reinserting_into_another_port_does_not_pin_confidence_low(db, broker, m
     assert svc.refresh()[0].identity_confidence == "high"
 
 
-def test_an_unused_handle_is_retired_when_the_observation_changes(db, broker, monkeypatch):
+def test_no_handle_survives_a_finished_job(db, broker):
+    """使い終わった handle が残っていると、次のジョブがそれを掴む."""
     svc = service(db, broker)
     selection = svc.refresh()[0].selection
     svc.open(selection)
     svc.release(selection)
-    original = broker.list_volumes
-    monkeypatch.setattr(
-        broker,
-        "list_volumes",
-        lambda: [type(v)(**{**v.__dict__, "generation": v.generation + 1}) for v in original()],
-    )
     svc.refresh()
     assert svc.opened() == []
 
@@ -8225,6 +8232,18 @@ def test_a_swapped_card_is_judged_on_its_own_contents(
     view = svc.refresh()[0]
     assert view.profile_slug != "dji-osmo"
     assert view.identity_confidence == "low"
+
+    # 判定だけでなく、次に開く dirfd も新しいカードでなければならない。
+    # 画面には新カードが見えるのに取り込むのは旧カード、が最悪の食い違い。
+    os = __import__("os")
+    current = svc.open(view.selection)
+    dcim = os.open("DCIM", os.O_RDONLY | os.O_DIRECTORY, dir_fd=current.dirfd)
+    try:
+        assert "100CANON" in os.listdir(dcim)
+        assert "DJI_001" not in os.listdir(dcim)
+    finally:
+        os.close(dcim)
+        svc.release(view.selection)
 
 
 def test_a_card_without_a_uuid_keeps_its_selection_across_refreshes(db, broker, monkeypatch):
@@ -8535,8 +8554,8 @@ class VolumeService:
         self._conn = conn
         self._registry = registry
         self._client = client
-        # volume_instance_id -> (handle, selection, 参照カウント)
-        self._open: dict[str, _OpenVolume] = {}
+        # 実行中のジョブが掴んでいる handle。ジョブが終われば閉じる。
+        self._open: dict[str, VolumeHandle] = {}
         self._lock = threading.RLock()
 
     def refresh(self) -> list[VolumeView]:
@@ -8563,9 +8582,8 @@ class VolumeService:
                 seen_presence.append(presence_id)
                 observed.append((volume, volume_id, presence_id))
 
-            # pass 2: 消えた接続を detach し、使われていない古い handle を捨てる
+            # pass 2: 消えた接続を detach する
             detach_absent(self._conn, seen_presence)
-            self._retire_stale_handles({VolumeObservation.of(v) for v, _, _ in observed})
 
             # pass 3: 確定した live 集合を使って判定する
             definitions = [ref.definition for ref in self._registry.active()]
@@ -8573,22 +8591,6 @@ class VolumeService:
                 self._probe(volume, volume_id, presence_id, definitions)
                 for volume, volume_id, presence_id in observed
             ]
-
-    def _retire_stale_handles(self, live: set[VolumeObservation]) -> None:
-        """使われていない handle のうち、観測が変わったものを閉じる.
-
-        ジョブ用の handle は「選択した時点のカードを読み続ける」ためのもので、
-        観測が変わっても参照中なら触らない。参照が無くなったものだけ、次の
-        ジョブが古い detached mount を掴まないように閉じる。
-
-        **判定はこのキャッシュを使わない**（`_probe` を参照）。ここで残る
-        handle は、その selection が指した当時のカードを読む用途に限る。
-        """
-        for volume_instance_id, held in list(self._open.items()):
-            if held.refs == 0 and held.observation not in live:
-                del self._open[volume_instance_id]
-                with contextlib.suppress(Exception):
-                    self._client.close_volume(held.handle)
 
     def _probe(self, volume, volume_id, presence_id, definitions) -> VolumeView:  # noqa: ANN001
         remembered = self._conn.execute(
@@ -8731,25 +8733,21 @@ class VolumeService:
         `volume_instance_id` だけで開き直すと、抜き差しで別のカードが同じ
         ノードに来ていても、その現在値から正しい expect を作ってしまい、
         ブローカーの検証をすり抜ける。
+
+        **開いた handle をジョブ間でキャッシュしない。** `VolumeObservation` は
+        物理媒体の同一性を保証しないので（`_probe` のコメント参照）、次の
+        ジョブへ使い回すと「判定は新しいカード、読むのは古いカードの
+        detached clone」という食い違いが起きる。単一ワーカーなので開き直す
+        コストも実質かからない。
         """
         with self._lock:
-            held = self._open.get(selection.volume_instance_id)
-            if held is not None:
-                if held.observation == selection.observation:
-                    held.refs += 1
-                    return held.handle
-                if held.refs > 0:
-                    raise StaleSelection("同じボリュームを別の世代で使っているジョブがある")
-                # 参照が無い古い handle は捨てて開き直す
-                del self._open[selection.volume_instance_id]
-                with contextlib.suppress(Exception):
-                    self._client.close_volume(held.handle)
-
+            if selection.volume_instance_id in self._open:
+                # 単一ワーカーなのでここへは来ない。来たら契約違反なので、
+                # 同じ媒体である保証が無いまま共有せずに知らせる。
+                raise VolumeBusy("このボリュームは既に開かれている")
             volume = self._match_selection(selection)
             handle = self._client.open_volume(volume)
-            self._open[selection.volume_instance_id] = _OpenVolume(
-                handle=handle, observation=selection.observation, refs=1
-            )
+            self._open[selection.volume_instance_id] = handle
             return handle
 
     def _match_selection(self, selection: VolumeSelection):  # noqa: ANN202
@@ -8764,28 +8762,32 @@ class VolumeService:
         raise StaleSelection("選択した時点のボリュームが見つからない（抜き差しされた）")
 
     def release(self, selection: VolumeSelection) -> None:
-        """ジョブが自分の参照を返す. 参照が 0 になっても閉じない."""
+        """ジョブが使い終わった handle を閉じる.
+
+        次のジョブのために取っておかない。取っておくと、同じ observation の
+        まま媒体が差し替わったときに古い dirfd を渡すことになる。
+        """
         with self._lock:
-            held = self._open.get(selection.volume_instance_id)
-            if held is not None and held.refs > 0:
-                held.refs -= 1
+            handle = self._open.pop(selection.volume_instance_id, None)
+            if handle is not None:
+                with contextlib.suppress(Exception):
+                    self._client.close_volume(handle)
 
     def close(self, volume_instance_id: str) -> None:
+        """画面からの取り外し操作. 実行中のジョブが掴んでいれば拒否する.
+
+        ジョブが終われば `release` で閉じているので、通常は何もすることが無い。
+        """
         with self._lock:
-            held = self._open.get(volume_instance_id)
-            if held is None:
-                return
-            if held.refs > 0:
+            if volume_instance_id in self._open:
                 raise VolumeBusy("実行中のジョブがこのボリュームを使っている")
-            del self._open[volume_instance_id]
-            self._client.close_volume(held.handle)
 
     def close_all(self) -> None:
         with self._lock:
-            for volume_instance_id, held in list(self._open.items()):
-                del self._open[volume_instance_id]
+            for volume_instance_id in list(self._open):
+                handle = self._open.pop(volume_instance_id)
                 with contextlib.suppress(Exception):
-                    self._client.close_volume(held.handle)
+                    self._client.close_volume(handle)
 
     def opened(self) -> list[str]:
         return sorted(self._open)
@@ -8798,11 +8800,6 @@ class VolumeService:
             )
 
 
-@dataclass
-class _OpenVolume:
-    handle: VolumeHandle
-    observation: VolumeObservation
-    refs: int
 ```
 
 `app/src/mediaferry/core/manifest.py`:
@@ -9906,6 +9903,18 @@ Task 7〜12・15・16・22 は互いに独立で、Task 1 の後ならいつで�
 | `release()` は `_open` から消さないので、`opened() == []` を期待するテストは落ちる | 期待を `[volume_instance_id]` にし、`close()` まで通す形に |
 | stale dirfd の回帰テストが、旧 fd と新 open が同じディレクトリを指すため修正を検出しない | `FakeMountManager.target` を差し替える fixture にし、既存 fd は旧カードを見続ける構成に。「generation 据え置きのまま差し替え」もこれで固定 |
 | 同一 identity 2 本のテストが、最初から 2 本返して 2 回目を見るため旧実装でも通る | 1 本で high を作ってから 2 本目が現れた**最初の refresh** を見る形に |
+
+### 5 巡目（blocker 1）で反映した指摘
+
+4 巡目の修正（判定は毎回開き直す）の論理的帰結を追い切れていなかった。
+
+| 指摘 | 反映先 |
+| --- | --- |
+| **判定は新カードを見るのに、その後の `open()` が同じ observation の古い handle を返す。** 差し替えでは generation も epoch も据え置きなので、`_retire_stale_handles` は古い handle を live と見なして残す。結果、**画面には新カードが見えるのに、取り込むのは取り外した旧カードの detached clone**になる | Task 23 で handle のジョブ間キャッシュを廃止。`release()` がその場で閉じ、`open()` は既に開いていれば `VolumeBusy`。`_retire_stale_handles` は不要になったので削除。差し替えテストの末尾に「次に開く dirfd も新カードである」ことの確認を追加 |
+
+`VolumeObservation` は**接続の同一性であって媒体の同一性ではない**。この区別を
+守れる場所（selection の照合）と守れない場所（開いた fd の使い回し）を分け、
+後者を作らないことで解決している。
 
 ### 退けた指摘
 
