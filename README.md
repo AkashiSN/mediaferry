@@ -23,11 +23,15 @@ mountd の名前空間（ホストから bind した `/dev` を含む）へ到�
 
 ```bash
 cd docker/mediaferry
-uv sync
+uv sync --all-packages   # ワークスペースメンバーを全て入れる
 uv run pytest
 uv run ruff check .
 uv run ruff format --check .
 ```
+
+`--all-packages` が要るのは、根の `mediaferry-workspace` がメンバーに
+依存していないため。素の `uv sync` ではメンバーが venv に入らず、
+テストが import に失敗する。
 
 root を要するテストは `-m needs_root`、実 Immich を要するテストは
 `-m needs_immich` が付いており、既定では実行されない。
