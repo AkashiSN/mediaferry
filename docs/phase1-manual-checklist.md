@@ -140,6 +140,19 @@ Linux の exfat ドライバは `OffsetFromUtc` の valid bit が立っていれ
 
 **結果はどちらであっても `phase0-findings.md` に 1 件として残す。**
 
+### 12. 埋め込みサムネイルの disposition を確かめる
+
+結合が「最初の映像ストリームのみ」を保持する判定は、`disposition.attached_pic`
+でサムネイルを見分けている（`core/merge/streams.py`）。
+
+```bash
+ffprobe -v error -print_format json -show_streams /path/to/DJI_....MP4
+```
+
+- `mjpeg` のストリームに `"attached_pic": 1` が立っている → 判定は正しい
+- 立っていない → `keep_streams.video` が `primary` の間は影響しないが、`all` を
+  使うプロファイルを足すときに `_is_thumbnail` の判定を増やす必要がある
+
 ## 関連
 
 - [`phase1-backup.md`](phase1-backup.md)（バックアップとリストア）

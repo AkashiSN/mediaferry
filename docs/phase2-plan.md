@@ -776,7 +776,7 @@ Expected: PASS（11 件）
 | `videos[:1]` を `videos` にする | `test_an_attached_thumbnail_is_not_counted_as_video` は落ちない（サムネイルは既に除外済み）。**`video="primary"` で本物の映像が 2 本あるケースを足す** |
 | `_is_thumbnail` を常に `False` にする | `test_an_attached_thumbnail_is_not_counted_as_video` |
 | `keep.timecode if is_timecode else keep.data` の 2 項を入れ替える | `test_the_timecode_track_is_dropped_independently_of_the_other_data_tracks` |
-| `sorted(..., key=index)` を外す | `test_the_result_keeps_the_original_stream_order` は落ちない（追加順が偶然一致する）。**data を先に足す実装に変異させて確認する**か、`test_the_dji_profile_keeps_video_audio_and_timecode` が index 順を見ているので落ちる |
+| `sorted(..., key=index)` を外す | `test_the_result_keeps_the_original_stream_order` も `test_the_dji_profile_keeps_video_audio_and_timecode` も**落ちない**。DJI の並びは video → audio → data なので、種別ごとに集めた順が index 順とたまたま一致する。**音声が映像より前にあるファイル**のテスト（`test_the_result_is_ordered_by_the_index_not_by_the_type`）を足して検出した |
 | `stream_signature` から `codec_tag_string` を落とす | `test_the_signature_covers_type_codec_and_tag` |
 
 映像 2 本のテストを足す:
@@ -5777,6 +5777,8 @@ uv run ruff format --check .
 - §7「持ち越している判断」に、Task 3 の `attached_pic` の確認を足す
 
 - [ ] **Step 6: `docs/phase1-manual-checklist.md` に 1 項目足す**
+
+**Task 3 の実装時に追記済み**（判定を書いた場所で足す方が取りこぼさない）。内容は次のとおり。
 
 ```markdown
 ### 12. 埋め込みサムネイルの disposition を確かめる
