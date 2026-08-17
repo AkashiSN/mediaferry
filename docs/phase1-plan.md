@@ -5393,12 +5393,16 @@ def test_dot_directories_and_apple_doubles_are_skipped(tree):
     assert found == {"DCIM/DJI_001/A.MP4"}
 
 
-def test_extension_matching_is_case_insensitive(tmp_path):
+@pytest.mark.parametrize("configured", ["MP4", "mp4", "Mp4"])
+def test_extension_matching_is_case_insensitive(tmp_path, configured):
+    """カード上の名前と、呼び出し側が渡す拡張子の両方で大小文字を問わない."""
     (tmp_path / "DCIM").mkdir()
     (tmp_path / "DCIM" / "a.mp4").write_bytes(b"x")
+    (tmp_path / "DCIM" / "B.MP4").write_bytes(b"x")
     fd = os.open(tmp_path, os.O_RDONLY | os.O_DIRECTORY)
     try:
-        assert [f.rel_path for f in iter_media_files(fd, ("DCIM",), ("MP4",))] == ["DCIM/a.mp4"]
+        found = {f.rel_path for f in iter_media_files(fd, ("DCIM",), (configured,))}
+        assert found == {"DCIM/a.mp4", "DCIM/B.MP4"}
     finally:
         os.close(fd)
 
@@ -5489,8 +5493,7 @@ from collections.abc import Iterable, Iterator
 from dataclasses import dataclass
 from pathlib import Path
 
-# require の確認で 1 ボリュームあたりに読むファイル名の上限を超えないよう、
-# 呼び出し側が limit を渡す。
+# macOS が書く AppleDouble の残骸。本体と同じ拡張子を持つので、名前で弾く。
 APPLE_DOUBLE_PREFIX = "._"
 
 
@@ -5552,11 +5555,9 @@ def _walk(dirfd: int, root: str, rel_prefix: str, wanted: set[str]) -> Iterator[
             rel = f"{rel_prefix}/{name}"
             if entry.is_dir(follow_symlinks=False):
                 yield from _walk(fd, name, rel, wanted)
-            elif entry.is_file(follow_symlinks=False):
-                if _extension(name) in wanted:
-                    stat = entry.stat(follow_symlinks=False)
-                    yield FoundFile(rel_path=rel, size_bytes=stat.st_size,
-                                    mtime_ns=stat.st_mtime_ns)
+            elif entry.is_file(follow_symlinks=False) and _extension(name) in wanted:
+                stat = entry.stat(follow_symlinks=False)
+                yield FoundFile(rel_path=rel, size_bytes=stat.st_size, mtime_ns=stat.st_mtime_ns)
     finally:
         os.close(fd)
 
@@ -5639,7 +5640,14 @@ def assert_same_filesystem(*paths: Path) -> None:
 Run: `uv run pytest app/tests/test_adapter_fs.py -v`
 Expected: すべて PASS
 
-- [ ] **Step 5: コミット**
+- [ ] **Step 5: 変異試験**
+
+`open_beneath` の `O_NOFOLLOW` を外して `test_symlinks_are_not_followed` が、
+`_walk` の `follow_symlinks=False` を `True` にして同じテストが、構成要素の
+検査を削って `test_open_beneath_refuses_to_escape` が落ちることを確認してから
+戻す。
+
+- [ ] **Step 6: コミット**
 
 ```bash
 git add app/src/mediaferry/adapters/fs.py app/tests/test_adapter_fs.py
