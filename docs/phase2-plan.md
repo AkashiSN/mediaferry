@@ -2202,6 +2202,27 @@ Expected: PASS（10 件）
 TS 経路が通らない場合は `work_dir/ts-*.log` を読む。`-bsf:v` の付け外しと
 `-map` の位置（入力の直後、`-c copy` の前）を先に疑う。
 
+**実装で 1 つ足りなかった: TS 片のストリームの並びを揃える（`_ts_layout`）。**
+`concat:` は mpegts の生バイトを継ぐので、パートごとに TS の中の並びが違うと
+後続のパートを読めない（`No start code is found` → `could not write header`）。
+上の計画のままだと `test_parts_with_a_different_stream_order_skip_the_concat_demuxer`
+が TS 経路でも落ちる（実際に落ちた）。map に使う index は**そのパート自身のもの**の
+ままにして、`-map` に並べる順だけを種別順（video → audio → その他）へ揃える。
+
+```python
+# TS 片の中でのストリームの並び。ここに無い種別は後ろへ回す。
+_TS_TYPE_ORDER = {"video": 0, "audio": 1}
+
+
+def _ts_layout(streams: Sequence[dict[str, Any]]) -> list[dict[str, Any]]:
+    """TS 片のストリームの並びを、パートによらず種別順に揃える."""
+    return sorted(
+        streams, key=lambda s: _TS_TYPE_ORDER.get(str(s.get("codec_type")), len(_TS_TYPE_ORDER))
+    )
+```
+
+呼び出しは `*map_arguments(_ts_layout(carried))`。
+
 - [ ] **Step 5: 変異試験**
 
 | 変異 | 落ちるべきテスト |
@@ -2209,17 +2230,18 @@ TS 経路が通らない場合は `work_dir/ts-*.log` を読む。`-bsf:v` の�
 | `maps` を `merge` に渡さない（ffmpeg の既定選択に任せる） | `test_the_declared_streams_decide_what_is_kept` |
 | TS 化の map を `selections[0]` から作る（先頭パートの index を使い回す） | `test_each_part_is_mapped_by_its_own_indexes` |
 | `_topology_matches` を常に `True` にする | `test_parts_with_a_different_stream_order_skip_the_concat_demuxer` |
-| `_topology_matches` から絶対 index の比較を落とし、signature だけ見る | 同上（signature は同じで index だけ違うので `concat.log` ができる） |
+| `_topology_matches` から絶対 index の比較を落とし、signature だけ見る | 同上を期待したが**素通りする**。並びが違うクリップは全ストリームの signature も違うので、1 つ目の判定で先に落ちて index の比較へ到達しない。ffprobe の出力では index が位置と一致するので、**この分岐は実クリップでは踏めない**。`_topology_matches` を直接呼ぶ単体テスト（`test_the_preflight_also_compares_the_absolute_indexes`）を足して固定した |
+| `_ts_layout` の並べ替えを外す | `test_parts_with_a_different_stream_order_skip_the_concat_demuxer`（**実装で追加した処理**。下記） |
 | `except MergeFailed` を握りつぶして concat の結果を返す | `test_the_ts_route_runs_when_the_concat_demuxer_fails` |
 | `UNSUPPORTED_BY_TS` を空にする | `test_the_ts_route_drops_what_mpegts_cannot_carry_and_records_it`（mpegts が tmcd を拒否して `MergeFailed`） |
 | `dropped` を返さず `()` にする | 同上（記録が空になる） |
 | `on_progress()` の起動直後の 1 回を消す | `test_the_lease_pulse_is_throttled_but_always_fires_once` |
 | pulse の throttle を外して poll のたびに打つ | 同上（`pulse_interval=1000` でも複数回打つ） |
 | `cancelled()` の確認を消す | `test_a_cancelled_merge_raises_and_leaves_no_output` |
-| `_video_bitstream` を常に `[]` にする | `test_the_ts_route_runs_when_the_concat_demuxer_fails`（H.264 が mpegts に入らず失敗する） |
-| `_audio_bitstream` を常に `[]` にする | 同上（AAC が MP4 へ戻せない） |
+| `_video_bitstream` を常に `[]` にする | **落ちない**。現行の ffmpeg（`N-125084-geb7f4b4e79`）は mpegts へ入れるときに `h264_mp4toannexb` を自動で挿入する。明示は古い ffmpeg のための保険。検出できない変異として記録する |
+| `_audio_bitstream` を常に `[]` にする | 同上。`aac_adtstoasc` も自動で挿入される。検出できない変異として記録する |
 | `_kill` の SIGKILL 段を消す | **落ちない**。SIGTERM で終わる ffmpeg しかテストで使えないため。検出できない変異として記録する（`-i` に名前付きパイプを渡して SIGTERM を無視させる試験は、環境依存が大きいので入れない） |
-| `start_new_session=True` を外す | **落ちない**。単一プロセスの ffmpeg しか起動しないため。子プロセスを持つ経路（TS 化を並列にする等）を足すときに効く保険。検出できない変異として記録する |
+| `start_new_session=True` を外す | **この変異は当ててはいけない。** 外すと子が**テストランナー自身のプロセスグループ**に入り、キャンセルのテストで `os.killpg` が pytest ごと撃つ（実際に走らせて、変異ドライバとシェルが死んだ）。保護が効いていることの裏返しだが、自動では確かめられない。検出できない変異として記録する |
 
 - [ ] **Step 6: コミット**
 
