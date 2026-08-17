@@ -76,7 +76,6 @@ def test_permissions_are_repaired_on_every_connect(tmp_path):
     assert stat.S_IMODE(path.parent.stat().st_mode) == 0o700
 
 
-@pytest.mark.xfail(reason="Task 2 で最初の migration が入る", strict=True)
 def test_apply_migrations_is_idempotent(tmp_path):
     conn = Database(tmp_path / "db.sqlite3").connect()
     first = apply_migrations(conn)

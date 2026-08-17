@@ -17,7 +17,8 @@
 - **作業ディレクトリは `docker/mediaferry/`。** コマンドはすべてここから実行する。
 - Python は `>=3.12`。ruff の `line-length = 100`、`target-version = "py312"`、
   lint は `select = ["E", "F", "I", "UP", "B", "SIM", "ANN", "S"]`（`ANN401` のみ ignore）。
-  `**/tests/*` は `S101` と `ANN` が免除される。
+  `**/tests/*` は `S101` / `S105`〜`S107` / `ANN` が免除される
+  （リーストークンや API キーは固定値でなければテストで検証できない）。
   **`docs/` は ruff の対象外**（`extend-exclude = ["docs"]`）。ruff は Markdown の
   コードブロックも整形するので、除外しないと仕様書と実装計画そのものが書き換わる。
   この計画に載っている Python はすべて ruff を通した形で書いてある。
@@ -705,12 +706,33 @@ def test_job_event_id_is_monotonic_across_jobs(db):
     first, second = a_job(db), a_job(db)
     for job_id in (first, second):
         db.execute(
-            "INSERT INTO job_event (job_id, seq, level, message, at)"
-            " VALUES (?, 1, 'info', 'x', ?)",
+            "INSERT INTO job_event (job_id, seq, level, message, at) VALUES (?, 1, 'info', 'x', ?)",
             (job_id, now_iso()),
         )
     ids = [r[0] for r in db.execute("SELECT id FROM job_event ORDER BY id")]
     assert ids == sorted(ids) and len(set(ids)) == 2
+
+
+def test_job_event_ids_are_not_reused_after_a_job_is_deleted(db):
+    """AUTOINCREMENT が無いと rowid が再利用され、SSE が既読の id を再発行する.
+
+    Last-Event-ID より小さい id は配信済みとして飛ばされるので、再利用された
+    イベントはクライアントに永久に届かない。
+    """
+    first = a_job(db)
+    db.execute(
+        "INSERT INTO job_event (job_id, seq, level, message, at) VALUES (?, 1, 'info', 'x', ?)",
+        (first, now_iso()),
+    )
+    used = db.execute("SELECT max(id) FROM job_event").fetchone()[0]
+    db.execute("DELETE FROM job WHERE id = ?", (first,))
+
+    second = a_job(db)
+    db.execute(
+        "INSERT INTO job_event (job_id, seq, level, message, at) VALUES (?, 1, 'info', 'y', ?)",
+        (second, now_iso()),
+    )
+    assert db.execute("SELECT max(id) FROM job_event").fetchone()[0] > used
 
 
 def test_job_events_go_away_with_the_job(db):
