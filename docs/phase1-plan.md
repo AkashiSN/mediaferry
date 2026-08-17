@@ -1675,8 +1675,10 @@ def an_upload(db, dest, media_id, **over):
 def test_destination_revision_is_immutable(db):
     _, rev_id, _ = a_destination(db)
     with pytest.raises(sqlite3.IntegrityError, match="immutable"):
-        db.execute("UPDATE destination_revision SET base_url = 'http://x.invalid' WHERE id = ?",
-                   (rev_id,))
+        db.execute(
+            "UPDATE destination_revision SET base_url = 'http://x.invalid' WHERE id = ?",
+            (rev_id,),
+        )
     with pytest.raises(sqlite3.IntegrityError, match="immutable"):
         db.execute("DELETE FROM destination_revision WHERE id = ?", (rev_id,))
 
@@ -1698,8 +1700,10 @@ def test_current_revision_must_belong_to_the_destination(db):
     first = a_destination(db, name="a")
     _, other_rev, _ = a_destination(db, name="b")
     with pytest.raises(sqlite3.IntegrityError):
-        db.execute("UPDATE upload_destination SET current_revision_id = ? WHERE id = ?",
-                   (other_rev, first[0]))
+        db.execute(
+            "UPDATE upload_destination SET current_revision_id = ? WHERE id = ?",
+            (other_rev, first[0]),
+        )
 
 
 def test_upload_record_revision_must_match_destination_and_epoch(db):
@@ -1791,8 +1795,9 @@ def test_a_complete_record_remembers_which_revision_it_used(db):
     dest = a_destination(db)
     with pytest.raises(sqlite3.IntegrityError):
         an_upload(db, dest, a_media_file(db, profile), state="complete")
-    an_upload(db, dest, a_media_file(db, profile), state="complete",
-              destination_revision_id=dest[1])
+    an_upload(
+        db, dest, a_media_file(db, profile), state="complete", destination_revision_id=dest[1]
+    )
 
 
 def test_claim_columns_are_all_null_or_all_set(db):
@@ -1801,8 +1806,14 @@ def test_claim_columns_are_all_null_or_all_set(db):
     dest = a_destination(db)
     job_id = a_job(db, type="upload")
     with pytest.raises(sqlite3.IntegrityError):
-        an_upload(db, dest, a_media_file(db, profile), state="checking",
-                  destination_revision_id=dest[1], claim_job_id=job_id)
+        an_upload(
+            db,
+            dest,
+            a_media_file(db, profile),
+            state="checking",
+            destination_revision_id=dest[1],
+            claim_job_id=job_id,
+        )
     an_upload(
         db,
         dest,
@@ -1821,8 +1832,10 @@ def test_selection_rule_cannot_be_rewritten(db):
     dest = a_destination(db)
     record_id = an_upload(db, dest, a_media_file(db, profile))
     with pytest.raises(sqlite3.IntegrityError, match="immutable"):
-        db.execute("UPDATE upload_record SET selection_rule = 'adopted_derived' WHERE id = ?",
-                   (record_id,))
+        db.execute(
+            "UPDATE upload_record SET selection_rule = 'adopted_derived' WHERE id = ?",
+            (record_id,),
+        )
     # 状態を進めること自体は妨げない
     db.execute("UPDATE upload_record SET state = 'needs_recheck' WHERE id = ?", (record_id,))
 
@@ -1851,8 +1864,9 @@ def test_states_and_origins_are_constrained(db):
 def test_purged_credentials_keep_only_the_fingerprint(db):
     _, _, cred_id = a_destination(db)
     with pytest.raises(sqlite3.IntegrityError):
-        db.execute("UPDATE destination_credential SET purged_at = ? WHERE id = ?",
-                   (now_iso(), cred_id))
+        db.execute(
+            "UPDATE destination_credential SET purged_at = ? WHERE id = ?", (now_iso(), cred_id)
+        )
     db.execute(
         "UPDATE destination_credential SET secret_encrypted = NULL, purged_at = ? WHERE id = ?",
         (now_iso(), cred_id),
