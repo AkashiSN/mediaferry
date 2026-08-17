@@ -6892,6 +6892,52 @@ def test_an_old_fingerprint_version_is_recomputed(scanning, db):
     assert row["quick_fingerprint"] != "stale"
 
 
+def test_an_old_version_is_recomputed_even_when_the_fingerprint_matches(scanning, db):
+    """版を上げる意味は「前の版の判定を信用しない」こと.
+
+    指紋の文字列が一致しているかどうかで版の検査を代用すると、算出方法を
+    変えた版でたまたま一致した行を取り込み済みのまま据え置いてしまう。
+    """
+    scanner, ctx, fd, volume_id, profile, _ = scanning
+    scanner.scan(ctx, fd, volume_id, profile)
+    db.execute("UPDATE source_entry SET state = 'published', fingerprint_version = 0")
+
+    outcome = scanner.scan(ctx, fd, volume_id, profile)
+    assert outcome.new == 1
+    assert outcome.already_imported == 0
+    row = db.execute("SELECT * FROM source_entry").fetchone()
+    assert row["fingerprint_version"] == 1
+    assert row["state"] == "seen"
+
+
+def test_an_entry_that_was_never_imported_is_still_new(scanning, db):
+    """スキャンしただけの行を「取り込み済み」と報告すると、永久に取り込まれない."""
+    scanner, ctx, fd, volume_id, profile, _ = scanning
+    first = scanner.scan(ctx, fd, volume_id, profile)
+    assert first.new == 1
+
+    second = scanner.scan(ctx, fd, volume_id, profile)
+    assert second.already_imported == 0
+    assert second.new == 1
+    assert db.execute("SELECT state FROM source_entry").fetchone()["state"] == "seen"
+
+
+def test_the_lease_is_kept_alive_while_scanning(scanning, db):
+    """16GiB のカードは 1 スキャンがリース (60 秒) より長くなりうる.
+
+    heartbeat を打たないと、途中で失効して reap され、走り続けているのに
+    interrupted として表示される。
+    """
+    scanner, ctx, fd, volume_id, profile, card = scanning
+    (card / "DCIM" / "DJI_001" / "DJI_20260817143001_0002_D.MP4").write_bytes(b"c" * 10)
+    beats = []
+    real_heartbeat = ctx.heartbeat
+    ctx.heartbeat = lambda: (beats.append(1), real_heartbeat())[1]
+
+    outcome = scanner.scan(ctx, fd, volume_id, profile)
+    assert len(beats) == outcome.total == 2
+
+
 def test_cancelling_stops_the_scan(scanning, db):
     scanner, ctx, fd, volume_id, profile, _ = scanning
     JobStore(db).request_cancel(ctx.job_id)
@@ -6985,8 +7031,16 @@ class Scanner:
                 "INSERT INTO source_entry (id, volume_instance_id, rel_path, size_bytes, mtime_ns,"
                 " quick_fingerprint, fingerprint_version, state, observed_at)"
                 " VALUES (?, ?, ?, ?, ?, ?, ?, 'seen', ?)",
-                (new_id(), volume_instance_id, found.rel_path, found.size_bytes, found.mtime_ns,
-                 fingerprint, FINGERPRINT_VERSION, now_iso()),
+                (
+                    new_id(),
+                    volume_instance_id,
+                    found.rel_path,
+                    found.size_bytes,
+                    found.mtime_ns,
+                    fingerprint,
+                    FINGERPRINT_VERSION,
+                    now_iso(),
+                ),
             )
             return "new"
 
@@ -7007,8 +7061,14 @@ class Scanner:
             "UPDATE source_entry SET size_bytes = ?, mtime_ns = ?, quick_fingerprint = ?,"
             " fingerprint_version = ?, state = 'seen', media_file_id = NULL, observed_at = ?"
             " WHERE id = ?",
-            (found.size_bytes, found.mtime_ns, fingerprint, FINGERPRINT_VERSION, now_iso(),
-             row["id"]),
+            (
+                found.size_bytes,
+                found.mtime_ns,
+                fingerprint,
+                FINGERPRINT_VERSION,
+                now_iso(),
+                row["id"],
+            ),
         )
         return "new"
 
@@ -7022,14 +7082,25 @@ class Scanner:
 `same` が偽になり、下の UPDATE で再計算された指紋に更新される。
 `state` が `published` のまま維持されないのは、指紋の版が変わると
 「同じファイルか」を主張できないため。テスト
-`test_an_old_fingerprint_version_is_recomputed` はこの挙動を固定している。
+`test_an_old_version_is_recomputed_even_when_the_fingerprint_matches` が
+この挙動を固定している（指紋の文字列も壊すテストでは、版の検査を通らない）。
+
+**注**: `same` の `row["size_bytes"] == found.size_bytes` は変異させても
+検出できない。`quick_fingerprint` が size を digest に含むので、サイズが
+違えば指紋も必ず違う。冗長だが、指紋の定義を変えたときの保険として残す。
 
 - [ ] **Step 4: テストが通ることを確認する**
 
 Run: `uv run pytest app/tests/test_scanner.py -v`
 Expected: すべて PASS
 
-- [ ] **Step 5: コミット**
+- [ ] **Step 5: 変異試験**
+
+`same` から `fingerprint_version` の比較を、取り込み済み判定から
+`row["state"] == "published"` を、ループから `ctx.heartbeat()` をそれぞれ削り、
+対応するテストが落ちることを確認してから戻す。
+
+- [ ] **Step 6: コミット**
 
 ```bash
 git add app/src/mediaferry/jobs/scan.py app/tests/test_scanner.py
