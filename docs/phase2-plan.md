@@ -3648,13 +3648,15 @@ Expected: PASS（9 件）
 
 | 変異 | 落ちるべきテスト |
 | --- | --- |
-| `taken` の行で `runs.append([])` せず `continue` だけにする | `test_a_file_already_in_a_group_is_a_boundary` |
-| `role = 'original'` の条件を消す | `test_photos_and_derived_files_are_not_parts` |
-| `kind = 'video'` の条件を消す | 同上 |
+| `taken` の行で `runs.append([])` せず `continue` だけにする | `test_a_file_already_in_a_group_is_a_boundary` では**落ちない**（取り除いた後に残るのが 1 件だけなので、どちらでもグループにならない）。**取り除くと前後がつながる並び**のテスト（`test_a_taken_file_between_two_free_ones_does_not_join_them`）を足した |
+| `role = 'original'` の条件を消す | `test_photos_and_derived_files_are_not_parts` では**落ちない**（残るのが 1 件だけ）。`derived` が 2 件続くテスト（`test_derived_files_are_never_parts`）を足した |
+| `kind = 'video'` の条件を消す | 同上で**落ちない**。写真は `duration` を持たないので、候補に入ると**境界**として働き、その前後の分割録画が検出されなくなる。写真を挟むテスト（`test_a_photo_between_two_parts_does_not_break_the_group`）を足した |
+| `input_digest` に `profile.revision_id` を渡さない | `test_the_stored_digest_covers_the_profile_revision`（**追加**）。保存された digest をテスト側で組み直して突き合わせる |
+| `_runs` の `len(run) >= 2` の絞り込みを外す | **落ちない**。`detect_groups` が 2 件未満の列から候補を作らないので、挙動が変わらない。構造的に検出できない冗長な絞り込みとして記録する |
 | `missing_at IS NULL` の条件を消す | `test_a_missing_file_is_not_a_part` |
 | `ORDER BY m.captured_at` を `ORDER BY m.rel_path` だけにする | **落ちない**。rel_path の順と時刻の順が一致するデータしか使っていない。**順序が食い違うテストを足す**（下記） |
 | `merged_rel_path` の事前確認を消す | `test_a_candidate_without_a_readable_sequence_is_reported_not_stored` |
-| `rule.enabled` の確認を消す | `test_a_disabled_profile_detects_nothing` |
+| `rule.enabled` の確認を消す | `test_a_disabled_profile_detects_nothing` では**落ちない**（`detect_groups` 側も `enabled` を見るので二重に守られている）。この確認の値は「理由を画面へ出すこと」なので、job_event を見る `test_a_disabled_profile_says_why` を足した |
 | `preview` が `save_detected` を呼ぶようにする | `test_the_preview_does_not_store_anything` |
 | `preview` が `profile.definition.merge` を読み直す | `test_the_preview_uses_the_thresholds_it_is_given` |
 
@@ -3668,7 +3670,7 @@ def test_the_parts_are_ordered_by_the_capture_time_not_the_name(db, profile, ctx
     GroupDetector(db, MergeRepository(db)).run(ctx, profile)
     repo = MergeRepository(db)
     group = repo.list_groups()[0]
-    assert [row["rel_path"][-13:-6] for row in repo.members(group["id"])] == ["_0002_D", "_0001_D"]
+    assert [row["rel_path"].split("_")[-2] for row in repo.members(group["id"])] == ["0002", "0001"]
 ```
 
 - [ ] **Step 6: コミット**
