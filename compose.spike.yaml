@@ -1,0 +1,66 @@
+# Phase 0 の実測専用。本番構成は compose.yaml を参照。
+#
+# 本番と同じ権限条件で測る。app を root で動かすと SO_PEERCRED も
+# ソケットの GID も検証されず、本番でだけ接続できない事態になる。
+#
+# 使い方:
+#   docker compose -f compose.spike.yaml up --build -d mountd
+#   docker compose -f compose.spike.yaml run --rm app            # 通るべき
+#   docker compose -f compose.spike.yaml run --rm app-wrong-uid  # 弾かれるべき
+name: mediaferry-spike
+
+x-app-uid: &app-uid "10001"
+x-app-gid: &app-gid "10001"
+
+services:
+  mountd:
+    build:
+      context: .
+      dockerfile: mountd/Dockerfile
+    privileged: true
+    volumes:
+      - /dev:/dev
+      - /lib/modules:/lib/modules:ro
+      - broker-sock:/run/mediaferry
+    environment:
+      MOUNTD_LOG_LEVEL: DEBUG
+      MOUNTD_ALLOWED_UIDS: *app-uid
+      MOUNTD_SOCKET_GID: *app-gid
+
+  app:
+    build:
+      context: .
+      dockerfile: app/Dockerfile
+    depends_on:
+      - mountd
+    user: "10001:10001"
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    read_only: true
+    environment:
+      # Osmo なら内蔵ストレージと microSD で 2 件。カードリーダーだけなら 1 件。
+      MEDIAFERRY_EXPECT_VOLUMES: "${MEDIAFERRY_EXPECT_VOLUMES:-1}"
+      MEDIAFERRY_EXPECT_UID: *app-uid
+    volumes:
+      - broker-sock:/run/mediaferry:ro
+
+  # 許可されていない UID からの接続が SO_PEERCRED で拒否されることを確かめる。
+  #
+  # GID は app と同じ 10001 にする。別 GID にすると、ソケットの 0660 に
+  # よって connect が Unix の DAC で弾かれ、broker の UID 検査に到達しない。
+  # それでも非ゼロにはなるので「SO_PEERCRED が効いた」と誤判定してしまう。
+  # 拒否がどの層で起きたかを区別するための構成。
+  app-wrong-uid:
+    build:
+      context: .
+      dockerfile: app/Dockerfile
+    depends_on:
+      - mountd
+    user: "10002:10001"
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    volumes:
+      - broker-sock:/run/mediaferry:ro
+
+volumes:
+  broker-sock:
