@@ -1,9 +1,15 @@
 # mediaferry
 
 カメラの SD カードを NAS へ取り込み、分割動画を結合して Immich へ同期する
-TrueNAS カスタムアプリ。設計は `docs/superpowers/specs/2026-08-17-mediaferry-design.md`。
+TrueNAS カスタムアプリ。
 
-現在 **Phase 0（スパイク）**。配布可能なリリースではない。
+| ドキュメント | 内容 |
+| --- | --- |
+| [`docs/HANDOFF.md`](docs/HANDOFF.md) | **まずここ。** 現在地、確定した判断、環境の癖、次にやること |
+| [`docs/design.md`](docs/design.md) | 設計仕様書（正本） |
+| [`docs/phase0-findings.md`](docs/phase0-findings.md) | Phase 0 の実測結果 |
+
+**Phase 0（スパイク）まで完了。** 配布可能なリリースではない。
 
 ## 構成
 
