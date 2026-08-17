@@ -1,28 +1,33 @@
 # mediaferry 引き継ぎ資料
 
-最終更新: 2026-08-17
-ブランチ: `feat/mediaferry`（`main` から 18 コミット）
+最終更新: 2026-08-18
+ブランチ: `feat/mediaferry`（`main` から 24 コミット）
 
 このファイルは、別セッションが作業を引き継ぐための出発点。
-**まずここを読み、次に `design.md` §20（実装フェーズ）を読む。**
+**まずここを読み、次に `phase1-plan.md` を読む。**
 
 ---
 
 ## 1. 現在地
 
-**Phase 0（スパイク）は完了。次は Phase 1（基盤 + 取り込み）の実装計画を書く。**
+**Phase 1 の実装計画は完成してレビューも通った。次は計画の実行（Task 1 から）。**
 
 | Phase | 内容 | 状態 |
 | --- | --- | --- |
 | 0 | スパイク。未検証項目の実測とブローカーの最小実装 | **完了** |
-| 1 | 基盤 + 取り込み。`ArtifactPublisher` / `Reconciler` / DB スキーマ / scan / import | **次はここ。計画未作成** |
+| 1 | 基盤 + 取り込み。`ArtifactPublisher` / `Reconciler` / DB スキーマ / scan / import | **計画完成・レビュー済み。実装未着手** |
 | 2 | 結合 | 未着手 |
 | 3 | Immich 同期（転送先プロファイル、状態機械） | 未着手 |
 | 4 | Web UI | 未着手 |
 | 5 | 汎用化（Canon、プロファイル編集 UI、複数デバイス） | 未着手 |
 
-仕様書は codex のレビューを 6 巡通しており、**最終判定は「blocker なし。Phase 1 の
-DB スキーマとジョブ契約を確定し、実装に着手してよい」**。
+仕様書（`design.md`）は codex のレビューを 6 巡、実装計画（`phase1-plan.md`）は
+さらに 6 巡通している。**計画の最終判定は「blocker なし。着手して問題ない」**
+（2026-08-17）。
+
+計画は 25 タスクで、各タスクが「失敗するテストを書く → 最小実装 → 検証 →
+コミット」で完結する。**着手は Task 1（DB 接続とマイグレーション）から。**
+Task 7〜12・15・16・22 は互いに独立なので、並行して進めるならこの 9 つ。
 
 ### 検証状態
 
@@ -40,6 +45,7 @@ uv run ruff format --check .   25 files already formatted
 | ファイル | 内容 | 追跡 |
 | --- | --- | --- |
 | `docker/mediaferry/docs/design.md` | **設計仕様書。正本。** | ✅ |
+| `docker/mediaferry/docs/phase1-plan.md` | **Phase 1 の実装計画。次はこれを実行する。** 末尾の「レビュー記録」に 6 巡分の判断と根拠 | ✅ |
 | `docker/mediaferry/docs/phase0-findings.md` | Phase 0 の実測結果と設計への反映 | ✅ |
 | `docker/mediaferry/docs/HANDOFF.md` | このファイル | ✅ |
 | `docker/mediaferry/{protocol,mountd,app,spikes}/` | Phase 0 の実装 | ✅ |
@@ -132,25 +138,26 @@ Phase 0 の価値はここにある。**いずれも「実際に動かして」�
 
 ### 着手手順
 
-1. **`superpowers:writing-plans` で Phase 1 の実装計画を書く。**
-   出力先は `docker/mediaferry/docs/phase1-plan.md`（追跡下に置く）
-2. 計画中のコードを実ファイルに展開して `pytest` / `ruff` を通し、
-   **変異試験でテストが素通りしていないことを確認する**（Phase 0 で有効だった）
-3. codex にレビューさせる（下記）
-4. 反映してから実装に入る
+**計画は書き終わっており、レビューも通っている。次は実行だけ。**
 
-### Phase 1 で必ずスキーマに入れるもの
+1. `docker/mediaferry/docs/phase1-plan.md` の Task 1 から順に実行する。
+   各タスクは「失敗するテストを書く → 失敗を確認 → 最小実装 → 通ることを確認 →
+   コミット」で完結する
+2. **変異試験のステップを省かない。** レビューで「テストが修正を検出しない」
+   指摘が 3 件出ている（回帰テストが、直す前の実装でも通る書き方だった）。
+   修正を元に戻して落ちることを毎回確かめる
+3. 計画から外れる判断をしたら、その場で計画側にも書き戻す
+4. 詰まったら codex に相談する（下記）
 
-codex が「後から直すと高くつく」と指摘した項目。`design.md` §8 に詳細がある。
+### 計画で確定していて、蒸し返してはいけない判断
 
-- `upload_record` の claim 3 欄（`claim_job_id` / `claim_token` / `claim_expires_at`）と
-  `CHECK`（all-null か all-non-null）
-- `selection_rule`（不変）
-- `destination_revision`（不変）と `target_epoch`
-- `UNIQUE(destination_id, target_epoch, media_file_id)`
-- **複合候補キーと複合外部キー**（別宛先の credential / revision を参照できないようにする）
-- `destination_revision` の UPDATE / DELETE を禁止する trigger
-- 暗号化フォーマット（§12.3 で確定済み。AEAD、自己記述、AAD、`key_id`）
+`phase1-plan.md` の「レビュー記録」に 6 巡分の根拠がある。特に間違えやすい 3 つ。
+
+| 判断 | 理由 |
+| --- | --- |
+| **DB 接続はスコープごとに 1 本。同時共有しない** | トランザクションは接続に属していてスレッドには属さない。API の書き込みが publisher の `BEGIN IMMEDIATE` に混ざる。`check_same_thread=False` は必要（作るスレッドと使うスレッドが違う）だが、共有してよいという意味ではない |
+| **`VolumeObservation` は接続の同一性であって媒体の同一性ではない** | mountd の `generation` は観測した集合の指紋が変わったときだけ進む。polling の合間に同じ UUID・容量のカードが同じノードで差し替わると据え置きになる。**開いた dirfd を使い回す根拠にできない**（判定は毎回開き直し、ジョブの handle は release で閉じる） |
+| **staged 以降の失敗を「取り込み失敗」として扱わない** | ファイルは検証済みで公開に必要な情報は永続化済み。reconciliation が完遂するので、`source_entry` を failed に戻すと次のスキャンで新規と判定されて二重に取り込む |
 
 ### レビューの依頼先
 
