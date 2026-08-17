@@ -15,11 +15,18 @@
 | 入れる | 入れない（Phase 3 以降） |
 | --- | --- |
 | §9.7 のグループ検出（`detect_groups` ジョブ）と保存しない preview | 手動でのグループ分割・結合（`detected_by = manual` / supersede）→ Phase 4 |
-| §9.8 の結合・検証・公開（`merge` ジョブ） | 継ぎ目サムネイルの**画像生成**と `GET /media/{id}/thumbnail` → Phase 4 |
-| 採用（`adopted_at`）・再試行・破棄（`skipped`）の API | `upload_record` / `selection_rule` / claim 時の §10 (a)(c) 評価 → Phase 3 |
-| §10 **(b) の選択肢の提示規則**と `GET /uploads/selectable` | 宛先ごとの状態表示（`destination_id` フィルタ）→ Phase 3 |
+| §9.8 の結合・検証・公開（`merge` ジョブ）。`detected` / `failed` から実行できる | 継ぎ目サムネイルの**画像生成**と `GET /media/{id}/thumbnail` → Phase 4 |
+| 採用（`adopted_at`）の API | **公開済み結合物の破棄・再結合** → Phase 4 |
+| §10 **(b) の選択肢の提示規則**と `GET /uploads/selectable` | `upload_record` / `selection_rule` / claim 時の §10 (a)(c) 評価 → Phase 3 |
 
 継ぎ目については、**秒数（各パートの累積境界）を `verification_json` に残す**ところまでを Phase 2 とする。画像はまだ作らない。
+
+**公開後の操作は「採用」だけにする。** 検証に落ちた出力も公開済み
+（`status = merged`、`output_media_file_id` が入っている）なので、これを破棄したり
+作り直したりするには、旧グループを `superseded_by_id` で新グループへ向ける仕組みが
+要る。それを画面の無い段階で先に固めると、Phase 4 の手動編集と二重の仕様になる。
+**「まだ何も公開していない失敗」（`status = failed`）からの結合実行は残す** ——
+出力も `media_file` も無いので、やり直しても履歴を壊さない。
 
 ## Global Constraints
 
@@ -535,6 +542,7 @@ git commit -m "feat(mediaferry): derive a deterministic digest for merge inputs"
   - `selected_streams(streams: Sequence[dict[str, Any]], keep: KeepStreams) -> list[dict[str, Any]]`
   - `stream_signature(streams: Sequence[dict[str, Any]]) -> tuple[tuple[str, str, str], ...]`
   - `map_arguments(streams: Sequence[dict[str, Any]]) -> list[str]`
+  - `stream_summary(stream: dict[str, Any]) -> dict[str, Any]`
   - `TIMECODE_TAG: str`
 
 **なぜ独立したモジュールか:** `-map` の組み立て（`adapters/ffmpeg.py`）と検証
@@ -620,6 +628,45 @@ def test_map_arguments_use_the_absolute_index():
     assert map_arguments(selected_streams(DJI_STREAMS, DJI_KEEP)) == [
         "-map", "0:0", "-map", "0:1", "-map", "0:4",
     ]
+
+
+def test_the_same_signature_can_have_different_absolute_indexes():
+    """並びが違えば、同じ signature でも map は違う. 使い回してはいけない."""
+    reordered = [
+        {"index": 0, "codec_type": "video", "codec_name": "hevc", "codec_tag_string": "hvc1"},
+        {"index": 1, "codec_type": "data", "codec_name": "bin_data",
+         "codec_tag_string": "dbgi"},
+        {"index": 2, "codec_type": "audio", "codec_name": "aac", "codec_tag_string": "mp4a"},
+    ]
+    keep = KeepStreams(video="primary", audio="all", timecode=False, data=False)
+    plain = [
+        {"index": 0, "codec_type": "video", "codec_name": "hevc", "codec_tag_string": "hvc1"},
+        {"index": 1, "codec_type": "audio", "codec_name": "aac", "codec_tag_string": "mp4a"},
+    ]
+    assert stream_signature(selected_streams(reordered, keep)) == stream_signature(
+        selected_streams(plain, keep)
+    )
+    assert map_arguments(selected_streams(reordered, keep)) != map_arguments(
+        selected_streams(plain, keep)
+    )
+
+
+def test_the_summary_keeps_what_the_screen_needs():
+    assert stream_summary(DJI_STREAMS[3]) == {
+        "index": 3, "codec_type": "data", "codec_name": "bin_data",
+        "codec_tag_string": "dbgi", "bit_rate": "10300000",
+    }
+```
+
+先頭の import に `stream_summary` を足す:
+
+```python
+from mediaferry.core.merge.streams import (
+    map_arguments,
+    selected_streams,
+    stream_signature,
+    stream_summary,
+)
 ```
 
 - [ ] **Step 2: 失敗を確認する**
@@ -688,11 +735,26 @@ def stream_signature(streams: Sequence[dict[str, Any]]) -> tuple[tuple[str, str,
 
 
 def map_arguments(streams: Sequence[dict[str, Any]]) -> list[str]:
-    """`-map 0:<index>` の列. 絶対 index で指定し、選択を曖昧にしない."""
+    """`-map 0:<index>` の列. 絶対 index で指定し、選択を曖昧にしない.
+
+    **index はそのストリームが属するファイルのもの。** 別のパートへ使い回すと、
+    保持対象の並びが違うファイルで別のストリームを選ぶ。
+    """
     args: list[str] = []
     for stream in streams:
         args.extend(["-map", f"0:{stream['index']}"])
     return args
+
+
+def stream_summary(stream: dict[str, Any]) -> dict[str, Any]:
+    """記録・表示用の要約. 検証と ffmpeg アダプタが同じ形で残す."""
+    return {
+        "index": stream.get("index"),
+        "codec_type": stream.get("codec_type"),
+        "codec_name": stream.get("codec_name"),
+        "codec_tag_string": stream.get("codec_tag_string"),
+        "bit_rate": stream.get("bit_rate"),
+    }
 
 
 def _is_thumbnail(stream: dict[str, Any]) -> bool:
@@ -703,7 +765,7 @@ def _is_thumbnail(stream: dict[str, Any]) -> bool:
 - [ ] **Step 4: 通ることを確認する**
 
 Run: `uv run pytest app/tests/test_merge_streams.py -q`
-Expected: PASS（9 件）
+Expected: PASS（11 件）
 
 - [ ] **Step 5: 変異試験**
 
@@ -986,18 +1048,36 @@ git commit -m "feat(mediaferry): name merged outputs from the profile template"
 - Produces:
   - `ProbedFile(duration_seconds: float | None, size_bytes: int, streams: tuple[dict[str, Any], ...])`
   - `Check(name: str, verdict: str, detail: dict[str, Any])` — `verdict` は `pass` / `fail` / `inconclusive`
-  - `Verification(passed: bool, route: str, checks: tuple[Check, ...], dropped_streams: tuple[dict[str, Any], ...], seam_offsets: tuple[float, ...])` と `Verification.to_json() -> str`
-  - `verify(parts: Sequence[ProbedFile], merged: ProbedFile, keep: KeepStreams, route: str) -> Verification`
-  - 定数 `DURATION_TOLERANCE_PER_PART` / `FRAME_ALLOWANCE_PER_SEAM` / `FRAME_ALLOWANCE_BASE` / `SIZE_TOLERANCE` / `BITRATE_SPREAD_LIMIT`
+  - `Verification(passed: bool, route: str, pipeline_version: int, checks: tuple[Check, ...], dropped_streams: tuple[dict[str, Any], ...], route_dropped_streams: tuple[dict[str, Any], ...], seam_offsets: tuple[float, ...])` と `Verification.to_json() -> str`
+  - `verify(parts: Sequence[ProbedFile], merged: ProbedFile, keep: KeepStreams, route: str, route_dropped: Sequence[dict[str, Any]] = ()) -> Verification`
+  - 定数 `PIPELINE_VERSION` / `DURATION_TOLERANCE_PER_PART` / `FRAME_ALLOWANCE_PER_SEAM` / `FRAME_ALLOWANCE_BASE` / `SIZE_TOLERANCE` / `BITRATE_SPREAD_LIMIT` / `ESTIMABLE_TYPES`
 
 **設計に無い実値をここで決める（`design.md` へ書き戻す）:**
 
 - **`BITRATE_SPREAD_LIMIT = 0.1`** — §9.8 の「各パートの `bit_rate` のばらつきが
-  小さく、平均値として信用できる」の実装。`(max - min) / mean` が 0.1 を超えたら
-  `inconclusive` にする。分散ではなく範囲で見るのは、パートが 2 本のときでも
-  意味を持つため。
+  小さく、平均値として信用できる」の実装。分散ではなく範囲（`(max - min) / mean`）
+  で見るのは、パートが 2 本のときでも意味を持つため。**対応するストリームごとに
+  評価する。** 保持ストリームの合計で見ると、支配的な映像（80 Mbps）が音声
+  （317 kbps）の大きな変動を隠す。
 - **フレーム数は `nb_frames` だけを見る。** `-count_frames` は 30 GiB を全デコード
   するので使わない。取れないパートが 1 つでもあれば `inconclusive`。
+- **期待サイズは `bit_rate` が取れた保持ストリームだけで組み立てる。**
+  `tmcd`（タイムコード）は `bit_rate` を持たないことが多く、そこで全体を
+  `inconclusive` にすると、**既定の DJI プロファイル（`timecode: true`）では
+  サイズ検査が常に無効になる**（Phase 0 で直した検査が既定で死ぬ）。
+  取れなかったのが `video` / `audio`（`ESTIMABLE_TYPES`）なら支配的なので
+  `inconclusive`、`data` だけなら推定を続け、除外したストリームを `detail` に残す。
+- **`PIPELINE_VERSION = 1`** — 検証器の版。`verification_json` に入れる。
+  閾値や判定を変えたら上げる。**`input_digest` には入れない**（下記）。
+
+**`input_digest` に検証器の版を入れない（codex の指摘を退けた）:** `input_digest` は
+§8 で「構成ファイルの ordered な id と sha1、結合設定、プロファイルリビジョン」と
+定義され、その役割は §10 のとおり**入力の同一性**の判定（グループを編集した後に
+旧派生物が選択肢へ戻る経路を塞ぐ）。検証の閾値はプロファイルの `merge` 節にも無く、
+入力ではない。ここへ混ぜると、閾値を 1 つ変えただけで**既存の結合物がそろって
+既定の選択肢から消え、再結合するまで戻らない**。検証器の版は
+`verification_json.pipeline_version` に残し、画面で「古い版で検証された」と
+示せるようにする。
 
 - [ ] **Step 1: 失敗するテストを書く**
 
@@ -1112,15 +1192,43 @@ def test_missing_frame_counts_are_inconclusive_not_failed():
     assert result.passed
 
 
-def test_a_missing_bit_rate_makes_the_size_check_inconclusive():
+def test_a_missing_video_bit_rate_makes_the_size_check_inconclusive():
     parts = [a_part(video_rate=None), a_part()]
     result = verify(parts, a_merged(), KEEP, "concat")
     assert verdicts(result)["size"] == "inconclusive"
     assert result.passed
 
 
+def test_a_timecode_without_a_bit_rate_does_not_disable_the_size_check():
+    """既定の DJI プロファイルは timecode を保持する. tmcd に bit_rate は無い.
+
+    ここで全体を inconclusive にすると、Phase 0 で直したサイズ検査が既定で
+    毎回死ぬ。推定から外して、外したことを detail に残す。
+    """
+    tmcd = {"index": 3, "codec_type": "data", "codec_name": "none", "codec_tag_string": "tmcd"}
+    parts = [a_part(extra=[tmcd]), a_part(extra=[tmcd])]
+    merged_streams = [
+        {"index": 0, "codec_type": "video", "codec_name": "hevc", "codec_tag_string": "hvc1",
+         "bit_rate": "79924667", "nb_frames": "89999"},
+        {"index": 1, "codec_type": "audio", "codec_name": "aac", "codec_tag_string": "mp4a",
+         "bit_rate": "317374"},
+        {"index": 2, "codec_type": "data", "codec_name": "none", "codec_tag_string": "tmcd"},
+    ]
+    result = verify(parts, a_merged(streams=merged_streams), KEEP, "concat")
+    assert verdicts(result)["size"] == "pass"
+    excluded = result.checks[3].detail["excluded_streams"]
+    assert [s["codec_tag_string"] for s in excluded] == ["tmcd"]
+
+
 def test_a_wide_bit_rate_spread_makes_the_size_check_inconclusive():
     parts = [a_part(video_rate="79924667"), a_part(video_rate="40000000")]
+    result = verify(parts, a_merged(), KEEP, "concat")
+    assert verdicts(result)["size"] == "inconclusive"
+
+
+def test_a_spread_hidden_by_the_dominant_stream_is_still_caught():
+    """合計で見ると、80 Mbps の映像が音声の 2 倍の変動を隠す."""
+    parts = [a_part(audio_rate="317374"), a_part(audio_rate="634748")]
     result = verify(parts, a_merged(), KEEP, "concat")
     assert verdicts(result)["size"] == "inconclusive"
 
@@ -1145,11 +1253,20 @@ def test_the_ts_route_allows_a_wider_size_difference():
     assert verdicts(verify(parts, merged, KEEP, "ts"))["size"] == "pass"
 
 
+def test_streams_dropped_by_the_route_are_recorded():
+    """TS 経路が運べずに外したストリームは、脱落の理由が違うので分けて残す."""
+    dropped = [{"index": 4, "codec_type": "data", "codec_name": "none",
+                "codec_tag_string": "tmcd"}]
+    result = verify([a_part(), a_part()], a_merged(), KEEP, "ts", route_dropped=dropped)
+    assert [s["codec_tag_string"] for s in result.route_dropped_streams] == ["tmcd"]
+
+
 def test_the_result_serialises_to_json():
     result = verify([a_part(), a_part()], a_merged(), KEEP, "concat")
     payload = json.loads(result.to_json())
     assert payload["passed"] is True
     assert payload["route"] == "concat"
+    assert payload["pipeline_version"] == 1
     assert payload["seam_offsets"] == [1500.0]
     assert {c["name"] for c in payload["checks"]} == {"duration", "streams", "frames", "size"}
     assert payload["checks"][3]["detail"]["part_bit_rates"] == [80242041.0, 80242041.0]
@@ -1208,8 +1325,11 @@ from dataclasses import dataclass
 from typing import Any
 
 from ..profiles.model import KeepStreams
-from .streams import selected_streams, stream_signature
+from .streams import selected_streams, stream_signature, stream_summary
 
+# 検証器の版。閾値や判定を変えたら上げる。**input_digest には入れない**
+# （入力の同一性の判定であって、検証器の同一性ではない）。
+PIPELINE_VERSION = 1
 # 継ぎ目ごとに 1 秒。パート数に比例させる。
 DURATION_TOLERANCE_PER_PART = 1.0
 # 継ぎ目で数フレーム落ちるのは正常。
@@ -1219,6 +1339,9 @@ FRAME_ALLOWANCE_BASE = 2
 SIZE_TOLERANCE = {"concat": 0.02, "ts": 0.05}
 # (max - min) / mean がこれを超えたら、平均ビットレートとして信用しない。
 BITRATE_SPREAD_LIMIT = 0.1
+# bit_rate が無いと期待サイズを組み立てられない種別。data はサイズへの寄与が
+# 小さいので、取れなければ推定から外して先へ進む。
+ESTIMABLE_TYPES = frozenset({"video", "audio"})
 
 PASS = "pass"
 FAIL = "fail"
@@ -1243,8 +1366,12 @@ class Check:
 class Verification:
     passed: bool
     route: str
+    pipeline_version: int
     checks: tuple[Check, ...]
+    # プロファイルが保持を宣言しなかったストリーム。
     dropped_streams: tuple[dict[str, Any], ...]
+    # 保持を宣言したのに、経路のコンテナが運べずに外したストリーム。
+    route_dropped_streams: tuple[dict[str, Any], ...]
     seam_offsets: tuple[float, ...]
 
     def to_json(self) -> str:
@@ -1252,10 +1379,12 @@ class Verification:
             {
                 "passed": self.passed,
                 "route": self.route,
+                "pipeline_version": self.pipeline_version,
                 "checks": [
                     {"name": c.name, "verdict": c.verdict, "detail": c.detail} for c in self.checks
                 ],
                 "dropped_streams": list(self.dropped_streams),
+                "route_dropped_streams": list(self.route_dropped_streams),
                 "seam_offsets": list(self.seam_offsets),
             },
             ensure_ascii=False,
@@ -1263,7 +1392,11 @@ class Verification:
 
 
 def verify(
-    parts: Sequence[ProbedFile], merged: ProbedFile, keep: KeepStreams, route: str
+    parts: Sequence[ProbedFile],
+    merged: ProbedFile,
+    keep: KeepStreams,
+    route: str,
+    route_dropped: Sequence[dict[str, Any]] = (),
 ) -> Verification:
     checks = (
         _duration_check(parts, merged),
@@ -1275,8 +1408,10 @@ def verify(
         # inconclusive は合否に使わない。fail が 1 つも無ければ合格。
         passed=all(check.verdict != FAIL for check in checks),
         route=route,
+        pipeline_version=PIPELINE_VERSION,
         checks=checks,
         dropped_streams=_dropped_streams(parts[0], keep),
+        route_dropped_streams=tuple(stream_summary(stream) for stream in route_dropped),
         seam_offsets=_seam_offsets(parts),
     )
 
@@ -1350,33 +1485,61 @@ def _frames_check(parts: Sequence[ProbedFile], merged: ProbedFile, keep: KeepStr
 def _size_check(
     parts: Sequence[ProbedFile], merged: ProbedFile, keep: KeepStreams, route: str
 ) -> Check:
-    rates: list[float] = []
-    for part in parts:
-        rate = _kept_bitrate(part, keep)
-        if rate is None or part.duration_seconds is None:
+    """保持対象の `bit_rate × duration` から期待サイズを組み立てて比べる.
+
+    **ばらつきは対応するストリームごとに見る。** 合計で見ると、支配的な映像が
+    音声の大きな変動を隠す。`bit_rate` が取れないストリームは、映像・音声なら
+    推定できないので `inconclusive`、data なら推定から外して先へ進む
+    （`tmcd` は毎秒わずかで、許容誤差に埋もれる）。
+    """
+    if any(part.duration_seconds is None for part in parts):
+        return Check("size", INCONCLUSIVE, {"reason": "duration が取れないパートがある"})
+    selections = [selected_streams(part.streams, keep) for part in parts]
+    if len({len(selection) for selection in selections}) != 1:
+        return Check("size", INCONCLUSIVE, {"reason": "パート間で保持ストリームの本数が違う"})
+
+    excluded: list[dict[str, Any]] = []
+    part_rates = [0.0] * len(parts)
+    expected_bits = 0.0
+    # 位置で対応付ける。構成がずれている場合はストリーム検査が fail するので、
+    # ここでは本数の一致だけを前提にする。
+    for column in zip(*selections, strict=True):
+        rates = [_bitrate_of(stream) for stream in column]
+        if any(rate is None for rate in rates):
+            if column[0].get("codec_type") in ESTIMABLE_TYPES:
+                return Check(
+                    "size",
+                    INCONCLUSIVE,
+                    {
+                        "reason": "映像か音声の bit_rate が取れない",
+                        "stream": stream_summary(column[0]),
+                    },
+                )
+            excluded.append(stream_summary(column[0]))
+            continue
+        mean = sum(rates) / len(rates)
+        if mean <= 0:
+            excluded.append(stream_summary(column[0]))
+            continue
+        spread = (max(rates) - min(rates)) / mean
+        if spread > BITRATE_SPREAD_LIMIT:
             return Check(
                 "size",
                 INCONCLUSIVE,
-                {"reason": "保持対象の bit_rate または duration が取れないパートがある"},
+                {
+                    "reason": "パート間の bit_rate のばらつきが大きく、平均として使えない",
+                    "stream": stream_summary(column[0]),
+                    "spread": spread,
+                    "limit": BITRATE_SPREAD_LIMIT,
+                },
             )
-        rates.append(rate)
-    mean = sum(rates) / len(rates)
-    if mean <= 0:
-        return Check("size", INCONCLUSIVE, {"reason": "保持対象の bit_rate が 0"})
-    spread = (max(rates) - min(rates)) / mean
-    if spread > BITRATE_SPREAD_LIMIT:
-        return Check(
-            "size",
-            INCONCLUSIVE,
-            {
-                "reason": "パート間の bit_rate のばらつきが大きく、平均として使えない",
-                "spread": spread,
-                "limit": BITRATE_SPREAD_LIMIT,
-            },
-        )
-    expected = sum(
-        rate * part.duration_seconds for rate, part in zip(rates, parts, strict=True)
-    ) / 8
+        for index, (rate, part) in enumerate(zip(rates, parts, strict=True)):
+            expected_bits += rate * part.duration_seconds
+            part_rates[index] += rate
+
+    expected = expected_bits / 8
+    if expected <= 0:
+        return Check("size", INCONCLUSIVE, {"reason": "期待サイズを組み立てられない"})
     tolerance = SIZE_TOLERANCE[route]
     ratio = abs(merged.size_bytes - expected) / expected
     return Check(
@@ -1387,8 +1550,9 @@ def _size_check(
             "actual_bytes": merged.size_bytes,
             "ratio": ratio,
             "tolerance": tolerance,
-            "part_bit_rates": rates,
+            "part_bit_rates": part_rates,
             "part_durations": [part.duration_seconds for part in parts],
+            "excluded_streams": excluded,
         },
     )
 
@@ -1408,32 +1572,21 @@ def _video_frames(probed: ProbedFile, keep: KeepStreams) -> int | None:
     return total
 
 
-def _kept_bitrate(probed: ProbedFile, keep: KeepStreams) -> float | None:
-    total = 0.0
-    for stream in selected_streams(probed.streams, keep):
-        raw = stream.get("bit_rate")
-        if raw is None:
-            return None
-        try:
-            total += float(raw)
-        except (TypeError, ValueError):
-            return None
-    return total
+def _bitrate_of(stream: dict[str, Any]) -> float | None:
+    raw = stream.get("bit_rate")
+    if raw is None:
+        return None
+    try:
+        return float(raw)
+    except (TypeError, ValueError):
+        return None
 
 
 def _dropped_streams(part: ProbedFile, keep: KeepStreams) -> tuple[dict[str, Any], ...]:
     """脱落したストリームを記録する. 画面に出してユーザが把握できるようにする."""
     kept = {id(stream) for stream in selected_streams(part.streams, keep)}
     return tuple(
-        {
-            "index": stream.get("index"),
-            "codec_type": stream.get("codec_type"),
-            "codec_name": stream.get("codec_name"),
-            "codec_tag_string": stream.get("codec_tag_string"),
-            "bit_rate": stream.get("bit_rate"),
-        }
-        for stream in part.streams
-        if id(stream) not in kept
+        stream_summary(stream) for stream in part.streams if id(stream) not in kept
     )
 
 
@@ -1449,16 +1602,15 @@ def _seam_offsets(parts: Sequence[ProbedFile]) -> tuple[float, ...]:
     return tuple(offsets)
 ```
 
-**`_kept_bitrate` は timecode ストリームを含む。** `tmcd` は `bit_rate` を持たない
-ことが多く、その場合この検査は `inconclusive` になる。DJI の実測（0.002% の差）は
-映像と音声だけで出しているので、tmcd を保持するプロファイルではサイズ検査が
-効かなくなりうる。**これは仕様どおりの安全側の挙動**（判定できないものを合否に
-使わない）だが、統合テスト（Task 14）で実際にどちらへ倒れるかを確認する。
+**`tmcd` を推定から外すのは、検査を弱めるためではなく生かすため。** DJI の実測
+（0.002% の差）は映像と音声だけで出している。`tmcd` は `bit_rate` を持たないので、
+これを理由に全体を `inconclusive` にすると、**既定のプロファイル（`timecode: true`）
+ではサイズ検査が常に無効**になる。外したストリームは `excluded_streams` に残す。
 
 - [ ] **Step 4: 通ることを確認する**
 
 Run: `uv run pytest app/tests/test_merge_verify.py -q`
-Expected: PASS（16 件）
+Expected: PASS（19 件）
 
 - [ ] **Step 5: 変異試験**
 
@@ -1471,8 +1623,13 @@ Expected: PASS（16 件）
 | `allowance` の `+ FRAME_ALLOWANCE_BASE` を消す | `test_lost_frames_within_the_allowance_pass`（許容 2 になり 4 フレーム欠けが fail） |
 | `lost <= allowance` を `abs(lost) <= allowance` にする | **落ちない**。設計が片側だけを見ると決めているため、結合後が Σ より多いケースは判定していない。検出できない変異として記録する |
 | `spread > BITRATE_SPREAD_LIMIT` を消す | `test_a_wide_bit_rate_spread_makes_the_size_check_inconclusive` |
+| ばらつきをストリームごとではなく合計で見る | `test_a_spread_hidden_by_the_dominant_stream_is_still_caught` |
+| `ESTIMABLE_TYPES` の判定を消して、`bit_rate` が無ければ常に `inconclusive` | `test_a_timecode_without_a_bit_rate_does_not_disable_the_size_check` |
+| `ESTIMABLE_TYPES` に `data` を足す（＝常に推定を続ける） | `test_a_missing_video_bit_rate_makes_the_size_check_inconclusive` は video なので落ちない。**`data` の `bit_rate` 欠落で fail 側へ倒れるケースは無い**ので、この変異は `ESTIMABLE_TYPES` から `video` を外す形で確かめる |
 | `SIZE_TOLERANCE[route]` を `0.02` 固定にする | `test_the_ts_route_allows_a_wider_size_difference` |
-| `_kept_bitrate` を全ストリームの合計にする | `test_the_size_is_compared_against_the_kept_streams_only`（dbgi の 10.3 Mbps が乗って fail） |
+| 推定を保持対象ではなく全ストリームで行う | `test_the_size_is_compared_against_the_kept_streams_only`（dbgi の 10.3 Mbps が乗って fail） |
+| `route_dropped` を捨てる | `test_streams_dropped_by_the_route_are_recorded` |
+| `PIPELINE_VERSION` を `to_json` から落とす | `test_the_result_serialises_to_json` |
 | `_seam_offsets` の `parts[:-1]` を `parts` にする | `test_seam_offsets_are_the_cumulative_boundaries` |
 
 codec だけ違うテストを足す:
@@ -1506,22 +1663,34 @@ git commit -m "feat(mediaferry): verify a merge against its declared streams"
 - Test: `app/tests/test_adapter_ffmpeg.py`
 
 **Interfaces:**
-- Consumes: `map_arguments` / `selected_streams`（Task 3）、`KeepStreams`
+- Consumes: `map_arguments` / `selected_streams` / `stream_signature` / `stream_summary`（Task 3）、`KeepStreams`
 - Produces:
-  - `MergeRunner(ffmpeg_path: str = "ffmpeg", poll_interval: float = POLL_INTERVAL, term_grace_seconds: float = TERM_GRACE_SECONDS)`
-  - `MergeRunner.merge(parts: Sequence[Path], first_streams: Sequence[dict[str, Any]], keep: KeepStreams, work_dir: Path, output_name: str, on_progress: Callable[[], None], cancelled: Callable[[], bool]) -> MergeOutcome`
+  - `MergeRunner(ffmpeg_path: str = "ffmpeg", poll_interval: float = POLL_INTERVAL, pulse_interval: float = PULSE_INTERVAL, term_grace_seconds: float = TERM_GRACE_SECONDS)`
+  - `MergeRunner.merge(parts: Sequence[Path], part_streams: Sequence[Sequence[dict[str, Any]]], keep: KeepStreams, work_dir: Path, output_name: str, on_progress: Callable[[], None], cancelled: Callable[[], bool]) -> MergeOutcome`
   - `MergeRunner.tool_version() -> str`
-  - `MergeOutcome(route: str, output_path: Path, tool_version: str)`
+  - `MergeOutcome(route: str, output_path: Path, tool_version: str, dropped_by_route: tuple[dict[str, Any], ...])`
   - `MergeFailed(RuntimeError)` / `MergeCancelled(RuntimeError)`
+  - `UNSUPPORTED_BY_TS: frozenset[str]`
 
-**TS 経路での `-map` の扱い:** 設計は「concat demuxer でも TS フォールバックでも
-同じ `-map` を使う」と定めている。TS 経路では**各パートを mpegts にする段で
-その選択を適用**し、結合の段は `concat:` が渡したものをそのまま通す
-（`-map 0`）。mpegts の中でストリーム index は振り直されるので、MP4 の絶対
-index を結合の段で使うと別のストリームを指す。**`mpegts` は `tmcd` を運べない**
-ので、timecode を保持するプロファイルが TS 経路に落ちるとストリーム検査は
-不合格になる。これは仕様どおり（TS 経路に落ちた時点で異常であり、ユーザは
-中身を見て採用を選べる）。
+**ストリームの選択は「パートごと」に作る。** 先頭パートの絶対 index を全パートへ
+使い回すと、保持 signature が同じでも**保持しない data track の挿入位置が違う
+パートで別のストリームを選ぶ**（part 1 が video=0/audio=1/data=2、part 2 が
+video=0/data=1/audio=2 のとき、`-map 0:1` は part 2 の data を指す）。同じ codec の
+別トラックなら、失敗せずに誤った中身のまま通る余地がある。**`merge()` は全パートの
+ffprobe 結果を受け取り、各パートの選択から map を組む。**
+
+**concat demuxer は preflight してから使う。** concat demuxer は最初のファイルの
+ストリーム構成を全体に適用するので、**全パートの全ストリームの signature が一致し、
+かつ保持対象の絶対 index の並びが一致する**ときだけ試す。満たさなければ concat を
+試さずに TS 経路へ送る。
+
+**TS 経路が運べないストリームは、意図して外して記録する。** `mpegts` は QuickTime の
+data track（`tmcd` / `djmd`）を運べないので、map に残したままだと mux が拒否して
+**検証できる出力そのものが作られない**（既定の DJI プロファイルは `timecode: true`
+なので、fallback が常に使えない経路になる）。外したストリームは
+`MergeOutcome.dropped_by_route` に入れ、`verification_json` の
+`route_dropped_streams` に残す。ストリーム検査は「宣言した種別が揃っていない」ので
+**不合格**になるが、出力は公開されるので、ユーザは中身を見て採用を選べる。
 
 - [ ] **Step 1: 失敗するテストを書く**
 
@@ -1541,18 +1710,19 @@ KEEP = KeepStreams(video="primary", audio="all", timecode=False, data=False)
 VIDEO_ONLY = KeepStreams(video="primary", audio="none", timecode=False, data=False)
 
 
-def make_clip(path, seconds=2):
-    subprocess.run(  # noqa: S603
-        [  # noqa: S607
-            "ffmpeg", "-nostdin", "-v", "error",
-            "-f", "lavfi", "-i", f"testsrc=duration={seconds}:size=64x64:rate=10",
-            "-f", "lavfi", "-i", f"sine=frequency=440:duration={seconds}",
-            "-c:v", "libx264", "-pix_fmt", "yuv420p", "-c:a", "aac",
-            "-y", str(path),
-        ],
-        check=True,
-        capture_output=True,
-    )
+def make_clip(path, seconds=2, *, timecode=False, audio_first=False):
+    command = [
+        "ffmpeg", "-nostdin", "-v", "error",
+        "-f", "lavfi", "-i", f"testsrc=duration={seconds}:size=64x64:rate=10",
+        "-f", "lavfi", "-i", f"sine=frequency=440:duration={seconds}",
+    ]
+    # -map の順がそのまま出力のストリーム順になる。並びの違うパートを作れる。
+    command += ["-map", "1:a", "-map", "0:v"] if audio_first else ["-map", "0:v", "-map", "1:a"]
+    command += ["-c:v", "libx264", "-pix_fmt", "yuv420p", "-c:a", "aac"]
+    if timecode:
+        command += ["-timecode", "00:00:00:00"]
+    command += ["-y", str(path)]
+    subprocess.run(command, check=True, capture_output=True)  # noqa: S603
     return path
 
 
@@ -1570,8 +1740,8 @@ def work_dir(tmp_path):
     return path
 
 
-def streams_of(path):
-    return MediaProbe().describe(path, "MP4").streams
+def streams_for(paths):
+    return [MediaProbe().describe(path, "MP4").streams for path in paths]
 
 
 def never_cancelled():
@@ -1580,9 +1750,10 @@ def never_cancelled():
 
 def test_two_clips_are_joined_by_the_concat_demuxer(clips, work_dir):
     outcome = MergeRunner().merge(
-        clips, streams_of(clips[0]), KEEP, work_dir, "MERGED.MP4", lambda: None, never_cancelled
+        clips, streams_for(clips), KEEP, work_dir, "MERGED.MP4", lambda: None, never_cancelled
     )
     assert outcome.route == "concat"
+    assert outcome.dropped_by_route == ()
     probe = MediaProbe().describe(outcome.output_path, "MP4")
     assert probe.probe_state == "ok"
     assert 3.6 < probe.duration_seconds < 4.4
@@ -1590,20 +1761,21 @@ def test_two_clips_are_joined_by_the_concat_demuxer(clips, work_dir):
 
 def test_the_declared_streams_decide_what_is_kept(clips, work_dir):
     outcome = MergeRunner().merge(
-        clips, streams_of(clips[0]), VIDEO_ONLY, work_dir, "MERGED.MP4",
+        clips, streams_for(clips), VIDEO_ONLY, work_dir, "MERGED.MP4",
         lambda: None, never_cancelled,
     )
     kinds = {s["codec_type"] for s in MediaProbe().describe(outcome.output_path, "MP4").streams}
     assert kinds == {"video"}
 
 
-def test_progress_is_reported_even_for_a_fast_merge(clips, work_dir):
+def test_the_lease_pulse_is_throttled_but_always_fires_once(clips, work_dir):
     beats = []
-    MergeRunner().merge(
-        clips, streams_of(clips[0]), KEEP, work_dir, "MERGED.MP4",
+    MergeRunner(pulse_interval=1000.0).merge(
+        clips, streams_for(clips), KEEP, work_dir, "MERGED.MP4",
         lambda: beats.append(1), never_cancelled,
     )
-    assert beats
+    # 短い結合でも 1 回は打つ。poll のたびには打たない。
+    assert len(beats) == 1
 
 
 class FailingConcat(MergeRunner):
@@ -1616,12 +1788,67 @@ class FailingConcat(MergeRunner):
 
 def test_the_ts_route_runs_when_the_concat_demuxer_fails(clips, work_dir):
     outcome = FailingConcat().merge(
-        clips, streams_of(clips[0]), KEEP, work_dir, "MERGED.MP4", lambda: None, never_cancelled
+        clips, streams_for(clips), KEEP, work_dir, "MERGED.MP4", lambda: None, never_cancelled
     )
     assert outcome.route == "ts"
     probe = MediaProbe().describe(outcome.output_path, "MP4")
     assert probe.probe_state == "ok"
     assert 3.6 < probe.duration_seconds < 4.4
+
+
+def test_parts_with_a_different_stream_order_skip_the_concat_demuxer(tmp_path, work_dir):
+    """concat demuxer は最初のファイルの構成を全体に適用する.
+
+    並びが違うまま渡すと、後続のパートで別のストリームを拾う。preflight で
+    弾いて TS 経路へ送る。
+    """
+    if shutil.which("ffmpeg") is None:
+        pytest.skip("ffmpeg が無い")
+    parts = [
+        make_clip(tmp_path / "a.MP4"),
+        make_clip(tmp_path / "b.MP4", audio_first=True),
+    ]
+    outcome = MergeRunner().merge(
+        parts, streams_for(parts), KEEP, work_dir, "MERGED.MP4", lambda: None, never_cancelled
+    )
+    assert outcome.route == "ts"
+    assert not (work_dir / "concat.log").exists()
+    kinds = sorted(
+        s["codec_type"] for s in MediaProbe().describe(outcome.output_path, "MP4").streams
+    )
+    assert kinds == ["audio", "video"]
+
+
+def test_each_part_is_mapped_by_its_own_indexes(tmp_path, work_dir):
+    """並びの違うパートでも、映像と音声が取り違えられずに残る."""
+    if shutil.which("ffmpeg") is None:
+        pytest.skip("ffmpeg が無い")
+    parts = [
+        make_clip(tmp_path / "a.MP4"),
+        make_clip(tmp_path / "b.MP4", audio_first=True),
+    ]
+    outcome = MergeRunner().merge(
+        parts, streams_for(parts), VIDEO_ONLY, work_dir, "MERGED.MP4",
+        lambda: None, never_cancelled,
+    )
+    streams = MediaProbe().describe(outcome.output_path, "MP4").streams
+    assert [s["codec_type"] for s in streams] == ["video"]
+
+
+def test_the_ts_route_drops_what_mpegts_cannot_carry_and_records_it(tmp_path, work_dir):
+    """mpegts は tmcd を運べない. map に残すと出力そのものが作られない."""
+    if shutil.which("ffmpeg") is None:
+        pytest.skip("ffmpeg が無い")
+    parts = [
+        make_clip(tmp_path / "a.MP4", timecode=True),
+        make_clip(tmp_path / "b.MP4", timecode=True),
+    ]
+    outcome = FailingConcat().merge(
+        parts, streams_for(parts), KEEP, work_dir, "MERGED.MP4", lambda: None, never_cancelled
+    )
+    assert outcome.route == "ts"
+    assert [s["codec_tag_string"] for s in outcome.dropped_by_route] == ["tmcd"]
+    assert MediaProbe().describe(outcome.output_path, "MP4").probe_state == "ok"
 
 
 def test_a_broken_input_fails_on_both_routes(tmp_path, work_dir):
@@ -1631,20 +1858,28 @@ def test_a_broken_input_fails_on_both_routes(tmp_path, work_dir):
     broken.write_bytes(b"\x00" * 128)
     with pytest.raises(MergeFailed):
         MergeRunner().merge(
-            [broken, broken], [], KEEP, work_dir, "MERGED.MP4", lambda: None, never_cancelled
+            [broken, broken], [[], []], KEEP, work_dir, "MERGED.MP4",
+            lambda: None, never_cancelled,
         )
 
 
 def test_a_cancelled_merge_raises_and_leaves_no_output(clips, work_dir):
     with pytest.raises(MergeCancelled):
         MergeRunner().merge(
-            clips, streams_of(clips[0]), KEEP, work_dir, "MERGED.MP4",
+            clips, streams_for(clips), KEEP, work_dir, "MERGED.MP4",
             lambda: None, lambda: True,
         )
 
 
 def test_the_tool_version_is_the_first_line_of_ffmpeg_version(clips):
     assert MergeRunner().tool_version().startswith("ffmpeg version")
+```
+
+`KEEP` は `timecode=True` に直す（既定の DJI プロファイルと同じ形にして、
+TS 経路の脱落を再現できるようにする）:
+
+```python
+KEEP = KeepStreams(video="primary", audio="all", timecode=True, data=False)
 ```
 
 - [ ] **Step 2: 失敗を確認する**
@@ -1659,13 +1894,18 @@ Expected: FAIL（`ModuleNotFoundError: No module named 'mediaferry.adapters.ffmp
 ```python
 """ffmpeg による結合（§9.8）.
 
-concat demuxer を試し、失敗したら TS 経由へ落とす。**どちらの経路でも保持する
-ストリームの選択は同じ。** 経路によって保持されるものが変わると、検証は
-「何を保持したか」を出力自身から推測することになる。
+concat demuxer を試し、失敗したら TS 経由へ落とす。**保持するストリームの選択は
+パートごとに、そのパート自身の ffprobe 結果から作る。** 先頭パートの絶対 index を
+使い回すと、保持しない data track の挿入位置が違うパートで別のストリームを選ぶ。
+
+concat demuxer は最初のファイルの構成を全体に適用するので、全パートの構成が
+一致するときだけ試す。一致しなければ preflight で弾いて TS 経路へ送る。
 
 TS 経路では、選択を各パートの mpegts 化の段で適用する。mpegts の中では
 ストリーム index が振り直されるので、結合の段で MP4 の絶対 index を使うと
-別のストリームを指す。
+別のストリームを指す。**mpegts は QuickTime の data track（tmcd / djmd）を
+運べない**ので、保持を宣言されていても外し、外したことを呼び出し元へ返す。
+map に残したままだと mux が拒否して、検証できる出力そのものが作られない。
 
 外部プロセスはプロセスグループとして起動し、キャンセル時は SIGTERM → 猶予 →
 SIGKILL の順に送って必ず刈り取る（§9.9）。
@@ -1684,16 +1924,28 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from ..core.merge.streams import map_arguments, selected_streams
+from ..core.merge.streams import (
+    map_arguments,
+    selected_streams,
+    stream_signature,
+    stream_summary,
+)
 from ..core.profiles.model import KeepStreams
 
 logger = logging.getLogger(__name__)
 
+# キャンセル要求に気づくまでの間隔。
 POLL_INTERVAL = 0.5
+# リースを延ばす間隔。リース (60 秒) の 1/3。poll のたびに書くと、30 分の結合で
+# 数千回 WAL へ書き、API とキャンセルの書き込みロックに不要に競合する。
+PULSE_INTERVAL = 20.0
 TERM_GRACE_SECONDS = 5.0
 VERSION_TIMEOUT_SECONDS = 30
 # 失敗の理由を伝えるのに要る分だけ。ログ全体は work/ に残る。
 LOG_TAIL_CHARS = 2000
+
+# mpegts が運べない種別。tmcd（タイムコード）と djmd / dbgi がここに入る。
+UNSUPPORTED_BY_TS = frozenset({"data"})
 
 # MP4 の中の H.264 / H.265 を mpegts へ入れるには Annex B へ直す。
 _ANNEXB = {"h264": "h264_mp4toannexb", "hevc": "hevc_mp4toannexb"}
@@ -1712,6 +1964,8 @@ class MergeOutcome:
     route: str  # concat / ts
     output_path: Path
     tool_version: str
+    # 保持を宣言されていたのに、経路のコンテナが運べずに外したストリーム。
+    dropped_by_route: tuple[dict[str, Any], ...]
 
 
 class MergeRunner:
@@ -1719,37 +1973,46 @@ class MergeRunner:
         self,
         ffmpeg_path: str = "ffmpeg",
         poll_interval: float = POLL_INTERVAL,
+        pulse_interval: float = PULSE_INTERVAL,
         term_grace_seconds: float = TERM_GRACE_SECONDS,
     ) -> None:
         self._ffmpeg = ffmpeg_path
         self._poll_interval = poll_interval
+        self._pulse_interval = pulse_interval
         self._term_grace = term_grace_seconds
 
     def merge(
         self,
         parts: Sequence[Path],
-        first_streams: Sequence[dict[str, Any]],
+        part_streams: Sequence[Sequence[dict[str, Any]]],
         keep: KeepStreams,
         work_dir: Path,
         output_name: str,
         on_progress: Callable[[], None],
         cancelled: Callable[[], bool],
     ) -> MergeOutcome:
-        maps = map_arguments(selected_streams(first_streams, keep))
+        selections = [selected_streams(streams, keep) for streams in part_streams]
         output = work_dir / output_name
-        try:
-            self._run(
-                self._concat_command(parts, maps, work_dir, output),
-                work_dir / "concat.log",
-                on_progress,
-                cancelled,
-            )
-            return MergeOutcome("concat", output, self.tool_version())
-        except MergeFailed as exc:
-            logger.warning("concat demuxer に失敗した。TS 経由へ落とす: %s", exc)
+        if _topology_matches(part_streams, selections):
+            try:
+                self._run(
+                    self._concat_command(
+                        parts, map_arguments(selections[0]), work_dir, output
+                    ),
+                    work_dir / "concat.log",
+                    on_progress,
+                    cancelled,
+                )
+                return MergeOutcome("concat", output, self.tool_version(), ())
+            except MergeFailed as exc:
+                logger.warning("concat demuxer に失敗した。TS 経由へ落とす: %s", exc)
+        else:
+            logger.warning("パート間でストリームの並びが違うので concat demuxer を使わない")
         output.unlink(missing_ok=True)
-        self._ts_merge(parts, first_streams, maps, work_dir, output, on_progress, cancelled)
-        return MergeOutcome("ts", output, self.tool_version())
+        dropped = self._ts_merge(
+            parts, part_streams, selections, work_dir, output, on_progress, cancelled
+        )
+        return MergeOutcome("ts", output, self.tool_version(), dropped)
 
     def tool_version(self) -> str:
         completed = subprocess.run(  # noqa: S603
@@ -1779,20 +2042,33 @@ class MergeRunner:
     def _ts_merge(
         self,
         parts: Sequence[Path],
-        first_streams: Sequence[dict[str, Any]],
-        maps: list[str],
+        part_streams: Sequence[Sequence[dict[str, Any]]],
+        selections: Sequence[Sequence[dict[str, Any]]],
         work_dir: Path,
         output: Path,
         on_progress: Callable[[], None],
         cancelled: Callable[[], bool],
-    ) -> None:
+    ) -> tuple[dict[str, Any], ...]:
+        """各パートを mpegts にしてから `concat:` で結合する.
+
+        map と bitstream filter は**そのパート自身の**構成から作る。
+        """
+        dropped: dict[tuple[Any, ...], dict[str, Any]] = {}
         pieces: list[Path] = []
         for index, part in enumerate(parts):
+            carried = []
+            for stream in selections[index]:
+                if stream.get("codec_type") in UNSUPPORTED_BY_TS:
+                    summary = stream_summary(stream)
+                    dropped[(summary["codec_type"], summary["codec_tag_string"])] = summary
+                    continue
+                carried.append(stream)
             piece = work_dir / f"part-{index:04d}.ts"
             self._run(
                 [
                     self._ffmpeg, "-nostdin", "-v", "error", "-i", str(part),
-                    *maps, "-c", "copy", *_video_bitstream(first_streams),
+                    *map_arguments(carried), "-c", "copy",
+                    *_video_bitstream(part_streams[index]),
                     "-f", "mpegts", "-y", str(piece),
                 ],
                 work_dir / f"ts-{index:04d}.log",
@@ -1804,13 +2080,14 @@ class MergeRunner:
             [
                 self._ffmpeg, "-nostdin", "-v", "error",
                 "-i", "concat:" + "|".join(str(piece) for piece in pieces),
-                "-map", "0", "-c", "copy", *_audio_bitstream(first_streams),
+                "-map", "0", "-c", "copy", *_audio_bitstream(part_streams[0]),
                 "-y", str(output),
             ],
             work_dir / "ts-join.log",
             on_progress,
             cancelled,
         )
+        return tuple(dropped.values())
 
     def _run(
         self,
@@ -1832,12 +2109,18 @@ class MergeRunner:
             try:
                 # 起動直後に 1 回打つ。短い結合でも heartbeat が 0 回にならない。
                 on_progress()
+                last_pulse = time.monotonic()
                 while process.poll() is None:
+                    # キャンセルは細かく見る。応答を待たせない。
                     if cancelled():
                         self._kill(process)
                         raise MergeCancelled("キャンセル要求を観測した")
-                    # リースは時間で延ばす。バイト数だと低速な環境で切れる。
-                    on_progress()
+                    # **リースの延長は throttle する。** poll のたびに打つと、
+                    # 30 分の結合で数千回 WAL へ書き、API とキャンセルの
+                    # 書き込みロックに不要に競合する。
+                    if time.monotonic() - last_pulse >= self._pulse_interval:
+                        on_progress()
+                        last_pulse = time.monotonic()
                     time.sleep(self._poll_interval)
             finally:
                 if process.poll() is None:
@@ -1862,6 +2145,20 @@ class MergeRunner:
         with contextlib.suppress(ProcessLookupError):
             os.killpg(group, signal.SIGKILL)
         process.wait()
+
+
+def _topology_matches(
+    part_streams: Sequence[Sequence[dict[str, Any]]],
+    selections: Sequence[Sequence[dict[str, Any]]],
+) -> bool:
+    """concat demuxer を使ってよいか.
+
+    demuxer は最初のファイルの構成を全体に適用するので、**全ストリームの
+    構成**と**保持対象の絶対 index の並び**の両方が一致していることを求める。
+    """
+    if len({stream_signature(streams) for streams in part_streams}) != 1:
+        return False
+    return len({tuple(s["index"] for s in selection) for selection in selections}) == 1
 
 
 def _escape(path: Path) -> str:
@@ -1893,7 +2190,7 @@ def _tail(log_path: Path) -> str:
 - [ ] **Step 4: 通ることを確認する**
 
 Run: `uv run pytest app/tests/test_adapter_ffmpeg.py -q`
-Expected: PASS（7 件）
+Expected: PASS（10 件）
 
 TS 経路が通らない場合は `work_dir/ts-*.log` を読む。`-bsf:v` の付け外しと
 `-map` の位置（入力の直後、`-c copy` の前）を先に疑う。
@@ -1903,8 +2200,14 @@ TS 経路が通らない場合は `work_dir/ts-*.log` を読む。`-bsf:v` の�
 | 変異 | 落ちるべきテスト |
 | --- | --- |
 | `maps` を `merge` に渡さない（ffmpeg の既定選択に任せる） | `test_the_declared_streams_decide_what_is_kept` |
+| TS 化の map を `selections[0]` から作る（先頭パートの index を使い回す） | `test_each_part_is_mapped_by_its_own_indexes` |
+| `_topology_matches` を常に `True` にする | `test_parts_with_a_different_stream_order_skip_the_concat_demuxer` |
+| `_topology_matches` から絶対 index の比較を落とし、signature だけ見る | 同上（signature は同じで index だけ違うので `concat.log` ができる） |
 | `except MergeFailed` を握りつぶして concat の結果を返す | `test_the_ts_route_runs_when_the_concat_demuxer_fails` |
-| `on_progress()` の起動直後の 1 回を消す | `test_progress_is_reported_even_for_a_fast_merge` |
+| `UNSUPPORTED_BY_TS` を空にする | `test_the_ts_route_drops_what_mpegts_cannot_carry_and_records_it`（mpegts が tmcd を拒否して `MergeFailed`） |
+| `dropped` を返さず `()` にする | 同上（記録が空になる） |
+| `on_progress()` の起動直後の 1 回を消す | `test_the_lease_pulse_is_throttled_but_always_fires_once` |
+| pulse の throttle を外して poll のたびに打つ | 同上（`pulse_interval=1000` でも複数回打つ） |
 | `cancelled()` の確認を消す | `test_a_cancelled_merge_raises_and_leaves_no_output` |
 | `_video_bitstream` を常に `[]` にする | `test_the_ts_route_runs_when_the_concat_demuxer_fails`（H.264 が mpegts に入らず失敗する） |
 | `_audio_bitstream` を常に `[]` にする | 同上（AAC が MP4 へ戻せない） |
@@ -1930,7 +2233,10 @@ git commit -m "feat(mediaferry): join parts with ffmpeg and fall back through ts
 - Test: `app/tests/test_publisher.py`（追記）
 
 **Interfaces:**
-- Produces: `ArtifactPublisher.publish_prepared(ctx: JobContext, request: ArtifactRequest, prepared_abs: Path) -> PublishedArtifact`
+- Produces:
+  - `ArtifactPublisher.publish_prepared(ctx: JobContext, request: ArtifactRequest, prepared_abs: Path) -> PublishedArtifact`
+  - `PublishCancelled(PublishAborted)`
+  - `HEARTBEAT_INTERVAL: float`
 - 既存の `publish` / `resume` / 例外・11 手順の意味は**変えない**
 
 **なぜ足すか:** `publish` は `write` コールバックで staging へ書きながら SHA-1 を
@@ -1938,6 +2244,16 @@ git commit -m "feat(mediaferry): join parts with ffmpeg and fall back through ts
 もう一度書き直すことになる。`work/` と `staging/` は同じファイルシステムなので
 （§7 が保証する）、`os.link` で移せば書き直しが要らない。**手順 1 と 3 以降は
 まったく同じコードを通る。**
+
+**読み取りの間も heartbeat とキャンセル確認を続ける。** 取り込みでは
+`Importer` の `write` コールバックの中で打っているが（`importer.py`）、
+結合では読み取りが publisher の内側で起きる。30 GiB の SHA-1 が 60 秒を超えると、
+読み切った後の手順 7 の `assert_lease` で**リースが失効し、正しく生成・検証済みの
+結合物が `PublishAborted` になる**。低速な HDD や負荷中の NAS では毎回同じ位置で
+再現する。キャンセルも走査が終わるまで効かない。`_materialise_link` は
+`ctx.heartbeat()` を時間ベースで打ち、chunk ごとに `ctx.cancelled()` を見て
+`PublishCancelled` を送出する（staged より前なので durable なものは残らない。
+`PublishAborted` の派生にして、既存の呼び出し側の扱いを変えない）。
 
 - [ ] **Step 1: 失敗するテストを書く**
 
@@ -2044,7 +2360,53 @@ def test_a_missing_prepared_file_leaves_nothing_durable(setup, data_root, db):
     row = db.execute("SELECT state FROM artifact_staging").fetchone()
     assert row["state"] == "writing"
     assert db.execute("SELECT count(*) FROM media_file").fetchone()[0] == 0
+
+
+def test_the_hash_scan_pulses_the_lease(setup, data_root, db, monkeypatch):
+    """リースより長い走査でも、手順 7 で失効しない."""
+    publisher, ctx, profile, _ = setup
+    group_id = a_merge_group(db, (profile.profile_id, profile.revision_id), "digest-1")
+    work = data_root / "work" / ctx.job_id
+    work.mkdir(parents=True)
+    prepared = work / "MERGED.MP4"
+    # 2 chunk 以上にして、走査の途中で打つ機会を作る。
+    prepared.write_bytes(b"x" * (4 * 1024 * 1024 + 1))
+    monkeypatch.setattr("mediaferry.adapters.publisher.HEARTBEAT_INTERVAL", 0)
+    beats = []
+    monkeypatch.setattr(ctx, "heartbeat", lambda: beats.append(1))
+
+    publisher.publish_prepared(
+        ctx,
+        a_request(profile, None, kind="merge", role="derived",
+                  desired_rel_path="derived/dji-osmo/DCIM/MERGED.MP4", merge_group_id=group_id),
+        prepared,
+    )
+    assert beats
+
+
+def test_a_cancelled_hash_scan_leaves_nothing_durable(setup, data_root, db):
+    publisher, ctx, profile, _ = setup
+    group_id = a_merge_group(db, (profile.profile_id, profile.revision_id), "digest-1")
+    work = data_root / "work" / ctx.job_id
+    work.mkdir(parents=True)
+    prepared = work / "MERGED.MP4"
+    prepared.write_bytes(b"merged-bytes")
+    db.execute("UPDATE job SET status = 'cancelling' WHERE id = ?", (ctx.job_id,))
+
+    with pytest.raises(PublishCancelled):
+        publisher.publish_prepared(
+            ctx,
+            a_request(profile, None, kind="merge", role="derived",
+                      desired_rel_path="derived/dji-osmo/DCIM/MERGED.MP4",
+                      merge_group_id=group_id),
+            prepared,
+        )
+    assert db.execute("SELECT count(*) FROM media_file").fetchone()[0] == 0
+    assert db.execute("SELECT state FROM artifact_staging").fetchone()["state"] == "writing"
+    assert not (data_root / "derived/dji-osmo/DCIM/MERGED.MP4").exists()
 ```
+
+`PublishCancelled` を import に足す。
 
 ファイル先頭の import に次を足す:
 
@@ -2168,22 +2530,68 @@ Expected: FAIL（`AttributeError: 'ArtifactPublisher' object has no attribute 'p
         return writer.size, writer.sha1
 
     def _materialise_link(
-        self, staging_abs: Path, prepared_abs: Path, mtime_ns: int
+        self, staging_abs: Path, prepared_abs: Path, mtime_ns: int, ctx: JobContext
     ) -> tuple[int, str]:
-        """既存のファイルを staging へ link し、1 パス読んで SHA-1 を取る."""
+        """既存のファイルを staging へ link し、1 パス読んで SHA-1 を取る.
+
+        30 GiB の走査はリース（60 秒）より長い。**chunk 境界がキャンセル
+        ポイントで、heartbeat は時間で打つ。** 打たないと、読み切った後の
+        手順 7 でリースが失効し、検証済みの結合物が捨てられる。
+        """
         os.link(prepared_abs, staging_abs)
         digest = hashlib.sha1(usedforsecurity=False)
         size = 0
+        last_beat = time.monotonic()
         with staging_abs.open("rb") as fileobj:
             while chunk := fileobj.read(COPY_CHUNK):
                 digest.update(chunk)
                 size += len(chunk)
+                if ctx.cancelled():
+                    raise PublishCancelled("SHA-1 の走査中にキャンセル要求を観測した")
+                if time.monotonic() - last_beat >= HEARTBEAT_INTERVAL:
+                    # **バイト数ではなく経過時間で打つ。** 低速な読み出しでは、
+                    # 閾値バイトに達する前にリースが切れる。
+                    ctx.heartbeat()
+                    last_beat = time.monotonic()
             self._checkpoint(STEP_WRITTEN)
             os.utime(staging_abs, ns=(mtime_ns, mtime_ns))
             os.fsync(fileobj.fileno())
         fsync_dir(staging_abs.parent)
         self._checkpoint(STEP_FSYNCED)
         return size, digest.hexdigest()
+```
+
+`publish_prepared` は `ctx` を渡す形にする:
+
+```python
+        return self._publish(
+            ctx,
+            request,
+            lambda staging_abs: self._materialise_link(
+                staging_abs, prepared_abs, request.mtime_ns, ctx
+            ),
+        )
+```
+
+ファイル冒頭に足すもの:
+
+```python
+import time
+
+from ..db.jobs import LEASE_SECONDS, JobContext, LeaseLost
+
+# リース (60 秒) の 1/3 ごとに延ばす。30 GiB の走査はリースより長く、
+# 読み出し速度は環境で桁が変わるので、バイト数ではなく時間で決める。
+HEARTBEAT_INTERVAL = LEASE_SECONDS / 3
+
+
+class PublishCancelled(PublishAborted):
+    """staged へ進む前にキャンセル要求を観測した.
+
+    `PublishAborted` の派生にしてあるので、既存の呼び出し側は今までどおり
+    「durable なものは残っていない」として扱える。結合の呼び出し元は、
+    これを見てグループを detected へ戻す。
+    """
 ```
 
 - [ ] **Step 4: 通ることを確認する**
@@ -2282,6 +2690,10 @@ Expected: PASS（11 段 × 3 種 + 既存の個別ケース）
 | 変異 | 落ちるべきテスト |
 | --- | --- |
 | `_materialise_link` の `os.utime` を消す | `test_the_prepared_file_gets_the_requested_mtime` |
+| `ctx.heartbeat()` の pulse を消す | `test_the_hash_scan_pulses_the_lease` |
+| pulse をバイト数（chunk 数）で打つ形にする | **落ちない**。テストの入力が小さいため。**時間で打つ根拠は「読み出し速度が環境で桁違い」なので、`HEARTBEAT_INTERVAL` を 0 にした形でしか観測できない。** 検出できない変異として記録する |
+| `ctx.cancelled()` の確認を消す | `test_a_cancelled_hash_scan_leaves_nothing_durable` |
+| `PublishCancelled` を `PublishAborted` に戻す | 同上（`pytest.raises(PublishCancelled)` が落ちる） |
 | `os.link` を `shutil.copy` にする | **落ちない**（結果は同じになる）。書き直しを避けることが目的なので、検出できない変異として記録する。ただし `test_the_published_file_survives_the_work_directory_being_cleaned` は copy でも通るので、**inode の共有を直接見るテストを足す**（下記） |
 | `size` の検証（手順 4）を消す | 既存の `test_a_short_write_is_aborted`（`publish` 側）が落ちる |
 | `_materialise_link` の `os.fsync` を消す | **落ちない**。電源断を再現できないため。検出できない変異として記録する（`os._exit` の crash 試験はページキャッシュを失わない） |
@@ -2330,7 +2742,7 @@ git commit -m "feat(mediaferry): publish an already written artifact by link"
   - `.save_detected(profile: ProfileRef, candidate: GroupCandidate, digest: str) -> str | None`
   - `.claim_for_merge(group_id: str, expected_digest: str) -> None`（取れなければ `GroupNotClaimable`）
   - `.record_verification(group_id: str, verification_json: str, tool_version: str) -> None`
-  - `.mark_merged(group_id) -> None` / `.mark_failed(group_id, error: str) -> None` / `.mark_skipped(group_id) -> None` / `.release(group_id) -> None` / `.adopt(group_id) -> None`
+  - `.mark_merged(group_id) -> None` / `.mark_failed(group_id, error: str) -> None` / `.release(group_id) -> None` / `.adopt(group_id) -> None`
   - `.get(group_id) -> sqlite3.Row | None` / `.members(group_id) -> list[sqlite3.Row]` / `.list_groups(status: str | None = None, limit: int = 200, offset: int = 0) -> list[sqlite3.Row]`
   - `GroupNotClaimable(RuntimeError)`
 
@@ -2445,12 +2857,42 @@ def test_a_failed_group_can_be_claimed_again(db, profile):
     assert repo.get(group_id)["error"] is None
 
 
-def test_a_skipped_group_cannot_be_claimed(db, profile):
+def test_a_merged_group_cannot_be_claimed_again(db, profile):
+    """再結合は旧 output_media_file_id を取り残す. supersede が要るので Phase 4."""
     repo = MergeRepository(db)
     group_id = repo.save_detected(profile, a_candidate(db, profile), "digest-1")
-    repo.mark_skipped(group_id)
+    output_id = a_media_file(
+        db, (profile.profile_id, profile.revision_id), role="derived",
+        rel_path="derived/dji-osmo/DCIM/MERGED.MP4",
+    )
+    repo.claim_for_merge(group_id, "digest-1")
+    repo.record_verification(group_id, '{"passed": true}', "ffmpeg version X")
+    db.execute(
+        "UPDATE merge_group SET output_media_file_id = ? WHERE id = ?", (output_id, group_id)
+    )
+    repo.mark_merged(group_id)
     with pytest.raises(GroupNotClaimable):
         repo.claim_for_merge(group_id, "digest-1")
+
+
+def test_recording_a_verification_needs_a_merging_group(db, profile):
+    repo = MergeRepository(db)
+    group_id = repo.save_detected(profile, a_candidate(db, profile), "digest-1")
+    with pytest.raises(GroupNotClaimable):
+        repo.record_verification(group_id, '{"passed": true}', "ffmpeg version X")
+
+
+def test_marking_merged_needs_an_output_and_a_verification(db, profile):
+    repo = MergeRepository(db)
+    group_id = repo.save_detected(profile, a_candidate(db, profile), "digest-1")
+    repo.claim_for_merge(group_id, "digest-1")
+    # 検証も出力も無い状態では倒せない。呼び出し順のバグで「merged なのに
+    # 出力が無い」行を作らせない。
+    with pytest.raises(GroupNotClaimable):
+        repo.mark_merged(group_id)
+    repo.record_verification(group_id, '{"passed": true}', "ffmpeg version X")
+    with pytest.raises(GroupNotClaimable):
+        repo.mark_merged(group_id)
 
 
 def test_releasing_puts_the_group_back_to_detected(db, profile):
@@ -2488,6 +2930,7 @@ def test_adopting_is_idempotent(db, profile):
         rel_path="derived/dji-osmo/DCIM/MERGED.MP4",
     )
     repo.claim_for_merge(group_id, "digest-1")
+    repo.record_verification(group_id, '{"passed": false}', "ffmpeg version X")
     db.execute(
         "UPDATE merge_group SET output_media_file_id = ? WHERE id = ?", (output_id, group_id)
     )
@@ -2607,21 +3050,42 @@ class MergeRepository:
     def record_verification(
         self, group_id: str, verification_json: str, tool_version: str
     ) -> None:
-        """**公開の前に呼ぶ。** 公開の途中で落ちても検証をやり直さずに済む."""
-        self._conn.execute(
-            "UPDATE merge_group SET verification_json = ?, tool_version = ?, updated_at = ?"
-            " WHERE id = ?",
-            (verification_json, tool_version, now_iso(), group_id),
-        )
+        """**公開の前に呼ぶ。** 公開の途中で落ちても検証をやり直さずに済む.
+
+        成立条件を DB 側でも確かめる。呼び出し順のバグ 1 つで、結合していない
+        グループに検証結果が付くのを防ぐ。
+        """
+        with immediate(self._conn):
+            updated = self._conn.execute(
+                "UPDATE merge_group SET verification_json = ?, tool_version = ?, updated_at = ?"
+                " WHERE id = ? AND status = 'merging' AND superseded_by_id IS NULL",
+                (verification_json, tool_version, now_iso(), group_id),
+            )
+            if updated.rowcount != 1:
+                raise GroupNotClaimable(
+                    f"グループ {group_id} は結合中ではないので検証結果を書けない"
+                )
 
     def mark_merged(self, group_id: str) -> None:
-        self._transition(group_id, "merged", ("merging",))
+        """**出力と検証結果が揃っていることを DB 側で確かめる。**
+
+        揃っていない `merged` 行を作ると、選択肢の側が黙って隠すので
+        異常が静かに残る。
+        """
+        with immediate(self._conn):
+            updated = self._conn.execute(
+                "UPDATE merge_group SET status = 'merged', error = NULL, updated_at = ?"
+                " WHERE id = ? AND status = 'merging' AND superseded_by_id IS NULL"
+                "   AND output_media_file_id IS NOT NULL AND verification_json IS NOT NULL",
+                (now_iso(), group_id),
+            )
+            if updated.rowcount != 1:
+                raise GroupNotClaimable(
+                    f"グループ {group_id} には merged にできる出力と検証結果が無い"
+                )
 
     def mark_failed(self, group_id: str, error: str) -> None:
         self._transition(group_id, "failed", ("merging",), error=error)
-
-    def mark_skipped(self, group_id: str) -> None:
-        self._transition(group_id, "skipped", CLAIMABLE)
 
     def release(self, group_id: str) -> None:
         """merging → detected. キャンセルと中断の後始末に使う."""
@@ -2698,7 +3162,7 @@ class MergeRepository:
 - [ ] **Step 4: 通ることを確認する**
 
 Run: `uv run pytest app/tests/test_merge_repository.py -q`
-Expected: PASS（13 件）
+Expected: PASS（15 件）
 
 - [ ] **Step 5: 変異試験**
 
@@ -2708,9 +3172,12 @@ Expected: PASS（13 件）
 | `taken` のチェックを消す | `test_a_member_of_an_active_group_is_not_taken_again`（同上。`merge_member_one_active_group` が `IntegrityError` を投げる） |
 | `claim_for_merge` から `input_digest = ?` を落とす | `test_a_changed_digest_cannot_be_claimed` |
 | `CLAIMABLE` に `"merging"` を足す | `test_claiming_twice_is_refused` |
-| `CLAIMABLE` に `"skipped"` を足す | `test_a_skipped_group_cannot_be_claimed` |
+| `CLAIMABLE` に `"merged"` を足す | `test_a_merged_group_cannot_be_claimed_again` |
 | `claim_for_merge` の `error = NULL` を消す | `test_a_failed_group_can_be_claimed_again` の後半 |
 | `record_verification` で `status = 'merged'` も同時に立てる | `test_the_verification_is_recorded_before_the_group_is_merged` |
+| `record_verification` の `status = 'merging'` の条件を消す | `test_recording_a_verification_needs_a_merging_group` |
+| `mark_merged` の `output_media_file_id IS NOT NULL` を消す | `test_marking_merged_needs_an_output_and_a_verification` |
+| `mark_merged` の `verification_json IS NOT NULL` を消す | 同上（後半） |
 | `adopt` の `output_media_file_id IS NULL` の判定を消す | `test_adopting_requires_a_merged_group_with_an_output` |
 | `adopt` の `adopted_at is not None` の早期 return を消す | `test_adopting_is_idempotent` |
 
@@ -3061,17 +3528,20 @@ git commit -m "feat(mediaferry): detect merge groups from the published library"
   - `.run(ctx: JobContext, group_id: str, expected_digest: str, profile: ProfileRef) -> MergeResult`
   - `MergeResult(media_file_id: str, rel_path: str, route: str, passed: bool)`
   - `MergeInputsChanged(RuntimeError)` / `NotEnoughSpace(RuntimeError)`
+  - `TS_PEAK_FACTOR: int` / `FREE_SPACE_MARGIN: int`
 
 **順序の要点:**
 
 1. `claim_for_merge`（構成が変わっていれば始めない）
-2. 入力の実在確認と空き容量の確認（始めてから途中で止まる状態を作らない）
-3. `work/<job-id>/` で結合
-4. 全パートと出力を ffprobe して検証
-5. **検証結果を commit する（公開の前）**
-6. キャンセルを再確認して `publish_prepared`
-7. `mark_merged`
-8. `work/` を掃除（成功・失敗にかかわらず）
+2. 入力の実在確認と空き容量の確認（始めてから途中で止まる状態を作らない）。
+   **TS 経路のピーク（`.ts` と出力が同時に置かれる）で見積もる**
+3. **全パートを ffprobe する**（map をパートごとに作るため。結合の前に済ませる）
+4. `work/<job-id>/` で結合
+5. 出力を ffprobe して検証（経路が運べずに落としたストリームも受け取る）
+6. **検証結果を commit する（公開の前）**
+7. キャンセルを再確認して `publish_prepared`
+8. `mark_merged`
+9. `work/` を掃除（成功・失敗にかかわらず）
 
 - [ ] **Step 1: 失敗するテストを書く**
 
@@ -3091,7 +3561,12 @@ from mediaferry.core.merge.grouping import GroupCandidate, MergePart
 from mediaferry.db.jobs import JobStore
 from mediaferry.db.merges import GroupNotClaimable, MergeRepository
 from mediaferry.db.profiles import ProfileRegistry
-from mediaferry.jobs.merger import MergeInputsChanged, Merger
+from mediaferry.jobs.merger import (
+    FREE_SPACE_MARGIN,
+    MergeInputsChanged,
+    Merger,
+    NotEnoughSpace,
+)
 
 from .test_schema_artifacts import a_media_file
 
@@ -3238,6 +3713,24 @@ def test_the_verification_is_recorded_before_the_publish(world, data_root, db, m
     assert row["status"] == "merging"
 
 
+def test_the_space_check_covers_the_ts_peak(world, data_root, db, monkeypatch):
+    """入力合計は入るが、TS の中間物と出力を同時に置けない空きでは始めない."""
+    import os as os_module
+
+    merger, ctx, profile, repo, group_id = world
+    total = sum(row["size_bytes"] for row in repo.members(group_id))
+    real = os_module.statvfs(data_root)
+
+    class Tight:
+        f_frsize = 1
+        f_bavail = total + FREE_SPACE_MARGIN + 1  # 入力 1 本ぶんは足りる
+
+    monkeypatch.setattr(os_module, "statvfs", lambda path: Tight() if str(path) == str(data_root) else real)
+    with pytest.raises(NotEnoughSpace):
+        merger.run(ctx, group_id, "digest-1", profile)
+    assert repo.get(group_id)["status"] == "failed"
+
+
 def test_a_failed_verification_is_still_published(world, data_root, db):
     merger, ctx, profile, repo, group_id = world
     # duration をずらして不合格にする。公開は行われ、採用はされない。
@@ -3284,7 +3777,12 @@ from pathlib import Path, PurePosixPath
 
 from ..adapters.ffmpeg import MergeCancelled, MergeRunner
 from ..adapters.ffprobe import MediaProbe
-from ..adapters.publisher import ArtifactPublisher, ArtifactRequest, PublishInterrupted
+from ..adapters.publisher import (
+    ArtifactPublisher,
+    ArtifactRequest,
+    PublishCancelled,
+    PublishInterrupted,
+)
 from ..core.merge.grouping import MergePart
 from ..core.merge.output import merged_rel_path
 from ..core.merge.verify import ProbedFile, verify
@@ -3296,6 +3794,8 @@ from ..db.profiles import ProfileRef
 
 # 空き容量の見積りに乗せる余裕。DB とサムネイルの分。
 FREE_SPACE_MARGIN = 512 * 1024 * 1024
+# TS フォールバックのピーク。全パートの .ts と結合後の出力が同時に置かれる。
+TS_PEAK_FACTOR = 2
 
 
 class MergeInputsChanged(RuntimeError):
@@ -3338,7 +3838,9 @@ class Merger:
         self._repo.claim_for_merge(group_id, expected_digest)
         try:
             return self._merge(ctx, group_id, profile)
-        except MergeCancelled:
+        except (MergeCancelled, PublishCancelled):
+            # どちらも staged より前。durable なものは残っていないので、
+            # グループを detected へ戻して再実行できるようにする。
             self._repo.release(group_id)
             raise
         except PublishInterrupted:
@@ -3367,10 +3869,12 @@ class Merger:
 
         work = self._data_root / work_rel_path(ctx.job_id)
         work.mkdir(parents=True, exist_ok=True)
-        first_streams = self._probe.describe(parts[0], extension).streams
+        # **全パートを先に probe する。** 先頭の構成を全体に当てはめると、
+        # 保持しない data track の位置が違うパートで別のストリームを選ぶ。
+        probed_parts = [self._probed(path, extension) for path in parts]
         outcome = self._runner.merge(
             parts,
-            first_streams,
+            [probed.streams for probed in probed_parts],
             rule.keep_streams,
             work,
             PurePosixPath(desired).name,
@@ -3379,10 +3883,11 @@ class Merger:
         )
 
         verification = verify(
-            [self._probed(path, extension) for path in parts],
+            probed_parts,
             self._probed(outcome.output_path, extension),
             rule.keep_streams,
             outcome.route,
+            outcome.dropped_by_route,
         )
         # 公開の前に残す。公開の途中で落ちても検証をやり直さない。
         self._repo.record_verification(group_id, verification.to_json(), outcome.tool_version)
@@ -3429,7 +3934,13 @@ class Merger:
         )
 
     def _assert_space(self, members: list[sqlite3.Row]) -> None:
-        needed = sum(row["size_bytes"] for row in members)
+        """**TS 経路のピークで見積もる。**
+
+        TS フォールバックでは、全パートの `.ts` と結合後の出力が同時に
+        `work/` に存在する。入力の合計しか要求しないと、`.ts` を作り終えた後の
+        出力生成で ENOSPC になり、「始める前に止める」という約束を破る。
+        """
+        needed = TS_PEAK_FACTOR * sum(row["size_bytes"] for row in members)
         stat = os.statvfs(self._data_root)
         if needed + FREE_SPACE_MARGIN > stat.f_bavail * stat.f_frsize:
             raise NotEnoughSpace(f"{needed} バイトの結合に空き容量が足りない")
@@ -3478,7 +3989,7 @@ def _recording_end_ns(members: list[sqlite3.Row]) -> int:
 - [ ] **Step 4: 通ることを確認する**
 
 Run: `uv run pytest app/tests/test_merger.py -q`
-Expected: PASS（8 件）
+Expected: PASS（9 件）
 
 - [ ] **Step 5: 変異試験**
 
@@ -3486,6 +3997,9 @@ Expected: PASS（8 件）
 | --- | --- |
 | `claim_for_merge` を `_merge` の後に呼ぶ | `test_a_changed_digest_is_refused_before_anything_runs`（work が作られる） |
 | 入力の実在確認を消す | `test_a_missing_input_stops_the_job_and_fails_the_group` |
+| `TS_PEAK_FACTOR` を 1 にする | `test_the_space_check_covers_the_ts_peak` |
+| `probed_parts` を先頭パートの複製にする | **落ちない**。統合テストのクリップは全パートが同じ並びだから。**並びの違う入力での確認は Task 6 の `test_each_part_is_mapped_by_its_own_indexes` が受け持つ**（検出できない変異として記録する） |
+| `outcome.dropped_by_route` を `verify` へ渡さない | **落ちない**。統合テストは concat 経路しか通らない（`dropped_by_route` は空）。Task 6 の `test_the_ts_route_drops_what_mpegts_cannot_carry_and_records_it` が受け持つ |
 | `record_verification` を公開の後に移す | `test_the_verification_is_recorded_before_the_publish` |
 | `except PublishInterrupted` を消して `mark_failed` に落とす | 同上（`status` が `failed` になる） |
 | `except MergeCancelled` の `release` を消す | `test_a_cancelled_merge_releases_the_group` |
@@ -3526,7 +4040,7 @@ git commit -m "feat(mediaferry): merge a group and publish the result"
 - Test: `app/tests/test_reconciler.py`（追記）
 
 **Interfaces:**
-- Produces: `ReconcileReport.merges_completed: int` / `ReconcileReport.merges_released: int`
+- Produces: `ReconcileReport.merges_completed: int` / `ReconcileReport.merges_released: int` / `ReconcileReport.merges_blocked: int`
 
 **なぜ要るか:** 公開は `publisher._commit` が `merge_group.output_media_file_id` を
 埋めるところまでを 1 トランザクションで行うが、`status` を `merged` にするのは
@@ -3576,7 +4090,33 @@ def test_a_finished_group_is_left_alone(db, data_root):
     assert db.execute("SELECT status FROM merge_group WHERE id = ?", (group_id,)).fetchone()[0] == (
         "skipped"
     )
+
+
+def test_a_group_with_an_unrecoverable_staging_is_not_released(db, data_root):
+    """`StagingLost` を残したまま再試行できると、履歴が上書きされうる."""
+    profile = _a_profile(db)
+    group_id = a_merge_group(db, profile, "digest-1", status="merging")
+    job_id = JobStore(db).enqueue("merge", {})
+    # staged なのに実体が無い（手順 7〜10 の間で停止し、両方が失われた形）。
+    a_staging(
+        db, job_id, kind="merge", state="staged", merge_group_id=group_id,
+        final_rel_path="derived/dji-osmo/DCIM/MERGED.MP4", expected_size=10,
+        content_sha1="0" * 40, metadata_json="{}",
+    )
+
+    report = _reconcile(db, data_root)
+
+    assert report.unrecoverable
+    assert report.merges_blocked == 1
+    assert report.merges_released == 0
+    assert db.execute("SELECT status FROM merge_group WHERE id = ?", (group_id,)).fetchone()[0] == (
+        "merging"
+    )
 ```
+
+`a_staging` は `test_schema_artifacts` から import する。`metadata_json` は
+`_recover_staging` が読むので、最低限 `{}` を入れる（`StagingLost` は実体と
+ハッシュの突き合わせで出る）。
 
 `_a_profile` と `_reconcile` は既存のテストが使っているヘルパに合わせる。無ければ
 次を足す:
@@ -3614,6 +4154,8 @@ class ReconcileReport:
     cleaned_dirs: int = 0
     merges_completed: int = 0
     merges_released: int = 0
+    # 回収できない staging を抱えていて、自動では動かせないグループ。
+    merges_blocked: int = 0
     orphans: list[OrphanFile] = field(default_factory=list)
     unrecoverable: list[str] = field(default_factory=list)
 ```
@@ -3640,10 +4182,27 @@ class ReconcileReport:
         公開まで進んでいれば（`output_media_file_id` が入っていれば）merged へ、
         進んでいなければ detected へ戻す。戻さないと再試行もできない。
         起動時に呼ぶので、走っているジョブは既に倒れている。
+
+        **回収できなかった `artifact_staging` を抱えたグループは動かさない。**
+        `_recover_staging` が `StagingLost` を残したものがこれにあたる。
+        detected へ戻すと再試行でき、古い staged 行と新しい公開が同じ
+        グループを指して、後の reconciliation がどちらの出力を書き込むかで
+        履歴が上書きされる。「自動では続行しない」という契約を守る。
         """
+        blocked = {
+            row["merge_group_id"]
+            for row in self._conn.execute(
+                "SELECT DISTINCT merge_group_id FROM artifact_staging"
+                " WHERE merge_group_id IS NOT NULL AND state <> 'published'"
+            )
+        }
         for row in self._conn.execute(
             "SELECT id, output_media_file_id FROM merge_group WHERE status = 'merging'"
         ).fetchall():
+            if row["id"] in blocked:
+                report.merges_blocked += 1
+                logger.warning("結合 %s は回収できない staging を抱えている", row["id"])
+                continue
             if row["output_media_file_id"] is not None:
                 target, counter = "merged", "merges_completed"
             else:
@@ -3664,9 +4223,11 @@ Expected: PASS
 
 | 変異 | 落ちるべきテスト |
 | --- | --- |
-| `_settle_merges` を `_recover_staging` の前に置く | crash 試験（手順 7〜10 で落とした `merge_prepared` のグループが `detected` に戻ってしまう）。**この順序を守るテストを Task 14 の統合テストで足す** |
+| `_settle_merges` を `_recover_staging` の前に置く | crash 試験（Task 14 で group status も assert するようにする。手順 7 で落とした `merge_prepared` のグループが `detected` + 出力ありになる） |
 | `output_media_file_id is not None` の分岐を反転する | `test_a_merge_that_reached_the_publish_is_completed` |
 | `WHERE status = 'merging'` を外す | `test_a_finished_group_is_left_alone` |
+| `blocked` の判定を消す | `test_a_group_with_an_unrecoverable_staging_is_not_released` |
+| `blocked` の条件を `state = 'writing'` だけにする | 同上（`staged` のまま残った行を拾えない） |
 
 - [ ] **Step 6: コミット**
 
@@ -3747,12 +4308,14 @@ def a_group(db, profile, members, *, status="merged", verification=PASSED, adopt
     return group_id
 
 
-def a_pair(db, profile):
+def a_pair(db, profile, prefix="P"):
+    """rel_path は UNIQUE なので、複数のグループを作るときは prefix を変える."""
     return [
         (
             a_media_file(db, (profile.profile_id, profile.revision_id),
-                         rel_path=f"library/dji-osmo/DCIM/P{index}.MP4", sha1=f"{index:040d}"),
-            f"{index:040d}",
+                         rel_path=f"library/dji-osmo/DCIM/{prefix}{index}.MP4",
+                         sha1=f"{prefix}{index:039d}"),
+            f"{prefix}{index:039d}",
         )
         for index in (1, 2)
     ]
@@ -3841,6 +4404,39 @@ def test_skipped_group_members_can_be_shown_with_the_same_filter(db, profile):
     assert ids(shown) == {media_id for media_id, _ in members}
 
 
+def test_a_string_false_is_not_a_pass(db, profile):
+    """`bool("false")` は真になる. `passed` は真の bool のときだけ合格."""
+    members = a_pair(db, profile)
+    output_id = a_media_file(db, (profile.profile_id, profile.revision_id), role="derived",
+                             rel_path="derived/dji-osmo/DCIM/MERGED.MP4")
+    a_group(db, profile, members, output_id=output_id,
+            verification=json.dumps({"passed": "false"}))
+    assert SelectionService(db, ProfileRegistry(db)).selectable() == []
+
+
+def test_the_list_is_capped(db, profile):
+    for index in range(5):
+        a_media_file(db, (profile.profile_id, profile.revision_id),
+                     rel_path=f"library/dji-osmo/DCIM/C{index}.MP4")
+    assert len(SelectionService(db, ProfileRegistry(db)).selectable(limit=3)) == 3
+
+
+def test_the_members_are_read_in_one_query(db, profile, monkeypatch):
+    """derived 1 件ごとに問い合わせない（グループが増えても query 数が伸びない）."""
+    for index in range(3):
+        members = a_pair(db, profile, prefix=f"G{index}")
+        output_id = a_media_file(db, (profile.profile_id, profile.revision_id), role="derived",
+                                 rel_path=f"derived/dji-osmo/DCIM/M{index}.MP4")
+        a_group(db, profile, members, output_id=output_id)
+
+    calls = []
+    real = db.execute
+    monkeypatch.setattr(db, "execute", lambda sql, *args: (calls.append(sql), real(sql, *args))[1])
+    SelectionService(db, ProfileRegistry(db)).selectable()
+
+    assert len([sql for sql in calls if "merge_member mm" in sql and "JOIN media_file" in sql]) == 1
+
+
 def test_unadopted_derived_outputs_can_be_shown_with_a_filter(db, profile):
     members = a_pair(db, profile)
     output_id = a_media_file(db, (profile.profile_id, profile.revision_id), role="derived",
@@ -3883,12 +4479,15 @@ import json
 import sqlite3
 from collections.abc import Sequence
 from dataclasses import dataclass
+from typing import Any
 
 from ..core.merge.digest import input_digest
 from .profiles import ProfileRegistry
 
 INCLUDE_FAILED_GROUP_MEMBERS = "failed_group_members"
 INCLUDE_UNADOPTED_DERIVED = "unadopted_derived"
+# 1 応答で返す上限。画面の pagination は Phase 4。
+DEFAULT_LIMIT = 500
 
 _ORIGINALS = (
     "SELECT m.id, m.rel_path, m.role FROM media_file m"
@@ -3907,6 +4506,8 @@ _DERIVED = (
     " ORDER BY m.captured_at DESC"
 )
 
+# `skipped` は Phase 2 では作られない（破棄は Phase 4）。§10 が「failed / skipped の
+# グループの member」と定めているので、条件は最初から両方書いておく。
 _MEMBERS_OF_UNMERGED = (
     "SELECT m.id, m.rel_path, m.role, g.id AS merge_group_id FROM media_file m"
     " JOIN merge_member mm ON mm.media_file_id = m.id"
@@ -3931,14 +4532,23 @@ class SelectionService:
         self._conn = conn
         self._registry = registry
 
-    def selectable(self, include: Sequence[str] = ()) -> list[Selectable]:
+    def selectable(self, include: Sequence[str] = (), limit: int = DEFAULT_LIMIT) -> list[Selectable]:
+        """**返す件数に上限を置く。** 数万件の一覧を 1 応答に詰めない.
+
+        呼び出し側は `len(result) == limit` で打ち切りを判断する。カーソルを
+        使った本格的な pagination は、画面の要件が決まる Phase 4 で足す。
+        """
         items = [
             Selectable(row["id"], row["rel_path"], row["role"], "default", None)
             for row in self._conn.execute(_ORIGINALS)
         ]
         wanted_unadopted = INCLUDE_UNADOPTED_DERIVED in include
-        for row in self._conn.execute(_DERIVED).fetchall():
-            if not self._digest_matches(row):
+        derived = self._conn.execute(_DERIVED).fetchall()
+        # profile と member はまとめて引く。derived 1 件ごとに問い合わせると、
+        # グループが数千あるだけで一覧を開くたびに数千回の query になる。
+        matching = self._matching_digests(derived)
+        for row in derived:
+            if row["merge_group_id"] not in matching:
                 continue
             adopted = row["adopted_at"] is not None
             passed = _verification_passed(row["verification_json"])
@@ -3969,38 +4579,60 @@ class SelectionService:
                 )
                 for row in self._conn.execute(_MEMBERS_OF_UNMERGED)
             )
-        return items
+        return items[:limit]
 
-    def _digest_matches(self, row: sqlite3.Row) -> bool:
-        """現行の構成・設定・リビジョンから計算し直して突き合わせる."""
-        profile = self._registry.by_id(row["profile_id"])
-        members = self._conn.execute(
-            "SELECT m.id, m.sha1 FROM merge_member mm"
-            " JOIN media_file m ON m.id = mm.media_file_id"
-            " WHERE mm.merge_group_id = ? AND mm.active = 1 ORDER BY mm.position",
-            (row["merge_group_id"],),
-        ).fetchall()
-        current = input_digest(
-            [(member["id"], member["sha1"]) for member in members],
-            profile.definition.merge,
-            profile.revision_id,
-        )
-        return current == row["input_digest"]
+    def _matching_digests(self, rows: Sequence[sqlite3.Row]) -> set[str]:
+        """現行の構成・設定・リビジョンから計算し直し、一致した group を返す."""
+        if not rows:
+            return set()
+        group_ids = [row["merge_group_id"] for row in rows]
+        marks = ", ".join("?" * len(group_ids))
+        members: dict[str, list[tuple[str, str]]] = {}
+        for member in self._conn.execute(
+            "SELECT mm.merge_group_id AS group_id, m.id AS media_file_id, m.sha1 AS sha1"
+            " FROM merge_member mm JOIN media_file m ON m.id = mm.media_file_id"
+            f" WHERE mm.merge_group_id IN ({marks}) AND mm.active = 1"  # noqa: S608
+            " ORDER BY mm.merge_group_id, mm.position",
+            group_ids,
+        ):
+            members.setdefault(member["group_id"], []).append(
+                (member["media_file_id"], member["sha1"])
+            )
+
+        profiles: dict[str, Any] = {}
+        matching: set[str] = set()
+        for row in rows:
+            profile = profiles.get(row["profile_id"])
+            if profile is None:
+                profile = profiles[row["profile_id"]] = self._registry.by_id(row["profile_id"])
+            current = input_digest(
+                members.get(row["merge_group_id"], []),
+                profile.definition.merge,
+                profile.revision_id,
+            )
+            if current == row["input_digest"]:
+                matching.add(row["merge_group_id"])
+        return matching
 
 
 def _verification_passed(verification_json: str | None) -> bool:
+    """`passed` が真の bool のときだけ合格.
+
+    `bool(value)` にすると、`"passed": "false"` のような文字列まで合格に
+    してしまう。
+    """
     if verification_json is None:
         return False
     try:
-        return bool(json.loads(verification_json).get("passed"))
-    except (TypeError, ValueError):
+        return json.loads(verification_json).get("passed") is True
+    except (AttributeError, TypeError, ValueError):
         return False
 ```
 
 - [ ] **Step 4: 通ることを確認する**
 
 Run: `uv run pytest app/tests/test_selection.py -q`
-Expected: PASS（11 件）
+Expected: PASS（15 件）
 
 - [ ] **Step 5: 変異試験**
 
@@ -4010,7 +4642,10 @@ Expected: PASS（11 件）
 | `missing_at IS NULL` を消す | `test_a_missing_file_is_not_selectable` |
 | `_DERIVED` の `g.status = 'merged'` を消す | `test_a_group_that_is_not_merged_yet_hides_both_sides` |
 | `_DERIVED` の `superseded_by_id IS NULL` を消す | **落ちない**。supersede は Phase 4 で入るので、テストデータに supersede されたグループが無い。**`superseded_by_id` を立てたケースを足す**（下記） |
-| `_digest_matches` を常に `True` にする | `test_a_stale_digest_takes_the_derived_output_out_of_the_list` |
+| `_matching_digests` を常に全件一致にする | `test_a_stale_digest_takes_the_derived_output_out_of_the_list` |
+| member をグループごとに 1 回ずつ引く形へ戻す | `test_the_members_are_read_in_one_query` |
+| `_verification_passed` を `bool(...)` に戻す | `test_a_string_false_is_not_a_pass` |
+| `items[:limit]` を消す | `test_the_list_is_capped` |
 | `adopted or passed` を `passed` だけにする | `test_an_adopted_failed_verification_is_selectable` |
 | `adopted or passed` を `adopted` だけにする | `test_a_verified_derived_output_is_selectable` |
 | `wanted_unadopted` の分岐を既定でも通す | `test_an_unadopted_failed_verification_is_not_selectable_by_default` |
@@ -4063,9 +4698,9 @@ git commit -m "feat(mediaferry): expose which media are offered for upload"
 | POST | `/merge-groups/preview?profile_slug=&tolerance_seconds=&min_part_size_gib=` | 閾値を変えた候補を**保存せず**返す |
 | GET | `/merge-groups?status=&limit=&offset=` | 一覧（構成・gap・検証結果） |
 | GET | `/merge-groups/{id}` | 詳細 |
-| POST | `/merge-groups/{id}/merge` | 結合ジョブを開始 |
-| PATCH | `/merge-groups/{id}?action=adopt\|discard` | 採用 / 破棄 |
-| GET | `/uploads/selectable?include=` | §10 (b) の選択肢 |
+| POST | `/merge-groups/{id}/merge` | 結合ジョブを開始（`detected` / `failed` から） |
+| PATCH | `/merge-groups/{id}?action=adopt` | 採用（検証不合格の出力を中身を見て採る） |
+| GET | `/uploads/selectable?include=&limit=` | §10 (b) の選択肢 |
 
 - `JobWorld.run_detect_groups(ctx, conn) -> None` / `JobWorld.run_merge(ctx, conn) -> None`
 
@@ -4162,13 +4797,11 @@ def test_adopting_a_group_without_an_output_is_a_409(client, api_db):
     assert client.patch(f"/api/merge-groups/{group_id}?action=adopt").status_code == 409
 
 
-def test_discarding_a_detected_group_skips_it(client, api_db):
+def test_discarding_is_not_offered_in_this_phase(client, api_db):
+    """破棄は公開済みの media_file を取り残す. supersede が入る Phase 4 で足す."""
     profile = ProfileRegistry(api_db).current("dji-osmo")
     group_id = a_merge_group(api_db, (profile.profile_id, profile.revision_id), "digest-1")
-    assert client.patch(f"/api/merge-groups/{group_id}?action=discard").status_code == 200
-    assert api_db.execute(
-        "SELECT status FROM merge_group WHERE id = ?", (group_id,)
-    ).fetchone()[0] == "skipped"
+    assert client.patch(f"/api/merge-groups/{group_id}?action=discard").status_code == 400
 
 
 def test_an_unknown_action_is_a_400(client, api_db):
@@ -4227,14 +4860,13 @@ from ..core.merge.output import MergeOutputUndefined, merged_rel_path
 from ..db.jobs import JobStore
 from ..db.merges import GroupNotClaimable, MergeRepository
 from ..db.profiles import ProfileRegistry, UnknownProfile
-from ..db.selection import SelectionService
+from ..db.selection import DEFAULT_LIMIT, SelectionService
 from ..jobs.detect_groups import GroupDetector
 from .deps import conn as get_conn
 
 router = APIRouter()
 
 ADOPT = "adopt"
-DISCARD = "discard"
 
 
 @router.post("/merge-groups/detect")
@@ -4338,12 +4970,17 @@ def start_merge(group_id: str, conn=Depends(get_conn)) -> dict[str, str]:  # noq
 
 @router.patch("/merge-groups/{group_id}")
 def patch_group(group_id: str, action: str, conn=Depends(get_conn)) -> dict[str, str]:  # noqa: ANN001, B008
+    """公開後にできる操作は採用だけ.
+
+    破棄と再結合は公開済みの `media_file` を取り残すので、supersede が入る
+    Phase 4 で足す。
+    """
     repo = MergeRepository(conn)
     _found(repo, group_id)
-    if action not in (ADOPT, DISCARD):
+    if action != ADOPT:
         raise HTTPException(status_code=400, detail=f"知らない操作: {action}")
     try:
-        repo.adopt(group_id) if action == ADOPT else repo.mark_skipped(group_id)
+        repo.adopt(group_id)
     except GroupNotClaimable as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     return {"status": "ok"}
@@ -4352,10 +4989,14 @@ def patch_group(group_id: str, action: str, conn=Depends(get_conn)) -> dict[str,
 @router.get("/uploads/selectable")
 def selectable(
     include: list[str] = Query(default=[]),  # noqa: B008
+    limit: int = DEFAULT_LIMIT,
     conn=Depends(get_conn),  # noqa: ANN001, B008
 ) -> dict[str, Any]:
     service = SelectionService(conn, ProfileRegistry(conn))
+    items = service.selectable(include, limit)
     return {
+        # 上限で切れたかを応答で示す。黙って一部だけ返さない。
+        "truncated": len(items) == limit,
         "selectable": [
             {
                 "media_file_id": item.media_file_id,
@@ -4364,8 +5005,8 @@ def selectable(
                 "reason": item.reason,
                 "merge_group_id": item.merge_group_id,
             }
-            for item in service.selectable(include)
-        ]
+            for item in items
+        ],
     }
 
 
@@ -4518,10 +5159,12 @@ Expected: PASS
 | `start_merge` の params から `input_digest` を落とす | `test_merging_fixes_the_digest_and_the_revision_in_the_job` |
 | `start_merge` の params で現行リビジョンを読み直す | 同上（リビジョンは一致するので**落ちない**。プロファイルを編集してから enqueue するケースを足す） |
 | `patch_group` の `action` の検証を消す | `test_an_unknown_action_is_a_400` |
+| `patch_group` に `discard`（`mark_skipped`）を足す | `test_discarding_is_not_offered_in_this_phase` |
 | `adopt` の `GroupNotClaimable` を 500 のまま通す | `test_adopting_a_group_without_an_output_is_a_409` |
 | `_found` を消す | `test_a_missing_group_is_a_404` |
-| `_targets` の `merge.enabled` の絞り込みを消す | **落ちない**。ビルトインは `dji-osmo` の 1 つだけで、`enabled: true`。**`enabled: false` のプロファイルを DB に入れるケースを足す** |
+| `_targets` の `merge.enabled` の絞り込みを消す | `test_profiles_that_do_not_merge_are_not_detected` |
 | `preview` が `save_detected` を呼ぶ | `test_the_preview_does_not_store_anything` |
+| `truncated` を常に `False` にする | **落ちない**。上限に届くデータを API のテストで作っていない。`SelectionService` 側の `test_the_list_is_capped` が上限そのものを見ている（検出できない変異として記録する） |
 
 リビジョンとプロファイル絞り込みのテストを足す:
 
@@ -4549,12 +5192,36 @@ def test_the_job_keeps_the_revision_that_was_current_when_it_was_queued(client, 
 
 
 def test_profiles_that_do_not_merge_are_not_detected(client, api_db):
-    # `_targets` は merge.enabled で絞る。archived も active() が外す。
-    api_db.execute(
-        "UPDATE device_profile SET archived_at = ? WHERE slug = 'dji-osmo'",
-        ("2026-08-17T00:00:00+00:00",),
+    """`archived` ではなく `merge.enabled = false` で確かめる.
+
+    archive は `registry.active()` が先に外すので、`_targets` から
+    `merge.enabled` の条件を消しても通ってしまう。
+    """
+    when = "2026-08-17T00:00:00+00:00"
+    profile = ProfileRegistry(api_db).current("dji-osmo")
+    definition = json.loads(
+        api_db.execute(
+            "SELECT definition_json FROM profile_revision WHERE id = ?", (profile.revision_id,)
+        ).fetchone()[0]
     )
-    assert client.post("/api/merge-groups/detect").json()["jobs"] == []
+    definition["slug"] = "no-merge"
+    definition["merge"]["enabled"] = False
+    api_db.execute(
+        "INSERT INTO device_profile (id, slug, name, builtin, created_at)"
+        " VALUES ('p-nomerge', 'no-merge', 'No merge', 0, ?)",
+        (when,),
+    )
+    api_db.execute(
+        "INSERT INTO profile_revision (id, profile_id, revision, definition_json,"
+        " schema_version, created_at) VALUES ('r-nomerge', 'p-nomerge', 1, ?, 1, ?)",
+        (json.dumps(definition), when),
+    )
+    api_db.execute(
+        "UPDATE device_profile SET current_revision_id = 'r-nomerge' WHERE id = 'p-nomerge'"
+    )
+
+    jobs = client.post("/api/merge-groups/detect").json()["jobs"]
+    assert [entry["profile_slug"] for entry in jobs] == ["dji-osmo"]
 ```
 
 - [ ] **Step 6: コミット**
@@ -4698,7 +5365,6 @@ def test_the_digest_stops_matching_when_a_part_is_replaced(db, data_root, librar
 
 
 def test_a_merge_interrupted_after_staging_is_settled_at_startup(db, data_root, library):
-    """`_recover_staging` の後に `_settle_merges` が走る順序を守る."""
     profile = library
     repo = MergeRepository(db)
     store = JobStore(db)
@@ -4712,11 +5378,9 @@ def test_a_merge_interrupted_after_staging_is_settled_at_startup(db, data_root, 
         db, repo, ArtifactPublisher(db, data_root, MediaProbe()), MergeRunner(),
         MediaProbe(), data_root,
     )
-    # 公開の途中で落ちた状態を作る（mark_merged まで到達しない）。
-    original = merger._repo.mark_merged
+    # 公開は終わったが mark_merged の前で落ちた状態を作る。
     merger._repo.mark_merged = lambda group_id: None
     merger.run(ctx, group["id"], group["input_digest"], profile)
-    merger._repo.mark_merged = original
     assert repo.get(group["id"])["status"] == "merging"
 
     report = Reconciler(
@@ -4731,7 +5395,54 @@ def test_a_merge_interrupted_after_staging_is_settled_at_startup(db, data_root, 
 `WHERE id = (SELECT id FROM media_file WHERE role = 'original' ORDER BY rel_path LIMIT 1)`
 に直す。
 
-- [ ] **Step 2: 通ることを確認する**
+**この 3 番目のテストは `_settle_merges` の順序を守らない。** 公開が手順 11 まで
+終わってから `mark_merged` だけを潰しているので、`_settle_merges` を
+`_recover_staging` より前へ動かしても `output_media_file_id` は既に入っており、
+通ってしまう。順序は次の Step で crash 試験に受け持たせる。
+
+- [ ] **Step 2: crash 試験でグループの状態も確かめる**
+
+`app/tests/test_crash_consistency.py` の本体テストに、`merge` / `merge_prepared`
+のときだけグループの状態を見るアサーションを足す。**`_settle_merges` を
+`_recover_staging` より前へ動かすと、手順 7 で落とした場合に「`detected` なのに
+出力 ID が入っている」状態になり、ここで落ちる。**
+
+```python
+    if kind != "import":
+        group = conn.execute("SELECT status, output_media_file_id FROM merge_group").fetchone()
+        if step <= 6:
+            # 公開へ進んでいない。再試行できる状態へ戻す。
+            assert group["status"] == "detected"
+            assert group["output_media_file_id"] is None
+        else:
+            # 公開は完遂している。出力 ID が入り、merged になる。
+            assert group["status"] == "merged"
+            assert group["output_media_file_id"] is not None
+```
+
+`crash_child.py` はグループを `merging` で作るので、reconciliation を経ずに
+この状態にはならない。**`merge_group.verification_json` も埋めておく**
+（`mark_merged` の CAS が検証結果を要求するため、`_settle_merges` が倒すときの
+前提を crash 試験でも満たす）:
+
+```python
+def _a_merge_group(conn, profile):  # noqa: ANN001, ANN202
+    from mediaferry.clock import now_iso
+
+    group_id = new_id()
+    conn.execute(
+        "INSERT INTO merge_group (id, profile_id, profile_revision_id, status, input_digest,"
+        " detected_by, verification_json, tool_version, created_at, updated_at)"
+        " VALUES (?, ?, ?, 'merging', 'digest-1', 'auto', '{\"passed\": true}', 'ffmpeg', ?, ?)",
+        (group_id, profile.profile_id, profile.revision_id, now_iso(), now_iso()),
+    )
+    return group_id
+```
+
+Run: `uv run pytest app/tests/test_crash_consistency.py -q`
+Expected: PASS
+
+- [ ] **Step 3: 通ることを確認する**
 
 Run: `uv run pytest -q`
 Expected: PASS（全件）
@@ -4743,7 +5454,7 @@ uv run ruff check .
 uv run ruff format --check .
 ```
 
-- [ ] **Step 3: `docs/design.md` を直す**
+- [ ] **Step 4: `docs/design.md` を直す**
 
 1. §11 の API 表に 1 行足す（`/merge-groups/preview` の上）:
 
@@ -4760,9 +5471,18 @@ uv run ruff format --check .
   30 GiB を全デコードするので使わない。取れないパートが 1 つでもあれば
   `inconclusive` とする
 - 「`bit_rate` のばらつきが小さい」は `(max - min) / mean ≤ 0.1`。分散ではなく
-  範囲で見るのは、パートが 2 本のときにも意味を持たせるため
-- `keep_streams.timecode` が真のとき、`tmcd` は `bit_rate` を持たないことが
-  多く、サイズ検査は `inconclusive` に倒れる
+  範囲で見るのは、パートが 2 本のときにも意味を持たせるため。**対応する
+  ストリームごとに評価する**（合計で見ると、支配的な映像が音声の変動を隠す）
+- 期待サイズは **`bit_rate` が取れた保持ストリームだけ**で組み立てる。取れなかった
+  のが映像・音声なら `inconclusive`、data（`tmcd` など）なら推定から外して続ける。
+  外したストリームは `verification_json` に残す。`tmcd` を理由に全体を
+  `inconclusive` にすると、既定の DJI プロファイルでサイズ検査が常に無効になる
+- 検証器の版は `verification_json.pipeline_version` に記録する。**`input_digest`
+  には入れない**（入力の同一性の判定であって、検証器の同一性ではない。混ぜると
+  閾値を変えるたびに既存の派生物が選択肢から消える）
+- TS 経路は `mpegts` が運べないストリーム（QuickTime の data track）を外して
+  結合する。外したものは `verification_json.route_dropped_streams` に残る。
+  ストリーム検査は不合格になるが、出力は公開されるのでユーザが目視して採用できる
 ```
 
 3. §21 に節を足して、Phase 2 で確定した契約を残す:
@@ -4773,14 +5493,21 @@ uv run ruff format --check .
 | 判断 | 理由 |
 | --- | --- |
 | **結合物の公開は `ArtifactPublisher.publish_prepared`（`os.link`）** | `write` コールバックで staging へ書き直すと 30 GiB をもう一度書く。`work/` と `staging/` は同一ファイルシステム（§7）なので link で移せる。11 手順と回収の性質は `publish` と同じ |
+| **`publish_prepared` の SHA-1 走査中も heartbeat とキャンセル確認を続ける** | 30 GiB の走査はリース（60 秒）より長い。打たないと、読み切った後の手順 7 で失効し、正しく生成・検証済みの結合物が捨てられる |
 | **検証結果は公開の前に commit する** | 公開の途中で落ちても検証をやり直さない。`merging` のまま残ったグループは起動時に決着させる |
-| **`merging` のまま残ったグループは、出力の有無で merged / detected へ倒す** | 倒さないと再試行もできない。`_recover_staging` の後に走らせる（そこで公開が完遂して `output_media_file_id` が入る） |
+| **`merging` のまま残ったグループは、出力の有無で merged / detected へ倒す** | 倒さないと再試行もできない。`_recover_staging` の後に走らせる（そこで公開が完遂して `output_media_file_id` が入る）。**回収できない `artifact_staging` を抱えたグループは動かさない**（再試行させると、古い staged 行と新しい公開が同じグループを指す） |
+| **公開後にできる操作は採用だけ。破棄と再結合は Phase 4** | どちらも公開済みの `media_file` を取り残す。旧グループを `superseded_by_id` で向け直す仕組みが要り、それは手動編集と共通なので画面と一緒に入れる |
 | **派生物の mtime は「壁時計を UTC として解釈した epoch」** | 取り込みの mtime と同じ表現にする。オフセット付きの瞬間を使うと、`library/` と `derived/` で衝突接尾辞の壁時計がずれる |
-| **TS 経路の `-map` は mpegts 化の段で適用する** | mpegts の中でストリーム index が振り直されるので、結合の段で MP4 の絶対 index を使うと別のストリームを指す |
+| **map はパートごとに、そのパート自身の ffprobe 結果から作る** | 保持 signature が同じでも、保持しない data track の挿入位置が違えば絶対 index は変わる。先頭の index を使い回すと、同じ codec の別トラックを黙って拾う |
+| **concat demuxer は preflight してから使う** | demuxer は最初のファイルの構成を全体に適用する。全ストリームの構成と保持対象の index の並びが一致しないときは、試さずに TS へ送る |
+| **TS 経路は mpegts が運べないストリームを外して記録する** | 外さないと mux が拒否して、検証できる出力そのものができない（既定の DJI プロファイルは `timecode: true` なので fallback が常に使えなくなる） |
+| **空き容量は TS 経路のピーク（入力合計の 2 倍）で見積もる** | `.ts` の中間物と出力が同時に `work/` に置かれる。入力合計だけだと、始めた後の出力生成で ENOSPC になる |
+| **リースの延長は throttle し、キャンセル確認だけを細かく回す** | poll のたびに延ばすと 30 分の結合で数千回 WAL へ書き、API とキャンセルの書き込みロックに競合する |
 | **検出は「アクティブな member」を境界として扱う** | 列から取り除くだけだと、その前後がつながって別の録画を 1 つのグループにする |
+| **`record_verification` と `mark_merged` は成立条件を DB 側で確かめる** | 呼び出し順のバグ 1 つで「merged なのに出力が無い」行ができ、選択肢の側が隠すので静かに残る |
 ```
 
-- [ ] **Step 4: `docs/HANDOFF.md` を直す**
+- [ ] **Step 5: `docs/HANDOFF.md` を直す**
 
 - §1 の表で Phase 2 を **完了**にし、検証状態のテスト件数を実測値に直す
 - §3「Phase 1 で確定した契約」に倣い、**Phase 2 で確定した契約**の表を足す
@@ -4788,7 +5515,7 @@ uv run ruff format --check .
 - §5「次にやること」を Phase 3（Immich 同期）の入口に書き換える
 - §7「持ち越している判断」に、Task 3 の `attached_pic` の確認を足す
 
-- [ ] **Step 5: `docs/phase1-manual-checklist.md` に 1 項目足す**
+- [ ] **Step 6: `docs/phase1-manual-checklist.md` に 1 項目足す**
 
 ```markdown
 ### 12. 埋め込みサムネイルの disposition を確かめる
@@ -4805,7 +5532,7 @@ ffprobe -v error -print_format json -show_streams /path/to/DJI_....MP4
   使うプロファイルを足すときに `_is_thumbnail` の判定を増やす必要がある
 ```
 
-- [ ] **Step 6: この計画に差分を書き戻してコミット**
+- [ ] **Step 7: この計画に差分を書き戻してコミット**
 
 実装で計画から外れた判断があれば、この `docs/phase2-plan.md` の該当タスクに
 書き戻す。検出できなかった変異も同様。
@@ -4836,13 +5563,37 @@ git commit -m "docs(mediaferry): record what phase 2 settled"
 | 手動でのグループ分割・結合（`detected_by = manual` / supersede） | Phase 4（画面ありきの操作。スキーマと trigger は Phase 1 で入っている） |
 | 継ぎ目サムネイルの画像生成、`ThumbnailService`、`GET /media/{id}/thumbnail` | Phase 4（Phase 2 は秒数を `verification_json` に残すところまで） |
 | `upload_record` / `selection_rule` / §10 (a)(c) の claim 時評価 | Phase 3 |
-| `skipped` からの復帰操作 | Phase 4（Phase 2 の `discard` は片道） |
-| `merged` なグループの再結合 | Phase 4（supersede が要る） |
+| **公開済み結合物の破棄（`skipped` へ倒す）と再結合** | Phase 4。どちらも旧 `output_media_file_id` と `media_file` を取り残すので、supersede が要る。`status = failed`（何も公開していない）からの結合実行は Phase 2 でできる |
+| カーソルによる pagination | Phase 4（Phase 2 は `limit` と `truncated` だけ） |
 | 入力スキーマ（pydantic モデル）と CSRF | Phase 4 |
 
 ## レビュー記録
 
-（実装前に codex へレビューを依頼した結果をここに書く。依頼は
-`bash ~/.agents/skills/agmsg/scripts/send.sh chezmoi claude-code codex "<本文>"`。
-長文は配送が遅れるので、このファイルを読ませて指摘を返させる。）
+### 1 巡目（2026-08-18、codex。blocker 4 / major 7 / minor 1）
+
+実装着手の前に依頼した。**11 件を反映し、1 件を退けた。**
+
+| # | 指摘 | 反映先 |
+| --- | --- | --- |
+| 1 [blocker] | `publish_prepared` の 30 GiB SHA-1 走査中に heartbeat もキャンセル確認も無く、リースが失効して検証済みの結合物が捨てられる | Task 7（`_materialise_link` に時間ベースの pulse と chunk ごとのキャンセル判定、`PublishCancelled`） |
+| 2 [blocker] | `StagingLost` を残したままグループを `detected` へ戻すので、古い staged 行と新しい公開が同じグループを指す | Task 11（`merges_blocked`。未解決の `artifact_staging` を持つグループは動かさない） |
+| 3 [blocker] | 先頭パートの絶対 stream index を全パートの TS 化に使い回している | Task 6 / 10（パートごとに map を作る。concat は preflight してから使う） |
+| 4 [blocker] | 検証不合格後の「再試行・破棄」が状態遷移として実装できず、範囲宣言と矛盾 | 範囲を「公開後は採用だけ」に決め直した（`mark_skipped` を落とし、API は `adopt` のみ） |
+| 5 [major] | `tmcd` を map したまま mpegts 化するので、既定プロファイルでは TS 経路が常に失敗する | Task 6（`UNSUPPORTED_BY_TS`。外して `route_dropped_streams` に記録する） |
+| 6 [major] | TS 経路のピーク容量を過小評価している | Task 10（`TS_PEAK_FACTOR = 2`） |
+| 7 [major] | heartbeat を 0.5 秒ごとに SQLite へ書いている | Task 6（`PULSE_INTERVAL`。キャンセル確認と分ける） |
+| 8 [major] | `tmcd` に `bit_rate` が無いため既定でサイズ検査が常に無効。ばらつきを合計で見ている | Task 5（`ESTIMABLE_TYPES` と `excluded_streams`、ばらつきはストリームごと） |
+| 9 [major] | reconciliation 順序の変異試験が順序逆転を検出しない | Task 14 Step 2（crash 試験でグループの状態も assert する） |
+| 10 [major] | 状態遷移メソッドが成立条件を DB 側で確認していない | Task 8（`record_verification` / `mark_merged` を CAS に） |
+| 11 [major] | `selectable` が無制限 + derived ごとの N+1。`bool(value)` が `"false"` を合格にする | Task 12（batch query、`DEFAULT_LIMIT` と `truncated`、`is True`） |
+| 12 [minor] | `merge.enabled` の変異を検出できないテスト | Task 13（archive ではなく `enabled: false` の第 2 プロファイルで確かめる） |
+
+**退けた指摘: `MERGE_PIPELINE_VERSION` を `input_digest` に入れる（#8 の一部）。**
+`input_digest` は §8 で「構成ファイルの ordered な id と sha1、結合設定、
+プロファイルリビジョン」と定義され、その役割は §10 のとおり**入力の同一性**の
+判定である。検証の閾値はプロファイルの `merge` 節にも無く、入力ではない。
+混ぜると、閾値を 1 つ変えただけで既存の結合物がそろって既定の選択肢から消え、
+再結合するまで戻らない。検証器の版は
+`verification_json.pipeline_version` に残し、画面で「古い版で検証された」と
+示せるようにした（Task 5）。
 
