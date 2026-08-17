@@ -5,8 +5,16 @@ from mediaferry.db.jobs import JobStore
 from mediaferry.db.profiles import ProfileRegistry
 from mediaferry.jobs.reconcile import Reconciler
 
-from .test_publisher import StubProbe, _Crash, _die_after, a_request, write_payload
-from .test_schema_artifacts import a_source_entry
+from .test_publisher import (
+    StubProbe,
+    _Crash,
+    _die_after,
+    a_merge_request,
+    a_prepared,
+    a_request,
+    write_payload,
+)
+from .test_schema_artifacts import a_media_file, a_merge_group, a_source_entry, a_staging
 from .test_schema_sources import a_volume
 
 
@@ -207,3 +215,114 @@ def test_running_jobs_are_marked_interrupted_first(world, db):
     ctx = store.claim_next()
     reconciler.run()
     assert store.get(ctx.job_id)["status"] == "interrupted"
+
+
+def _a_profile(db):
+    ProfileRegistry(db).sync_builtins()
+    profile = ProfileRegistry(db).current("dji-osmo")
+    return (profile.profile_id, profile.revision_id)
+
+
+def _reconcile(db, data_root):
+    publisher = ArtifactPublisher(db, data_root, StubProbe())
+    return Reconciler(db, data_root, publisher, JobStore(db)).run()
+
+
+def test_a_merge_that_reached_the_publish_is_completed(db, data_root):
+    profile = _a_profile(db)
+    group_id = a_merge_group(db, profile, "digest-1", status="merging")
+    output_id = a_media_file(
+        db, profile, role="derived", rel_path="derived/dji-osmo/DCIM/MERGED.MP4"
+    )
+    (data_root / "derived/dji-osmo/DCIM").mkdir(parents=True)
+    (data_root / "derived/dji-osmo/DCIM/MERGED.MP4").write_bytes(b"x")
+    db.execute(
+        "UPDATE merge_group SET output_media_file_id = ? WHERE id = ?", (output_id, group_id)
+    )
+
+    report = _reconcile(db, data_root)
+
+    assert report.merges_completed == 1
+    assert db.execute("SELECT status FROM merge_group WHERE id = ?", (group_id,)).fetchone()[0] == (
+        "merged"
+    )
+
+
+def test_a_merge_that_never_published_is_released_for_a_retry(db, data_root):
+    profile = _a_profile(db)
+    group_id = a_merge_group(db, profile, "digest-1", status="merging")
+
+    report = _reconcile(db, data_root)
+
+    assert report.merges_released == 1
+    assert db.execute("SELECT status FROM merge_group WHERE id = ?", (group_id,)).fetchone()[0] == (
+        "detected"
+    )
+
+
+def test_a_finished_group_is_left_alone(db, data_root):
+    profile = _a_profile(db)
+    group_id = a_merge_group(db, profile, "digest-1", status="skipped")
+    _reconcile(db, data_root)
+    assert db.execute("SELECT status FROM merge_group WHERE id = ?", (group_id,)).fetchone()[0] == (
+        "skipped"
+    )
+
+
+def test_a_group_with_an_unrecoverable_staging_is_not_released(db, data_root):
+    """`StagingLost` を残したまま再試行できると、履歴が上書きされうる."""
+    profile = _a_profile(db)
+    group_id = a_merge_group(db, profile, "digest-1", status="merging")
+    job_id = JobStore(db).enqueue("merge", {})
+    # staged なのに実体が無い（手順 7〜10 の間で停止し、両方が失われた形）。
+    a_staging(
+        db,
+        job_id,
+        kind="merge",
+        state="staged",
+        merge_group_id=group_id,
+        final_rel_path="derived/dji-osmo/DCIM/MERGED.MP4",
+        expected_size=10,
+        content_sha1="0" * 40,
+        metadata_json="{}",
+    )
+
+    report = _reconcile(db, data_root)
+
+    assert report.unrecoverable
+    assert report.merges_blocked == 1
+    assert report.merges_released == 0
+    assert db.execute("SELECT status FROM merge_group WHERE id = ?", (group_id,)).fetchone()[0] == (
+        "merging"
+    )
+
+
+def test_a_merge_is_settled_after_its_staging_is_recovered(db, data_root):
+    """決着は `_recover_staging` の後に置く.
+
+    先に置くと、公開まで進んでいたグループが「出力がまだ無い」と見えて
+    detected へ戻り、その直後に公開が完遂して出力だけが付く。
+    """
+    ProfileRegistry(db).sync_builtins()
+    profile = ProfileRegistry(db).current("dji-osmo")
+    group_id = a_merge_group(
+        db, (profile.profile_id, profile.revision_id), "digest-1", status="merging"
+    )
+    store = JobStore(db)
+    store.enqueue("merge", {})
+    ctx = store.claim_next()
+    publisher = ArtifactPublisher(db, data_root, StubProbe())
+    publisher._checkpoint = _die_after(7)  # noqa: SLF001
+    with pytest.raises(_Crash):
+        publisher.publish_prepared(
+            ctx, a_merge_request(profile, group_id), a_prepared(data_root, ctx)
+        )
+    publisher._checkpoint = lambda step: None  # noqa: SLF001
+
+    report = Reconciler(db, data_root, publisher, store).run()
+
+    assert report.resumed == 1
+    assert report.merges_completed == 1
+    assert db.execute("SELECT status FROM merge_group WHERE id = ?", (group_id,)).fetchone()[0] == (
+        "merged"
+    )

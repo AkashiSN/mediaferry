@@ -4394,7 +4394,7 @@ Expected: PASS
 
 | 変異 | 落ちるべきテスト |
 | --- | --- |
-| `_settle_merges` を `_recover_staging` の前に置く | crash 試験（Task 14 で group status も assert するようにする。手順 7 で落とした `merge_prepared` のグループが `detected` + 出力ありになる） |
+| `_settle_merges` を `_recover_staging` の前に置く | Task 14 を待たずに、この場で固定できる。手順 7 で落とした `publish_prepared` を回収させる `test_a_merge_is_settled_after_its_staging_is_recovered` を足した（先に置くと `merges_released` が 1、`merges_completed` が 0 になる） |
 | `output_media_file_id is not None` の分岐を反転する | `test_a_merge_that_reached_the_publish_is_completed` |
 | `WHERE status = 'merging'` を外す | `test_a_finished_group_is_left_alone` |
 | `blocked` の判定を消す | `test_a_group_with_an_unrecoverable_staging_is_not_released` |

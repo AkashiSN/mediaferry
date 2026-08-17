@@ -42,6 +42,10 @@ class ReconcileReport:
     missing: int = 0
     restored: int = 0
     cleaned_dirs: int = 0
+    merges_completed: int = 0
+    merges_released: int = 0
+    # 回収できない staging を抱えていて、自動では動かせないグループ。
+    merges_blocked: int = 0
     orphans: list[OrphanFile] = field(default_factory=list)
     # 自動では続行できなかった staging（実体が無い、内容が一致しない）。
     # 行は残す。画面に出して判断を仰ぐ。
@@ -67,10 +71,48 @@ class Reconciler:
         # staging と work を掃除する。
         self._store.sweep_interrupted()
         self._recover_staging(report)
+        self._settle_merges(report)
         self._sync_missing(report)
         self._collect_orphans(report)
         self._clean_job_dirs(report)
         return report
+
+    def _settle_merges(self, report: ReconcileReport) -> None:
+        """`merging` のまま残ったグループを決着させる.
+
+        公開まで進んでいれば（`output_media_file_id` が入っていれば）merged へ、
+        進んでいなければ detected へ戻す。戻さないと再試行もできない。
+        起動時に呼ぶので、走っているジョブは既に倒れている。
+
+        **回収できなかった `artifact_staging` を抱えたグループは動かさない。**
+        `_recover_staging` が `StagingLost` を残したものがこれにあたる。
+        detected へ戻すと再試行でき、古い staged 行と新しい公開が同じ
+        グループを指して、後の reconciliation がどちらの出力を書き込むかで
+        履歴が上書きされる。「自動では続行しない」という契約を守る。
+        """
+        blocked = {
+            row["merge_group_id"]
+            for row in self._conn.execute(
+                "SELECT DISTINCT merge_group_id FROM artifact_staging"
+                " WHERE merge_group_id IS NOT NULL AND state <> 'published'"
+            )
+        }
+        for row in self._conn.execute(
+            "SELECT id, output_media_file_id FROM merge_group WHERE status = 'merging'"
+        ).fetchall():
+            if row["id"] in blocked:
+                report.merges_blocked += 1
+                logger.warning("結合 %s は回収できない staging を抱えている", row["id"])
+                continue
+            if row["output_media_file_id"] is not None:
+                target, counter = "merged", "merges_completed"
+            else:
+                target, counter = "detected", "merges_released"
+            self._conn.execute(
+                "UPDATE merge_group SET status = ?, updated_at = ? WHERE id = ?",
+                (target, now_iso(), row["id"]),
+            )
+            setattr(report, counter, getattr(report, counter) + 1)
 
     def _recover_staging(self, report: ReconcileReport) -> None:
         # published の行は commit と同じトランザクションで media_file を作るので、
