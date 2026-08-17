@@ -1,0 +1,7716 @@
+# mediaferry Phase 1（基盤 + 取り込み）実装計画
+
+> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+
+**Goal:** DB スキーマ・`ArtifactPublisher`・`Reconciler`・プロファイルリビジョンを確定し、既知の DJI カードを実 USB から手動 scan / import できる API を作る。
+
+**Architecture:** `core/` は OS もネットワークも知らない純粋ロジック（指紋・プロファイル判定・時刻解決・衝突名・暗号）。副作用は `adapters/`（dirfd 走査・ffprobe・公開）に閉じる。`db/` は SQLite の単一書き込み者としてスキーマ・マイグレーション・リポジトリを持つ。`jobs/` は単一 asyncio ワーカーで、実処理は `asyncio.to_thread` に逃がす。`api/` は FastAPI で loopback バインドのみ。取り込みと結合の**両方**が §9.3 の公開プロトコル（`ArtifactPublisher`）を通り、`Reconciler` が起動時に齟齬を回収する。
+
+**Tech Stack:** Python 3.12 / uv workspace / SQLite（WAL）/ FastAPI / cryptography（AES-256-GCM）/ PyYAML / ffprobe / pytest / ruff
+
+**Spec:** `docker/mediaferry/docs/design.md`（正本）。実測で確定した事項は `docker/mediaferry/docs/phase0-findings.md`、作業の前提は `docker/mediaferry/docs/HANDOFF.md`。
+
+## Global Constraints
+
+すべてのタスクの要件に、以下が暗黙に含まれる。
+
+- **作業ディレクトリは `docker/mediaferry/`。** コマンドはすべてここから実行する。
+- Python は `>=3.12`。ruff の `line-length = 100`、`target-version = "py312"`、
+  lint は `select = ["E", "F", "I", "UP", "B", "SIM", "ANN", "S"]`（`ANN401` のみ ignore）。
+  `**/tests/*` は `S101` と `ANN` が免除される。
+- すべてのモジュールは `from __future__ import annotations` で始める（既存コードの作法）。
+- **コメントと docstring は日本語。**「いま書かれているコードを現在形で説明する」だけを書く。
+  過去の経緯（「以前は〜だった」「〜へ移行した」）はコードに書かず、`docs/` に残す
+  （リポジトリの `CLAUDE.md` の規約）。
+- **環境固有の値をリポジトリに含めない。** IP アドレス、ホスト名、データセットのパス、
+  API キー、タイムゾーンの実値をコードにもテストにも書かない。
+- **DB に絶対パスを保存しない。** `DATA_ROOT` からの相対パスのみが正規形（§7）。
+- **秘密をログ・`job.params_json`・`job_event`・API 応答・例外メッセージに出さない**（§12.3）。
+- 外部コマンドは必ず引数配列で起動する。シェル文字列を組み立てない（§14）。
+- ソース側のパス解決は dirfd 起点の**単一構成要素のみ**。`..`・絶対パス・シンボリック
+  リンクを辿らない（`O_NOFOLLOW`）（§14）。
+- システム時刻（`created_at` / `updated_at` / `observed_at` など）は **UTC の
+  ISO-8601 文字列**（`2026-08-17T13:04:05.123456+00:00`）で DB に入れる。生成は
+  `mediaferry.clock` の関数だけを使う。
+  **例外は `media_file.captured_at`。** これは解決したオフセット付きで保存する
+  （`2026-08-17T14:30:00+09:00`）。UTC へ正規化すると、`force_offset` で復元した
+  現地の壁時計が読めなくなる。
+- ID は `uuid4().hex`（32 文字の TEXT）。`job_event.id` だけ整数の自動採番。
+- テストのマーカー: root を要するものは `needs_root`、実 Immich を要するものは
+  `needs_immich`。既定の `pytest` では実行されない。
+- 各タスクの最後に必ず `uv run pytest`・`uv run ruff check .`・`uv run ruff format .` を通す。
+- コミットは Conventional Commits + 日本語の本文（例: `feat(mediaferry): add the artifact publisher`）。
+  **本文に Claude のセッション URL を書かない**（`CLAUDE.md` の規約）。
+- **Phase 1 は配布可能なリリースにしない。** `BIND_HOST` の既定は `127.0.0.1` のまま。
+
+### 検証コマンド
+
+```bash
+cd docker/mediaferry
+uv sync --all-packages     # --all-packages が必須。素の sync ではメンバーが入らない
+uv run pytest
+uv run ruff check .
+uv run ruff format --check .
+```
+
+---
+
+## ファイル構成
+
+Phase 1 で作る／触るファイルと、それぞれの責務。
+
+| ファイル | 責務 |
+| --- | --- |
+| `app/src/mediaferry/clock.py` | 現在時刻の単一の出所。テストで差し替える |
+| `app/src/mediaferry/ids.py` | ID 採番 |
+| `app/src/mediaferry/settings.py` | env > DB > 既定値の解決、起動時の検証 |
+| `app/src/mediaferry/db/connection.py` | 接続の PRAGMA と `BEGIN IMMEDIATE` |
+| `app/src/mediaferry/db/migrate.py` | マイグレーション適用 |
+| `app/src/mediaferry/db/migrations/000{1..4}_*.sql` | スキーマ。1 ファイル 1 版、自分で BEGIN/COMMIT する |
+| `app/src/mediaferry/db/profiles.py` | `ProfileRegistry`。ビルトインの投入とリビジョン解決 |
+| `app/src/mediaferry/db/jobs.py` | `JobStore`。CAS による claim、リース、`job_event` |
+| `app/src/mediaferry/db/artifacts.py` | `artifact_staging` / `media_file` のリポジトリ |
+| `app/src/mediaferry/db/sources.py` | `source_device` / `volume_instance` / `volume_presence` / `source_entry` |
+| `app/src/mediaferry/core/fingerprint.py` | `quick_fingerprint` |
+| `app/src/mediaferry/core/naming.py` | ライブラリ内の保存名と衝突時の決定的系列 |
+| `app/src/mediaferry/core/timestamps.py` | `captured_at` の解決（`force_offset`・DST） |
+| `app/src/mediaferry/core/profiles/model.py` | プロファイル定義の型と検証 |
+| `app/src/mediaferry/core/profiles/matching.py` | `hints` / `require` の判定 |
+| `app/src/mediaferry/core/profiles/builtin/dji-osmo.yaml` | ビルトイン定義 |
+| `app/src/mediaferry/core/crypto.py` | API キーの AEAD 暗号化フォーマット |
+| `app/src/mediaferry/adapters/fs.py` | dirfd 起点の安全な `openat` と走査 |
+| `app/src/mediaferry/adapters/ffprobe.py` | メディアの種別・duration の確定 |
+| `app/src/mediaferry/adapters/publisher.py` | `ArtifactPublisher`（§9.3） |
+| `app/src/mediaferry/jobs/runner.py` | 単一 asyncio ワーカー、キャンセル、リース更新 |
+| `app/src/mediaferry/jobs/scan.py` | `Scanner`（§9.5） |
+| `app/src/mediaferry/jobs/importer.py` | `Importer`（§9.4） |
+| `app/src/mediaferry/jobs/reconcile.py` | `Reconciler`（§9.6） |
+| `app/src/mediaferry/api/app.py` | FastAPI ファクトリと lifespan |
+| `app/src/mediaferry/api/routes_*.py` | ルータ |
+| `app/src/mediaferry/__main__.py` | 起動エントリ |
+| `app/tests/**` | 単体・統合・crash consistency |
+| `docs/phase1-backup.md` | バックアップとリストア、再構築できる範囲（§18-4） |
+| `docs/phase1-manual-checklist.md` | 実 USB での手動確認手順 |
+
+---
+
+### Task 1: DB 接続とマイグレーション適用
+
+**Files:**
+- Create: `app/src/mediaferry/clock.py`
+- Create: `app/src/mediaferry/ids.py`
+- Create: `app/src/mediaferry/db/__init__.py`
+- Create: `app/src/mediaferry/db/connection.py`
+- Create: `app/src/mediaferry/db/migrate.py`
+- Create: `app/src/mediaferry/db/migrations/__init__.py`
+- Create: `app/tests/conftest.py`
+- Test: `app/tests/test_db_migrate.py`
+
+**Interfaces:**
+- Consumes: なし（このタスクが土台）
+- Produces:
+  - `mediaferry.clock.utcnow() -> datetime`（tz-aware, UTC）
+  - `mediaferry.clock.iso(dt: datetime) -> str`
+  - `mediaferry.clock.now_iso() -> str`
+  - `mediaferry.ids.new_id() -> str`（32 文字 hex）
+  - `mediaferry.db.connection.open_database(path: Path) -> sqlite3.Connection`
+  - `mediaferry.db.connection.immediate(conn) -> ContextManager[sqlite3.Connection]`
+  - `mediaferry.db.migrate.apply_migrations(conn) -> list[int]`
+  - `mediaferry.db.migrate.MigrationError`
+  - pytest フィクスチャ `db`（マイグレーション適用済みの接続）と `data_root`
+
+- [ ] **Step 1: 失敗するテストを書く**
+
+`app/tests/test_db_migrate.py`:
+
+```python
+import sqlite3
+import stat
+
+import pytest
+
+from mediaferry.db.connection import immediate, open_database
+from mediaferry.db.migrate import MigrationError, apply_migrations
+
+
+def test_open_database_sets_wal_and_foreign_keys(tmp_path):
+    conn = open_database(tmp_path / "var" / "mediaferry.sqlite3")
+    assert conn.execute("PRAGMA journal_mode").fetchone()[0] == "wal"
+    assert conn.execute("PRAGMA foreign_keys").fetchone()[0] == 1
+    assert conn.execute("PRAGMA synchronous").fetchone()[0] == 2  # FULL
+    conn.close()
+
+
+def test_database_file_is_not_world_readable(tmp_path):
+    """API キーの暗号文と履歴が入るので、DB は 0600・親は 0700 にする."""
+    path = tmp_path / "var" / "mediaferry.sqlite3"
+    conn = open_database(path)
+    conn.close()
+    assert stat.S_IMODE(path.stat().st_mode) == 0o600
+    assert stat.S_IMODE(path.parent.stat().st_mode) == 0o700
+
+
+def test_apply_migrations_is_idempotent(tmp_path):
+    conn = open_database(tmp_path / "db.sqlite3")
+    first = apply_migrations(conn)
+    assert first  # 1 版以上が適用される
+    assert apply_migrations(conn) == []
+    conn.close()
+
+
+def test_apply_migrations_rejects_a_file_that_does_not_record_its_version(tmp_path, monkeypatch):
+    """版を記録しない migration は、再起動のたびに再適用されて壊れる."""
+    from mediaferry.db import migrate
+
+    bogus = tmp_path / "migrations"
+    bogus.mkdir()
+    (bogus / "0001_bogus.sql").write_text("BEGIN;\nCREATE TABLE t (x);\nCOMMIT;\n")
+    monkeypatch.setattr(migrate, "MIGRATIONS_DIR", bogus)
+
+    conn = open_database(tmp_path / "db.sqlite3")
+    with pytest.raises(MigrationError, match="0001_bogus.sql"):
+        apply_migrations(conn)
+    conn.close()
+
+
+def test_immediate_rolls_back_on_error(db):
+    db.execute("CREATE TABLE t (x INTEGER)")
+    with pytest.raises(ValueError):
+        with immediate(db):
+            db.execute("INSERT INTO t VALUES (1)")
+            raise ValueError("boom")
+    assert db.execute("SELECT count(*) FROM t").fetchone()[0] == 0
+
+
+def test_immediate_takes_the_write_lock_immediately(tmp_path):
+    """BEGIN IMMEDIATE でないと、後から昇格するときに SQLITE_BUSY で失敗しうる."""
+    path = tmp_path / "db.sqlite3"
+    a = open_database(path)
+    apply_migrations(a)
+    b = open_database(path)
+    b.execute("PRAGMA busy_timeout = 0")
+    with immediate(a):
+        with pytest.raises(sqlite3.OperationalError):
+            b.execute("BEGIN IMMEDIATE")
+    a.close()
+    b.close()
+```
+
+`app/tests/conftest.py`:
+
+```python
+import pytest
+
+from mediaferry.db.connection import open_database
+from mediaferry.db.migrate import apply_migrations
+
+
+@pytest.fixture
+def data_root(tmp_path):
+    """§7 のレイアウト. staging は library と同じファイルシステムに要る."""
+    root = tmp_path / "data"
+    for name in ("library", "derived", "staging", "work", "var"):
+        (root / name).mkdir(parents=True)
+    return root
+
+
+@pytest.fixture
+def db(data_root):
+    conn = open_database(data_root / "var" / "mediaferry.sqlite3")
+    apply_migrations(conn)
+    yield conn
+    conn.close()
+```
+
+- [ ] **Step 2: 失敗を確認する**
+
+Run: `uv run pytest app/tests/test_db_migrate.py -v`
+Expected: FAIL（`ModuleNotFoundError: No module named 'mediaferry.db'`）
+
+- [ ] **Step 3: 実装する**
+
+`app/src/mediaferry/clock.py`:
+
+```python
+"""現在時刻の単一の出所.
+
+DB に入る時刻はすべてここを通す。テストは `freeze` で固定した値を使い、
+「1 秒ずれたから落ちる」テストを書かなくて済むようにする。
+"""
+
+from __future__ import annotations
+
+from datetime import UTC, datetime
+
+
+def utcnow() -> datetime:
+    return datetime.now(UTC)
+
+
+def iso(dt: datetime) -> str:
+    """UTC の ISO-8601 文字列にする. DB の時刻表現はこれだけ."""
+    return dt.astimezone(UTC).isoformat()
+
+
+def now_iso() -> str:
+    return iso(utcnow())
+```
+
+`app/src/mediaferry/ids.py`:
+
+```python
+"""ID の採番.
+
+uuid4 の hex を使う。ハイフン無しなのは、パスやログに出したときに
+選択・コピーしやすいため。
+"""
+
+from __future__ import annotations
+
+from uuid import uuid4
+
+
+def new_id() -> str:
+    return uuid4().hex
+```
+
+`app/src/mediaferry/db/connection.py`:
+
+```python
+"""SQLite 接続の作法をここに集約する.
+
+PRAGMA の大半は接続ごとの状態で、ファイルに永続するのは `journal_mode` だけ。
+接続を開くたびに設定しないと、外部キーが無効な接続が混ざる。
+"""
+
+from __future__ import annotations
+
+import os
+import sqlite3
+from collections.abc import Iterator
+from contextlib import contextmanager
+from pathlib import Path
+
+BUSY_TIMEOUT_MS = 5000
+
+
+def open_database(path: Path) -> sqlite3.Connection:
+    """DB を開く. 親ディレクトリは 0700、ファイルは 0600 で作る.
+
+    WAL と SHM は SQLite が DB ファイルと同じ権限で作るので、個別に
+    chmod しなくても秘密が世界可読にはならない。
+    """
+    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    fresh = not path.exists()
+    # API のスレッドとワーカーのスレッドが同じ接続を使う。SQLite 自体は
+    # serialized モードで動くので同時アクセスは安全で、書き込みの競合は
+    # BEGIN IMMEDIATE と busy_timeout が引き受ける。
+    conn = sqlite3.connect(path, isolation_level=None, check_same_thread=False)
+    conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA journal_mode = WAL")
+    conn.execute("PRAGMA synchronous = FULL")
+    conn.execute(f"PRAGMA busy_timeout = {BUSY_TIMEOUT_MS}")
+    conn.execute("PRAGMA foreign_keys = ON")
+    if fresh:
+        os.chmod(path, 0o600)
+    return conn
+
+
+@contextmanager
+def immediate(conn: sqlite3.Connection) -> Iterator[sqlite3.Connection]:
+    """`BEGIN IMMEDIATE` で書き込みトランザクションを開く.
+
+    既定の遅延開始だと、読んでから書きに昇格する時点で他の接続と衝突し、
+    `busy_timeout` があっても即座に SQLITE_BUSY になる。claim（§8）は
+    この排他に依存している。
+    """
+    conn.execute("BEGIN IMMEDIATE")
+    try:
+        yield conn
+    except BaseException:
+        conn.execute("ROLLBACK")
+        raise
+    conn.execute("COMMIT")
+```
+
+`app/src/mediaferry/db/migrate.py`:
+
+```python
+"""マイグレーションの適用.
+
+各 SQL ファイルは自分で `BEGIN` / `COMMIT` を書き、最後に自分の版を
+`schema_migration` へ INSERT する。`executescript` は保留中のトランザクションを
+暗黙に COMMIT してしまうので、Python 側でトランザクションを囲んでも
+DDL と版の記録を原子的にできない。
+"""
+
+from __future__ import annotations
+
+import re
+import sqlite3
+from pathlib import Path
+
+MIGRATIONS_DIR = Path(__file__).parent / "migrations"
+
+_VERSION_RE = re.compile(r"^(\d{4})_")
+
+
+class MigrationError(RuntimeError):
+    pass
+
+
+def apply_migrations(conn: sqlite3.Connection) -> list[int]:
+    """未適用の版を順に適用し、適用した版番号を返す."""
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS schema_migration ("
+        " version INTEGER PRIMARY KEY,"
+        " applied_at TEXT NOT NULL)"
+    )
+    applied = _applied_versions(conn)
+    done: list[int] = []
+    for path in sorted(MIGRATIONS_DIR.glob("*.sql")):
+        match = _VERSION_RE.match(path.name)
+        if match is None:
+            raise MigrationError(f"{path.name} のファイル名が 4 桁の版番号で始まっていない")
+        version = int(match.group(1))
+        if version in applied:
+            continue
+        conn.executescript(path.read_text(encoding="utf-8"))
+        if version not in _applied_versions(conn):
+            raise MigrationError(f"{path.name} が schema_migration に版 {version} を記録していない")
+        done.append(version)
+    return done
+
+
+def _applied_versions(conn: sqlite3.Connection) -> set[int]:
+    return {row["version"] for row in conn.execute("SELECT version FROM schema_migration")}
+```
+
+`app/src/mediaferry/db/__init__.py` と `app/src/mediaferry/db/migrations/__init__.py` は空ファイル。
+
+SQL ファイルをホイールに含めるため `app/pyproject.toml` に追記する:
+
+```toml
+[tool.hatch.build.targets.wheel]
+packages = ["src/mediaferry"]
+
+# .sql はソースディストリビューションから漏れやすい。明示的に含める。
+[tool.hatch.build.targets.wheel.force-include]
+"src/mediaferry/db/migrations" = "mediaferry/db/migrations"
+```
+
+- [ ] **Step 4: テストが通ることを確認する**
+
+Run: `uv run pytest app/tests/test_db_migrate.py -v`
+Expected: `test_apply_migrations_is_idempotent` 以外 PASS。
+`migrations/` が空なので `assert first` で落ちる。**Task 2 の後に通る**ので、
+このタスクでは `@pytest.mark.xfail(reason="Task 2 で最初の migration が入る", strict=True)`
+を `test_apply_migrations_is_idempotent` に付けてコミットし、Task 2 で外す。
+
+- [ ] **Step 5: コミット**
+
+```bash
+git add app/src/mediaferry/clock.py app/src/mediaferry/ids.py app/src/mediaferry/db app/tests/conftest.py app/tests/test_db_migrate.py app/pyproject.toml
+git commit -m "feat(mediaferry): add the sqlite connection and migration runner"
+```
+
+---
+
+### Task 2: スキーマ 0001 — ジョブと設定
+
+**Files:**
+- Create: `app/src/mediaferry/db/migrations/0001_jobs_and_settings.sql`
+- Modify: `app/tests/test_db_migrate.py`（Task 1 の `xfail` を外す）
+- Test: `app/tests/test_schema_jobs.py`
+
+**Interfaces:**
+- Consumes: `apply_migrations`, `db` フィクスチャ（Task 1）
+- Produces: テーブル `job` / `job_event` / `app_setting`
+
+ジョブを最初の版に置くのは、`artifact_staging` と `upload_record` が `job.id` を
+参照するため。外部キーの親テーブルが先に存在していないと、テストで行を作れない。
+
+- [ ] **Step 1: 失敗するテストを書く**
+
+`app/tests/test_schema_jobs.py`:
+
+```python
+import sqlite3
+
+import pytest
+
+from mediaferry.clock import now_iso
+from mediaferry.ids import new_id
+
+
+def a_job(db, **over):
+    row = {
+        "id": new_id(),
+        "type": "import",
+        "status": "queued",
+        "params_json": "{}",
+        "created_at": now_iso(),
+    }
+    row.update(over)
+    cols = ", ".join(row)
+    marks = ", ".join("?" * len(row))
+    db.execute(f"INSERT INTO job ({cols}) VALUES ({marks})", tuple(row.values()))  # noqa: S608
+    return row["id"]
+
+
+def test_job_status_is_constrained(db):
+    with pytest.raises(sqlite3.IntegrityError):
+        a_job(db, status="halfway")
+
+
+def test_job_type_is_constrained(db):
+    with pytest.raises(sqlite3.IntegrityError):
+        a_job(db, type="rm_rf")
+
+
+def test_lease_columns_are_all_null_or_all_set(db):
+    """片方だけ残ると、期限切れ判定が「期限なし」に化ける."""
+    with pytest.raises(sqlite3.IntegrityError):
+        a_job(db, lease_token="t")
+    a_job(db, lease_token="t", lease_expires_at=now_iso())
+
+
+def test_job_event_seq_is_unique_per_job(db):
+    job_id = a_job(db)
+    db.execute(
+        "INSERT INTO job_event (job_id, seq, level, message, at) VALUES (?, 1, 'info', 'x', ?)",
+        (job_id, now_iso()),
+    )
+    with pytest.raises(sqlite3.IntegrityError):
+        db.execute(
+            "INSERT INTO job_event (job_id, seq, level, message, at) VALUES (?, 1, 'info', 'y', ?)",
+            (job_id, now_iso()),
+        )
+
+
+def test_job_event_id_is_monotonic_across_jobs(db):
+    """SSE は id の昇順で再開するので、ジョブをまたいで単調でなければならない."""
+    first, second = a_job(db), a_job(db)
+    for job_id in (first, second):
+        db.execute(
+            "INSERT INTO job_event (job_id, seq, level, message, at)"
+            " VALUES (?, 1, 'info', 'x', ?)",
+            (job_id, now_iso()),
+        )
+    ids = [r[0] for r in db.execute("SELECT id FROM job_event ORDER BY id")]
+    assert ids == sorted(ids) and len(set(ids)) == 2
+
+
+def test_job_events_go_away_with_the_job(db):
+    job_id = a_job(db)
+    db.execute(
+        "INSERT INTO job_event (job_id, seq, level, message, at) VALUES (?, 1, 'info', 'x', ?)",
+        (job_id, now_iso()),
+    )
+    db.execute("DELETE FROM job WHERE id = ?", (job_id,))
+    assert db.execute("SELECT count(*) FROM job_event").fetchone()[0] == 0
+
+
+def test_app_setting_keys_are_unique(db):
+    db.execute("INSERT INTO app_setting VALUES ('LOG_LEVEL', 'info', ?)", (now_iso(),))
+    with pytest.raises(sqlite3.IntegrityError):
+        db.execute("INSERT INTO app_setting VALUES ('LOG_LEVEL', 'debug', ?)", (now_iso(),))
+```
+
+- [ ] **Step 2: 失敗を確認する**
+
+Run: `uv run pytest app/tests/test_schema_jobs.py -v`
+Expected: FAIL（`sqlite3.OperationalError: no such table: job`）
+
+- [ ] **Step 3: 実装する**
+
+`app/src/mediaferry/db/migrations/0001_jobs_and_settings.sql`:
+
+```sql
+-- ジョブと設定。artifact_staging と upload_record が job.id を参照するので
+-- 最初の版に置く。
+BEGIN;
+
+CREATE TABLE job (
+    id               TEXT PRIMARY KEY,
+    type             TEXT NOT NULL CHECK (type IN (
+                         'scan', 'import', 'detect_groups', 'merge',
+                         'upload', 'recompute_timestamps', 'deep_verify')),
+    status           TEXT NOT NULL CHECK (status IN (
+                         'queued', 'running', 'cancelling', 'cancelled',
+                         'interrupted', 'succeeded', 'failed')),
+    params_json      TEXT NOT NULL,
+    progress_json    TEXT,
+    lease_token      TEXT,
+    lease_expires_at TEXT,
+    created_at       TEXT NOT NULL,
+    started_at       TEXT,
+    finished_at      TEXT,
+    error            TEXT,
+    -- 片方だけ残ると「期限なし」と区別できなくなる。
+    CHECK ((lease_token IS NULL AND lease_expires_at IS NULL)
+        OR (lease_token IS NOT NULL AND lease_expires_at IS NOT NULL))
+);
+
+CREATE INDEX job_queued ON job (created_at) WHERE status = 'queued';
+CREATE INDEX job_running ON job (lease_expires_at) WHERE status IN ('running', 'cancelling');
+
+-- id は SSE の Last-Event-ID に使うので、ジョブをまたいで単調増加させる。
+CREATE TABLE job_event (
+    id        INTEGER PRIMARY KEY AUTOINCREMENT,
+    job_id    TEXT NOT NULL REFERENCES job(id) ON DELETE CASCADE,
+    seq       INTEGER NOT NULL,
+    level     TEXT NOT NULL CHECK (level IN ('debug', 'info', 'warning', 'error')),
+    message   TEXT NOT NULL,
+    data_json TEXT,
+    at        TEXT NOT NULL,
+    UNIQUE (job_id, seq)
+);
+
+CREATE TABLE app_setting (
+    key        TEXT PRIMARY KEY,
+    value      TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+
+INSERT INTO schema_migration (version, applied_at) VALUES (1, datetime('now'));
+
+COMMIT;
+```
+
+`app/tests/test_db_migrate.py` の `test_apply_migrations_is_idempotent` から
+`xfail` マーカーを削除する。
+
+- [ ] **Step 4: テストが通ることを確認する**
+
+Run: `uv run pytest app/tests/test_schema_jobs.py app/tests/test_db_migrate.py -v`
+Expected: すべて PASS
+
+- [ ] **Step 5: コミット**
+
+```bash
+git add app/src/mediaferry/db/migrations/0001_jobs_and_settings.sql app/tests/test_schema_jobs.py app/tests/test_db_migrate.py
+git commit -m "feat(mediaferry): add the job and setting tables"
+```
+
+---
+
+### Task 3: スキーマ 0002 — プロファイルとソース側
+
+**Files:**
+- Create: `app/src/mediaferry/db/migrations/0002_profiles_and_sources.sql`
+- Test: `app/tests/test_schema_sources.py`
+
+**Interfaces:**
+- Consumes: 0001（`schema_migration`）
+- Produces: `device_profile` / `profile_revision` / `source_device` /
+  `volume_instance` / `volume_presence` / `source_entry`
+
+- [ ] **Step 1: 失敗するテストを書く**
+
+`app/tests/test_schema_sources.py`:
+
+```python
+import sqlite3
+
+import pytest
+
+from mediaferry.clock import now_iso
+from mediaferry.ids import new_id
+
+
+def a_profile(db, slug="dji-osmo"):
+    profile_id, revision_id = new_id(), new_id()
+    db.execute(
+        "INSERT INTO device_profile (id, slug, name, builtin, created_at)"
+        " VALUES (?, ?, 'DJI Osmo', 1, ?)",
+        (profile_id, slug, now_iso()),
+    )
+    db.execute(
+        "INSERT INTO profile_revision"
+        " (id, profile_id, revision, definition_json, schema_version, created_at)"
+        " VALUES (?, ?, 1, '{}', 1, ?)",
+        (revision_id, profile_id, now_iso()),
+    )
+    db.execute(
+        "UPDATE device_profile SET current_revision_id = ? WHERE id = ?",
+        (revision_id, profile_id),
+    )
+    return profile_id, revision_id
+
+
+def a_volume(db, profile=None, **over):
+    profile_id, revision_id = profile or (None, None)
+    row = {
+        "id": new_id(),
+        "fs_uuid": "26B1-2FD6",
+        "fs_type": "exfat",
+        "fs_label": "SD_Card",
+        "size_bytes": 512_000_000_000,
+        "identity_confidence": "high",
+        "profile_id": profile_id,
+        "profile_revision_id": revision_id,
+        "first_seen_at": now_iso(),
+        "last_seen_at": now_iso(),
+    }
+    row.update(over)
+    cols = ", ".join(row)
+    marks = ", ".join("?" * len(row))
+    db.execute(f"INSERT INTO volume_instance ({cols}) VALUES ({marks})", tuple(row.values()))  # noqa: S608
+    return row["id"]
+
+
+def test_profile_slug_is_unique(db):
+    a_profile(db)
+    with pytest.raises(sqlite3.IntegrityError):
+        a_profile(db)
+
+
+def test_profile_revision_is_immutable(db):
+    _, revision_id = a_profile(db)
+    with pytest.raises(sqlite3.IntegrityError, match="immutable"):
+        db.execute("UPDATE profile_revision SET definition_json = '{\"x\":1}' WHERE id = ?",
+                   (revision_id,))
+    with pytest.raises(sqlite3.IntegrityError, match="immutable"):
+        db.execute("DELETE FROM profile_revision WHERE id = ?", (revision_id,))
+
+
+def test_current_revision_must_belong_to_the_same_profile(db):
+    first, _ = a_profile(db, slug="a")
+    _, other_revision = a_profile(db, slug="b")
+    with pytest.raises(sqlite3.IntegrityError):
+        db.execute("UPDATE device_profile SET current_revision_id = ? WHERE id = ?",
+                   (other_revision, first))
+
+
+def test_source_device_identity_is_the_whole_tuple(db):
+    """serial は Linux ガジェットの既定値 (123456789ABCDEF) でありうるので、
+    単独では識別子にならない。product まで含めた組で一意にする."""
+    base = ("2ca3", "0020", "OsmoPocket4-AAA", "123456789ABCDEF", now_iso(), now_iso())
+    db.execute(
+        "INSERT INTO source_device (id, usb_vendor_id, usb_product_id, usb_product, serial,"
+        " first_seen_at, last_seen_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+        (new_id(), *base),
+    )
+    # 別の機体は product が違うので入る
+    db.execute(
+        "INSERT INTO source_device (id, usb_vendor_id, usb_product_id, usb_product, serial,"
+        " first_seen_at, last_seen_at) VALUES (?, '2ca3', '0020', 'OsmoPocket4-BBB',"
+        " '123456789ABCDEF', ?, ?)",
+        (new_id(), now_iso(), now_iso()),
+    )
+    with pytest.raises(sqlite3.IntegrityError):
+        db.execute(
+            "INSERT INTO source_device (id, usb_vendor_id, usb_product_id, usb_product, serial,"
+            " first_seen_at, last_seen_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (new_id(), *base),
+        )
+
+
+def test_volume_identity_confidence_is_constrained(db):
+    with pytest.raises(sqlite3.IntegrityError):
+        a_volume(db, identity_confidence="probably")
+
+
+def test_volume_identity_is_unique_only_when_the_uuid_is_known(db):
+    a_volume(db)
+    with pytest.raises(sqlite3.IntegrityError):
+        a_volume(db)
+    # UUID が空のカードは同定できないので、同じ形でも別行として残す
+    a_volume(db, fs_uuid="")
+    a_volume(db, fs_uuid="")
+
+
+def test_volume_profile_revision_must_belong_to_the_profile(db):
+    first = a_profile(db, slug="a")
+    _, other_revision = a_profile(db, slug="b")
+    with pytest.raises(sqlite3.IntegrityError):
+        a_volume(db, profile=(first[0], other_revision))
+
+
+def test_source_entry_is_unique_per_volume_and_path(db):
+    volume_id = a_volume(db)
+    row = (new_id(), volume_id, "DCIM/DJI_001/A.MP4", 10, 1, "abc", 1, "seen", now_iso())
+    sql = (
+        "INSERT INTO source_entry (id, volume_instance_id, rel_path, size_bytes, mtime_ns,"
+        " quick_fingerprint, fingerprint_version, state, observed_at)"
+        " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)"
+    )
+    db.execute(sql, row)
+    with pytest.raises(sqlite3.IntegrityError):
+        db.execute(sql, (new_id(), *row[1:]))
+
+
+def test_presence_rows_survive_independently_of_the_device_node(db):
+    """ジョブは device_node ではなく presence.id と generation を持つ."""
+    volume_id = a_volume(db)
+    for generation in (1, 2):
+        db.execute(
+            "INSERT INTO volume_presence (id, volume_instance_id, broker_epoch, generation,"
+            " device_node, major, minor, sysfs_path, attached_at)"
+            " VALUES (?, ?, 'e1', ?, '/dev/sdk', 8, 160, '/sys/x', ?)",
+            (new_id(), volume_id, generation, now_iso()),
+        )
+    assert db.execute("SELECT count(*) FROM volume_presence").fetchone()[0] == 2
+```
+
+- [ ] **Step 2: 失敗を確認する**
+
+Run: `uv run pytest app/tests/test_schema_sources.py -v`
+Expected: FAIL（`no such table: device_profile`）
+
+- [ ] **Step 3: 実装する**
+
+`app/src/mediaferry/db/migrations/0002_profiles_and_sources.sql`:
+
+```sql
+-- プロファイルとソース側（デバイス・ボリューム・スキャン結果）。
+BEGIN;
+
+CREATE TABLE device_profile (
+    id                  TEXT PRIMARY KEY,
+    -- ライブラリのパスに使うので作成後は変更しない。
+    slug                TEXT NOT NULL UNIQUE,
+    name                TEXT NOT NULL,
+    builtin             INTEGER NOT NULL CHECK (builtin IN (0, 1)),
+    archived_at         TEXT,
+    current_revision_id TEXT,
+    created_at          TEXT NOT NULL,
+    -- 他プロファイルの版を現行にできないよう複合外部キーで縛る。
+    FOREIGN KEY (id, current_revision_id)
+        REFERENCES profile_revision(profile_id, id) ON DELETE RESTRICT
+);
+
+CREATE TABLE profile_revision (
+    id              TEXT PRIMARY KEY,
+    profile_id      TEXT NOT NULL REFERENCES device_profile(id) ON DELETE RESTRICT,
+    revision        INTEGER NOT NULL,
+    definition_json TEXT NOT NULL,
+    schema_version  INTEGER NOT NULL,
+    created_at      TEXT NOT NULL,
+    UNIQUE (profile_id, revision),
+    UNIQUE (profile_id, id)
+);
+
+-- 過去データの解釈が後から変わらないよう、版は不変にする。
+CREATE TRIGGER profile_revision_no_update BEFORE UPDATE ON profile_revision
+BEGIN
+    SELECT RAISE(ABORT, 'profile_revision is immutable');
+END;
+
+CREATE TRIGGER profile_revision_no_delete BEFORE DELETE ON profile_revision
+BEGIN
+    SELECT RAISE(ABORT, 'profile_revision is immutable');
+END;
+
+-- serial は機種の既定値でありうるので、識別は 4 つ組で行う。
+-- SQLite の UNIQUE は NULL 同士を区別するため、欠損は '' で表す。
+CREATE TABLE source_device (
+    id             TEXT PRIMARY KEY,
+    usb_vendor_id  TEXT NOT NULL,
+    usb_product_id TEXT NOT NULL,
+    usb_product    TEXT NOT NULL DEFAULT '',
+    serial         TEXT NOT NULL DEFAULT '',
+    first_seen_at  TEXT NOT NULL,
+    last_seen_at   TEXT NOT NULL,
+    UNIQUE (usb_vendor_id, usb_product_id, usb_product, serial)
+);
+
+-- カードはリーダーの間を移動するので、デバイスとは独立に記憶する。
+CREATE TABLE volume_instance (
+    id                      TEXT PRIMARY KEY,
+    fs_uuid                 TEXT NOT NULL DEFAULT '',
+    fs_type                 TEXT NOT NULL,
+    fs_label                TEXT NOT NULL DEFAULT '',
+    size_bytes              INTEGER NOT NULL,
+    identity_confidence     TEXT NOT NULL CHECK (identity_confidence IN ('high', 'low')),
+    content_manifest_digest TEXT,
+    last_source_device_id   TEXT REFERENCES source_device(id) ON DELETE SET NULL,
+    profile_id              TEXT REFERENCES device_profile(id) ON DELETE RESTRICT,
+    profile_revision_id     TEXT,
+    trusted_at              TEXT,
+    first_seen_at           TEXT NOT NULL,
+    last_seen_at            TEXT NOT NULL,
+    FOREIGN KEY (profile_id, profile_revision_id)
+        REFERENCES profile_revision(profile_id, id) ON DELETE RESTRICT
+);
+
+-- UUID の無いカードは同定できない。推測でしかない同定に UNIQUE を掛けない。
+CREATE UNIQUE INDEX volume_instance_identity
+    ON volume_instance (fs_uuid, fs_type, size_bytes) WHERE fs_uuid <> '';
+
+-- 同じ identity のカードが同時に 2 枚挿さりうるので、接続ごとに行を持つ。
+CREATE TABLE volume_presence (
+    id                 TEXT PRIMARY KEY,
+    volume_instance_id TEXT NOT NULL REFERENCES volume_instance(id) ON DELETE CASCADE,
+    broker_epoch       TEXT NOT NULL,
+    generation         INTEGER NOT NULL,
+    device_node        TEXT NOT NULL,
+    major              INTEGER NOT NULL,
+    minor              INTEGER NOT NULL,
+    sysfs_path         TEXT NOT NULL,
+    attached_at        TEXT NOT NULL,
+    detached_at        TEXT
+);
+
+CREATE INDEX volume_presence_live
+    ON volume_presence (volume_instance_id) WHERE detached_at IS NULL;
+
+CREATE TABLE source_entry (
+    id                  TEXT PRIMARY KEY,
+    volume_instance_id  TEXT NOT NULL REFERENCES volume_instance(id) ON DELETE CASCADE,
+    -- カード上の原名。保存先の名前 (media_file.rel_path) とは衝突時に食い違う。
+    rel_path            TEXT NOT NULL,
+    size_bytes          INTEGER NOT NULL,
+    mtime_ns            INTEGER NOT NULL,
+    quick_fingerprint   TEXT NOT NULL,
+    fingerprint_version INTEGER NOT NULL,
+    media_file_id       TEXT,
+    state               TEXT NOT NULL CHECK (state IN ('seen', 'importing', 'published', 'failed')),
+    observed_at         TEXT NOT NULL,
+    UNIQUE (volume_instance_id, rel_path)
+);
+
+INSERT INTO schema_migration (version, applied_at) VALUES (2, datetime('now'));
+
+COMMIT;
+```
+
+`source_entry.media_file_id` に外部キーを付けないのは、`media_file` が
+0003 で作られるため。**0003 でこの列に外部キーを足す**（Task 4 で行う）。
+
+- [ ] **Step 4: テストが通ることを確認する**
+
+Run: `uv run pytest app/tests/test_schema_sources.py -v`
+Expected: すべて PASS
+
+- [ ] **Step 5: 変異試験でテストが効いていることを確かめる**
+
+`0002` の `UNIQUE (usb_vendor_id, usb_product_id, usb_product, serial)` を
+`UNIQUE (serial)` に書き換え、`uv run pytest app/tests/test_schema_sources.py -v`
+が `test_source_device_identity_is_the_whole_tuple` で落ちることを確認してから戻す。
+
+- [ ] **Step 6: コミット**
+
+```bash
+git add app/src/mediaferry/db/migrations/0002_profiles_and_sources.sql app/tests/test_schema_sources.py
+git commit -m "feat(mediaferry): add the profile and source tables"
+```
+
+---
+
+### Task 4: スキーマ 0003 — アーティファクトと結合
+
+**Files:**
+- Create: `app/src/mediaferry/db/migrations/0003_artifacts_and_merges.sql`
+- Create: `app/tests/__init__.py`（空。テスト間の相対 import に要る）
+- Test: `app/tests/test_schema_artifacts.py`
+
+**Interfaces:**
+- Consumes: 0001（`job`）、0002（`profile_revision`、`source_entry`）
+- Produces: `artifact_staging` / `media_file` / `merge_group` / `merge_member`
+
+`source_entry.media_file_id` へ後付けで外部キーを張るため、SQLite の
+`ALTER TABLE ... ADD CONSTRAINT` が無い制約を、テーブル再作成で回避する。
+
+- [ ] **Step 1: 失敗するテストを書く**
+
+`app/tests/test_schema_artifacts.py`:
+
+```python
+import sqlite3
+
+import pytest
+
+from mediaferry.clock import now_iso
+from mediaferry.ids import new_id
+
+from .test_schema_jobs import a_job
+from .test_schema_sources import a_profile, a_volume
+
+
+def a_media_file(db, profile, **over):
+    profile_id, revision_id = profile
+    row = {
+        "id": new_id(),
+        "role": "original",
+        "profile_id": profile_id,
+        "profile_revision_id": revision_id,
+        "rel_path": f"library/dji-osmo/DCIM/{new_id()}.MP4",
+        "size_bytes": 100,
+        "mtime_ns": 1,
+        "sha1": "0" * 40,
+        "kind": "video",
+        "captured_at": now_iso(),
+        "captured_at_source": "filename",
+        "duration_seconds": 1.5,
+        "probe_state": "ok",
+        "created_at": now_iso(),
+    }
+    row.update(over)
+    cols = ", ".join(row)
+    marks = ", ".join("?" * len(row))
+    db.execute(f"INSERT INTO media_file ({cols}) VALUES ({marks})", tuple(row.values()))  # noqa: S608
+    return row["id"]
+
+
+def a_staging(db, job_id, **over):
+    row = {
+        "id": new_id(),
+        "kind": "import",
+        "job_id": job_id,
+        "lease_token": "lease-1",
+        "state": "writing",
+        "staging_rel_path": f"staging/{job_id}/{new_id()}",
+        "created_at": now_iso(),
+        "updated_at": now_iso(),
+    }
+    row.update(over)
+    cols = ", ".join(row)
+    marks = ", ".join("?" * len(row))
+    db.execute(f"INSERT INTO artifact_staging ({cols}) VALUES ({marks})", tuple(row.values()))  # noqa: S608
+    return row["id"]
+
+
+def a_source_entry(db, volume_id):
+    entry_id = new_id()
+    db.execute(
+        "INSERT INTO source_entry (id, volume_instance_id, rel_path, size_bytes, mtime_ns,"
+        " quick_fingerprint, fingerprint_version, state, observed_at)"
+        " VALUES (?, ?, ?, 10, 1, 'abc', 1, 'seen', ?)",
+        (entry_id, volume_id, f"DCIM/{entry_id}.MP4", now_iso()),
+    )
+    return entry_id
+
+
+def test_media_rel_path_is_unique(db):
+    profile = a_profile(db)
+    path = "library/dji-osmo/DCIM/A.MP4"
+    a_media_file(db, profile, rel_path=path)
+    with pytest.raises(sqlite3.IntegrityError):
+        a_media_file(db, profile, rel_path=path)
+
+
+def test_published_video_must_carry_a_duration(db):
+    """公開前にメタデータを確定させる（§9.3 手順 5）ので、
+    probe に成功した動画が duration 無しで残ることはない."""
+    profile = a_profile(db)
+    with pytest.raises(sqlite3.IntegrityError):
+        a_media_file(db, profile, kind="video", probe_state="ok", duration_seconds=None)
+    a_media_file(db, profile, kind="video", probe_state="failed", duration_seconds=None)
+    a_media_file(db, profile, kind="photo", probe_state="not_applicable", duration_seconds=None)
+
+
+def test_probe_state_has_no_not_run(db):
+    profile = a_profile(db)
+    with pytest.raises(sqlite3.IntegrityError):
+        a_media_file(db, profile, probe_state="not_run")
+
+
+def test_staged_rows_must_carry_everything_needed_to_resume(db):
+    """reconciliation はパスを推測しない。staged になった時点で
+    final_rel_path / content_sha1 / expected_size / metadata_json が揃う."""
+    job_id = a_job(db)
+    with pytest.raises(sqlite3.IntegrityError):
+        a_staging(db, job_id, state="staged", final_rel_path="library/x/A.MP4")
+    a_staging(
+        db,
+        job_id,
+        state="staged",
+        final_rel_path="library/x/A.MP4",
+        content_sha1="0" * 40,
+        expected_size=10,
+        metadata_json="{}",
+    )
+
+
+def test_staging_kind_decides_which_back_reference_is_set(db):
+    job_id = a_job(db)
+    volume_id = a_volume(db)
+    entry_id = a_source_entry(db, volume_id)
+    a_staging(db, job_id, kind="import", source_entry_id=entry_id)
+    with pytest.raises(sqlite3.IntegrityError):
+        a_staging(db, job_id, kind="import")  # 参照元が無い
+    with pytest.raises(sqlite3.IntegrityError):
+        a_staging(db, job_id, kind="merge", source_entry_id=entry_id)
+
+
+def test_source_entry_cannot_point_at_a_missing_media_file(db):
+    volume_id = a_volume(db)
+    entry_id = a_source_entry(db, volume_id)
+    with pytest.raises(sqlite3.IntegrityError):
+        db.execute("UPDATE source_entry SET media_file_id = ? WHERE id = ?", (new_id(), entry_id))
+
+
+def test_active_merge_groups_have_distinct_input_digests(db):
+    profile = a_profile(db)
+    first = a_merge_group(db, profile, digest="d1")
+    with pytest.raises(sqlite3.IntegrityError):
+        a_merge_group(db, profile, digest="d1")
+    # supersede すれば同じ digest の新グループを作れる
+    second = a_merge_group(db, profile, digest="d2")
+    db.execute("UPDATE merge_group SET superseded_by_id = ? WHERE id = ?", (second, first))
+    a_merge_group(db, profile, digest="d1")
+
+
+def a_merge_group(db, profile, digest, **over):
+    profile_id, revision_id = profile
+    row = {
+        "id": new_id(),
+        "profile_id": profile_id,
+        "profile_revision_id": revision_id,
+        "status": "detected",
+        "input_digest": digest,
+        "detected_by": "auto",
+        "created_at": now_iso(),
+        "updated_at": now_iso(),
+    }
+    row.update(over)
+    cols = ", ".join(row)
+    marks = ", ".join("?" * len(row))
+    db.execute(f"INSERT INTO merge_group ({cols}) VALUES ({marks})", tuple(row.values()))  # noqa: S608
+    return row["id"]
+
+
+def test_a_media_file_belongs_to_at_most_one_active_group(db):
+    profile = a_profile(db)
+    media_id = a_media_file(db, profile)
+    first = a_merge_group(db, profile, digest="d1")
+    second = a_merge_group(db, profile, digest="d2")
+    db.execute("INSERT INTO merge_member VALUES (?, ?, 0, 1)", (first, media_id))
+    with pytest.raises(sqlite3.IntegrityError):
+        db.execute("INSERT INTO merge_member VALUES (?, ?, 0, 1)", (second, media_id))
+
+
+def test_superseding_a_group_frees_its_members(db):
+    profile = a_profile(db)
+    media_id = a_media_file(db, profile)
+    first = a_merge_group(db, profile, digest="d1")
+    second = a_merge_group(db, profile, digest="d2")
+    db.execute("INSERT INTO merge_member VALUES (?, ?, 0, 1)", (first, media_id))
+    db.execute("UPDATE merge_group SET superseded_by_id = ? WHERE id = ?", (second, first))
+    db.execute("INSERT INTO merge_member VALUES (?, ?, 0, 1)", (second, media_id))
+    assert db.execute(
+        "SELECT active FROM merge_member WHERE merge_group_id = ?", (first,)
+    ).fetchone()[0] == 0
+
+
+def test_member_positions_are_unique_within_a_group(db):
+    profile = a_profile(db)
+    group = a_merge_group(db, profile, digest="d1")
+    db.execute("INSERT INTO merge_member VALUES (?, ?, 0, 1)", (group, a_media_file(db, profile)))
+    with pytest.raises(sqlite3.IntegrityError):
+        db.execute(
+            "INSERT INTO merge_member VALUES (?, ?, 0, 1)", (group, a_media_file(db, profile))
+        )
+```
+
+- [ ] **Step 2: 失敗を確認する**
+
+Run: `uv run pytest app/tests/test_schema_artifacts.py -v`
+Expected: FAIL（`no such table: media_file`）
+
+- [ ] **Step 3: 実装する**
+
+`app/src/mediaferry/db/migrations/0003_artifacts_and_merges.sql`:
+
+```sql
+-- 公開されたメディアと、公開途中の状態、結合グループ。
+BEGIN;
+
+CREATE TABLE media_file (
+    id                  TEXT PRIMARY KEY,
+    role                TEXT NOT NULL CHECK (role IN ('original', 'derived')),
+    profile_id          TEXT NOT NULL REFERENCES device_profile(id) ON DELETE RESTRICT,
+    profile_revision_id TEXT NOT NULL,
+    -- DATA_ROOT からの相対パス。保存先の名前であり、カード上の原名ではない。
+    rel_path            TEXT NOT NULL UNIQUE,
+    size_bytes          INTEGER NOT NULL,
+    mtime_ns            INTEGER NOT NULL,
+    sha1                TEXT NOT NULL,
+    kind                TEXT NOT NULL CHECK (kind IN ('photo', 'video')),
+    captured_at         TEXT NOT NULL,
+    captured_at_source  TEXT NOT NULL CHECK (captured_at_source IN ('filename', 'exif', 'mtime')),
+    captured_at_tz      TEXT,
+    captured_at_note    TEXT,
+    duration_seconds    REAL,
+    -- ffprobe を実行していない状態 (not_run) は公開済みレコードには無い。
+    probe_state         TEXT NOT NULL CHECK (probe_state IN ('ok', 'failed', 'not_applicable')),
+    missing_at          TEXT,
+    created_at          TEXT NOT NULL,
+    FOREIGN KEY (profile_id, profile_revision_id)
+        REFERENCES profile_revision(profile_id, id) ON DELETE RESTRICT,
+    -- probe に成功した動画は必ず duration を持つ（§9.7 の境界判定が依存する）。
+    CHECK (kind <> 'video' OR probe_state <> 'ok' OR duration_seconds IS NOT NULL)
+);
+
+CREATE INDEX media_file_sha1 ON media_file (sha1);
+CREATE INDEX media_file_captured_at ON media_file (captured_at);
+
+CREATE TABLE merge_group (
+    id                   TEXT PRIMARY KEY,
+    profile_id           TEXT NOT NULL REFERENCES device_profile(id) ON DELETE RESTRICT,
+    profile_revision_id  TEXT NOT NULL,
+    status               TEXT NOT NULL CHECK (status IN (
+                             'detected', 'merging', 'merged', 'failed', 'skipped')),
+    input_digest         TEXT NOT NULL,
+    output_media_file_id TEXT REFERENCES media_file(id) ON DELETE RESTRICT,
+    detected_by          TEXT NOT NULL CHECK (detected_by IN ('auto', 'manual')),
+    superseded_by_id     TEXT REFERENCES merge_group(id) ON DELETE RESTRICT,
+    tool_version         TEXT,
+    verification_json    TEXT,
+    adopted_at           TEXT,
+    error                TEXT,
+    created_at           TEXT NOT NULL,
+    updated_at           TEXT NOT NULL,
+    FOREIGN KEY (profile_id, profile_revision_id)
+        REFERENCES profile_revision(profile_id, id) ON DELETE RESTRICT
+);
+
+CREATE UNIQUE INDEX merge_group_active_digest
+    ON merge_group (input_digest) WHERE superseded_by_id IS NULL;
+
+-- active は merge_group.superseded_by_id の写し。SQLite の部分索引は
+-- 他テーブルの列を見られないので、trigger で同期する。
+CREATE TABLE merge_member (
+    merge_group_id TEXT NOT NULL REFERENCES merge_group(id) ON DELETE CASCADE,
+    media_file_id  TEXT NOT NULL REFERENCES media_file(id) ON DELETE RESTRICT,
+    position       INTEGER NOT NULL,
+    active         INTEGER NOT NULL DEFAULT 1 CHECK (active IN (0, 1)),
+    PRIMARY KEY (merge_group_id, media_file_id),
+    UNIQUE (merge_group_id, position)
+);
+
+CREATE UNIQUE INDEX merge_member_one_active_group
+    ON merge_member (media_file_id) WHERE active = 1;
+
+CREATE TRIGGER merge_group_supersede_deactivates_members
+AFTER UPDATE OF superseded_by_id ON merge_group
+WHEN NEW.superseded_by_id IS NOT NULL AND OLD.superseded_by_id IS NULL
+BEGIN
+    UPDATE merge_member SET active = 0 WHERE merge_group_id = NEW.id;
+END;
+
+-- 取り込みと結合が同じ公開プロトコルを通る。片方だけ回収不能にしない。
+CREATE TABLE artifact_staging (
+    id               TEXT PRIMARY KEY,
+    kind             TEXT NOT NULL CHECK (kind IN ('import', 'merge')),
+    job_id           TEXT NOT NULL REFERENCES job(id) ON DELETE RESTRICT,
+    lease_token      TEXT NOT NULL,
+    state            TEXT NOT NULL CHECK (state IN ('writing', 'staged', 'published')),
+    staging_rel_path TEXT NOT NULL,
+    final_rel_path   TEXT,
+    expected_size    INTEGER,
+    content_sha1     TEXT,
+    metadata_json    TEXT,
+    source_entry_id  TEXT REFERENCES source_entry(id) ON DELETE RESTRICT,
+    merge_group_id   TEXT REFERENCES merge_group(id) ON DELETE RESTRICT,
+    created_at       TEXT NOT NULL,
+    updated_at       TEXT NOT NULL,
+    -- staged 以降は永続情報だけで公開を再開できる。
+    CHECK (state = 'writing' OR (final_rel_path IS NOT NULL AND expected_size IS NOT NULL
+           AND content_sha1 IS NOT NULL AND metadata_json IS NOT NULL)),
+    CHECK ((kind = 'import' AND source_entry_id IS NOT NULL AND merge_group_id IS NULL)
+        OR (kind = 'merge' AND merge_group_id IS NOT NULL AND source_entry_id IS NULL))
+);
+
+CREATE INDEX artifact_staging_open ON artifact_staging (state) WHERE state <> 'published';
+
+-- media_file が 0002 の時点では無かったので、外部キーをここで足す。
+-- SQLite に ADD CONSTRAINT が無いため、作り直して移し替える。
+CREATE TABLE source_entry_new (
+    id                  TEXT PRIMARY KEY,
+    volume_instance_id  TEXT NOT NULL REFERENCES volume_instance(id) ON DELETE CASCADE,
+    rel_path            TEXT NOT NULL,
+    size_bytes          INTEGER NOT NULL,
+    mtime_ns            INTEGER NOT NULL,
+    quick_fingerprint   TEXT NOT NULL,
+    fingerprint_version INTEGER NOT NULL,
+    media_file_id       TEXT REFERENCES media_file(id) ON DELETE SET NULL,
+    state               TEXT NOT NULL CHECK (state IN ('seen', 'importing', 'published', 'failed')),
+    observed_at         TEXT NOT NULL,
+    UNIQUE (volume_instance_id, rel_path)
+);
+
+INSERT INTO source_entry_new SELECT * FROM source_entry;
+DROP TABLE source_entry;
+ALTER TABLE source_entry_new RENAME TO source_entry;
+
+INSERT INTO schema_migration (version, applied_at) VALUES (3, datetime('now'));
+
+COMMIT;
+```
+
+- [ ] **Step 4: テストが通ることを確認する**
+
+Run: `uv run pytest app/tests/test_schema_artifacts.py -v`
+Expected: すべて PASS
+
+- [ ] **Step 5: 変異試験**
+
+`artifact_staging` の `CHECK (state = 'writing' OR ...)` を削除し、
+`test_staged_rows_must_carry_everything_needed_to_resume` が落ちることを
+確認してから戻す。
+
+- [ ] **Step 6: コミット**
+
+```bash
+git add app/src/mediaferry/db/migrations/0003_artifacts_and_merges.sql app/tests/__init__.py app/tests/test_schema_artifacts.py
+git commit -m "feat(mediaferry): add the artifact and merge tables"
+```
+
+---
+
+### Task 5: スキーマ 0004 — 転送先とアップロード
+
+**Files:**
+- Create: `app/src/mediaferry/db/migrations/0004_destinations_and_uploads.sql`
+- Test: `app/tests/test_schema_uploads.py`
+
+**Interfaces:**
+- Consumes: 0001（`job`）、0003（`media_file`, `merge_group`）
+- Produces: `upload_destination` / `destination_credential` / `destination_revision` /
+  `upload_record`
+
+Phase 3 まで使わないが、**後から直すと全 credential の migration が要る**ため
+今のうちに確定させる（HANDOFF §5）。宛先の取り違えは最も危険な誤りなので、
+アプリの検証ではなく DB の制約で防ぐ（§8）。
+
+- [ ] **Step 1: 失敗するテストを書く**
+
+`app/tests/test_schema_uploads.py`:
+
+```python
+import sqlite3
+
+import pytest
+
+from mediaferry.clock import now_iso
+from mediaferry.ids import new_id
+
+from .test_schema_artifacts import a_media_file
+from .test_schema_jobs import a_job
+from .test_schema_sources import a_profile
+
+
+def a_destination(db, name="home", epoch=1):
+    dest_id, cred_id, rev_id = new_id(), new_id(), new_id()
+    db.execute(
+        "INSERT INTO upload_destination (id, name, kind, enabled, created_at)"
+        " VALUES (?, ?, 'immich', 1, ?)",
+        (dest_id, name, now_iso()),
+    )
+    db.execute(
+        "INSERT INTO destination_credential"
+        " (id, destination_id, revision, secret_encrypted, key_fingerprint, created_at)"
+        " VALUES (?, ?, 1, X'00', 'kf', ?)",
+        (cred_id, dest_id, now_iso()),
+    )
+    db.execute(
+        "INSERT INTO destination_revision (id, destination_id, revision, target_epoch, base_url,"
+        " credential_id, created_at) VALUES (?, ?, 1, ?, 'http://immich.invalid', ?, ?)",
+        (rev_id, dest_id, epoch, cred_id, now_iso()),
+    )
+    db.execute(
+        "UPDATE upload_destination SET current_revision_id = ? WHERE id = ?", (rev_id, dest_id)
+    )
+    return dest_id, rev_id, cred_id
+
+
+def an_upload(db, dest, media_id, **over):
+    dest_id, rev_id, _ = dest
+    row = {
+        "id": new_id(),
+        "destination_id": dest_id,
+        "target_epoch": 1,
+        "media_file_id": media_id,
+        "state": "pending",
+        "selection_rule": "default",
+        "origin": "unknown",
+        "created_at": now_iso(),
+        "updated_at": now_iso(),
+    }
+    row.update(over)
+    cols = ", ".join(row)
+    marks = ", ".join("?" * len(row))
+    db.execute(f"INSERT INTO upload_record ({cols}) VALUES ({marks})", tuple(row.values()))  # noqa: S608
+    return row["id"]
+
+
+def test_destination_revision_is_immutable(db):
+    _, rev_id, _ = a_destination(db)
+    with pytest.raises(sqlite3.IntegrityError, match="immutable"):
+        db.execute("UPDATE destination_revision SET base_url = 'http://x.invalid' WHERE id = ?",
+                   (rev_id,))
+    with pytest.raises(sqlite3.IntegrityError, match="immutable"):
+        db.execute("DELETE FROM destination_revision WHERE id = ?", (rev_id,))
+
+
+def test_a_revision_cannot_borrow_another_destinations_credential(db):
+    """他宛先の鍵で送ると、確認画面と違う先へ資産が渡る."""
+    first = a_destination(db, name="a")
+    _, _, other_cred = a_destination(db, name="b")
+    with pytest.raises(sqlite3.IntegrityError):
+        db.execute(
+            "INSERT INTO destination_revision (id, destination_id, revision, target_epoch,"
+            " base_url, credential_id, created_at)"
+            " VALUES (?, ?, 2, 1, 'http://immich.invalid', ?, ?)",
+            (new_id(), first[0], other_cred, now_iso()),
+        )
+
+
+def test_current_revision_must_belong_to_the_destination(db):
+    first = a_destination(db, name="a")
+    _, other_rev, _ = a_destination(db, name="b")
+    with pytest.raises(sqlite3.IntegrityError):
+        db.execute("UPDATE upload_destination SET current_revision_id = ? WHERE id = ?",
+                   (other_rev, first[0]))
+
+
+def test_upload_record_revision_must_match_destination_and_epoch(db):
+    """epoch を跨いだ revision を掴むと、進めた向き先の履歴が混ざる."""
+    profile = a_profile(db)
+    dest = a_destination(db)
+    media_id = a_media_file(db, profile)
+    an_upload(db, dest, media_id, destination_revision_id=dest[1])
+    with pytest.raises(sqlite3.IntegrityError):
+        an_upload(
+            db, dest, a_media_file(db, profile), target_epoch=2, destination_revision_id=dest[1]
+        )
+
+
+def test_one_record_per_destination_epoch_and_media(db):
+    profile = a_profile(db)
+    dest = a_destination(db)
+    media_id = a_media_file(db, profile)
+    an_upload(db, dest, media_id)
+    with pytest.raises(sqlite3.IntegrityError):
+        an_upload(db, dest, media_id)
+    # epoch を進めれば、旧記録を監査履歴として残したまま送り直せる
+    an_upload(db, dest, media_id, target_epoch=2)
+
+
+def test_claim_columns_are_all_null_or_all_set(db):
+    """未来の期限だけが残ると、明示操作しても期限まで claim できなくなる."""
+    profile = a_profile(db)
+    dest = a_destination(db)
+    job_id = a_job(db, type="upload")
+    with pytest.raises(sqlite3.IntegrityError):
+        an_upload(db, dest, a_media_file(db, profile), claim_job_id=job_id)
+    an_upload(
+        db,
+        dest,
+        a_media_file(db, profile),
+        claim_job_id=job_id,
+        claim_token="t",
+        claim_expires_at=now_iso(),
+    )
+
+
+def test_selection_rule_cannot_be_rewritten(db):
+    """再試行で上書きすると、なぜ送信を許可したかが失われる."""
+    profile = a_profile(db)
+    dest = a_destination(db)
+    record_id = an_upload(db, dest, a_media_file(db, profile))
+    with pytest.raises(sqlite3.IntegrityError, match="immutable"):
+        db.execute("UPDATE upload_record SET selection_rule = 'adopted_derived' WHERE id = ?",
+                   (record_id,))
+    db.execute("UPDATE upload_record SET state = 'checking' WHERE id = ?", (record_id,))
+
+
+def test_first_check_result_is_write_once(db):
+    """初回 checking の結果は pre_existing の証明に使う。書き換えられては困る."""
+    profile = a_profile(db)
+    dest = a_destination(db)
+    record_id = an_upload(db, dest, a_media_file(db, profile))
+    db.execute("UPDATE upload_record SET first_check_result = 'reject' WHERE id = ?", (record_id,))
+    with pytest.raises(sqlite3.IntegrityError, match="immutable"):
+        db.execute(
+            "UPDATE upload_record SET first_check_result = 'accept' WHERE id = ?", (record_id,)
+        )
+
+
+def test_states_and_origins_are_constrained(db):
+    profile = a_profile(db)
+    dest = a_destination(db)
+    with pytest.raises(sqlite3.IntegrityError):
+        an_upload(db, dest, a_media_file(db, profile), state="uploaded")
+    with pytest.raises(sqlite3.IntegrityError):
+        an_upload(db, dest, a_media_file(db, profile), origin="probably_ours")
+
+
+def test_purged_credentials_keep_only_the_fingerprint(db):
+    _, _, cred_id = a_destination(db)
+    with pytest.raises(sqlite3.IntegrityError):
+        db.execute("UPDATE destination_credential SET purged_at = ? WHERE id = ?",
+                   (now_iso(), cred_id))
+    db.execute(
+        "UPDATE destination_credential SET secret_encrypted = NULL, purged_at = ? WHERE id = ?",
+        (now_iso(), cred_id),
+    )
+```
+
+- [ ] **Step 2: 失敗を確認する**
+
+Run: `uv run pytest app/tests/test_schema_uploads.py -v`
+Expected: FAIL（`no such table: upload_destination`）
+
+- [ ] **Step 3: 実装する**
+
+`app/src/mediaferry/db/migrations/0004_destinations_and_uploads.sql`:
+
+```sql
+-- 転送先プロファイルとアップロード履歴。
+-- 宛先の取り違えはアプリの検証だけに頼らず、複合外部キーで DB が防ぐ。
+BEGIN;
+
+CREATE TABLE upload_destination (
+    id                  TEXT PRIMARY KEY,
+    name                TEXT NOT NULL UNIQUE,
+    kind                TEXT NOT NULL CHECK (kind IN ('immich')),
+    enabled             INTEGER NOT NULL CHECK (enabled IN (0, 1)),
+    -- 物理削除しない。履歴と監査情報を残す。
+    archived_at         TEXT,
+    current_revision_id TEXT,
+    created_at          TEXT NOT NULL,
+    FOREIGN KEY (id, current_revision_id)
+        REFERENCES destination_revision(destination_id, id) ON DELETE RESTRICT
+);
+
+CREATE TABLE destination_credential (
+    id               TEXT PRIMARY KEY,
+    destination_id   TEXT NOT NULL REFERENCES upload_destination(id) ON DELETE RESTRICT,
+    revision         INTEGER NOT NULL,
+    -- core/crypto.py の自己記述フォーマット。参照が絶えたら消して purged_at を立てる。
+    secret_encrypted BLOB,
+    key_fingerprint  TEXT NOT NULL,
+    created_at       TEXT NOT NULL,
+    purged_at        TEXT,
+    UNIQUE (destination_id, revision),
+    UNIQUE (destination_id, id),
+    CHECK ((secret_encrypted IS NOT NULL AND purged_at IS NULL)
+        OR (secret_encrypted IS NULL AND purged_at IS NOT NULL))
+);
+
+-- ある時点の接続設定一式のスナップショット。編集のたびに行が増える。
+CREATE TABLE destination_revision (
+    id                 TEXT PRIMARY KEY,
+    destination_id     TEXT NOT NULL REFERENCES upload_destination(id) ON DELETE RESTRICT,
+    revision           INTEGER NOT NULL,
+    -- 向き先が変わったときだけ進む。履歴を引き継いでよいかの境界。
+    target_epoch       INTEGER NOT NULL,
+    -- API を叩きに行くエンドポイント。CDN やリバースプロキシを経由しない。
+    base_url           TEXT NOT NULL,
+    -- 画面のリンク生成にだけ使う。通信には使わない。
+    public_url         TEXT,
+    credential_id      TEXT NOT NULL,
+    -- 同一性ではなく、向き先が変わったことを検知する guard。
+    remote_user_id     TEXT,
+    server_instance_id TEXT,
+    verified_at        TEXT,
+    created_at         TEXT NOT NULL,
+    UNIQUE (destination_id, revision),
+    UNIQUE (destination_id, id),
+    UNIQUE (destination_id, target_epoch, id),
+    FOREIGN KEY (destination_id, credential_id)
+        REFERENCES destination_credential(destination_id, id) ON DELETE RESTRICT
+);
+
+CREATE TRIGGER destination_revision_no_update BEFORE UPDATE ON destination_revision
+BEGIN
+    SELECT RAISE(ABORT, 'destination_revision is immutable');
+END;
+
+CREATE TRIGGER destination_revision_no_delete BEFORE DELETE ON destination_revision
+BEGIN
+    SELECT RAISE(ABORT, 'destination_revision is immutable');
+END;
+
+CREATE TABLE upload_record (
+    id                      TEXT PRIMARY KEY,
+    destination_id          TEXT NOT NULL REFERENCES upload_destination(id) ON DELETE RESTRICT,
+    target_epoch            INTEGER NOT NULL,
+    media_file_id           TEXT NOT NULL REFERENCES media_file(id) ON DELETE RESTRICT,
+    state                   TEXT NOT NULL CHECK (state IN (
+                                'pending', 'checking', 'uploading', 'asset_known', 'tagging',
+                                'fixing_datetime', 'awaiting_datetime_approval',
+                                'complete', 'failed', 'needs_recheck')),
+    -- 送信を許可した根拠。claim 時にどの条件で再評価するかを決める。
+    selection_rule          TEXT NOT NULL CHECK (selection_rule IN (
+                                'default', 'failed_group_member', 'adopted_derived')),
+    origin                  TEXT NOT NULL CHECK (origin IN (
+                                'created_by_us', 'pre_existing', 'unknown')),
+    -- 初回 checking が reject なら「以前から存在した」ことを証明できる。
+    -- accept だったことは自作の証明にならない。
+    first_check_result      TEXT CHECK (first_check_result IN ('accept', 'reject')),
+    remote_asset_id         TEXT,
+    remote_is_trashed       INTEGER CHECK (remote_is_trashed IN (0, 1)),
+    remote_checked_at       TEXT,
+    checksum                TEXT,
+    attempts                INTEGER NOT NULL DEFAULT 0,
+    last_error              TEXT,
+    eligibility_reason      TEXT,
+    merge_group_id          TEXT REFERENCES merge_group(id) ON DELETE RESTRICT,
+    claim_job_id            TEXT REFERENCES job(id) ON DELETE RESTRICT,
+    claim_token             TEXT,
+    claim_expires_at        TEXT,
+    destination_revision_id TEXT,
+    -- 状態機械とは直交するフラグ。state の列挙には混ぜない。
+    invalidated_at          TEXT,
+    invalidated_reason      TEXT,
+    created_at              TEXT NOT NULL,
+    updated_at              TEXT NOT NULL,
+    UNIQUE (destination_id, target_epoch, media_file_id),
+    CHECK ((claim_job_id IS NULL AND claim_token IS NULL AND claim_expires_at IS NULL)
+        OR (claim_job_id IS NOT NULL AND claim_token IS NOT NULL AND claim_expires_at IS NOT NULL)),
+    FOREIGN KEY (destination_id, target_epoch, destination_revision_id)
+        REFERENCES destination_revision(destination_id, target_epoch, id) ON DELETE RESTRICT
+);
+
+CREATE INDEX upload_record_by_media ON upload_record (media_file_id);
+CREATE INDEX upload_record_claimable
+    ON upload_record (destination_id, state) WHERE invalidated_at IS NULL;
+
+CREATE TRIGGER upload_record_selection_rule_immutable
+BEFORE UPDATE OF selection_rule ON upload_record
+WHEN NEW.selection_rule <> OLD.selection_rule
+BEGIN
+    SELECT RAISE(ABORT, 'selection_rule is immutable');
+END;
+
+CREATE TRIGGER upload_record_first_check_immutable
+BEFORE UPDATE OF first_check_result ON upload_record
+WHEN OLD.first_check_result IS NOT NULL AND NEW.first_check_result IS NOT OLD.first_check_result
+BEGIN
+    SELECT RAISE(ABORT, 'first_check_result is immutable');
+END;
+
+INSERT INTO schema_migration (version, applied_at) VALUES (4, datetime('now'));
+
+COMMIT;
+```
+
+- [ ] **Step 4: テストが通ることを確認する**
+
+Run: `uv run pytest app/tests/test_schema_uploads.py -v`
+Expected: すべて PASS
+
+- [ ] **Step 5: 変異試験**
+
+`upload_record` の複合外部キー `(destination_id, target_epoch, destination_revision_id)`
+を単純な `destination_revision_id` への外部キーに置き換え、
+`test_upload_record_revision_must_match_destination_and_epoch` が落ちることを
+確認してから戻す。
+
+- [ ] **Step 6: コミット**
+
+```bash
+git add app/src/mediaferry/db/migrations/0004_destinations_and_uploads.sql app/tests/test_schema_uploads.py
+git commit -m "feat(mediaferry): add the destination and upload tables"
+```
+
+---
+
+### Task 6: 設定の解決（env > DB > 既定値）
+
+**Files:**
+- Create: `app/src/mediaferry/settings.py`
+- Test: `app/tests/test_settings.py`
+
+**Interfaces:**
+- Consumes: `app_setting` テーブル（Task 2）、`mediaferry.clock.now_iso`
+- Produces:
+  - `mediaferry.settings.SETTING_SPECS: dict[str, SettingSpec]`
+  - `mediaferry.settings.SettingValue(key, value, source, locked)`
+  - `mediaferry.settings.SettingsService(conn, env)` — `.snapshot()`, `.describe_all()`, `.set(key, value)`
+  - `mediaferry.settings.Settings`（型付きスナップショット。`data_root`, `bind_host`,
+    `http_port`, `auth_password`, `secret_key`, `upload_concurrency`,
+    `upload_timeout_seconds`, `upload_max_attempts`, `auto_import`,
+    `default_timezone`, `log_level`）
+  - 例外 `SettingLocked` / `SettingInvalid`
+  - `mediaferry.settings.startup_warnings(settings) -> list[str]`
+
+- [ ] **Step 1: 失敗するテストを書く**
+
+`app/tests/test_settings.py`:
+
+```python
+import pytest
+
+from mediaferry.clock import now_iso
+from mediaferry.settings import SettingInvalid, SettingLocked, SettingsService, startup_warnings
+
+
+def service(db, **env):
+    return SettingsService(db, env={f"MEDIAFERRY_{k}": v for k, v in env.items()})
+
+
+def test_defaults_are_used_when_nothing_is_set(db):
+    snapshot = service(db).snapshot()
+    assert snapshot.bind_host == "127.0.0.1"
+    assert snapshot.http_port == 8080
+    assert str(snapshot.broker_socket) == "/run/mediaferry/broker.sock"
+    assert snapshot.auto_import == "trusted"
+    assert snapshot.upload_concurrency == 2
+    assert snapshot.default_timezone is None
+
+
+def test_db_overrides_the_default(db):
+    db.execute("INSERT INTO app_setting VALUES ('LOG_LEVEL', 'debug', ?)", (now_iso(),))
+    assert service(db).snapshot().log_level == "debug"
+
+
+def test_env_overrides_the_db(db):
+    """TrueNAS のアプリ設定画面が常に事実と一致するようにするため、env が勝つ."""
+    db.execute("INSERT INTO app_setting VALUES ('LOG_LEVEL', 'debug', ?)", (now_iso(),))
+    assert service(db, LOG_LEVEL="warning").snapshot().log_level == "warning"
+
+
+def test_env_backed_settings_are_locked(db):
+    described = {s.key: s for s in service(db, HTTP_PORT="9000").describe_all()}
+    assert described["HTTP_PORT"].source == "env"
+    assert described["HTTP_PORT"].locked is True
+    assert described["LOG_LEVEL"].locked is False
+
+
+def test_writing_a_locked_setting_is_refused(db):
+    with pytest.raises(SettingLocked):
+        service(db, HTTP_PORT="9000").set("HTTP_PORT", "9001")
+
+
+def test_set_validates_before_storing(db):
+    svc = service(db)
+    with pytest.raises(SettingInvalid):
+        svc.set("HTTP_PORT", "not-a-port")
+    with pytest.raises(SettingInvalid):
+        svc.set("AUTO_IMPORT", "always")
+    with pytest.raises(SettingInvalid):
+        svc.set("DEFAULT_TIMEZONE", "Mars/Olympus")
+    assert db.execute("SELECT count(*) FROM app_setting").fetchone()[0] == 0
+
+
+def test_unknown_keys_are_refused(db):
+    with pytest.raises(SettingInvalid):
+        service(db).set("SHELL", "/bin/sh")
+
+
+def test_secret_key_must_be_32_random_bytes_in_base64(db):
+    with pytest.raises(SettingInvalid, match="32"):
+        service(db, SECRET_KEY="hunter2").snapshot()
+
+
+def test_secrets_are_masked_when_described(db):
+    """API 応答にもログにも値そのものを出さない."""
+    described = {s.key: s for s in service(db, AUTH_PASSWORD="s3cret").describe_all()}
+    assert described["AUTH_PASSWORD"].value == "********"
+    assert "s3cret" not in repr(described["AUTH_PASSWORD"])
+
+
+def test_non_loopback_without_auth_warns(db):
+    warnings = startup_warnings(service(db, BIND_HOST="0.0.0.0").snapshot())  # noqa: S104
+    assert any("認証" in w for w in warnings)
+    assert startup_warnings(service(db).snapshot()) == []
+```
+
+- [ ] **Step 2: 失敗を確認する**
+
+Run: `uv run pytest app/tests/test_settings.py -v`
+Expected: FAIL（`ModuleNotFoundError: No module named 'mediaferry.settings'`）
+
+- [ ] **Step 3: 実装する**
+
+`app/src/mediaferry/settings.py`:
+
+```python
+"""インフラ設定の解決.
+
+優先順位は 環境変数 > DB（Web 画面） > 既定値。env で指定された項目は画面で
+ロックされる。TrueNAS のアプリ設定画面に書いた値が、常にアプリの実際の挙動と
+一致する状態を保つための順序である。
+
+転送先プロファイルはここに含まれない。ユーザのデータであって基盤の設定では
+ないので、DB だけで管理する（§12）。
+"""
+
+from __future__ import annotations
+
+import base64
+import binascii
+import sqlite3
+from collections.abc import Callable, Mapping
+from dataclasses import dataclass
+from ipaddress import ip_address
+from pathlib import Path
+from typing import Any
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+
+from .clock import now_iso
+
+ENV_PREFIX = "MEDIAFERRY_"
+MASK = "********"
+
+
+class SettingLocked(RuntimeError):
+    """env で固定されている項目を書こうとした."""
+
+
+class SettingInvalid(ValueError):
+    """未知のキー、または値が仕様を満たさない."""
+
+
+@dataclass(frozen=True)
+class SettingSpec:
+    key: str
+    default: str | None
+    parse: Callable[[str], Any]
+    secret: bool = False
+
+
+@dataclass(frozen=True)
+class SettingValue:
+    key: str
+    value: str | None
+    source: str  # env / db / default
+    locked: bool
+
+
+@dataclass(frozen=True)
+class Settings:
+    data_root: Path
+    broker_socket: Path
+    bind_host: str
+    http_port: int
+    auth_password: str | None
+    secret_key: bytes | None
+    upload_concurrency: int
+    upload_timeout_seconds: int
+    upload_max_attempts: int
+    auto_import: str
+    default_timezone: str | None
+    log_level: str
+
+
+def _port(raw: str) -> int:
+    if not raw.isdigit() or not (1 <= int(raw) <= 65535):
+        raise SettingInvalid(f"ポート番号として解釈できない: {raw}")
+    return int(raw)
+
+
+def _positive_int(raw: str) -> int:
+    if not raw.isdigit() or int(raw) < 1:
+        raise SettingInvalid(f"1 以上の整数である必要がある: {raw}")
+    return int(raw)
+
+
+def _choice(*allowed: str) -> Callable[[str], str]:
+    def parse(raw: str) -> str:
+        if raw not in allowed:
+            raise SettingInvalid(f"{raw} は {allowed} のいずれかでなければならない")
+        return raw
+
+    return parse
+
+
+def _timezone(raw: str) -> str:
+    try:
+        ZoneInfo(raw)
+    except (ZoneInfoNotFoundError, ValueError) as exc:
+        raise SettingInvalid(f"IANA タイムゾーンとして解釈できない: {raw}") from exc
+    return raw
+
+
+def _secret_key(raw: str) -> bytes:
+    """パスワードではなく 256bit のランダム鍵を base64 で受け取る."""
+    try:
+        key = base64.b64decode(raw, validate=True)
+    except (binascii.Error, ValueError) as exc:
+        raise SettingInvalid("SECRET_KEY は base64 で与える") from exc
+    if len(key) != 32:
+        raise SettingInvalid(f"SECRET_KEY は 32 バイトである必要がある（{len(key)} バイト）")
+    return key
+
+
+SETTING_SPECS: dict[str, SettingSpec] = {
+    spec.key: spec
+    for spec in (
+        SettingSpec("DATA_ROOT", "/data", Path),
+        # compose.yaml が既にこのキーを app に渡している。
+        SettingSpec("BROKER_SOCKET", "/run/mediaferry/broker.sock", Path),
+        SettingSpec("BIND_HOST", "127.0.0.1", str),
+        SettingSpec("HTTP_PORT", "8080", _port),
+        SettingSpec("AUTH_PASSWORD", None, str, secret=True),
+        SettingSpec("SECRET_KEY", None, _secret_key, secret=True),
+        SettingSpec("UPLOAD_CONCURRENCY", "2", _positive_int),
+        SettingSpec("UPLOAD_TIMEOUT_SECONDS", "86400", _positive_int),
+        SettingSpec("UPLOAD_MAX_ATTEMPTS", "3", _positive_int),
+        SettingSpec("AUTO_IMPORT", "trusted", _choice("trusted", "off")),
+        # 既定値を置かない。UTC を既定にすると force_offset が補正にならないまま
+        # 誤った時刻で確定する（§12.2）。
+        SettingSpec("DEFAULT_TIMEZONE", None, _timezone),
+        SettingSpec("LOG_LEVEL", "info", _choice("debug", "info", "warning", "error")),
+    )
+}
+
+
+class SettingsService:
+    def __init__(self, conn: sqlite3.Connection, env: Mapping[str, str]) -> None:
+        self._conn = conn
+        self._env = env
+
+    def _raw(self, key: str) -> tuple[str | None, str]:
+        from_env = self._env.get(ENV_PREFIX + key)
+        if from_env is not None:
+            return from_env, "env"
+        row = self._conn.execute("SELECT value FROM app_setting WHERE key = ?", (key,)).fetchone()
+        if row is not None:
+            return row["value"], "db"
+        return SETTING_SPECS[key].default, "default"
+
+    def describe_all(self) -> list[SettingValue]:
+        out = []
+        for key, spec in SETTING_SPECS.items():
+            raw, source = self._raw(key)
+            value = MASK if (spec.secret and raw is not None) else raw
+            out.append(SettingValue(key=key, value=value, source=source, locked=source == "env"))
+        return out
+
+    def set(self, key: str, value: str) -> None:
+        spec = SETTING_SPECS.get(key)
+        if spec is None:
+            raise SettingInvalid(f"未知の設定キー: {key}")
+        if ENV_PREFIX + key in self._env:
+            raise SettingLocked(f"{key} は環境変数で固定されている")
+        spec.parse(value)
+        self._conn.execute(
+            "INSERT INTO app_setting (key, value, updated_at) VALUES (?, ?, ?)"
+            " ON CONFLICT (key) DO UPDATE SET value = excluded.value,"
+            " updated_at = excluded.updated_at",
+            (key, value, now_iso()),
+        )
+
+    def snapshot(self) -> Settings:
+        parsed: dict[str, Any] = {}
+        for key, spec in SETTING_SPECS.items():
+            raw, _ = self._raw(key)
+            parsed[key] = None if raw is None else spec.parse(raw)
+        return Settings(
+            data_root=parsed["DATA_ROOT"],
+            broker_socket=parsed["BROKER_SOCKET"],
+            bind_host=parsed["BIND_HOST"],
+            http_port=parsed["HTTP_PORT"],
+            auth_password=parsed["AUTH_PASSWORD"],
+            secret_key=parsed["SECRET_KEY"],
+            upload_concurrency=parsed["UPLOAD_CONCURRENCY"],
+            upload_timeout_seconds=parsed["UPLOAD_TIMEOUT_SECONDS"],
+            upload_max_attempts=parsed["UPLOAD_MAX_ATTEMPTS"],
+            auto_import=parsed["AUTO_IMPORT"],
+            default_timezone=parsed["DEFAULT_TIMEZONE"],
+            log_level=parsed["LOG_LEVEL"],
+        )
+
+
+def startup_warnings(settings: Settings) -> list[str]:
+    """危険な組み合わせを起動ログと UI バナーに出す.
+
+    認証は必須にしない（LAN 内で無設定で使えることを優先する）が、意図せず
+    公開している状態には気づけるようにする。
+    """
+    warnings: list[str] = []
+    if settings.auth_password is None and not _is_loopback(settings.bind_host):
+        warnings.append(
+            f"認証が無効なまま {settings.bind_host} で待ち受けている。"
+            "LAN の他の端末から操作できる状態になっている。"
+        )
+    return warnings
+
+
+def _is_loopback(host: str) -> bool:
+    if host in {"localhost"}:
+        return True
+    try:
+        return ip_address(host).is_loopback
+    except ValueError:
+        return False
+```
+
+- [ ] **Step 4: テストが通ることを確認する**
+
+Run: `uv run pytest app/tests/test_settings.py -v`
+Expected: すべて PASS
+
+- [ ] **Step 5: コミット**
+
+```bash
+git add app/src/mediaferry/settings.py app/tests/test_settings.py
+git commit -m "feat(mediaferry): resolve settings from env, db and defaults"
+```
+
+---
+
+### Task 7: API キーの暗号化フォーマット
+
+**Files:**
+- Create: `app/src/mediaferry/core/__init__.py`
+- Create: `app/src/mediaferry/core/crypto.py`
+- Modify: `app/pyproject.toml`（`cryptography` を追加）
+- Test: `app/tests/test_crypto.py`
+
+**Interfaces:**
+- Consumes: `mediaferry.settings.Settings.secret_key`（Task 6）
+- Produces:
+  - `mediaferry.core.crypto.SecretAad(credential_id, destination_id, revision, schema_version)`
+  - `mediaferry.core.crypto.SecretBox(master_key: bytes)` — `.key_id`, `.encrypt(str, SecretAad) -> bytes`, `.decrypt(bytes, SecretAad) -> str`
+  - 例外 `WrongKeyError` / `SecretCorrupt`
+
+**方式の確定**: `cryptography` の `AESGCM`（AES-256-GCM）を使う。仕様は
+XChaCha20-Poly1305 を第一候補としているが、`cryptography` は XChaCha20 を
+公開していない。§12.3 の「無ければ AES-256-GCM」に従う。アルゴリズム番号を
+ヘッダに持たせるので、後から追加しても既存の暗号文を読める。
+
+- [ ] **Step 1: 失敗するテストを書く**
+
+`app/tests/test_crypto.py`:
+
+```python
+import os
+
+import pytest
+
+from mediaferry.core.crypto import SecretAad, SecretBox, SecretCorrupt, WrongKeyError
+
+
+def an_aad(**over):
+    fields = {
+        "credential_id": "cred-1",
+        "destination_id": "dest-1",
+        "revision": 1,
+        "schema_version": 1,
+    }
+    fields.update(over)
+    return SecretAad(**fields)
+
+
+@pytest.fixture
+def box():
+    return SecretBox(os.urandom(32))
+
+
+def test_round_trip(box):
+    blob = box.encrypt("immich-api-key", an_aad())
+    assert box.decrypt(blob, an_aad()) == "immich-api-key"
+
+
+def test_the_plaintext_does_not_appear_in_the_blob(box):
+    assert b"immich-api-key" not in box.encrypt("immich-api-key", an_aad())
+
+
+def test_nonce_is_fresh_for_every_encryption(box):
+    first = box.encrypt("k", an_aad())
+    second = box.encrypt("k", an_aad())
+    assert first != second
+
+
+def test_moving_a_row_to_another_destination_is_detected(box):
+    """AAD に destination_id を含めるので、行の差し替えが復号で落ちる."""
+    blob = box.encrypt("k", an_aad())
+    with pytest.raises(SecretCorrupt):
+        box.decrypt(blob, an_aad(destination_id="dest-2"))
+    with pytest.raises(SecretCorrupt):
+        box.decrypt(blob, an_aad(revision=2))
+
+
+def test_a_different_key_is_reported_as_wrong_key_not_corruption(box):
+    """誤鍵を「壊れた credential」として上書きしてしまわないため、
+    復号を試みる前に key_id で弾く."""
+    other = SecretBox(os.urandom(32))
+    blob = box.encrypt("k", an_aad())
+    with pytest.raises(WrongKeyError) as exc:
+        other.decrypt(blob, an_aad())
+    assert exc.value.expected == other.key_id
+    assert exc.value.found == box.key_id
+
+
+def test_key_id_is_stable_and_does_not_leak_the_key():
+    key = os.urandom(32)
+    assert SecretBox(key).key_id == SecretBox(key).key_id
+    assert SecretBox(key).key_id.encode() not in key
+
+
+def test_a_truncated_blob_is_corruption_not_a_crash(box):
+    blob = box.encrypt("k", an_aad())
+    with pytest.raises(SecretCorrupt):
+        box.decrypt(blob[:-1], an_aad())
+    with pytest.raises(SecretCorrupt):
+        box.decrypt(b"nonsense", an_aad())
+
+
+def test_the_key_must_be_32_bytes():
+    with pytest.raises(ValueError, match="32"):
+        SecretBox(os.urandom(16))
+```
+
+- [ ] **Step 2: 失敗を確認する**
+
+Run: `uv run pytest app/tests/test_crypto.py -v`
+Expected: FAIL（`ModuleNotFoundError: No module named 'mediaferry.core'`）
+
+- [ ] **Step 3: 実装する**
+
+`app/pyproject.toml` の `dependencies` に `"cryptography>=43"` を追加してから
+`uv sync --all-packages` する。
+
+`app/src/mediaferry/core/__init__.py` は空ファイル。
+
+`app/src/mediaferry/core/crypto.py`:
+
+```python
+"""転送先 API キーの保存形式.
+
+Immich API は可逆な値を要求するのでハッシュ化できない。マスター鍵による
+AEAD 暗号化で保存する。マスター鍵は環境変数にあり DATA_ROOT の外なので、
+DB やバックアップ単体の流出には効く。app の RCE には効かない（§12.3）。
+
+形式を仕様で固定してあるのは、後から変えると全 credential の migration が
+要るため。ヘッダは自己記述で、アルゴリズムと鍵の指紋を含む。
+"""
+
+from __future__ import annotations
+
+import hashlib
+import json
+import os
+from dataclasses import asdict, dataclass
+
+from cryptography.exceptions import InvalidTag
+from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+
+MAGIC = b"mfk"
+FORMAT_VERSION = 1
+ALG_AES_256_GCM = 1
+NONCE_BYTES = 12
+KEY_BYTES = 32
+KEY_ID_CHARS = 16
+
+
+class WrongKeyError(RuntimeError):
+    """暗号文が別のマスター鍵で作られている.
+
+    復号の失敗と区別する。区別しないと、鍵を取り違えた状態で
+    「壊れた credential」として上書きしてしまう。
+    """
+
+    def __init__(self, expected: str, found: str) -> None:
+        super().__init__(f"key_id が一致しない（期待 {expected} / 実際 {found}）")
+        self.expected = expected
+        self.found = found
+
+
+class SecretCorrupt(RuntimeError):
+    """形式が壊れているか、AAD が一致しない."""
+
+
+@dataclass(frozen=True)
+class SecretAad:
+    """暗号文に束縛する文脈.
+
+    行を別の宛先・別の版へ差し替える攻撃を復号時に検出する。
+    """
+
+    credential_id: str
+    destination_id: str
+    revision: int
+    schema_version: int
+
+    def to_bytes(self) -> bytes:
+        payload = {"v": FORMAT_VERSION, **asdict(self)}
+        return json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+
+
+class SecretBox:
+    def __init__(self, master_key: bytes) -> None:
+        if len(master_key) != KEY_BYTES:
+            raise ValueError(f"マスター鍵は {KEY_BYTES} バイトである必要がある")
+        self._aead = AESGCM(master_key)
+        self.key_id = hashlib.sha256(b"mediaferry-key-id" + master_key).hexdigest()[:KEY_ID_CHARS]
+
+    def encrypt(self, plaintext: str, aad: SecretAad) -> bytes:
+        nonce = os.urandom(NONCE_BYTES)
+        body = self._aead.encrypt(nonce, plaintext.encode("utf-8"), aad.to_bytes())
+        return self._header() + nonce + body
+
+    def decrypt(self, blob: bytes, aad: SecretAad) -> str:
+        header = self._header()
+        if not blob.startswith(MAGIC) or len(blob) < len(header) + NONCE_BYTES + 16:
+            raise SecretCorrupt("暗号文のヘッダが読めない")
+        found_key_id = blob[len(MAGIC) + 2 : len(header)].decode("ascii", errors="replace")
+        if found_key_id != self.key_id:
+            raise WrongKeyError(expected=self.key_id, found=found_key_id)
+        if blob[len(MAGIC)] != FORMAT_VERSION or blob[len(MAGIC) + 1] != ALG_AES_256_GCM:
+            raise SecretCorrupt("未知の形式またはアルゴリズム")
+        nonce = blob[len(header) : len(header) + NONCE_BYTES]
+        body = blob[len(header) + NONCE_BYTES :]
+        try:
+            return self._aead.decrypt(nonce, body, aad.to_bytes()).decode("utf-8")
+        except (InvalidTag, UnicodeDecodeError) as exc:
+            raise SecretCorrupt("復号できない（AAD 不一致または改竄）") from exc
+
+    def _header(self) -> bytes:
+        return MAGIC + bytes([FORMAT_VERSION, ALG_AES_256_GCM]) + self.key_id.encode("ascii")
+```
+
+- [ ] **Step 4: テストが通ることを確認する**
+
+Run: `uv run pytest app/tests/test_crypto.py -v`
+Expected: すべて PASS
+
+- [ ] **Step 5: 変異試験**
+
+`encrypt` / `decrypt` の `aad.to_bytes()` を `b""` に置き換え、
+`test_moving_a_row_to_another_destination_is_detected` が落ちることを
+確認してから戻す。
+
+- [ ] **Step 6: コミット**
+
+```bash
+git add app/src/mediaferry/core app/tests/test_crypto.py app/pyproject.toml uv.lock
+git commit -m "feat(mediaferry): fix the on-disk format for encrypted api keys"
+```
+
+---
+
+### Task 8: quick_fingerprint
+
+**Files:**
+- Create: `app/src/mediaferry/core/fingerprint.py`
+- Test: `app/tests/test_fingerprint.py`
+
+**Interfaces:**
+- Consumes: なし（純粋関数）
+- Produces:
+  - `mediaferry.core.fingerprint.FINGERPRINT_VERSION: int`
+  - `mediaferry.core.fingerprint.window_offsets(size: int) -> list[int]`
+  - `mediaferry.core.fingerprint.quick_fingerprint(fileobj: BinaryIO, size: int) -> str`（hex）
+
+- [ ] **Step 1: 失敗するテストを書く**
+
+`app/tests/test_fingerprint.py`:
+
+```python
+import hashlib
+import io
+
+from mediaferry.core.fingerprint import (
+    FINGERPRINT_VERSION,
+    WINDOW_BYTES,
+    WINDOW_COUNT,
+    quick_fingerprint,
+    window_offsets,
+)
+
+
+def a_file(size, seed=b"\x01"):
+    return io.BytesIO((seed * size)[:size])
+
+
+def test_small_files_are_read_whole():
+    assert window_offsets(1000) == [0]
+
+
+def test_offsets_are_deterministic_and_ordered():
+    first = window_offsets(10_000_000)
+    assert first == window_offsets(10_000_000)
+    assert first == sorted(first)
+    assert len(first) == WINDOW_COUNT
+    assert first[0] == 0
+    assert first[-1] == 10_000_000 - WINDOW_BYTES
+
+
+def test_overlapping_windows_are_deduplicated():
+    """1MiB を少し超えるだけのファイルでは窓が重なる."""
+    offsets = window_offsets(WINDOW_BYTES * WINDOW_COUNT + 10)
+    assert offsets == sorted(set(offsets))
+
+
+def test_size_is_part_of_the_digest():
+    """サイズを含めないと、連結の曖昧さで別の内容が同じ指紋になりうる."""
+    assert quick_fingerprint(a_file(100), 100) != quick_fingerprint(a_file(200), 200)
+
+
+def test_same_bytes_give_the_same_digest():
+    assert quick_fingerprint(a_file(5000), 5000) == quick_fingerprint(a_file(5000), 5000)
+
+
+def test_a_change_inside_a_sampled_window_is_detected():
+    size = 4 * 1024 * 1024
+    base = bytearray(size)
+    changed = bytearray(size)
+    changed[0] = 0xFF
+    assert quick_fingerprint(io.BytesIO(bytes(base)), size) != quick_fingerprint(
+        io.BytesIO(bytes(changed)), size
+    )
+
+
+def test_the_digest_has_the_documented_construction():
+    """仕様の式 sha1(b"mfq" + u8(version) + u64le(size) + windows) と一致する."""
+    data = bytes(range(256)) * 4  # 1024 バイト
+    expected = hashlib.sha1(  # noqa: S324
+        b"mfq" + bytes([FINGERPRINT_VERSION]) + len(data).to_bytes(8, "little") + data,
+        usedforsecurity=False,
+    ).hexdigest()
+    assert quick_fingerprint(io.BytesIO(data), len(data)) == expected
+
+
+def test_an_empty_file_has_a_digest():
+    assert len(quick_fingerprint(io.BytesIO(b""), 0)) == 40
+```
+
+- [ ] **Step 2: 失敗を確認する**
+
+Run: `uv run pytest app/tests/test_fingerprint.py -v`
+Expected: FAIL（`ModuleNotFoundError`）
+
+- [ ] **Step 3: 実装する**
+
+`app/src/mediaferry/core/fingerprint.py`:
+
+```python
+"""スキャン時の同一性判定に使う軽量な指紋.
+
+(rel_path, size, mtime) だけだと、SD を再フォーマットして連番が再利用され、
+たまたま同じサイズ・同じ mtime の別ファイルが同じパスに来る場合を取りこぼす。
+16GiB に毎回フル SHA-1 を掛けるのは実用に耐えないので、決定的な位置の
+16 窓（合計 1MiB）だけを読む。
+
+**これは同一性の確率的キャッシュキーであって、完全性検査ではない。**
+サンプリング対象外だけが変化・破損したファイルは検出できない。ビットロットの
+検出には media_file.sha1 とソースのフルハッシュを突き合わせる deep_verify を使う。
+"""
+
+from __future__ import annotations
+
+import hashlib
+from typing import BinaryIO
+
+FINGERPRINT_VERSION = 1
+WINDOW_BYTES = 64 * 1024
+WINDOW_COUNT = 16
+DOMAIN = b"mfq"
+
+
+def window_offsets(size: int) -> list[int]:
+    """読む窓の先頭オフセットを決定的に算出する.
+
+    1MiB 以下ならファイル全体を 1 窓として読む。範囲が重なる場合は
+    重複を除いて昇順で返す。
+    """
+    if size <= WINDOW_BYTES * WINDOW_COUNT:
+        return [0]
+    span = size - WINDOW_BYTES
+    offsets = [round(i * span / (WINDOW_COUNT - 1)) for i in range(WINDOW_COUNT)]
+    return sorted(set(offsets))
+
+
+def quick_fingerprint(fileobj: BinaryIO, size: int) -> str:
+    """ドメイン分離子と固定幅のサイズを含めて連結の曖昧さを排除する."""
+    digest = hashlib.sha1(usedforsecurity=False)  # noqa: S324
+    digest.update(DOMAIN)
+    digest.update(bytes([FINGERPRINT_VERSION]))
+    digest.update(size.to_bytes(8, "little"))
+    for offset in window_offsets(size):
+        fileobj.seek(offset)
+        remaining = WINDOW_BYTES if size > WINDOW_BYTES * WINDOW_COUNT else size
+        while remaining > 0:
+            chunk = fileobj.read(remaining)
+            if not chunk:
+                break
+            digest.update(chunk)
+            remaining -= len(chunk)
+    return digest.hexdigest()
+```
+
+- [ ] **Step 4: テストが通ることを確認する**
+
+Run: `uv run pytest app/tests/test_fingerprint.py -v`
+Expected: すべて PASS
+
+- [ ] **Step 5: コミット**
+
+```bash
+git add app/src/mediaferry/core/fingerprint.py app/tests/test_fingerprint.py
+git commit -m "feat(mediaferry): add the quick fingerprint used by scanning"
+```
+
+---
+
+### Task 9: プロファイル定義の型・検証・ビルトイン
+
+**Files:**
+- Create: `app/src/mediaferry/core/profiles/__init__.py`
+- Create: `app/src/mediaferry/core/profiles/model.py`
+- Create: `app/src/mediaferry/core/profiles/builtin/dji-osmo.yaml`
+- Modify: `app/pyproject.toml`（`pyyaml` を追加）
+- Test: `app/tests/test_profile_model.py`
+
+**Interfaces:**
+- Consumes: なし（純粋）
+- Produces:
+  - `mediaferry.core.profiles.model.PROFILE_SCHEMA_VERSION: int`
+  - dataclass `ProfileDefinition`（`slug`, `name`, `hints`, `require`, `scan`,
+    `timestamp`, `merge`, `immich`）と内訳の `Hints` / `Require` / `ScanRule` /
+    `TimestampRule` / `MergeRule` / `KeepStreams` / `ImmichRule`
+  - `parse_definition(data: Mapping[str, Any]) -> ProfileDefinition`
+  - `definition_to_json(defn: ProfileDefinition) -> str`
+  - `load_builtin_definitions() -> list[ProfileDefinition]`
+  - 例外 `ProfileInvalid`
+
+- [ ] **Step 1: 失敗するテストを書く**
+
+`app/tests/test_profile_model.py`:
+
+```python
+import json
+
+import pytest
+
+from mediaferry.core.profiles.model import (
+    ProfileInvalid,
+    definition_to_json,
+    load_builtin_definitions,
+    parse_definition,
+)
+
+
+def a_definition(**over):
+    data = {
+        "slug": "dji-osmo",
+        "name": "DJI Osmo Pocket",
+        "hints": {"usb_ids": ["2ca3:*"], "volume_labels": ["SD_Card"]},
+        "require": {
+            "roots": ["DCIM", "PANORAMA"],
+            "filename_pattern": r"^DJI_\d{14}_\d{4}_D\.(MP4|JPG)$",
+            "min_matching_files": 1,
+        },
+        "scan": {"roots": ["DCIM", "PANORAMA"], "extensions": ["MP4", "JPG"]},
+        "timestamp": {
+            "source": "filename",
+            "pattern": r"^DJI_(?P<ts>\d{14})_",
+            "format": "%Y%m%d%H%M%S",
+            "fallback": "mtime",
+            "timezone_policy": "force_offset",
+            "timezone": None,
+        },
+        "merge": {
+            "enabled": True,
+            "tolerance_seconds": 5,
+            "min_part_size_gib": 15,
+            "sequence_pattern": r"_(?P<seq>\d{4})_D$",
+            "output_name": "DJI_{ts}_{first_seq}-{last_seq}_MERGED.MP4",
+            "keep_streams": {"video": "primary", "audio": "all", "timecode": True, "data": False},
+        },
+        "immich": {
+            "tags": ["DJI Osmo Pocket 4"],
+            "tag_pre_existing": True,
+            "fix_datetime_after_upload": True,
+        },
+    }
+    data.update(over)
+    return data
+
+
+def test_a_complete_definition_parses():
+    defn = parse_definition(a_definition())
+    assert defn.slug == "dji-osmo"
+    assert defn.scan.extensions == ("MP4", "JPG")
+    assert defn.merge.keep_streams.data is False
+    assert defn.timestamp.timezone is None
+
+
+def test_lrf_is_excluded_because_it_is_not_in_the_extensions():
+    assert "LRF" not in parse_definition(a_definition()).scan.extensions
+
+
+@pytest.mark.parametrize("root", ["..", "/DCIM", "DCIM/../..", "a/b", ""])
+def test_roots_must_be_single_safe_components(root):
+    """マウントルートの外へ抜ける経路を定義から作らせない."""
+    with pytest.raises(ProfileInvalid):
+        parse_definition(a_definition(scan={"roots": [root], "extensions": ["MP4"]}))
+
+
+def test_output_name_cannot_contain_a_path_separator():
+    merged = a_definition()["merge"] | {"output_name": "../evil.MP4"}
+    with pytest.raises(ProfileInvalid):
+        parse_definition(a_definition(merge=merged))
+
+
+def test_broken_regexes_are_rejected_at_parse_time():
+    require = a_definition()["require"] | {"filename_pattern": "^DJI_(unclosed"}
+    with pytest.raises(ProfileInvalid, match="filename_pattern"):
+        parse_definition(a_definition(require=require))
+
+
+def test_slug_is_restricted_to_path_safe_characters():
+    with pytest.raises(ProfileInvalid):
+        parse_definition(a_definition(slug="../etc"))
+    with pytest.raises(ProfileInvalid):
+        parse_definition(a_definition(slug="DJI Osmo"))
+
+
+def test_timezone_policy_is_constrained():
+    ts = a_definition()["timestamp"] | {"timezone_policy": "guess"}
+    with pytest.raises(ProfileInvalid):
+        parse_definition(a_definition(timestamp=ts))
+
+
+def test_a_filename_source_needs_a_pattern_and_a_format():
+    ts = a_definition()["timestamp"] | {"pattern": None}
+    with pytest.raises(ProfileInvalid, match="pattern"):
+        parse_definition(a_definition(timestamp=ts))
+
+
+def test_the_pattern_must_capture_ts():
+    ts = a_definition()["timestamp"] | {"pattern": r"^DJI_(\d{14})_"}
+    with pytest.raises(ProfileInvalid, match="ts"):
+        parse_definition(a_definition(timestamp=ts))
+
+
+def test_unknown_keys_are_rejected():
+    """綴りを間違えた設定が黙って無視されると、効いていない設定に気づけない."""
+    with pytest.raises(ProfileInvalid, match="tolerance_second"):
+        parse_definition(a_definition(merge=a_definition()["merge"] | {"tolerance_second": 5}))
+
+
+def test_json_round_trip_is_stable():
+    defn = parse_definition(a_definition())
+    once = definition_to_json(defn)
+    assert parse_definition(json.loads(once)) == defn
+    assert definition_to_json(parse_definition(json.loads(once))) == once
+
+
+def test_the_builtin_dji_profile_is_valid_and_has_no_local_timezone():
+    """地域固定の値をリポジトリに含めない。TZ は設定で与える（§12.2）."""
+    builtins = {d.slug: d for d in load_builtin_definitions()}
+    assert "dji-osmo" in builtins
+    assert builtins["dji-osmo"].timestamp.timezone is None
+    assert builtins["dji-osmo"].timestamp.timezone_policy == "force_offset"
+```
+
+- [ ] **Step 2: 失敗を確認する**
+
+Run: `uv run pytest app/tests/test_profile_model.py -v`
+Expected: FAIL（`ModuleNotFoundError`）
+
+- [ ] **Step 3: 実装する**
+
+`app/pyproject.toml` の `dependencies` に `"pyyaml>=6"` を追加し、`uv sync --all-packages`。
+
+`app/src/mediaferry/core/profiles/__init__.py` は空ファイル。
+
+`app/src/mediaferry/core/profiles/model.py`:
+
+```python
+"""デバイスプロファイルの定義と検証.
+
+機種差をコードの分岐ではなく設定の差分として表す。定義は DB のリビジョンに
+JSON で保存され、取り込み・結合・アップロードの各レコードが使用したリビジョン
+ID を持つ。
+
+パスを含む項目は、マウントルートの外へ抜ける経路を作らせないため、単一の
+安全な構成要素だけを許す（§14）。
+"""
+
+from __future__ import annotations
+
+import json
+import re
+from collections.abc import Mapping, Sequence
+from dataclasses import asdict, dataclass
+from pathlib import Path
+from typing import Any
+
+import yaml
+
+PROFILE_SCHEMA_VERSION = 1
+BUILTIN_DIR = Path(__file__).parent / "builtin"
+
+_SLUG_RE = re.compile(r"^[a-z0-9][a-z0-9-]*$")
+_TIMESTAMP_SOURCES = ("filename", "exif", "mtime")
+_TIMEZONE_POLICIES = ("none", "force_offset")
+_VIDEO_KEEP = ("primary", "all")
+_AUDIO_KEEP = ("none", "primary", "all")
+
+
+class ProfileInvalid(ValueError):
+    """定義が仕様を満たさない."""
+
+
+@dataclass(frozen=True)
+class Hints:
+    usb_ids: tuple[str, ...]
+    volume_labels: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class Require:
+    roots: tuple[str, ...]
+    filename_pattern: str
+    min_matching_files: int
+
+
+@dataclass(frozen=True)
+class ScanRule:
+    roots: tuple[str, ...]
+    extensions: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class TimestampRule:
+    source: str
+    pattern: str | None
+    format: str | None
+    fallback: str
+    timezone_policy: str
+    timezone: str | None
+
+
+@dataclass(frozen=True)
+class KeepStreams:
+    video: str
+    audio: str
+    timecode: bool
+    data: bool
+
+
+@dataclass(frozen=True)
+class MergeRule:
+    enabled: bool
+    tolerance_seconds: int
+    min_part_size_gib: int
+    sequence_pattern: str
+    output_name: str
+    keep_streams: KeepStreams
+
+
+@dataclass(frozen=True)
+class ImmichRule:
+    tags: tuple[str, ...]
+    tag_pre_existing: bool
+    fix_datetime_after_upload: bool
+
+
+@dataclass(frozen=True)
+class ProfileDefinition:
+    slug: str
+    name: str
+    hints: Hints
+    require: Require
+    scan: ScanRule
+    timestamp: TimestampRule
+    merge: MergeRule
+    immich: ImmichRule
+
+
+def parse_definition(data: Mapping[str, Any]) -> ProfileDefinition:
+    _reject_unknown(data, {"slug", "name", "hints", "require", "scan", "timestamp",
+                           "merge", "immich"}, "profile")
+    slug = _string(data, "slug")
+    if not _SLUG_RE.match(slug):
+        raise ProfileInvalid(f"slug は英小文字・数字・ハイフンのみ: {slug}")
+    return ProfileDefinition(
+        slug=slug,
+        name=_string(data, "name"),
+        hints=_parse_hints(_mapping(data, "hints")),
+        require=_parse_require(_mapping(data, "require")),
+        scan=_parse_scan(_mapping(data, "scan")),
+        timestamp=_parse_timestamp(_mapping(data, "timestamp")),
+        merge=_parse_merge(_mapping(data, "merge")),
+        immich=_parse_immich(_mapping(data, "immich")),
+    )
+
+
+def definition_to_json(defn: ProfileDefinition) -> str:
+    """DB へ入れる正規形. 差分検出に使うのでキー順を固定する."""
+    return json.dumps(asdict(defn), sort_keys=True, ensure_ascii=False, separators=(",", ":"))
+
+
+def load_builtin_definitions() -> list[ProfileDefinition]:
+    out = []
+    for path in sorted(BUILTIN_DIR.glob("*.yaml")):
+        out.append(parse_definition(yaml.safe_load(path.read_text(encoding="utf-8"))))
+    return out
+
+
+# ----------------------------------------------------------------------
+def _reject_unknown(data: Mapping[str, Any], known: set[str], where: str) -> None:
+    unknown = sorted(set(data) - known)
+    if unknown:
+        raise ProfileInvalid(f"{where} に未知のキー: {', '.join(unknown)}")
+
+
+def _mapping(data: Mapping[str, Any], key: str) -> Mapping[str, Any]:
+    value = data.get(key)
+    if not isinstance(value, Mapping):
+        raise ProfileInvalid(f"{key} はオブジェクトである必要がある")
+    return value
+
+
+def _string(data: Mapping[str, Any], key: str) -> str:
+    value = data.get(key)
+    if not isinstance(value, str) or not value:
+        raise ProfileInvalid(f"{key} は空でない文字列である必要がある")
+    return value
+
+
+def _bool(data: Mapping[str, Any], key: str) -> bool:
+    value = data.get(key)
+    if not isinstance(value, bool):
+        raise ProfileInvalid(f"{key} は真偽値である必要がある")
+    return value
+
+
+def _positive_int(data: Mapping[str, Any], key: str) -> int:
+    value = data.get(key)
+    if not isinstance(value, int) or isinstance(value, bool) or value < 0:
+        raise ProfileInvalid(f"{key} は 0 以上の整数である必要がある")
+    return value
+
+
+def _strings(data: Mapping[str, Any], key: str) -> tuple[str, ...]:
+    value = data.get(key)
+    if not isinstance(value, Sequence) or isinstance(value, str):
+        raise ProfileInvalid(f"{key} は文字列の配列である必要がある")
+    for item in value:
+        if not isinstance(item, str):
+            raise ProfileInvalid(f"{key} の要素は文字列である必要がある")
+    return tuple(value)
+
+
+def _safe_components(names: Sequence[str], key: str) -> tuple[str, ...]:
+    for name in names:
+        if not name or name in {".", ".."} or "/" in name or "\\" in name or "\0" in name:
+            raise ProfileInvalid(f"{key} は単一の安全なディレクトリ名である必要がある: {name!r}")
+    return tuple(names)
+
+
+def _regex(data: Mapping[str, Any], key: str) -> str:
+    pattern = _string(data, key)
+    try:
+        re.compile(pattern)
+    except re.error as exc:
+        raise ProfileInvalid(f"{key} が正規表現として不正: {exc}") from exc
+    return pattern
+
+
+def _parse_hints(data: Mapping[str, Any]) -> Hints:
+    _reject_unknown(data, {"usb_ids", "volume_labels"}, "hints")
+    return Hints(usb_ids=_strings(data, "usb_ids"), volume_labels=_strings(data, "volume_labels"))
+
+
+def _parse_require(data: Mapping[str, Any]) -> Require:
+    _reject_unknown(data, {"roots", "filename_pattern", "min_matching_files"}, "require")
+    return Require(
+        roots=_safe_components(_strings(data, "roots"), "require.roots"),
+        filename_pattern=_regex(data, "filename_pattern"),
+        min_matching_files=_positive_int(data, "min_matching_files"),
+    )
+
+
+def _parse_scan(data: Mapping[str, Any]) -> ScanRule:
+    _reject_unknown(data, {"roots", "extensions"}, "scan")
+    extensions = _strings(data, "extensions")
+    for ext in extensions:
+        if ext != ext.upper() or ext.startswith("."):
+            raise ProfileInvalid(f"scan.extensions はドット無しの大文字で書く: {ext!r}")
+    return ScanRule(
+        roots=_safe_components(_strings(data, "roots"), "scan.roots"), extensions=extensions
+    )
+
+
+def _parse_timestamp(data: Mapping[str, Any]) -> TimestampRule:
+    _reject_unknown(
+        data, {"source", "pattern", "format", "fallback", "timezone_policy", "timezone"}, "timestamp"
+    )
+    source = _string(data, "source")
+    if source not in _TIMESTAMP_SOURCES:
+        raise ProfileInvalid(f"timestamp.source は {_TIMESTAMP_SOURCES} のいずれか")
+    fallback = _string(data, "fallback")
+    if fallback not in _TIMESTAMP_SOURCES:
+        raise ProfileInvalid(f"timestamp.fallback は {_TIMESTAMP_SOURCES} のいずれか")
+    policy = _string(data, "timezone_policy")
+    if policy not in _TIMEZONE_POLICIES:
+        raise ProfileInvalid(f"timestamp.timezone_policy は {_TIMEZONE_POLICIES} のいずれか")
+    pattern = data.get("pattern")
+    fmt = data.get("format")
+    if source == "filename":
+        if not isinstance(pattern, str):
+            raise ProfileInvalid("source が filename なら timestamp.pattern が要る")
+        _regex(data, "pattern")
+        if "(?P<ts>" not in pattern:
+            raise ProfileInvalid("timestamp.pattern は名前付きグループ ts を持つ必要がある")
+        if not isinstance(fmt, str):
+            raise ProfileInvalid("source が filename なら timestamp.format が要る")
+    timezone = data.get("timezone")
+    if timezone is not None and not isinstance(timezone, str):
+        raise ProfileInvalid("timestamp.timezone は文字列か null")
+    return TimestampRule(
+        source=source,
+        pattern=pattern if isinstance(pattern, str) else None,
+        format=fmt if isinstance(fmt, str) else None,
+        fallback=fallback,
+        timezone_policy=policy,
+        timezone=timezone,
+    )
+
+
+def _parse_keep_streams(data: Mapping[str, Any]) -> KeepStreams:
+    _reject_unknown(data, {"video", "audio", "timecode", "data"}, "merge.keep_streams")
+    video, audio = _string(data, "video"), _string(data, "audio")
+    if video not in _VIDEO_KEEP:
+        raise ProfileInvalid(f"keep_streams.video は {_VIDEO_KEEP} のいずれか")
+    if audio not in _AUDIO_KEEP:
+        raise ProfileInvalid(f"keep_streams.audio は {_AUDIO_KEEP} のいずれか")
+    return KeepStreams(
+        video=video, audio=audio, timecode=_bool(data, "timecode"), data=_bool(data, "data")
+    )
+
+
+def _parse_merge(data: Mapping[str, Any]) -> MergeRule:
+    _reject_unknown(
+        data,
+        {"enabled", "tolerance_seconds", "min_part_size_gib", "sequence_pattern",
+         "output_name", "keep_streams"},
+        "merge",
+    )
+    output_name = _string(data, "output_name")
+    _safe_components([output_name], "merge.output_name")
+    return MergeRule(
+        enabled=_bool(data, "enabled"),
+        tolerance_seconds=_positive_int(data, "tolerance_seconds"),
+        min_part_size_gib=_positive_int(data, "min_part_size_gib"),
+        sequence_pattern=_regex(data, "sequence_pattern"),
+        output_name=output_name,
+        keep_streams=_parse_keep_streams(_mapping(data, "keep_streams")),
+    )
+
+
+def _parse_immich(data: Mapping[str, Any]) -> ImmichRule:
+    _reject_unknown(data, {"tags", "tag_pre_existing", "fix_datetime_after_upload"}, "immich")
+    return ImmichRule(
+        tags=_strings(data, "tags"),
+        tag_pre_existing=_bool(data, "tag_pre_existing"),
+        fix_datetime_after_upload=_bool(data, "fix_datetime_after_upload"),
+    )
+```
+
+`app/src/mediaferry/core/profiles/builtin/dji-osmo.yaml`:
+
+```yaml
+# DJI Osmo Pocket 系。SD カードと内蔵ストレージの両方が同じ形をしている。
+slug: dji-osmo
+name: DJI Osmo Pocket
+hints:
+  # 候補の順位付けにのみ使う。単独では確定しない。
+  usb_ids: ["2ca3:*"]
+  volume_labels: ["SD_Card", "Pocket4"]
+require:
+  roots: ["DCIM", "PANORAMA"]
+  filename_pattern: '^DJI_\d{14}_\d{4}_D\.(MP4|JPG)$'
+  min_matching_files: 1
+scan:
+  roots: ["DCIM", "PANORAMA"]
+  # .LRF はここに無いので取り込まれない。
+  extensions: ["MP4", "JPG"]
+timestamp:
+  source: filename
+  pattern: '^DJI_(?P<ts>\d{14})_'
+  format: "%Y%m%d%H%M%S"
+  # PANO_0001.JPG のように pattern に当たらないファイルがある。
+  fallback: mtime
+  # DJI は creation_time を UTC で書きつつオフセットも GPS も書かないので、
+  # Immich が撮影地の TZ を判定できない。壁時計にオフセットを付けて書き戻す。
+  timezone_policy: force_offset
+  # 地域固定の値は持たない。MEDIAFERRY_DEFAULT_TIMEZONE か画面で与える。
+  timezone: null
+merge:
+  enabled: true
+  tolerance_seconds: 5
+  # ~16GiB での自動分割を「分割」と「連続した別録画」の区別に使う。
+  min_part_size_gib: 15
+  sequence_pattern: '_(?P<seq>\d{4})_D$'
+  output_name: "DJI_{ts}_{first_seq}-{last_seq}_MERGED.MP4"
+  keep_streams:
+    video: primary
+    audio: all
+    timecode: true
+    # djmd / dbgi は Immich が使わない。落として転送量を減らす。
+    data: false
+immich:
+  tags: ["DJI Osmo Pocket 4"]
+  tag_pre_existing: true
+  fix_datetime_after_upload: true
+```
+
+YAML をホイールに含めるため `app/pyproject.toml` の `force-include` に追記する:
+
+```toml
+[tool.hatch.build.targets.wheel.force-include]
+"src/mediaferry/db/migrations" = "mediaferry/db/migrations"
+"src/mediaferry/core/profiles/builtin" = "mediaferry/core/profiles/builtin"
+```
+
+- [ ] **Step 4: テストが通ることを確認する**
+
+Run: `uv run pytest app/tests/test_profile_model.py -v`
+Expected: すべて PASS
+
+- [ ] **Step 5: コミット**
+
+```bash
+git add app/src/mediaferry/core/profiles app/tests/test_profile_model.py app/pyproject.toml uv.lock
+git commit -m "feat(mediaferry): add device profile definitions and the dji builtin"
+```
+
+---
+
+### Task 10: プロファイルの判定（hints と require）
+
+**Files:**
+- Create: `app/src/mediaferry/core/profiles/matching.py`
+- Test: `app/tests/test_profile_matching.py`
+
+**Interfaces:**
+- Consumes: `ProfileDefinition`（Task 9）
+- Produces:
+  - `mediaferry.core.profiles.matching.VolumeFacts(usb_vendor_id, usb_product_id, fs_label)`
+  - `Protocol SourceTree`: `.has_root(name: str) -> bool`,
+    `.iter_names(root: str, limit: int) -> Iterable[str]`
+  - `MatchOutcome(slug, confidence, provisional, reason)`（`confidence` は `high` / `low`、
+    `slug` が `None` なら対象外）
+  - `resolve_profile(definitions, facts, tree, remembered_slug=None) -> MatchOutcome`
+  - `hint_score(defn, facts) -> int`
+
+- [ ] **Step 1: 失敗するテストを書く**
+
+`app/tests/test_profile_matching.py`:
+
+```python
+from mediaferry.core.profiles.matching import VolumeFacts, hint_score, resolve_profile
+from mediaferry.core.profiles.model import parse_definition
+
+from .test_profile_model import a_definition
+
+
+class DictTree:
+    """dirfd の代わり. core は OS を知らない."""
+
+    def __init__(self, contents):
+        self._contents = contents
+
+    def has_root(self, name):
+        return name in self._contents
+
+    def iter_names(self, root, limit):
+        return list(self._contents.get(root, []))[:limit]
+
+
+def dji():
+    return parse_definition(a_definition())
+
+
+def generic():
+    data = a_definition(
+        slug="generic-dcim",
+        name="Generic DCIM",
+        hints={"usb_ids": [], "volume_labels": []},
+        require={"roots": ["DCIM"], "filename_pattern": r".*\.(MP4|JPG|JPEG|MOV)$",
+                 "min_matching_files": 1},
+    )
+    return parse_definition(data)
+
+
+def dji_facts(**over):
+    fields = {"usb_vendor_id": "2ca3", "usb_product_id": "0020", "fs_label": "SD_Card"}
+    fields.update(over)
+    return VolumeFacts(**fields)
+
+
+def test_hints_rank_candidates_but_do_not_confirm():
+    assert hint_score(dji(), dji_facts()) > hint_score(generic(), dji_facts())
+    # hints だけ一致しても中身が空なら確定しない
+    outcome = resolve_profile([dji(), generic()], dji_facts(), DictTree({}))
+    assert outcome.slug is None
+
+
+def test_content_confirms_the_profile():
+    tree = DictTree({"DCIM": ["DJI_20260817120000_0001_D.MP4"]})
+    outcome = resolve_profile([dji(), generic()], dji_facts(), tree)
+    assert outcome.slug == "dji-osmo"
+    assert outcome.confidence == "high"
+    assert outcome.provisional is False
+
+
+def test_usb_ids_alone_never_confirm():
+    """USB ID だけで確定させる経路を塞ぐ。中身は他機種のもの."""
+    tree = DictTree({"DCIM": ["IMG_0001.JPG"]})
+    outcome = resolve_profile([dji(), generic()], dji_facts(), tree)
+    assert outcome.slug == "generic-dcim"
+
+
+def test_an_empty_dcim_is_a_provisional_match_with_low_confidence():
+    """Osmo の内蔵ストレージは DCIM を持つが空だった（Phase 0 実測）."""
+    tree = DictTree({"DCIM": [], "PANORAMA": []})
+    outcome = resolve_profile([dji(), generic()], dji_facts(), tree)
+    assert outcome.slug == "dji-osmo"
+    assert outcome.provisional is True
+    assert outcome.confidence == "low"
+    assert "空" in outcome.reason
+
+
+def test_an_empty_tree_without_matching_hints_is_out_of_scope():
+    tree = DictTree({"DCIM": []})
+    outcome = resolve_profile([dji(), generic()], dji_facts(usb_vendor_id="abcd",
+                                                           fs_label="BACKUP"), tree)
+    assert outcome.slug is None
+    assert outcome.provisional is False
+
+
+def test_falls_back_to_generic_dcim():
+    tree = DictTree({"DCIM": ["IMG_0001.JPG"]})
+    outcome = resolve_profile([dji(), generic()], VolumeFacts("1234", "5678", "PHONE"), tree)
+    assert outcome.slug == "generic-dcim"
+
+
+def test_a_remembered_profile_is_still_revalidated():
+    """記憶を無条件に信用しない。中身が変わっていれば別のプロファイルになる."""
+    tree = DictTree({"DCIM": ["IMG_0001.JPG"]})
+    outcome = resolve_profile(
+        [dji(), generic()], dji_facts(), tree, remembered_slug="dji-osmo"
+    )
+    assert outcome.slug == "generic-dcim"
+
+
+def test_a_remembered_profile_wins_ties():
+    tree = DictTree({"DCIM": ["DJI_20260817120000_0001_D.MP4"]})
+    both = [generic(), dji()]
+    assert resolve_profile(both, dji_facts(), tree, remembered_slug="dji-osmo").slug == "dji-osmo"
+
+
+def test_usb_id_globs_match_any_product():
+    assert hint_score(dji(), dji_facts(usb_product_id="9999")) > 0
+    assert hint_score(dji(), dji_facts(usb_vendor_id="ffff", fs_label="OTHER")) == 0
+```
+
+- [ ] **Step 2: 失敗を確認する**
+
+Run: `uv run pytest app/tests/test_profile_matching.py -v`
+Expected: FAIL（`ModuleNotFoundError`）
+
+- [ ] **Step 3: 実装する**
+
+`app/src/mediaferry/core/profiles/matching.py`:
+
+```python
+"""ボリュームごとのプロファイル判定.
+
+`hints` は候補の順位付けにのみ使い、単独では確定させない。確定は必ず
+マウント先の中身が `require` を満たすことで行う。USB ID だけで確定すると、
+同じ ID の別機種や、他人のカードを誤って取り込む経路になる。
+"""
+
+from __future__ import annotations
+
+import re
+from collections.abc import Iterable, Sequence
+from dataclasses import dataclass
+from fnmatch import fnmatch
+from typing import Protocol
+
+from .model import ProfileDefinition
+
+# require の確認で読むファイル名の上限。数万件のカードで全件読まない。
+NAME_SCAN_LIMIT = 2000
+
+GENERIC_SLUG = "generic-dcim"
+
+
+@dataclass(frozen=True)
+class VolumeFacts:
+    usb_vendor_id: str
+    usb_product_id: str
+    fs_label: str
+
+
+class SourceTree(Protocol):
+    """ボリュームの中身への読み取り専用の窓."""
+
+    def has_root(self, name: str) -> bool: ...
+
+    def iter_names(self, root: str, limit: int) -> Iterable[str]: ...
+
+
+@dataclass(frozen=True)
+class MatchOutcome:
+    slug: str | None
+    confidence: str  # high / low
+    provisional: bool
+    reason: str
+
+
+def hint_score(defn: ProfileDefinition, facts: VolumeFacts) -> int:
+    """一致した hint の数. 0 なら順位付けに寄与しない."""
+    score = 0
+    usb = f"{facts.usb_vendor_id}:{facts.usb_product_id}".lower()
+    if any(fnmatch(usb, pattern.lower()) for pattern in defn.hints.usb_ids):
+        score += 1
+    if any(facts.fs_label == label for label in defn.hints.volume_labels):
+        score += 1
+    return score
+
+
+def resolve_profile(
+    definitions: Sequence[ProfileDefinition],
+    facts: VolumeFacts,
+    tree: SourceTree,
+    remembered_slug: str | None = None,
+) -> MatchOutcome:
+    """中身の検証を通った最初のプロファイルを採用する."""
+    ordered = sorted(
+        definitions,
+        key=lambda d: (
+            -hint_score(d, facts),
+            0 if d.slug == remembered_slug else 1,
+            1 if d.slug == GENERIC_SLUG else 0,
+            d.slug,
+        ),
+    )
+    provisional: MatchOutcome | None = None
+    for defn in ordered:
+        roots = [root for root in defn.require.roots if tree.has_root(root)]
+        if not roots:
+            continue
+        matches = _count_matching_files(defn, tree, roots)
+        if matches >= defn.require.min_matching_files:
+            return MatchOutcome(
+                slug=defn.slug,
+                confidence="high",
+                provisional=False,
+                reason=f"{', '.join(roots)} に一致するファイルが {matches} 件",
+            )
+        if provisional is None and hint_score(defn, facts) > 0:
+            # 中身が空でも正当なボリュームがある（まだ撮影していない内蔵ストレージ）。
+            # 対象だと分かるように残すが、自動取り込みの対象にはしない。
+            provisional = MatchOutcome(
+                slug=defn.slug,
+                confidence="low",
+                provisional=True,
+                reason=f"{', '.join(roots)} はあるが一致するファイルが無い（空）",
+            )
+    if provisional is not None:
+        return provisional
+    return MatchOutcome(slug=None, confidence="low", provisional=False, reason="対象外")
+
+
+def _count_matching_files(
+    defn: ProfileDefinition, tree: SourceTree, roots: Sequence[str]
+) -> int:
+    pattern = re.compile(defn.require.filename_pattern)
+    found = 0
+    for root in roots:
+        for name in tree.iter_names(root, NAME_SCAN_LIMIT):
+            if pattern.match(name):
+                found += 1
+                if found >= defn.require.min_matching_files:
+                    return found
+    return found
+```
+
+- [ ] **Step 4: テストが通ることを確認する**
+
+Run: `uv run pytest app/tests/test_profile_matching.py -v`
+Expected: すべて PASS
+
+- [ ] **Step 5: 変異試験**
+
+`resolve_profile` の `if matches >= defn.require.min_matching_files:` を
+`if roots:` に緩め、`test_usb_ids_alone_never_confirm` が落ちることを確認してから戻す。
+
+- [ ] **Step 6: コミット**
+
+```bash
+git add app/src/mediaferry/core/profiles/matching.py app/tests/test_profile_matching.py
+git commit -m "feat(mediaferry): resolve the profile from hints and volume contents"
+```
+
+---
+
+### Task 11: 撮影日時の解決
+
+**Files:**
+- Create: `app/src/mediaferry/core/timestamps.py`
+- Test: `app/tests/test_timestamps.py`
+
+**Interfaces:**
+- Consumes: `ProfileDefinition`（Task 9）
+- Produces:
+  - `mediaferry.core.timestamps.CapturedAt(at: datetime, source: str, tz: str | None, note: str | None)`
+  - `resolve_captured_at(defn, rel_path, mtime_ns, default_timezone) -> CapturedAt`
+  - 例外 `TimezoneUnresolved`
+
+- [ ] **Step 1: 失敗するテストを書く**
+
+`app/tests/test_timestamps.py`:
+
+```python
+from datetime import UTC, datetime
+
+import pytest
+
+from mediaferry.core.profiles.model import parse_definition
+from mediaferry.core.timestamps import TimezoneUnresolved, resolve_captured_at
+
+from .test_profile_model import a_definition
+
+
+def defn(**timestamp_over):
+    ts = a_definition()["timestamp"] | timestamp_over
+    return parse_definition(a_definition(timestamp=ts))
+
+
+def mtime_ns_of(wall_utc: str) -> int:
+    dt = datetime.fromisoformat(wall_utc).replace(tzinfo=UTC)
+    return int(dt.timestamp() * 1_000_000_000)
+
+
+def test_filename_wall_clock_gets_the_configured_offset():
+    """DJI は creation_time を UTC で書きつつオフセットを書かないので、
+    ファイル名の壁時計に profile の TZ を付けて撮影時刻とする."""
+    got = resolve_captured_at(
+        defn(timezone="Asia/Tokyo"), "DCIM/DJI_20260817143000_0001_D.MP4", 0, None
+    )
+    assert got.at.isoformat() == "2026-08-17T14:30:00+09:00"
+    assert got.source == "filename"
+    assert got.tz == "Asia/Tokyo"
+
+
+def test_the_default_timezone_is_used_when_the_profile_has_none():
+    got = resolve_captured_at(defn(), "DCIM/DJI_20260817143000_0001_D.MP4", 0, "Europe/Berlin")
+    assert got.at.utcoffset().total_seconds() == 2 * 3600
+    assert got.tz == "Europe/Berlin"
+
+
+def test_force_offset_without_any_timezone_is_an_error():
+    """UTC を既定にすると補正にならないまま誤った時刻で確定する（§12.2）."""
+    with pytest.raises(TimezoneUnresolved):
+        resolve_captured_at(defn(), "DCIM/DJI_20260817143000_0001_D.MP4", 0, None)
+
+
+def test_files_that_miss_the_pattern_fall_back_to_mtime():
+    got = resolve_captured_at(
+        defn(timezone="Asia/Tokyo"), "PANORAMA/PANO_0001.JPG", mtime_ns_of("2026-08-17T05:00:00"),
+        None,
+    )
+    assert got.source == "mtime"
+    # exFAT の mtime はローカル時刻なので、UTC 表現の壁時計にオフセットを付ける
+    assert got.at.isoformat() == "2026-08-17T05:00:00+09:00"
+
+
+def test_policy_none_keeps_the_instant_as_recorded():
+    """Canon は EXIF にローカル時刻を書くので介入しない."""
+    got = resolve_captured_at(
+        defn(timezone_policy="none", timezone=None),
+        "DCIM/DJI_20260817143000_0001_D.MP4",
+        mtime_ns_of("2026-08-17T05:00:00"),
+        None,
+    )
+    assert got.at == datetime(2026, 8, 17, 14, 30, tzinfo=UTC)
+    assert got.tz is None
+
+
+def test_an_ambiguous_wall_clock_takes_the_earlier_one_and_says_so():
+    """DST の戻りで 1 時間が 2 回ある."""
+    got = resolve_captured_at(
+        defn(timezone="Europe/Berlin"), "DCIM/DJI_20261025023000_0001_D.MP4", 0, None
+    )
+    assert got.at.utcoffset().total_seconds() == 2 * 3600  # 先に来る CEST
+    assert "曖昧" in got.note
+
+
+def test_a_nonexistent_wall_clock_shifts_forward_and_says_so():
+    """DST の進みで存在しない 1 時間がある."""
+    got = resolve_captured_at(
+        defn(timezone="Europe/Berlin"), "DCIM/DJI_20260329023000_0001_D.MP4", 0, None
+    )
+    assert got.at.isoformat() == "2026-03-29T03:30:00+02:00"
+    assert "存在しない" in got.note
+
+
+def test_an_unparsable_timestamp_in_the_name_falls_back():
+    got = resolve_captured_at(
+        defn(timezone="Asia/Tokyo"), "DCIM/DJI_99999999999999_0001_D.MP4",
+        mtime_ns_of("2026-08-17T05:00:00"), None,
+    )
+    assert got.source == "mtime"
+```
+
+- [ ] **Step 2: 失敗を確認する**
+
+Run: `uv run pytest app/tests/test_timestamps.py -v`
+Expected: FAIL（`ModuleNotFoundError`）
+
+- [ ] **Step 3: 実装する**
+
+`app/src/mediaferry/core/timestamps.py`:
+
+```python
+"""撮影日時の解決.
+
+`force_offset` は、ファイル名または mtime から得た**壁時計**にプロファイルの
+オフセットを付与する。DJI が MP4 の creation_time を UTC で書きつつオフセットも
+GPS も書かないため、Immich が撮影地の TZ を判定できず、UTC の壁時計をそのまま
+localDateTime として採用してしまう問題への対処である。
+
+mtime の壁時計は UTC 表現から取る。exFAT はローカル時刻を保持し、コンテナの
+TZ は UTC なので、epoch を UTC で描画したものがカード上の壁時計になる。
+"""
+
+from __future__ import annotations
+
+import re
+from dataclasses import dataclass
+from datetime import UTC, datetime, timedelta
+from pathlib import PurePosixPath
+from zoneinfo import ZoneInfo
+
+from .profiles.model import ProfileDefinition
+
+
+class TimezoneUnresolved(RuntimeError):
+    """force_offset なのに TZ がプロファイルにも既定値にも無い."""
+
+
+@dataclass(frozen=True)
+class CapturedAt:
+    at: datetime
+    source: str  # filename / exif / mtime
+    tz: str | None
+    note: str | None
+
+
+def resolve_captured_at(
+    defn: ProfileDefinition,
+    rel_path: str,
+    mtime_ns: int,
+    default_timezone: str | None,
+) -> CapturedAt:
+    wall, source = _wall_clock(defn, rel_path, mtime_ns)
+    if defn.timestamp.timezone_policy == "none":
+        return CapturedAt(at=wall.replace(tzinfo=UTC), source=source, tz=None, note=None)
+
+    name = defn.timestamp.timezone or default_timezone
+    if name is None:
+        raise TimezoneUnresolved(
+            f"プロファイル {defn.slug} は force_offset だが timezone が未設定"
+        )
+    at, note = _attach_offset(wall, ZoneInfo(name))
+    return CapturedAt(at=at, source=source, tz=name, note=note)
+
+
+def _wall_clock(defn: ProfileDefinition, rel_path: str, mtime_ns: int) -> tuple[datetime, str]:
+    rule = defn.timestamp
+    if rule.source == "filename" and rule.pattern is not None and rule.format is not None:
+        match = re.search(rule.pattern, PurePosixPath(rel_path).name)
+        if match is not None:
+            try:
+                return datetime.strptime(match.group("ts"), rule.format), "filename"  # noqa: DTZ007
+            except ValueError:
+                pass
+    # fallback は mtime のみを想定する（exif は Phase 5 の canon-eos で足す）。
+    return datetime.fromtimestamp(mtime_ns / 1e9, tz=UTC).replace(tzinfo=None), "mtime"
+
+
+def _attach_offset(wall: datetime, zone: ZoneInfo) -> tuple[datetime, str | None]:
+    """壁時計にオフセットを付ける. DST の境界は決め打ちで解決し、記録する."""
+    earlier = wall.replace(tzinfo=zone, fold=0)
+    later = wall.replace(tzinfo=zone, fold=1)
+    if earlier.utcoffset() != later.utcoffset():
+        # 同じ壁時計が 2 回あるか、1 回も無い。offset の大小で見分ける。
+        if earlier.utcoffset() > later.utcoffset():
+            return earlier, "壁時計が曖昧（DST の戻り）。先に来る方を採用した"
+        shifted = wall + timedelta(hours=1)
+        return (
+            shifted.replace(tzinfo=zone),
+            "壁時計が存在しない（DST の進み）。1 時間後ろへずらした",
+        )
+    return earlier, None
+```
+
+- [ ] **Step 4: テストが通ることを確認する**
+
+Run: `uv run pytest app/tests/test_timestamps.py -v`
+Expected: すべて PASS
+
+- [ ] **Step 5: コミット**
+
+```bash
+git add app/src/mediaferry/core/timestamps.py app/tests/test_timestamps.py
+git commit -m "feat(mediaferry): resolve captured_at from filenames and mtimes"
+```
+
+---
+
+### Task 12: 保存先の名前と衝突時の決定的系列
+
+**Files:**
+- Create: `app/src/mediaferry/core/naming.py`
+- Test: `app/tests/test_naming.py`
+
+**Interfaces:**
+- Consumes: なし（純粋）
+- Produces:
+  - `mediaferry.core.naming.library_rel_path(role, profile_slug, source_rel_path) -> str`
+  - `mediaferry.core.naming.staging_rel_path(job_id, artifact_id) -> str`
+  - `mediaferry.core.naming.work_rel_path(job_id) -> str`
+  - `mediaferry.core.naming.candidate_paths(rel_path, wall_clock, sha1_hex) -> Iterator[str]`
+  - `mediaferry.core.naming.safe_source_rel_path(rel_path) -> str`
+  - 例外 `UnsafePath`
+
+- [ ] **Step 1: 失敗するテストを書く**
+
+`app/tests/test_naming.py`:
+
+```python
+from datetime import datetime
+from itertools import islice
+
+import pytest
+
+from mediaferry.core.naming import (
+    UnsafePath,
+    candidate_paths,
+    library_rel_path,
+    safe_source_rel_path,
+    staging_rel_path,
+)
+
+
+def test_library_mirrors_the_path_on_the_card():
+    """ユーザが NAS を直接開いて辿れることを保証する."""
+    assert (
+        library_rel_path("original", "dji-osmo", "DCIM/DJI_001/A.MP4")
+        == "library/dji-osmo/DCIM/DJI_001/A.MP4"
+    )
+
+
+def test_derived_files_live_under_their_own_tree():
+    assert library_rel_path("derived", "dji-osmo", "DCIM/A.MP4") == "derived/dji-osmo/DCIM/A.MP4"
+
+
+@pytest.mark.parametrize(
+    "path", ["../etc/passwd", "/etc/passwd", "DCIM/../../x", "", "DCIM//A.MP4", "DCIM/./A.MP4"]
+)
+def test_unsafe_source_paths_are_refused(path):
+    with pytest.raises(UnsafePath):
+        safe_source_rel_path(path)
+
+
+def test_the_first_candidate_is_the_plain_path():
+    at = datetime(2026, 8, 17, 14, 30, 5)
+    assert next(candidate_paths("library/x/DCIM/A.MP4", at, "abcdef1234")) == "library/x/DCIM/A.MP4"
+
+
+def test_the_series_is_deterministic():
+    at = datetime(2026, 8, 17, 14, 30, 5)
+    got = list(islice(candidate_paths("library/x/DCIM/A.MP4", at, "abcdef1234"), 5))
+    assert got == [
+        "library/x/DCIM/A.MP4",
+        "library/x/DCIM/A_20260817143005.MP4",
+        "library/x/DCIM/A_20260817143005_abcdef12.MP4",
+        "library/x/DCIM/A_20260817143005_abcdef12_2.MP4",
+        "library/x/DCIM/A_20260817143005_abcdef12_3.MP4",
+    ]
+
+
+def test_the_series_keeps_the_extension_and_the_directory():
+    at = datetime(2026, 1, 2, 3, 4, 5)
+    second = list(islice(candidate_paths("derived/x/DCIM/B.tar.gz", at, "0" * 40), 2))[1]
+    assert second == "derived/x/DCIM/B.tar_20260102030405.gz"
+
+
+def test_staging_paths_are_scoped_to_the_job():
+    """起動時の掃除がジョブ単位でできるように、job-id でディレクトリを分ける."""
+    assert staging_rel_path("job-1", "art-1") == "staging/job-1/art-1"
+```
+
+- [ ] **Step 2: 失敗を確認する**
+
+Run: `uv run pytest app/tests/test_naming.py -v`
+Expected: FAIL（`ModuleNotFoundError`）
+
+- [ ] **Step 3: 実装する**
+
+`app/src/mediaferry/core/naming.py`:
+
+```python
+"""ライブラリ内のパスの決め方.
+
+デバイス上の相対パスを保つ。この鏡写しの構造は意図的な設計価値で、ユーザが
+NAS を直接開いて中身を辿れることを保証する。プロファイル slug で分けるのは、
+複数機種のファイル名が衝突しうるため（IMG_0001.JPG は多くの機種で使われる）。
+
+衝突時は**既存のファイルを絶対に動かさず**、新しく公開する側の名前を変える。
+既存を動かすと media_file.rel_path と、それを参照する merge_member /
+upload_record が壊れる。
+"""
+
+from __future__ import annotations
+
+from collections.abc import Iterator
+from datetime import datetime
+from pathlib import PurePosixPath
+
+SHA1_PREFIX_CHARS = 8
+
+
+class UnsafePath(ValueError):
+    """`..`・絶対パス・空の構成要素を含むパス."""
+
+
+def safe_source_rel_path(rel_path: str) -> str:
+    """カード上の相対パスを検証して正規形で返す."""
+    if not rel_path or rel_path.startswith("/"):
+        raise UnsafePath(f"相対パスではない: {rel_path!r}")
+    parts = rel_path.split("/")
+    for part in parts:
+        if not part or part in {".", ".."} or "\0" in part or "\\" in part:
+            raise UnsafePath(f"安全でない構成要素: {part!r}")
+    return "/".join(parts)
+
+
+def library_rel_path(role: str, profile_slug: str, source_rel_path: str) -> str:
+    top = "library" if role == "original" else "derived"
+    return f"{top}/{profile_slug}/{safe_source_rel_path(source_rel_path)}"
+
+
+def staging_rel_path(job_id: str, artifact_id: str) -> str:
+    return f"staging/{job_id}/{artifact_id}"
+
+
+def work_rel_path(job_id: str) -> str:
+    return f"work/{job_id}"
+
+
+def candidate_paths(rel_path: str, wall_clock: datetime, sha1_hex: str) -> Iterator[str]:
+    """公開先の候補を決定的な順序で無限に返す.
+
+    途中で落ちて再実行しても同じ名前に落ち着くよう、乱数も時刻も使わない
+    （`wall_clock` はソースの mtime 由来で、再実行しても同じ値になる）。
+    """
+    path = PurePosixPath(rel_path)
+    stem, suffix = path.stem, path.suffix
+    parent = path.parent
+    stamp = wall_clock.strftime("%Y%m%d%H%M%S")
+    short = sha1_hex[:SHA1_PREFIX_CHARS]
+
+    yield rel_path
+    yield str(parent / f"{stem}_{stamp}{suffix}")
+    yield str(parent / f"{stem}_{stamp}_{short}{suffix}")
+    n = 2
+    while True:
+        yield str(parent / f"{stem}_{stamp}_{short}_{n}{suffix}")
+        n += 1
+```
+
+- [ ] **Step 4: テストが通ることを確認する**
+
+Run: `uv run pytest app/tests/test_naming.py -v`
+Expected: すべて PASS
+
+- [ ] **Step 5: コミット**
+
+```bash
+git add app/src/mediaferry/core/naming.py app/tests/test_naming.py
+git commit -m "feat(mediaferry): decide library paths and the collision series"
+```
+
+---
+
+### Task 13: ProfileRegistry（ビルトインの投入とリビジョン）
+
+**Files:**
+- Create: `app/src/mediaferry/db/profiles.py`
+- Test: `app/tests/test_profile_registry.py`
+
+**Interfaces:**
+- Consumes: `device_profile` / `profile_revision`（Task 3）、
+  `load_builtin_definitions` / `definition_to_json` / `parse_definition`（Task 9）
+- Produces:
+  - `mediaferry.db.profiles.ProfileRef(profile_id, revision_id, revision, definition)`
+  - `ProfileRegistry(conn)` — `.sync_builtins() -> list[str]`, `.current(slug) -> ProfileRef`,
+    `.active() -> list[ProfileRef]`, `.definition_of(revision_id) -> ProfileDefinition`,
+    `.by_id(profile_id) -> ProfileRef`
+  - 例外 `UnknownProfile`
+
+- [ ] **Step 1: 失敗するテストを書く**
+
+`app/tests/test_profile_registry.py`:
+
+```python
+import pytest
+
+from mediaferry.core.profiles.model import definition_to_json
+from mediaferry.db.profiles import ProfileRegistry, UnknownProfile
+
+
+def test_sync_seeds_the_builtins(db):
+    registry = ProfileRegistry(db)
+    assert "dji-osmo" in registry.sync_builtins()
+    ref = registry.current("dji-osmo")
+    assert ref.revision == 1
+    assert ref.definition.slug == "dji-osmo"
+
+
+def test_sync_is_idempotent(db):
+    registry = ProfileRegistry(db)
+    registry.sync_builtins()
+    assert registry.sync_builtins() == []
+    assert db.execute("SELECT count(*) FROM profile_revision").fetchone()[0] == 1
+
+
+def test_a_changed_builtin_creates_a_new_revision_and_keeps_the_old_one(db):
+    """過去データの解釈が変わらないよう、旧リビジョンは残す."""
+    registry = ProfileRegistry(db)
+    registry.sync_builtins()
+    old = registry.current("dji-osmo")
+
+    db.execute(
+        "UPDATE profile_revision SET id = id",  # 触らない。定義側を変える
+    )
+    changed = definition_to_json(old.definition).replace('"tolerance_seconds":5',
+                                                         '"tolerance_seconds":9')
+    registry._upsert_revision("dji-osmo", changed)  # noqa: SLF001
+
+    new = registry.current("dji-osmo")
+    assert new.revision == 2
+    assert new.definition.merge.tolerance_seconds == 9
+    assert registry.definition_of(old.revision_id).merge.tolerance_seconds == 5
+
+
+def test_current_points_at_the_latest_revision(db):
+    registry = ProfileRegistry(db)
+    registry.sync_builtins()
+    row = db.execute("SELECT current_revision_id FROM device_profile").fetchone()
+    assert row["current_revision_id"] == registry.current("dji-osmo").revision_id
+
+
+def test_unknown_slug_raises(db):
+    with pytest.raises(UnknownProfile):
+        ProfileRegistry(db).current("nope")
+
+
+def test_archived_profiles_are_not_active(db):
+    registry = ProfileRegistry(db)
+    registry.sync_builtins()
+    assert [ref.definition.slug for ref in registry.active()] == ["dji-osmo"]
+    db.execute("UPDATE device_profile SET archived_at = '2026-01-01T00:00:00+00:00'")
+    assert registry.active() == []
+```
+
+- [ ] **Step 2: 失敗を確認する**
+
+Run: `uv run pytest app/tests/test_profile_registry.py -v`
+Expected: FAIL（`ModuleNotFoundError`）
+
+- [ ] **Step 3: 実装する**
+
+`app/src/mediaferry/db/profiles.py`:
+
+```python
+"""プロファイルとリビジョンの解決.
+
+編集は既存定義を書き換えず新しいリビジョンを作る。取り込み・結合・アップロードの
+各レコードが使用したリビジョン ID を持つので、後からプロファイルを変えても
+過去データの解釈は変わらない。
+
+ビルトインはアプリの更新で内容が変わりうる。起動時に定義を突き合わせ、
+変わっていれば新リビジョンを作る。
+"""
+
+from __future__ import annotations
+
+import json
+import sqlite3
+from dataclasses import dataclass
+
+from ..clock import now_iso
+from ..core.profiles.model import (
+    PROFILE_SCHEMA_VERSION,
+    ProfileDefinition,
+    definition_to_json,
+    load_builtin_definitions,
+    parse_definition,
+)
+from ..ids import new_id
+from .connection import immediate
+
+
+class UnknownProfile(LookupError):
+    pass
+
+
+@dataclass(frozen=True)
+class ProfileRef:
+    profile_id: str
+    revision_id: str
+    revision: int
+    definition: ProfileDefinition
+
+
+class ProfileRegistry:
+    def __init__(self, conn: sqlite3.Connection) -> None:
+        self._conn = conn
+
+    def sync_builtins(self) -> list[str]:
+        """定義が変わったビルトインの slug を返す."""
+        changed = []
+        for defn in load_builtin_definitions():
+            if self._upsert_revision(defn.slug, definition_to_json(defn), name=defn.name):
+                changed.append(defn.slug)
+        return changed
+
+    def _upsert_revision(self, slug: str, definition_json: str, name: str | None = None) -> bool:
+        """現行と違えば新リビジョンを作る. 作ったら True."""
+        with immediate(self._conn):
+            row = self._conn.execute(
+                "SELECT p.id AS profile_id, r.id AS revision_id, r.revision, r.definition_json"
+                " FROM device_profile p"
+                " LEFT JOIN profile_revision r ON r.id = p.current_revision_id"
+                " WHERE p.slug = ?",
+                (slug,),
+            ).fetchone()
+            if row is not None and row["definition_json"] == definition_json:
+                return False
+
+            profile_id = row["profile_id"] if row is not None else new_id()
+            if row is None:
+                self._conn.execute(
+                    "INSERT INTO device_profile (id, slug, name, builtin, created_at)"
+                    " VALUES (?, ?, ?, 1, ?)",
+                    (profile_id, slug, name or slug, now_iso()),
+                )
+            revision = (row["revision"] or 0) + 1 if row is not None else 1
+            revision_id = new_id()
+            self._conn.execute(
+                "INSERT INTO profile_revision"
+                " (id, profile_id, revision, definition_json, schema_version, created_at)"
+                " VALUES (?, ?, ?, ?, ?, ?)",
+                (revision_id, profile_id, revision, definition_json,
+                 PROFILE_SCHEMA_VERSION, now_iso()),
+            )
+            self._conn.execute(
+                "UPDATE device_profile SET current_revision_id = ? WHERE id = ?",
+                (revision_id, profile_id),
+            )
+        return True
+
+    def current(self, slug: str) -> ProfileRef:
+        row = self._conn.execute(
+            "SELECT p.id AS profile_id, r.id AS revision_id, r.revision, r.definition_json"
+            " FROM device_profile p JOIN profile_revision r ON r.id = p.current_revision_id"
+            " WHERE p.slug = ?",
+            (slug,),
+        ).fetchone()
+        if row is None:
+            raise UnknownProfile(slug)
+        return _to_ref(row)
+
+    def by_id(self, profile_id: str) -> ProfileRef:
+        row = self._conn.execute(
+            "SELECT p.id AS profile_id, r.id AS revision_id, r.revision, r.definition_json"
+            " FROM device_profile p JOIN profile_revision r ON r.id = p.current_revision_id"
+            " WHERE p.id = ?",
+            (profile_id,),
+        ).fetchone()
+        if row is None:
+            raise UnknownProfile(profile_id)
+        return _to_ref(row)
+
+    def active(self) -> list[ProfileRef]:
+        rows = self._conn.execute(
+            "SELECT p.id AS profile_id, r.id AS revision_id, r.revision, r.definition_json"
+            " FROM device_profile p JOIN profile_revision r ON r.id = p.current_revision_id"
+            " WHERE p.archived_at IS NULL ORDER BY p.slug"
+        )
+        return [_to_ref(row) for row in rows]
+
+    def definition_of(self, revision_id: str) -> ProfileDefinition:
+        row = self._conn.execute(
+            "SELECT definition_json FROM profile_revision WHERE id = ?", (revision_id,)
+        ).fetchone()
+        if row is None:
+            raise UnknownProfile(revision_id)
+        return parse_definition(json.loads(row["definition_json"]))
+
+
+def _to_ref(row: sqlite3.Row) -> ProfileRef:
+    return ProfileRef(
+        profile_id=row["profile_id"],
+        revision_id=row["revision_id"],
+        revision=row["revision"],
+        definition=parse_definition(json.loads(row["definition_json"])),
+    )
+```
+
+- [ ] **Step 4: テストが通ることを確認する**
+
+Run: `uv run pytest app/tests/test_profile_registry.py -v`
+Expected: すべて PASS
+
+- [ ] **Step 5: コミット**
+
+```bash
+git add app/src/mediaferry/db/profiles.py app/tests/test_profile_registry.py
+git commit -m "feat(mediaferry): resolve profiles through immutable revisions"
+```
+
+---
+
+### Task 14: ジョブストアと単一ワーカー
+
+**Files:**
+- Create: `app/src/mediaferry/db/jobs.py`
+- Create: `app/src/mediaferry/jobs/__init__.py`
+- Create: `app/src/mediaferry/jobs/runner.py`
+- Modify: `app/tests/conftest.py`（`anyio_backend` フィクスチャを追加）
+- Test: `app/tests/test_job_store.py`
+- Test: `app/tests/test_job_runner.py`
+
+**Interfaces:**
+- Consumes: `job` / `job_event`（Task 2）、`immediate`（Task 1）
+- Produces:
+  - `mediaferry.db.jobs.LEASE_SECONDS: int`
+  - `mediaferry.db.jobs.JobContext` — `.job_id`, `.lease_token`, `.params`,
+    `.cancelled() -> bool`, `.emit(level, message, data=None)`, `.heartbeat()`,
+    `.assert_lease()`
+  - `mediaferry.db.jobs.JobStore(conn, clock=now_iso)` — `.enqueue(type, params) -> str`,
+    `.claim_next() -> JobContext | None`, `.finish(job_id, token, status, error=None)`,
+    `.request_cancel(job_id) -> bool`, `.sweep_interrupted() -> int`,
+    `.reap_expired_leases() -> int`, `.get(job_id) -> sqlite3.Row | None`,
+    `.list_jobs(limit) -> list[sqlite3.Row]`, `.events(job_id, after_seq) -> list[sqlite3.Row]`
+  - 例外 `LeaseLost`
+  - `mediaferry.jobs.runner.JobRunner(store)` — `.register(job_type, handler)`,
+    `await .run_forever()`, `await .stop()`
+
+- [ ] **Step 1: 失敗するテストを書く**
+
+`app/tests/conftest.py` に追記:
+
+```python
+@pytest.fixture
+def anyio_backend():
+    """JobRunner は asyncio ワーカーなので、anyio の trio 側は使わない."""
+    return "asyncio"
+```
+
+`app/tests/test_job_store.py`:
+
+```python
+import pytest
+
+from mediaferry.db.connection import open_database
+from mediaferry.db.jobs import JobStore, LeaseLost
+from mediaferry.db.migrate import apply_migrations
+
+
+def test_enqueue_then_claim(db):
+    store = JobStore(db)
+    job_id = store.enqueue("scan", {"volume_instance_id": "v1"})
+    ctx = store.claim_next()
+    assert ctx is not None
+    assert ctx.job_id == job_id
+    assert ctx.params == {"volume_instance_id": "v1"}
+    assert store.get(job_id)["status"] == "running"
+
+
+def test_only_one_worker_wins_a_job(data_root):
+    """SQLite に行ロックは無い。BEGIN IMMEDIATE の中の条件付き UPDATE で所有権を取る."""
+    path = data_root / "var" / "mediaferry.sqlite3"
+    first = open_database(path)
+    apply_migrations(first)
+    second = open_database(path)
+    JobStore(first).enqueue("scan", {})
+    claims = [JobStore(first).claim_next(), JobStore(second).claim_next()]
+    assert sum(1 for c in claims if c is not None) == 1
+    first.close()
+    second.close()
+
+
+def test_claiming_sets_a_lease_and_heartbeat_extends_it(db):
+    store = JobStore(db)
+    store.enqueue("scan", {})
+    ctx = store.claim_next()
+    before = store.get(ctx.job_id)["lease_expires_at"]
+    ctx.heartbeat()
+    assert store.get(ctx.job_id)["lease_expires_at"] >= before
+
+
+def test_a_stale_token_cannot_touch_the_job(db):
+    """キャンセルされた古いジョブが新しいジョブの状態を上書きしないため."""
+    store = JobStore(db)
+    store.enqueue("scan", {})
+    ctx = store.claim_next()
+    with pytest.raises(LeaseLost):
+        store.finish(ctx.job_id, "someone-elses-token", "succeeded")
+    store.finish(ctx.job_id, ctx.lease_token, "succeeded")
+
+
+def test_finishing_clears_the_lease(db):
+    store = JobStore(db)
+    store.enqueue("scan", {})
+    ctx = store.claim_next()
+    store.finish(ctx.job_id, ctx.lease_token, "succeeded")
+    row = store.get(ctx.job_id)
+    assert row["status"] == "succeeded"
+    assert row["lease_token"] is None and row["lease_expires_at"] is None
+    assert row["finished_at"] is not None
+
+
+def test_cancel_is_cooperative(db):
+    store = JobStore(db)
+    store.enqueue("import", {})
+    ctx = store.claim_next()
+    assert ctx.cancelled() is False
+    assert store.request_cancel(ctx.job_id) is True
+    assert ctx.cancelled() is True
+
+
+def test_cancelling_a_finished_job_does_nothing(db):
+    store = JobStore(db)
+    job_id = store.enqueue("import", {})
+    ctx = store.claim_next()
+    store.finish(job_id, ctx.lease_token, "succeeded")
+    assert store.request_cancel(job_id) is False
+
+
+def test_startup_marks_running_jobs_interrupted(db):
+    store = JobStore(db)
+    store.enqueue("import", {})
+    ctx = store.claim_next()
+    assert store.sweep_interrupted() == 1
+    assert store.get(ctx.job_id)["status"] == "interrupted"
+    assert store.get(ctx.job_id)["lease_token"] is None
+
+
+def test_events_are_numbered_per_job_and_readable_from_a_cursor(db):
+    store = JobStore(db)
+    store.enqueue("scan", {})
+    ctx = store.claim_next()
+    ctx.emit("info", "1 件目")
+    ctx.emit("info", "2 件目", {"index": 2})
+    assert [e["seq"] for e in store.events(ctx.job_id, after_seq=0)] == [1, 2]
+    assert [e["message"] for e in store.events(ctx.job_id, after_seq=1)] == ["2 件目"]
+
+
+def test_expired_leases_are_reaped(db):
+    store = JobStore(db, lease_seconds=-1)  # 即座に失効する
+    store.enqueue("import", {})
+    ctx = store.claim_next()
+    assert store.reap_expired_leases() == 1
+    assert store.get(ctx.job_id)["status"] == "interrupted"
+```
+
+`app/tests/test_job_runner.py`:
+
+```python
+import anyio
+import pytest
+
+from mediaferry.db.jobs import JobStore
+from mediaferry.jobs.runner import JobRunner
+
+
+@pytest.mark.anyio
+async def test_the_runner_executes_a_handler(db):
+    store = JobStore(db)
+    seen = []
+
+    runner = JobRunner(store, poll_interval=0.01)
+    runner.register("scan", lambda ctx: seen.append(ctx.params["v"]))
+    job_id = store.enqueue("scan", {"v": 7})
+
+    async with anyio.create_task_group() as tg:
+        tg.start_soon(runner.run_forever)
+        with anyio.fail_after(5):
+            while store.get(job_id)["status"] == "queued":
+                await anyio.sleep(0.01)
+            while store.get(job_id)["status"] == "running":
+                await anyio.sleep(0.01)
+        await runner.stop()
+
+    assert seen == [7]
+    assert store.get(job_id)["status"] == "succeeded"
+
+
+@pytest.mark.anyio
+async def test_a_failing_handler_records_the_error_and_keeps_the_worker_alive(db):
+    store = JobStore(db)
+
+    def boom(ctx):
+        raise RuntimeError("ffprobe が見つからない")
+
+    runner = JobRunner(store, poll_interval=0.01)
+    runner.register("scan", boom)
+    failing = store.enqueue("scan", {})
+    later = store.enqueue("scan", {})
+
+    async with anyio.create_task_group() as tg:
+        tg.start_soon(runner.run_forever)
+        with anyio.fail_after(5):
+            while store.get(later)["status"] in {"queued", "running"}:
+                await anyio.sleep(0.01)
+        await runner.stop()
+
+    assert store.get(failing)["status"] == "failed"
+    assert "ffprobe" in store.get(failing)["error"]
+
+
+@pytest.mark.anyio
+async def test_a_cancelled_job_ends_as_cancelled(db):
+    store = JobStore(db)
+    started = anyio.Event()
+
+    def slow(ctx):
+        started.set()
+        while not ctx.cancelled():
+            pass
+
+    runner = JobRunner(store, poll_interval=0.01)
+    runner.register("import", slow)
+    job_id = store.enqueue("import", {})
+
+    async with anyio.create_task_group() as tg:
+        tg.start_soon(runner.run_forever)
+        with anyio.fail_after(5):
+            await started.wait()
+        store.request_cancel(job_id)
+        with anyio.fail_after(5):
+            while store.get(job_id)["status"] in {"running", "cancelling"}:
+                await anyio.sleep(0.01)
+        await runner.stop()
+
+    assert store.get(job_id)["status"] == "cancelled"
+```
+
+- [ ] **Step 2: 失敗を確認する**
+
+Run: `uv run pytest app/tests/test_job_store.py app/tests/test_job_runner.py -v`
+Expected: FAIL（`ModuleNotFoundError: No module named 'mediaferry.db.jobs'`）
+
+- [ ] **Step 3: 実装する**
+
+`app/src/mediaferry/db/jobs.py`:
+
+```python
+"""ジョブの永続化と所有権.
+
+SQLite に行ロックは無いので、所有権は `BEGIN IMMEDIATE` の中の条件付き
+UPDATE（CAS）で取る。更新できた 1 ワーカーだけが実行者になる。
+
+実行中のジョブはリースを持ち、heartbeat で延長する。ファイルを公開する直前に
+リースの有効性を確認するので、失効したジョブが後から書き込むことはない。
+"""
+
+from __future__ import annotations
+
+import json
+import sqlite3
+from dataclasses import dataclass, field
+from datetime import timedelta
+from typing import Any
+
+from ..clock import iso, utcnow
+from ..ids import new_id
+from .connection import immediate
+
+LEASE_SECONDS = 60
+
+ACTIVE = ("running", "cancelling")
+
+
+class LeaseLost(RuntimeError):
+    """自分のトークンではその行を操作できない."""
+
+
+@dataclass
+class JobContext:
+    job_id: str
+    lease_token: str
+    params: dict[str, Any]
+    _store: JobStore = field(repr=False)
+
+    def cancelled(self) -> bool:
+        row = self._store.get(self.job_id)
+        return row is None or row["status"] != "running"
+
+    def heartbeat(self) -> None:
+        self._store.extend_lease(self.job_id, self.lease_token)
+
+    def assert_lease(self) -> None:
+        """外部への副作用の直前に呼ぶ."""
+        self._store.extend_lease(self.job_id, self.lease_token)
+
+    def emit(self, level: str, message: str, data: dict[str, Any] | None = None) -> None:
+        self._store.emit(self.job_id, level, message, data)
+
+
+class JobStore:
+    def __init__(self, conn: sqlite3.Connection, lease_seconds: int = LEASE_SECONDS) -> None:
+        self._conn = conn
+        self._lease_seconds = lease_seconds
+
+    def enqueue(self, job_type: str, params: dict[str, Any]) -> str:
+        """params に秘密を入れない（画面と SSE に出る）."""
+        job_id = new_id()
+        self._conn.execute(
+            "INSERT INTO job (id, type, status, params_json, created_at)"
+            " VALUES (?, ?, 'queued', ?, ?)",
+            (job_id, job_type, json.dumps(params, ensure_ascii=False), iso(utcnow())),
+        )
+        return job_id
+
+    def claim_next(self) -> JobContext | None:
+        token = new_id()
+        now = utcnow()
+        with immediate(self._conn):
+            row = self._conn.execute(
+                "SELECT id, params_json FROM job WHERE status = 'queued'"
+                " ORDER BY created_at LIMIT 1"
+            ).fetchone()
+            if row is None:
+                return None
+            updated = self._conn.execute(
+                "UPDATE job SET status = 'running', lease_token = ?, lease_expires_at = ?,"
+                " started_at = COALESCE(started_at, ?)"
+                " WHERE id = ? AND status = 'queued'",
+                (token, self._expiry(), iso(now), row["id"]),
+            )
+            if updated.rowcount != 1:
+                return None
+        return JobContext(
+            job_id=row["id"],
+            lease_token=token,
+            params=json.loads(row["params_json"]),
+            _store=self,
+        )
+
+    def extend_lease(self, job_id: str, token: str) -> None:
+        updated = self._conn.execute(
+            "UPDATE job SET lease_expires_at = ? WHERE id = ? AND lease_token = ?"
+            " AND status IN ('running', 'cancelling')",
+            (self._expiry(), job_id, token),
+        )
+        if updated.rowcount != 1:
+            raise LeaseLost(f"ジョブ {job_id} のリースを失っている")
+
+    def finish(self, job_id: str, token: str, status: str, error: str | None = None) -> None:
+        updated = self._conn.execute(
+            "UPDATE job SET status = ?, error = ?, finished_at = ?,"
+            " lease_token = NULL, lease_expires_at = NULL"
+            " WHERE id = ? AND lease_token = ?",
+            (status, error, iso(utcnow()), job_id, token),
+        )
+        if updated.rowcount != 1:
+            raise LeaseLost(f"ジョブ {job_id} のリースを失っている")
+
+    def request_cancel(self, job_id: str) -> bool:
+        updated = self._conn.execute(
+            "UPDATE job SET status = 'cancelling' WHERE id = ? AND status IN ('queued', 'running')",
+            (job_id,),
+        )
+        return updated.rowcount == 1
+
+    def sweep_interrupted(self) -> int:
+        """起動時に、前回落ちたまま running だったジョブを倒す."""
+        updated = self._conn.execute(
+            "UPDATE job SET status = 'interrupted', finished_at = ?,"
+            " lease_token = NULL, lease_expires_at = NULL"
+            " WHERE status IN ('running', 'cancelling')",
+            (iso(utcnow()),),
+        )
+        return updated.rowcount
+
+    def reap_expired_leases(self) -> int:
+        updated = self._conn.execute(
+            "UPDATE job SET status = 'interrupted', finished_at = ?,"
+            " lease_token = NULL, lease_expires_at = NULL"
+            " WHERE status IN ('running', 'cancelling') AND lease_expires_at < ?",
+            (iso(utcnow()), iso(utcnow())),
+        )
+        return updated.rowcount
+
+    def emit(self, job_id: str, level: str, message: str, data: dict | None = None) -> None:
+        with immediate(self._conn):
+            row = self._conn.execute(
+                "SELECT COALESCE(MAX(seq), 0) AS seq FROM job_event WHERE job_id = ?", (job_id,)
+            ).fetchone()
+            self._conn.execute(
+                "INSERT INTO job_event (job_id, seq, level, message, data_json, at)"
+                " VALUES (?, ?, ?, ?, ?, ?)",
+                (
+                    job_id,
+                    row["seq"] + 1,
+                    level,
+                    message,
+                    None if data is None else json.dumps(data, ensure_ascii=False),
+                    iso(utcnow()),
+                ),
+            )
+
+    def get(self, job_id: str) -> sqlite3.Row | None:
+        return self._conn.execute("SELECT * FROM job WHERE id = ?", (job_id,)).fetchone()
+
+    def list_jobs(self, limit: int = 50) -> list[sqlite3.Row]:
+        return list(
+            self._conn.execute("SELECT * FROM job ORDER BY created_at DESC LIMIT ?", (limit,))
+        )
+
+    def events(self, job_id: str, after_seq: int = 0) -> list[sqlite3.Row]:
+        return list(
+            self._conn.execute(
+                "SELECT * FROM job_event WHERE job_id = ? AND seq > ? ORDER BY seq",
+                (job_id, after_seq),
+            )
+        )
+
+    def _expiry(self) -> str:
+        return iso(utcnow() + timedelta(seconds=self._lease_seconds))
+```
+
+`app/src/mediaferry/jobs/__init__.py` は空ファイル。
+
+`app/src/mediaferry/jobs/runner.py`:
+
+```python
+"""単一の asyncio ワーカー.
+
+SQLite の書き込みを 1 本に絞るため、同時に走るジョブは 1 つだけにする。
+実処理は同期関数として書き、`asyncio.to_thread` へ逃がしてイベントループを
+塞がないようにする。キャンセルは協調的で、ハンドラが `ctx.cancelled()` を
+見て自分で降りる。
+"""
+
+from __future__ import annotations
+
+import asyncio
+import logging
+from collections.abc import Callable
+
+from ..db.jobs import JobContext, JobStore
+
+logger = logging.getLogger(__name__)
+
+Handler = Callable[[JobContext], None]
+
+
+class JobRunner:
+    def __init__(self, store: JobStore, poll_interval: float = 0.5) -> None:
+        self._store = store
+        self._poll_interval = poll_interval
+        self._handlers: dict[str, Handler] = {}
+        self._stopping = asyncio.Event()
+
+    def register(self, job_type: str, handler: Handler) -> None:
+        self._handlers[job_type] = handler
+
+    async def stop(self) -> None:
+        self._stopping.set()
+
+    async def run_forever(self) -> None:
+        while not self._stopping.is_set():
+            ctx = await asyncio.to_thread(self._store.claim_next)
+            if ctx is None:
+                try:
+                    await asyncio.wait_for(self._stopping.wait(), timeout=self._poll_interval)
+                except TimeoutError:
+                    pass
+                continue
+            await self._run_one(ctx)
+
+    async def _run_one(self, ctx: JobContext) -> None:
+        row = self._store.get(ctx.job_id)
+        handler = self._handlers.get(row["type"])
+        if handler is None:
+            self._store.finish(
+                ctx.job_id, ctx.lease_token, "failed", f"未登録のジョブ種別: {row['type']}"
+            )
+            return
+        try:
+            await asyncio.to_thread(handler, ctx)
+        except Exception as exc:  # noqa: BLE001 - どのジョブが落ちてもワーカーは生かす
+            logger.exception("ジョブ %s が失敗した", ctx.job_id)
+            self._store.finish(ctx.job_id, ctx.lease_token, "failed", str(exc))
+            return
+        status = "cancelled" if self._store.get(ctx.job_id)["status"] == "cancelling" else "succeeded"
+        self._store.finish(ctx.job_id, ctx.lease_token, status)
+```
+
+- [ ] **Step 4: テストが通ることを確認する**
+
+Run: `uv run pytest app/tests/test_job_store.py app/tests/test_job_runner.py -v`
+Expected: すべて PASS
+
+- [ ] **Step 5: 変異試験**
+
+`claim_next` の `UPDATE ... WHERE id = ? AND status = 'queued'` から
+`AND status = 'queued'` を外し、`test_only_one_worker_wins_a_job` が
+落ちることを確認してから戻す。
+
+- [ ] **Step 6: コミット**
+
+```bash
+git add app/src/mediaferry/db/jobs.py app/src/mediaferry/jobs app/tests/test_job_store.py app/tests/test_job_runner.py app/tests/conftest.py
+git commit -m "feat(mediaferry): add the job store and the single asyncio worker"
+```
+
+---
+
+### Task 15: dirfd 起点の走査アダプタ
+
+**Files:**
+- Create: `app/src/mediaferry/adapters/fs.py`
+- Test: `app/tests/test_adapter_fs.py`
+
+**Interfaces:**
+- Consumes: `SourceTree` プロトコル（Task 10）、`safe_source_rel_path`（Task 12）
+- Produces:
+  - `mediaferry.adapters.fs.DirfdTree(dirfd)` — `SourceTree` の実装
+  - `mediaferry.adapters.fs.FoundFile(rel_path, size_bytes, mtime_ns)`
+  - `mediaferry.adapters.fs.iter_media_files(dirfd, roots, extensions) -> Iterator[FoundFile]`
+  - `mediaferry.adapters.fs.open_beneath(dirfd, rel_path) -> int`
+  - `mediaferry.adapters.fs.fsync_dir(path: Path) -> None`
+  - 例外 `EscapeAttempt`
+
+- [ ] **Step 1: 失敗するテストを書く**
+
+`app/tests/test_adapter_fs.py`:
+
+```python
+import os
+
+import pytest
+
+from mediaferry.adapters.fs import (
+    DirfdTree,
+    EscapeAttempt,
+    iter_media_files,
+    open_beneath,
+)
+
+
+@pytest.fixture
+def tree(tmp_path):
+    (tmp_path / "DCIM" / "DJI_001").mkdir(parents=True)
+    (tmp_path / "DCIM" / "DJI_001" / "A.MP4").write_bytes(b"payload")
+    (tmp_path / "DCIM" / "DJI_001" / "A.LRF").write_bytes(b"low res")
+    (tmp_path / "DCIM" / "DJI_001" / "._A.MP4").write_bytes(b"apple double")
+    (tmp_path / "DCIM" / ".hidden").mkdir()
+    (tmp_path / "DCIM" / ".hidden" / "B.MP4").write_bytes(b"x")
+    (tmp_path / "PANORAMA").mkdir()
+    (tmp_path / "PANORAMA" / "PANO_0001.JPG").write_bytes(b"jpg")
+    (tmp_path / "MISC").mkdir()
+    (tmp_path / "MISC" / "C.MP4").write_bytes(b"outside the roots")
+    fd = os.open(tmp_path, os.O_RDONLY | os.O_DIRECTORY)
+    yield fd
+    os.close(fd)
+
+
+def test_only_configured_roots_and_extensions_are_listed(tree):
+    found = {f.rel_path for f in iter_media_files(tree, ("DCIM", "PANORAMA"), ("MP4", "JPG"))}
+    assert found == {"DCIM/DJI_001/A.MP4", "PANORAMA/PANO_0001.JPG"}
+
+
+def test_dot_directories_and_apple_doubles_are_skipped(tree):
+    found = {f.rel_path for f in iter_media_files(tree, ("DCIM",), ("MP4",))}
+    assert found == {"DCIM/DJI_001/A.MP4"}
+
+
+def test_extension_matching_is_case_insensitive(tmp_path):
+    (tmp_path / "DCIM").mkdir()
+    (tmp_path / "DCIM" / "a.mp4").write_bytes(b"x")
+    fd = os.open(tmp_path, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        assert [f.rel_path for f in iter_media_files(fd, ("DCIM",), ("MP4",))] == ["DCIM/a.mp4"]
+    finally:
+        os.close(fd)
+
+
+def test_found_files_carry_size_and_mtime(tree):
+    found = next(iter(iter_media_files(tree, ("PANORAMA",), ("JPG",))))
+    assert found.size_bytes == 3
+    assert found.mtime_ns > 0
+
+
+def test_open_beneath_reads_through_the_dirfd(tree):
+    fd = open_beneath(tree, "DCIM/DJI_001/A.MP4")
+    with os.fdopen(fd, "rb") as f:
+        assert f.read() == b"payload"
+
+
+@pytest.mark.parametrize("path", ["../etc/passwd", "/etc/passwd", "DCIM/../../x"])
+def test_open_beneath_refuses_to_escape(tree, path):
+    with pytest.raises(EscapeAttempt):
+        open_beneath(tree, path)
+
+
+def test_symlinks_are_not_followed(tmp_path):
+    (tmp_path / "DCIM").mkdir()
+    (tmp_path / "DCIM" / "link.MP4").symlink_to("/etc/passwd")
+    fd = os.open(tmp_path, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        assert list(iter_media_files(fd, ("DCIM",), ("MP4",))) == []
+        with pytest.raises(OSError):
+            open_beneath(fd, "DCIM/link.MP4")
+    finally:
+        os.close(fd)
+
+
+def test_the_tree_view_answers_the_matching_questions(tree):
+    view = DirfdTree(tree)
+    assert view.has_root("DCIM") is True
+    assert view.has_root("NOPE") is False
+    assert "PANO_0001.JPG" in list(view.iter_names("PANORAMA", 100))
+
+
+def test_the_tree_view_walks_into_subdirectories(tree):
+    """DJI は DCIM/DJI_001/ の下にファイルを置く. 直下だけ見ると 0 件になる."""
+    assert "A.MP4" in list(DirfdTree(tree).iter_names("DCIM", 100))
+```
+
+- [ ] **Step 2: 失敗を確認する**
+
+Run: `uv run pytest app/tests/test_adapter_fs.py -v`
+Expected: FAIL（`ModuleNotFoundError`）
+
+- [ ] **Step 3: 実装する**
+
+`app/src/mediaferry/adapters/fs.py`:
+
+```python
+"""dirfd を起点にした読み取り.
+
+パス解決には常に単一のパス構成要素だけを使い、`..`・絶対パス・シンボリック
+リンクを辿らない（`O_NOFOLLOW`）。これで `openat2(RESOLVE_BENEATH)` と同等の
+閉じ込めを構成的に実現する。mountd が渡す dirfd は detached mount 由来なので、
+その `..` はボリュームルートに固定されている。
+"""
+
+from __future__ import annotations
+
+import os
+from collections.abc import Iterable, Iterator
+from dataclasses import dataclass
+from pathlib import Path
+
+# require の確認で 1 ボリュームあたりに読むファイル名の上限を超えないよう、
+# 呼び出し側が limit を渡す。
+APPLE_DOUBLE_PREFIX = "._"
+
+
+class EscapeAttempt(ValueError):
+    """マウントルートの外へ出ようとするパス."""
+
+
+@dataclass(frozen=True)
+class FoundFile:
+    rel_path: str
+    size_bytes: int
+    mtime_ns: int
+
+
+def open_beneath(dirfd: int, rel_path: str) -> int:
+    """dirfd の下のファイルを開く. 中間ディレクトリも 1 段ずつ辿る."""
+    parts = rel_path.split("/")
+    for part in parts:
+        if not part or part in {".", ".."} or "\\" in part or "\0" in part:
+            raise EscapeAttempt(f"安全でない構成要素: {part!r}")
+    if rel_path.startswith("/"):
+        raise EscapeAttempt("絶対パスは受け付けない")
+
+    current = dirfd
+    opened: list[int] = []
+    try:
+        for part in parts[:-1]:
+            current = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=current)
+            opened.append(current)
+        return os.open(parts[-1], os.O_RDONLY | os.O_NOFOLLOW, dir_fd=current)
+    finally:
+        for fd in opened:
+            os.close(fd)
+
+
+def iter_media_files(
+    dirfd: int, roots: Iterable[str], extensions: Iterable[str]
+) -> Iterator[FoundFile]:
+    """scan.roots の下から scan.extensions に一致するファイルを列挙する."""
+    wanted = {ext.upper() for ext in extensions}
+    for root in roots:
+        yield from _walk(dirfd, root, root, wanted)
+
+
+def _walk(dirfd: int, root: str, rel_prefix: str, wanted: set[str]) -> Iterator[FoundFile]:
+    try:
+        fd = os.open(root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=dirfd)
+    except OSError:
+        return
+    try:
+        for entry in sorted(os.scandir(fd), key=lambda e: e.name):
+            name = entry.name
+            if name.startswith(".") or name.startswith(APPLE_DOUBLE_PREFIX):
+                continue
+            rel = f"{rel_prefix}/{name}"
+            if entry.is_dir(follow_symlinks=False):
+                yield from _walk(fd, name, rel, wanted)
+            elif entry.is_file(follow_symlinks=False):
+                if _extension(name) in wanted:
+                    stat = entry.stat(follow_symlinks=False)
+                    yield FoundFile(rel_path=rel, size_bytes=stat.st_size,
+                                    mtime_ns=stat.st_mtime_ns)
+    finally:
+        os.close(fd)
+
+
+def _extension(name: str) -> str:
+    _, _, ext = name.rpartition(".")
+    return ext.upper()
+
+
+class DirfdTree:
+    """`resolve_profile` に渡す読み取り専用の窓."""
+
+    def __init__(self, dirfd: int) -> None:
+        self._dirfd = dirfd
+
+    def has_root(self, name: str) -> bool:
+        try:
+            fd = os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=self._dirfd)
+        except OSError:
+            return False
+        os.close(fd)
+        return True
+
+    def iter_names(self, root: str, limit: int) -> list[str]:
+        """root 配下のファイル名を（サブディレクトリも辿って）返す.
+
+        DJI は DCIM/DJI_001/ の下に置くので、直下だけを見ると 0 件になる。
+        """
+        names: list[str] = []
+        self._collect(self._dirfd, root, names, limit)
+        return names
+
+    def _collect(self, parent_fd: int, name: str, names: list[str], limit: int) -> None:
+        if len(names) >= limit:
+            return
+        try:
+            fd = os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=parent_fd)
+        except OSError:
+            return
+        try:
+            for entry in sorted(os.scandir(fd), key=lambda e: e.name):
+                if len(names) >= limit:
+                    return
+                if entry.name.startswith("."):
+                    continue
+                if entry.is_file(follow_symlinks=False):
+                    names.append(entry.name)
+                elif entry.is_dir(follow_symlinks=False):
+                    self._collect(fd, entry.name, names, limit)
+        finally:
+            os.close(fd)
+
+
+def fsync_dir(path: Path) -> None:
+    """ディレクトリエントリを永続化する. これを怠ると電源断で公開が失われる."""
+    fd = os.open(path, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+```
+
+- [ ] **Step 4: テストが通ることを確認する**
+
+Run: `uv run pytest app/tests/test_adapter_fs.py -v`
+Expected: すべて PASS
+
+- [ ] **Step 5: コミット**
+
+```bash
+git add app/src/mediaferry/adapters/fs.py app/tests/test_adapter_fs.py
+git commit -m "feat(mediaferry): walk source volumes through the dirfd only"
+```
+
+---
+
+### Task 16: ffprobe アダプタ
+
+**Files:**
+- Create: `app/src/mediaferry/adapters/ffprobe.py`
+- Test: `app/tests/test_adapter_ffprobe.py`
+
+**Interfaces:**
+- Consumes: なし
+- Produces:
+  - `mediaferry.adapters.ffprobe.ProbeResult(kind, duration_seconds, probe_state, streams)`
+  - `mediaferry.adapters.ffprobe.MediaProbe(ffprobe_path="ffprobe", timeout_seconds=60)` —
+    `.describe(path: Path, extension: str) -> ProbeResult`
+  - `mediaferry.adapters.ffprobe.PHOTO_EXTENSIONS: frozenset[str]`
+
+- [ ] **Step 1: 失敗するテストを書く**
+
+`app/tests/test_adapter_ffprobe.py`:
+
+```python
+import json
+import shutil
+import subprocess
+
+import pytest
+
+from mediaferry.adapters.ffprobe import MediaProbe
+
+
+@pytest.fixture
+def a_video(tmp_path):
+    if shutil.which("ffmpeg") is None:
+        pytest.skip("ffmpeg が無い")
+    path = tmp_path / "clip.mp4"
+    subprocess.run(  # noqa: S603
+        ["ffmpeg", "-nostdin", "-f", "lavfi", "-i", "testsrc=duration=2:size=64x64:rate=10",  # noqa: S607
+         "-c:v", "libx264", "-pix_fmt", "yuv420p", "-y", str(path)],
+        check=True,
+        capture_output=True,
+    )
+    return path
+
+
+def test_photos_are_not_probed(tmp_path):
+    path = tmp_path / "a.JPG"
+    path.write_bytes(b"not really a jpeg")
+    got = MediaProbe(ffprobe_path="/nonexistent").describe(path, "JPG")
+    assert got.kind == "photo"
+    assert got.probe_state == "not_applicable"
+    assert got.duration_seconds is None
+
+
+def test_a_video_gets_a_duration(a_video):
+    got = MediaProbe().describe(a_video, "MP4")
+    assert got.kind == "video"
+    assert got.probe_state == "ok"
+    assert 1.8 < got.duration_seconds < 2.2
+    assert any(s["codec_type"] == "video" for s in got.streams)
+
+
+def test_a_broken_video_fails_without_raising(tmp_path):
+    path = tmp_path / "broken.MP4"
+    path.write_bytes(b"\x00" * 128)
+    got = MediaProbe().describe(path, "MP4")
+    assert got.kind == "video"
+    assert got.probe_state == "failed"
+    assert got.duration_seconds is None
+
+
+def test_a_missing_ffprobe_is_reported_as_failed_not_a_crash(tmp_path):
+    path = tmp_path / "a.MP4"
+    path.write_bytes(b"\x00")
+    got = MediaProbe(ffprobe_path="/nonexistent/ffprobe").describe(path, "MP4")
+    assert got.probe_state == "failed"
+
+
+def test_the_command_is_an_argument_array(monkeypatch, tmp_path):
+    """シェル文字列を組み立てない（§14）."""
+    seen = {}
+
+    def fake_run(args, **kwargs):
+        seen["args"] = args
+        return subprocess.CompletedProcess(args, 0, json.dumps({"format": {"duration": "1.0"},
+                                                                "streams": []}), "")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    path = tmp_path / "a.MP4"
+    path.write_bytes(b"\x00")
+    MediaProbe().describe(path, "MP4")
+    assert isinstance(seen["args"], list)
+    assert str(path) in seen["args"]
+```
+
+- [ ] **Step 2: 失敗を確認する**
+
+Run: `uv run pytest app/tests/test_adapter_ffprobe.py -v`
+Expected: FAIL（`ModuleNotFoundError`）
+
+- [ ] **Step 3: 実装する**
+
+`app/src/mediaferry/adapters/ffprobe.py`:
+
+```python
+"""メディアの種別と duration の確定.
+
+公開前にメタデータを確定させるため（§9.3 手順 5）、ここで得た結果が
+そのまま media_file に入る。ffprobe が正当に失敗した場合と、そもそも実行して
+いない場合を probe_state で区別する。
+
+duration は §9.7 の結合グループ検出が境界判定に使うので、失敗を
+「0 秒」に丸めない。
+"""
+
+from __future__ import annotations
+
+import json
+import logging
+import subprocess
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Any
+
+logger = logging.getLogger(__name__)
+
+PHOTO_EXTENSIONS = frozenset({"JPG", "JPEG", "PNG", "HEIC", "DNG", "CR2", "CR3", "RAW"})
+
+
+@dataclass(frozen=True)
+class ProbeResult:
+    kind: str  # photo / video
+    duration_seconds: float | None
+    probe_state: str  # ok / failed / not_applicable
+    streams: list[dict[str, Any]] = field(default_factory=list)
+
+
+class MediaProbe:
+    def __init__(self, ffprobe_path: str = "ffprobe", timeout_seconds: int = 60) -> None:
+        self._ffprobe = ffprobe_path
+        self._timeout = timeout_seconds
+
+    def describe(self, path: Path, extension: str) -> ProbeResult:
+        if extension.upper() in PHOTO_EXTENSIONS:
+            return ProbeResult(kind="photo", duration_seconds=None, probe_state="not_applicable")
+        try:
+            completed = subprocess.run(  # noqa: S603
+                [
+                    self._ffprobe,
+                    "-v", "error",
+                    "-print_format", "json",
+                    "-show_format",
+                    "-show_streams",
+                    str(path),
+                ],
+                check=True,
+                capture_output=True,
+                text=True,
+                timeout=self._timeout,
+            )
+            payload = json.loads(completed.stdout)
+            duration = float(payload["format"]["duration"])
+        except (OSError, subprocess.SubprocessError, ValueError, KeyError) as exc:
+            logger.warning("ffprobe に失敗した: %s (%s)", path.name, exc)
+            return ProbeResult(kind="video", duration_seconds=None, probe_state="failed")
+        return ProbeResult(
+            kind="video",
+            duration_seconds=duration,
+            probe_state="ok",
+            streams=payload.get("streams", []),
+        )
+```
+
+- [ ] **Step 4: テストが通ることを確認する**
+
+Run: `uv run pytest app/tests/test_adapter_ffprobe.py -v`
+Expected: すべて PASS（ffmpeg が無い環境では 1 件 skip）
+
+- [ ] **Step 5: コミット**
+
+```bash
+git add app/src/mediaferry/adapters/ffprobe.py app/tests/test_adapter_ffprobe.py
+git commit -m "feat(mediaferry): finalise media metadata with ffprobe"
+```
+
+---
+
+### Task 17: ArtifactPublisher（§9.3 の公開プロトコル）
+
+**Files:**
+- Create: `app/src/mediaferry/adapters/publisher.py`
+- Test: `app/tests/test_publisher.py`
+
+**Interfaces:**
+- Consumes: `artifact_staging` / `media_file`（Task 4）、`JobContext`（Task 14）、
+  `MediaProbe`（Task 16）、`candidate_paths` / `staging_rel_path`（Task 12）、
+  `CapturedAt`（Task 11）、`fsync_dir`（Task 15）
+- Produces:
+  - `mediaferry.adapters.publisher.STEP_*`（1〜11 の定数）
+  - `ArtifactRequest(kind, role, profile_id, profile_revision_id, desired_rel_path,
+    source_rel_path, extension, captured, mtime_ns, source_entry_id, merge_group_id)`
+  - `PublishedArtifact(media_file_id, rel_path, size_bytes, sha1, reused_existing)`
+  - `HashingWriter(fileobj)` — `.write(bytes) -> int`, `.size`, `.sha1`
+  - `ArtifactPublisher(conn, data_root, probe)` —
+    `.publish(ctx, request, write) -> PublishedArtifact`,
+    `.resume(staging_id) -> PublishedArtifact | None`
+  - 例外 `PublishAborted`
+
+**この契約は import と merge の両方を想定して固定する。** Phase 2 で derived 専用の
+crash model を後付けすると、importer と別実装になって結合物だけが回収不能になる。
+
+- [ ] **Step 1: 失敗するテストを書く**
+
+`app/tests/test_publisher.py`:
+
+```python
+import hashlib
+import json
+from datetime import datetime
+
+import pytest
+
+from mediaferry.adapters.ffprobe import MediaProbe, ProbeResult
+from mediaferry.adapters.publisher import (
+    ArtifactPublisher,
+    ArtifactRequest,
+    HashingWriter,
+    PublishAborted,
+)
+from mediaferry.core.timestamps import CapturedAt
+from mediaferry.db.jobs import JobStore
+from mediaferry.db.profiles import ProfileRegistry
+
+from .test_schema_artifacts import a_source_entry
+from .test_schema_sources import a_volume
+
+
+class StubProbe(MediaProbe):
+    def __init__(self, result=None):
+        self.result = result or ProbeResult("video", 2.0, "ok")
+
+    def describe(self, path, extension):
+        return self.result
+
+
+@pytest.fixture
+def setup(db, data_root):
+    ProfileRegistry(db).sync_builtins()
+    profile = ProfileRegistry(db).current("dji-osmo")
+    store = JobStore(db)
+    store.enqueue("import", {})
+    ctx = store.claim_next()
+    publisher = ArtifactPublisher(db, data_root, StubProbe())
+    volume_id = a_volume(db, profile=(profile.profile_id, profile.revision_id))
+    return publisher, ctx, profile, volume_id
+
+
+def a_request(profile, entry_id, **over):
+    fields = {
+        "kind": "import",
+        "role": "original",
+        "profile_id": profile.profile_id,
+        "profile_revision_id": profile.revision_id,
+        "desired_rel_path": "library/dji-osmo/DCIM/A.MP4",
+        "source_rel_path": "DCIM/A.MP4",
+        "extension": "MP4",
+        "captured": CapturedAt(
+            at=datetime.fromisoformat("2026-08-17T14:30:00+09:00"),
+            source="filename",
+            tz="Asia/Tokyo",
+            note=None,
+        ),
+        "mtime_ns": 1_700_000_000_000_000_000,
+        "source_entry_id": entry_id,
+        "merge_group_id": None,
+    }
+    fields.update(over)
+    return ArtifactRequest(**fields)
+
+
+def write_payload(payload):
+    def write(writer):
+        writer.write(payload)
+
+    return write
+
+
+def test_publish_puts_the_file_in_the_library_and_records_it(setup, db, data_root):
+    publisher, ctx, profile, volume_id = setup
+    entry_id = a_source_entry(db, volume_id)
+    got = publisher.publish(ctx, a_request(profile, entry_id), write_payload(b"payload"))
+
+    assert (data_root / "library/dji-osmo/DCIM/A.MP4").read_bytes() == b"payload"
+    row = db.execute("SELECT * FROM media_file WHERE id = ?", (got.media_file_id,)).fetchone()
+    assert row["rel_path"] == "library/dji-osmo/DCIM/A.MP4"
+    assert row["sha1"] == hashlib.sha1(b"payload", usedforsecurity=False).hexdigest()
+    assert row["size_bytes"] == 7
+    assert row["duration_seconds"] == 2.0
+    assert row["probe_state"] == "ok"
+    assert row["captured_at"].startswith("2026-08-17T14:30:00")
+
+
+def test_the_source_entry_is_linked_and_marked_published(setup, db):
+    publisher, ctx, profile, volume_id = setup
+    entry_id = a_source_entry(db, volume_id)
+    got = publisher.publish(ctx, a_request(profile, entry_id), write_payload(b"x"))
+    row = db.execute("SELECT * FROM source_entry WHERE id = ?", (entry_id,)).fetchone()
+    assert row["media_file_id"] == got.media_file_id
+    assert row["state"] == "published"
+
+
+def test_the_staging_file_is_gone_and_the_row_is_published(setup, db, data_root):
+    publisher, ctx, profile, volume_id = setup
+    publisher.publish(ctx, a_request(profile, a_source_entry(db, volume_id)), write_payload(b"x"))
+    assert list((data_root / "staging").rglob("*")) == [data_root / "staging" / ctx.job_id]
+    assert db.execute("SELECT state FROM artifact_staging").fetchone()["state"] == "published"
+
+
+def test_an_existing_different_file_is_never_overwritten(setup, db, data_root):
+    """SD をフォーマットして連番が再利用されたケース. 既存は絶対に動かさない."""
+    publisher, ctx, profile, volume_id = setup
+    target = data_root / "library/dji-osmo/DCIM/A.MP4"
+    target.parent.mkdir(parents=True)
+    target.write_bytes(b"an older recording")
+
+    got = publisher.publish(
+        ctx, a_request(profile, a_source_entry(db, volume_id)), write_payload(b"new payload")
+    )
+
+    assert target.read_bytes() == b"an older recording"
+    assert got.rel_path != "library/dji-osmo/DCIM/A.MP4"
+    assert got.rel_path.startswith("library/dji-osmo/DCIM/A_")
+    assert (data_root / got.rel_path).read_bytes() == b"new payload"
+
+
+def test_the_alternate_name_is_deterministic(setup, db, data_root):
+    publisher, ctx, profile, volume_id = setup
+    target = data_root / "library/dji-osmo/DCIM/A.MP4"
+    target.parent.mkdir(parents=True)
+    target.write_bytes(b"older")
+    first = publisher.publish(
+        ctx, a_request(profile, a_source_entry(db, volume_id)), write_payload(b"payload")
+    )
+    # 同じ入力を別の source_entry で再公開すると、同じ内容なので同じ行に落ちる
+    second = publisher.publish(
+        ctx, a_request(profile, a_source_entry(db, volume_id)), write_payload(b"payload")
+    )
+    assert first.rel_path == second.rel_path
+    assert second.reused_existing is True
+    assert first.media_file_id == second.media_file_id
+
+
+def test_publishing_the_same_content_twice_does_not_duplicate(setup, db, data_root):
+    publisher, ctx, profile, volume_id = setup
+    first = publisher.publish(
+        ctx, a_request(profile, a_source_entry(db, volume_id)), write_payload(b"same")
+    )
+    second = publisher.publish(
+        ctx, a_request(profile, a_source_entry(db, volume_id)), write_payload(b"same")
+    )
+    assert first.media_file_id == second.media_file_id
+    assert db.execute("SELECT count(*) FROM media_file").fetchone()[0] == 1
+
+
+def test_a_lost_lease_stops_the_publish_before_it_touches_the_library(setup, db, data_root):
+    """キャンセル済みと表示した後に公開されることを防ぐ."""
+    publisher, ctx, profile, volume_id = setup
+    JobStore(db).finish(ctx.job_id, ctx.lease_token, "cancelled")
+    with pytest.raises(PublishAborted):
+        publisher.publish(
+            ctx, a_request(profile, a_source_entry(db, volume_id)), write_payload(b"x")
+        )
+    assert not (data_root / "library/dji-osmo/DCIM/A.MP4").exists()
+
+
+def test_the_staged_row_carries_everything_needed_to_resume(setup, db, data_root):
+    publisher, ctx, profile, volume_id = setup
+    entry_id = a_source_entry(db, volume_id)
+    seen = {}
+
+    original = publisher._checkpoint  # noqa: SLF001
+
+    def spy(step):
+        if step == 7:
+            seen["row"] = dict(db.execute("SELECT * FROM artifact_staging").fetchone())
+        original(step)
+
+    publisher._checkpoint = spy  # noqa: SLF001
+    publisher.publish(ctx, a_request(profile, entry_id), write_payload(b"payload"))
+
+    row = seen["row"]
+    assert row["state"] == "staged"
+    assert row["final_rel_path"] == "library/dji-osmo/DCIM/A.MP4"
+    assert row["expected_size"] == 7
+    assert row["content_sha1"]
+    assert json.loads(row["metadata_json"])["kind"] == "video"
+
+
+def test_the_published_file_keeps_the_source_mtime(setup, db, data_root):
+    publisher, ctx, profile, volume_id = setup
+    got = publisher.publish(
+        ctx, a_request(profile, a_source_entry(db, volume_id)), write_payload(b"x")
+    )
+    assert (data_root / got.rel_path).stat().st_mtime_ns == 1_700_000_000_000_000_000
+
+
+def test_merge_artifacts_use_the_same_protocol(setup, db, data_root):
+    from .test_schema_artifacts import a_merge_group
+
+    publisher, ctx, profile, _ = setup
+    group_id = a_merge_group(db, (profile.profile_id, profile.revision_id), digest="d1")
+    got = publisher.publish(
+        ctx,
+        a_request(
+            profile,
+            None,
+            kind="merge",
+            role="derived",
+            desired_rel_path="derived/dji-osmo/DCIM/MERGED.MP4",
+            source_rel_path="DCIM/MERGED.MP4",
+            source_entry_id=None,
+            merge_group_id=group_id,
+        ),
+        write_payload(b"merged"),
+    )
+    assert (data_root / "derived/dji-osmo/DCIM/MERGED.MP4").read_bytes() == b"merged"
+    assert db.execute(
+        "SELECT output_media_file_id FROM merge_group WHERE id = ?", (group_id,)
+    ).fetchone()[0] == got.media_file_id
+
+
+def test_the_hashing_writer_matches_hashlib(tmp_path):
+    with (tmp_path / "f").open("wb") as f:
+        writer = HashingWriter(f)
+        writer.write(b"ab")
+        writer.write(b"cd")
+    assert writer.size == 4
+    assert writer.sha1 == hashlib.sha1(b"abcd", usedforsecurity=False).hexdigest()
+```
+
+- [ ] **Step 2: 失敗を確認する**
+
+Run: `uv run pytest app/tests/test_publisher.py -v`
+Expected: FAIL（`ModuleNotFoundError`）
+
+- [ ] **Step 3: 実装する**
+
+`app/src/mediaferry/adapters/publisher.py`:
+
+```python
+"""アーティファクトの公開プロトコル（§9.3）.
+
+取り込みと結合の**両方**がこの手順を使う。ファイルの公開と DB のコミットの間に
+落ちても、齟齬を検出して回収できる状態にする。
+
+公開は `os.link` で行う。既存があれば EEXIST で失敗するので、`os.replace` の
+ように既存を黙って上書きしない。`renameat2(RENAME_NOREPLACE)` は Python 標準
+ライブラリから呼べないが、`link` は同じ no-clobber 性を持ち、同一ファイル
+システム内で原子的である。
+"""
+
+from __future__ import annotations
+
+import contextlib
+import hashlib
+import json
+import os
+import sqlite3
+from collections.abc import Callable
+from dataclasses import dataclass
+from pathlib import Path
+from typing import BinaryIO
+
+from ..clock import now_iso
+from ..core.naming import candidate_paths, staging_rel_path
+from ..core.timestamps import CapturedAt
+from ..db.connection import immediate
+from ..db.jobs import JobContext, LeaseLost
+from ..ids import new_id
+from .ffprobe import MediaProbe
+from .fs import fsync_dir
+
+STEP_WRITING_ROW = 1
+STEP_WRITTEN = 2
+STEP_FSYNCED = 3
+STEP_VERIFIED = 4
+STEP_METADATA = 5
+STEP_FINAL_PATH = 6
+STEP_STAGED = 7
+STEP_LINKED = 8
+STEP_DIR_FSYNCED = 9
+STEP_STAGING_UNLINKED = 10
+STEP_COMMITTED = 11
+
+COPY_CHUNK = 4 * 1024 * 1024
+
+
+class PublishAborted(RuntimeError):
+    """リースを失ったか、キャンセルされた."""
+
+
+@dataclass(frozen=True)
+class ArtifactRequest:
+    kind: str  # import / merge
+    role: str  # original / derived
+    profile_id: str
+    profile_revision_id: str
+    desired_rel_path: str
+    source_rel_path: str
+    extension: str
+    captured: CapturedAt
+    mtime_ns: int
+    source_entry_id: str | None
+    merge_group_id: str | None
+
+
+@dataclass(frozen=True)
+class PublishedArtifact:
+    media_file_id: str
+    rel_path: str
+    size_bytes: int
+    sha1: str
+    reused_existing: bool
+
+
+class HashingWriter:
+    """書き込みストリームで SHA-1 を計算する. 読み直しを 1 回省く."""
+
+    def __init__(self, fileobj: BinaryIO) -> None:
+        self._fileobj = fileobj
+        self._digest = hashlib.sha1(usedforsecurity=False)
+        self.size = 0
+
+    def write(self, data: bytes) -> int:
+        self._fileobj.write(data)
+        self._digest.update(data)
+        self.size += len(data)
+        return len(data)
+
+    @property
+    def sha1(self) -> str:
+        return self._digest.hexdigest()
+
+
+class ArtifactPublisher:
+    def __init__(self, conn: sqlite3.Connection, data_root: Path, probe: MediaProbe) -> None:
+        self._conn = conn
+        self._data_root = data_root
+        self._probe = probe
+
+    def _checkpoint(self, step: int) -> None:
+        """crash consistency テストが差し込む継ぎ目. 本番では何もしない."""
+
+    # ------------------------------------------------------------------
+    def publish(
+        self,
+        ctx: JobContext,
+        request: ArtifactRequest,
+        write: Callable[[HashingWriter], None],
+    ) -> PublishedArtifact:
+        staging_id = new_id()
+        staging_rel = staging_rel_path(ctx.job_id, staging_id)
+        staging_abs = self._data_root / staging_rel
+
+        # 1. writing の行を先に commit する。ここから先はどこで落ちても回収できる。
+        self._conn.execute(
+            "INSERT INTO artifact_staging (id, kind, job_id, lease_token, state,"
+            " staging_rel_path, source_entry_id, merge_group_id, created_at, updated_at)"
+            " VALUES (?, ?, ?, ?, 'writing', ?, ?, ?, ?, ?)",
+            (staging_id, request.kind, ctx.job_id, ctx.lease_token, staging_rel,
+             request.source_entry_id, request.merge_group_id, now_iso(), now_iso()),
+        )
+        self._checkpoint(STEP_WRITING_ROW)
+
+        # 2. 書き込み。SHA-1 はストリームで取る。
+        staging_abs.parent.mkdir(parents=True, exist_ok=True)
+        with staging_abs.open("wb") as fileobj:
+            writer = HashingWriter(fileobj)
+            write(writer)
+            fileobj.flush()
+            self._checkpoint(STEP_WRITTEN)
+            # 3. fsync
+            os.fsync(fileobj.fileno())
+        self._checkpoint(STEP_FSYNCED)
+
+        # 4. サイズとハッシュの検証、および mtime の付与
+        on_disk = staging_abs.stat().st_size
+        if on_disk != writer.size:
+            raise PublishAborted(f"書き込みサイズが一致しない（{on_disk} != {writer.size}）")
+        os.utime(staging_abs, ns=(request.mtime_ns, request.mtime_ns))
+        self._checkpoint(STEP_VERIFIED)
+
+        # 5. メタデータは公開前に確定させる。実体はあるがメタデータが欠けたまま
+        #    永久にスキップされる状態を作らない。
+        probe = self._probe.describe(staging_abs, request.extension)
+        metadata = {
+            "role": request.role,
+            # 衝突時の別名系列は必ず「最初に望んだパス」から辿る。再開時に
+            # 変更後の final_rel_path から辿ると、名前に接尾辞が二重に付く。
+            "desired_rel_path": request.desired_rel_path,
+            "profile_id": request.profile_id,
+            "profile_revision_id": request.profile_revision_id,
+            "kind": probe.kind,
+            # UTC へ正規化しない。復元した現地の壁時計が読めなくなる。
+            "captured_at": request.captured.at.isoformat(),
+            "captured_at_source": request.captured.source,
+            "captured_at_tz": request.captured.tz,
+            "captured_at_note": request.captured.note,
+            "duration_seconds": probe.duration_seconds,
+            "probe_state": probe.probe_state,
+            "mtime_ns": request.mtime_ns,
+        }
+        self._checkpoint(STEP_METADATA)
+
+        # 6. 公開先の決定
+        final_rel = request.desired_rel_path
+        self._checkpoint(STEP_FINAL_PATH)
+
+        # staged は後戻りできない点である（以後 reconciliation が公開を完遂する）。
+        # キャンセル済みと表示した後に公開されることを防ぐため、その手前で
+        # リースを確認する。ここで落ちた行は writing のまま次回起動で破棄される。
+        try:
+            ctx.assert_lease()
+        except LeaseLost as exc:
+            raise PublishAborted(str(exc)) from exc
+
+        # 7. staged。ここで永続化した情報だけで reconciliation が再開できる。
+        self._conn.execute(
+            "UPDATE artifact_staging SET state = 'staged', final_rel_path = ?,"
+            " expected_size = ?, content_sha1 = ?, metadata_json = ?, updated_at = ?"
+            " WHERE id = ?",
+            (final_rel, writer.size, writer.sha1,
+             json.dumps(metadata, ensure_ascii=False), now_iso(), staging_id),
+        )
+        self._checkpoint(STEP_STAGED)
+
+        return self._finish(staging_id)
+
+    def resume(self, staging_id: str) -> PublishedArtifact | None:
+        """reconciliation から呼ぶ. 永続化済みの情報だけを使い、パスを推測しない."""
+        row = self._row(staging_id)
+        if row is None:
+            return None
+        if row["state"] == "writing":
+            with contextlib.suppress(OSError):
+                (self._data_root / row["staging_rel_path"]).unlink()
+            self._conn.execute("DELETE FROM artifact_staging WHERE id = ?", (staging_id,))
+            return None
+        return self._finish(staging_id)
+
+    # ------------------------------------------------------------------
+    def _finish(self, staging_id: str) -> PublishedArtifact:
+        """手順 8 以降. 何度呼んでも同じ結果になる."""
+        row = self._row(staging_id)
+        reused = False
+        if row["state"] == "staged":
+            reused = self._link(staging_id)
+            row = self._row(staging_id)
+        return self._commit(row, reused)
+
+    def _link(self, staging_id: str) -> bool:
+        """8〜10. no-clobber で公開し、staging を消す. 既存と同内容なら True."""
+        row = self._row(staging_id)
+        staging_abs = self._data_root / row["staging_rel_path"]
+        metadata = json.loads(row["metadata_json"])
+        names = candidate_paths(
+            metadata["desired_rel_path"],
+            _wall_clock(metadata["mtime_ns"]),
+            row["content_sha1"],
+        )
+        reused = False
+        final_rel = row["final_rel_path"]
+        # 系列を現在の final_rel_path まで進める。再開時に先頭へ戻ると
+        # すでに使った名前を試し直し、接尾辞が二重に付く。
+        for candidate in names:
+            if candidate == final_rel:
+                break
+        while True:
+            final_abs = self._data_root / final_rel
+            final_abs.parent.mkdir(parents=True, exist_ok=True)
+            try:
+                os.link(staging_abs, final_abs)
+                break
+            except FileExistsError:
+                if _sha1_of(final_abs) == row["content_sha1"]:
+                    reused = True
+                    break
+                final_rel = next(names)
+                self._conn.execute(
+                    "UPDATE artifact_staging SET final_rel_path = ?, updated_at = ? WHERE id = ?",
+                    (final_rel, now_iso(), staging_id),
+                )
+        self._checkpoint(STEP_LINKED)
+
+        # 9. 公開先の親を fsync する。怠ると電源断で公開が失われる。
+        fsync_dir((self._data_root / final_rel).parent)
+        self._checkpoint(STEP_DIR_FSYNCED)
+
+        # 10. staging を消し、その親も fsync する。
+        with contextlib.suppress(FileNotFoundError):
+            staging_abs.unlink()
+        if staging_abs.parent.exists():
+            fsync_dir(staging_abs.parent)
+        self._checkpoint(STEP_STAGING_UNLINKED)
+        return reused
+
+    def _commit(self, row: sqlite3.Row, reused: bool) -> PublishedArtifact:
+        """11. media_file を作り、呼び出し元のレコードを更新する."""
+        metadata = json.loads(row["metadata_json"])
+        final_rel = row["final_rel_path"]
+        with immediate(self._conn):
+            existing = self._conn.execute(
+                "SELECT id FROM media_file WHERE rel_path = ?", (final_rel,)
+            ).fetchone()
+            if existing is not None:
+                media_file_id = existing["id"]
+            else:
+                media_file_id = new_id()
+                self._conn.execute(
+                    "INSERT INTO media_file (id, role, profile_id, profile_revision_id, rel_path,"
+                    " size_bytes, mtime_ns, sha1, kind, captured_at, captured_at_source,"
+                    " captured_at_tz, captured_at_note, duration_seconds, probe_state, created_at)"
+                    " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    (
+                        media_file_id, metadata["role"], metadata["profile_id"],
+                        metadata["profile_revision_id"], final_rel, row["expected_size"],
+                        metadata["mtime_ns"], row["content_sha1"], metadata["kind"],
+                        metadata["captured_at"], metadata["captured_at_source"],
+                        metadata["captured_at_tz"], metadata["captured_at_note"],
+                        metadata["duration_seconds"], metadata["probe_state"], now_iso(),
+                    ),
+                )
+            if row["source_entry_id"] is not None:
+                self._conn.execute(
+                    "UPDATE source_entry SET media_file_id = ?, state = 'published' WHERE id = ?",
+                    (media_file_id, row["source_entry_id"]),
+                )
+            if row["merge_group_id"] is not None:
+                self._conn.execute(
+                    "UPDATE merge_group SET output_media_file_id = ?, updated_at = ? WHERE id = ?",
+                    (media_file_id, now_iso(), row["merge_group_id"]),
+                )
+            self._conn.execute(
+                "UPDATE artifact_staging SET state = 'published', updated_at = ? WHERE id = ?",
+                (now_iso(), row["id"]),
+            )
+        self._checkpoint(STEP_COMMITTED)
+        return PublishedArtifact(
+            media_file_id=media_file_id,
+            rel_path=final_rel,
+            size_bytes=row["expected_size"],
+            sha1=row["content_sha1"],
+            reused_existing=reused,
+        )
+
+    def _row(self, staging_id: str) -> sqlite3.Row | None:
+        return self._conn.execute(
+            "SELECT * FROM artifact_staging WHERE id = ?", (staging_id,)
+        ).fetchone()
+
+
+def _wall_clock(mtime_ns: int):  # noqa: ANN202 - datetime を返す小さな補助
+    from datetime import UTC, datetime
+
+    return datetime.fromtimestamp(mtime_ns / 1e9, tz=UTC).replace(tzinfo=None)
+
+
+def _sha1_of(path: Path) -> str:
+    digest = hashlib.sha1(usedforsecurity=False)
+    with path.open("rb") as f:
+        while chunk := f.read(COPY_CHUNK):
+            digest.update(chunk)
+    return digest.hexdigest()
+```
+
+- [ ] **Step 4: テストが通ることを確認する**
+
+Run: `uv run pytest app/tests/test_publisher.py -v`
+Expected: すべて PASS
+
+- [ ] **Step 5: 変異試験**
+
+`os.link` を `os.replace` に変え、
+`test_an_existing_different_file_is_never_overwritten` が落ちることを確認してから戻す。
+
+- [ ] **Step 6: コミット**
+
+```bash
+git add app/src/mediaferry/adapters/publisher.py app/tests/test_publisher.py
+git commit -m "feat(mediaferry): add the shared artifact publish protocol"
+```
+
+---
+
+### Task 18: Scanner
+
+**Files:**
+- Create: `app/src/mediaferry/jobs/scan.py`
+- Test: `app/tests/test_scanner.py`
+
+**Interfaces:**
+- Consumes: `iter_media_files` / `open_beneath`（Task 15）、`quick_fingerprint`（Task 8）、
+  `source_entry`（Task 3）、`ProfileRef`（Task 13）、`JobContext`（Task 14）
+- Produces:
+  - `mediaferry.jobs.scan.ScanOutcome(total, new, already_imported, ambiguous)`
+  - `Scanner(conn)` — `.scan(ctx, dirfd, volume_instance_id, profile) -> ScanOutcome`
+
+- [ ] **Step 1: 失敗するテストを書く**
+
+`app/tests/test_scanner.py`:
+
+```python
+import os
+
+import pytest
+
+from mediaferry.db.jobs import JobStore
+from mediaferry.db.profiles import ProfileRegistry
+from mediaferry.jobs.scan import Scanner
+
+from .test_schema_sources import a_volume
+
+
+@pytest.fixture
+def scanning(db, tmp_path):
+    ProfileRegistry(db).sync_builtins()
+    profile = ProfileRegistry(db).current("dji-osmo")
+    store = JobStore(db)
+    store.enqueue("scan", {})
+    ctx = store.claim_next()
+    card = tmp_path / "card"
+    (card / "DCIM" / "DJI_001").mkdir(parents=True)
+    (card / "DCIM" / "DJI_001" / "DJI_20260817143000_0001_D.MP4").write_bytes(b"a" * 100)
+    (card / "DCIM" / "DJI_001" / "DJI_20260817143000_0001_D.LRF").write_bytes(b"low")
+    fd = os.open(card, os.O_RDONLY | os.O_DIRECTORY)
+    volume_id = a_volume(db, profile=(profile.profile_id, profile.revision_id))
+    yield Scanner(db), ctx, fd, volume_id, profile, card
+    os.close(fd)
+
+
+def test_scanning_records_entries_for_matching_files(scanning, db):
+    scanner, ctx, fd, volume_id, profile, _ = scanning
+    outcome = scanner.scan(ctx, fd, volume_id, profile)
+    assert outcome.total == 1
+    assert outcome.new == 1
+    row = db.execute("SELECT * FROM source_entry").fetchone()
+    assert row["rel_path"] == "DCIM/DJI_001/DJI_20260817143000_0001_D.MP4"
+    assert row["size_bytes"] == 100
+    assert row["state"] == "seen"
+    assert len(row["quick_fingerprint"]) == 40
+
+
+def test_rescanning_an_unchanged_card_finds_nothing_new(scanning, db):
+    scanner, ctx, fd, volume_id, profile, _ = scanning
+    scanner.scan(ctx, fd, volume_id, profile)
+    db.execute("UPDATE source_entry SET state = 'published'")
+    second = scanner.scan(ctx, fd, volume_id, profile)
+    assert second.already_imported == 1
+    assert second.new == 0
+    assert db.execute("SELECT count(*) FROM source_entry").fetchone()[0] == 1
+
+
+def test_a_reused_filename_with_different_content_is_new_again(scanning, db):
+    """SD をフォーマットして連番が再利用されたケース."""
+    scanner, ctx, fd, volume_id, profile, card = scanning
+    scanner.scan(ctx, fd, volume_id, profile)
+    db.execute("UPDATE source_entry SET state = 'published'")
+    target = card / "DCIM" / "DJI_001" / "DJI_20260817143000_0001_D.MP4"
+    target.write_bytes(b"b" * 100)  # 同じサイズ、違う中身
+    outcome = scanner.scan(ctx, fd, volume_id, profile)
+    assert outcome.new == 1
+    assert db.execute("SELECT state FROM source_entry").fetchone()["state"] == "seen"
+
+
+def test_an_older_mtime_than_recorded_is_ambiguous(scanning, db):
+    scanner, ctx, fd, volume_id, profile, card = scanning
+    scanner.scan(ctx, fd, volume_id, profile)
+    db.execute("UPDATE source_entry SET state = 'published', mtime_ns = mtime_ns + 1000000000")
+    outcome = scanner.scan(ctx, fd, volume_id, profile)
+    assert outcome.ambiguous == 1
+
+
+def test_an_old_fingerprint_version_is_recomputed(scanning, db):
+    scanner, ctx, fd, volume_id, profile, _ = scanning
+    scanner.scan(ctx, fd, volume_id, profile)
+    db.execute("UPDATE source_entry SET fingerprint_version = 0, quick_fingerprint = 'stale'")
+    scanner.scan(ctx, fd, volume_id, profile)
+    row = db.execute("SELECT * FROM source_entry").fetchone()
+    assert row["fingerprint_version"] == 1
+    assert row["quick_fingerprint"] != "stale"
+
+
+def test_cancelling_stops_the_scan(scanning, db):
+    scanner, ctx, fd, volume_id, profile, _ = scanning
+    JobStore(db).request_cancel(ctx.job_id)
+    outcome = scanner.scan(ctx, fd, volume_id, profile)
+    assert outcome.total == 0
+
+
+def test_progress_events_name_the_file(scanning, db):
+    scanner, ctx, fd, volume_id, profile, _ = scanning
+    scanner.scan(ctx, fd, volume_id, profile)
+    messages = [e["message"] for e in JobStore(db).events(ctx.job_id)]
+    assert any("DJI_20260817143000_0001_D.MP4" in m for m in messages)
+```
+
+- [ ] **Step 2: 失敗を確認する**
+
+Run: `uv run pytest app/tests/test_scanner.py -v`
+Expected: FAIL（`ModuleNotFoundError`）
+
+- [ ] **Step 3: 実装する**
+
+`app/src/mediaferry/jobs/scan.py`:
+
+```python
+"""ソースボリュームのスキャン（§9.5）.
+
+dirfd 起点で scan.roots 配下を列挙し、既知の source_entry と照合する。
+この段階でフル SHA-1 は計算しない（16GiB を読む必要があるため）。
+同一性の判定には quick_fingerprint を使う。
+"""
+
+from __future__ import annotations
+
+import os
+import sqlite3
+from dataclasses import dataclass
+
+from ..adapters.fs import iter_media_files, open_beneath
+from ..clock import now_iso
+from ..core.fingerprint import FINGERPRINT_VERSION, quick_fingerprint
+from ..db.jobs import JobContext
+from ..db.profiles import ProfileRef
+from ..ids import new_id
+
+
+@dataclass(frozen=True)
+class ScanOutcome:
+    total: int
+    new: int
+    already_imported: int
+    ambiguous: int
+
+
+class Scanner:
+    def __init__(self, conn: sqlite3.Connection) -> None:
+        self._conn = conn
+
+    def scan(
+        self, ctx: JobContext, dirfd: int, volume_instance_id: str, profile: ProfileRef
+    ) -> ScanOutcome:
+        defn = profile.definition
+        total = new = imported = ambiguous = 0
+        for found in iter_media_files(dirfd, defn.scan.roots, defn.scan.extensions):
+            if ctx.cancelled():
+                break
+            total += 1
+            ctx.heartbeat()
+            fingerprint = self._fingerprint(dirfd, found.rel_path, found.size_bytes)
+            verdict = self._reconcile_entry(volume_instance_id, found, fingerprint)
+            if verdict == "imported":
+                imported += 1
+            elif verdict == "ambiguous":
+                ambiguous += 1
+            else:
+                new += 1
+            ctx.emit("info", f"{found.rel_path}: {verdict}", {"size_bytes": found.size_bytes})
+        return ScanOutcome(total=total, new=new, already_imported=imported, ambiguous=ambiguous)
+
+    def _fingerprint(self, dirfd: int, rel_path: str, size: int) -> str:
+        fd = open_beneath(dirfd, rel_path)
+        with os.fdopen(fd, "rb") as fileobj:
+            return quick_fingerprint(fileobj, size)
+
+    def _reconcile_entry(self, volume_instance_id: str, found, fingerprint: str) -> str:  # noqa: ANN001
+        row = self._conn.execute(
+            "SELECT * FROM source_entry WHERE volume_instance_id = ? AND rel_path = ?",
+            (volume_instance_id, found.rel_path),
+        ).fetchone()
+        if row is None:
+            self._conn.execute(
+                "INSERT INTO source_entry (id, volume_instance_id, rel_path, size_bytes, mtime_ns,"
+                " quick_fingerprint, fingerprint_version, state, observed_at)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?, 'seen', ?)",
+                (new_id(), volume_instance_id, found.rel_path, found.size_bytes, found.mtime_ns,
+                 fingerprint, FINGERPRINT_VERSION, now_iso()),
+            )
+            return "new"
+
+        same = (
+            row["size_bytes"] == found.size_bytes
+            and row["quick_fingerprint"] == fingerprint
+            and row["fingerprint_version"] == FINGERPRINT_VERSION
+        )
+        if same and row["mtime_ns"] == found.mtime_ns and row["state"] == "published":
+            self._touch(row["id"])
+            return "imported"
+        if same and found.mtime_ns < row["mtime_ns"]:
+            # 指紋は一致するが mtime が記録より古い。フルハッシュで確認する
+            # （deep_verify で扱う。ここでは曖昧として画面に出す）。
+            self._touch(row["id"])
+            return "ambiguous"
+        self._conn.execute(
+            "UPDATE source_entry SET size_bytes = ?, mtime_ns = ?, quick_fingerprint = ?,"
+            " fingerprint_version = ?, state = 'seen', media_file_id = NULL, observed_at = ?"
+            " WHERE id = ?",
+            (found.size_bytes, found.mtime_ns, fingerprint, FINGERPRINT_VERSION, now_iso(),
+             row["id"]),
+        )
+        return "new"
+
+    def _touch(self, entry_id: str) -> None:
+        self._conn.execute(
+            "UPDATE source_entry SET observed_at = ? WHERE id = ?", (now_iso(), entry_id)
+        )
+```
+
+**注**: `same` の再計算のために `fingerprint_version` が古い行は
+`same` が偽になり、下の UPDATE で再計算された指紋に更新される。
+`state` が `published` のまま維持されないのは、指紋の版が変わると
+「同じファイルか」を主張できないため。テスト
+`test_an_old_fingerprint_version_is_recomputed` はこの挙動を固定している。
+
+- [ ] **Step 4: テストが通ることを確認する**
+
+Run: `uv run pytest app/tests/test_scanner.py -v`
+Expected: すべて PASS
+
+- [ ] **Step 5: コミット**
+
+```bash
+git add app/src/mediaferry/jobs/scan.py app/tests/test_scanner.py
+git commit -m "feat(mediaferry): scan source volumes into source entries"
+```
+
+---
+
+### Task 19: Importer
+
+**Files:**
+- Create: `app/src/mediaferry/jobs/importer.py`
+- Test: `app/tests/test_importer.py`
+
+**Interfaces:**
+- Consumes: `ArtifactPublisher`（Task 17）、`open_beneath`（Task 15）、
+  `resolve_captured_at`（Task 11）、`library_rel_path`（Task 12）、`ProfileRef`（Task 13）
+- Produces:
+  - `mediaferry.jobs.importer.ImportOutcome(published, skipped, failed)`
+  - `Importer(conn, publisher, data_root, default_timezone)` —
+    `.run(ctx, dirfd, volume_instance_id, profile) -> ImportOutcome`
+  - 例外 `NotEnoughSpace`
+
+- [ ] **Step 1: 失敗するテストを書く**
+
+`app/tests/test_importer.py`:
+
+```python
+import os
+
+import pytest
+
+from mediaferry.adapters.publisher import ArtifactPublisher
+from mediaferry.core.timestamps import TimezoneUnresolved
+from mediaferry.db.jobs import JobStore
+from mediaferry.db.profiles import ProfileRegistry
+from mediaferry.jobs.importer import Importer, NotEnoughSpace
+from mediaferry.jobs.scan import Scanner
+
+from .test_publisher import StubProbe
+from .test_schema_sources import a_volume
+
+
+@pytest.fixture
+def importing(db, data_root, tmp_path):
+    ProfileRegistry(db).sync_builtins()
+    profile = ProfileRegistry(db).current("dji-osmo")
+    store = JobStore(db)
+    store.enqueue("import", {})
+    ctx = store.claim_next()
+    card = tmp_path / "card"
+    (card / "DCIM" / "DJI_001").mkdir(parents=True)
+    (card / "DCIM" / "DJI_001" / "DJI_20260817143000_0001_D.MP4").write_bytes(b"a" * 100)
+    (card / "PANORAMA").mkdir()
+    (card / "PANORAMA" / "PANO_0001.JPG").write_bytes(b"jpeg")
+    fd = os.open(card, os.O_RDONLY | os.O_DIRECTORY)
+    volume_id = a_volume(db, profile=(profile.profile_id, profile.revision_id))
+    Scanner(db).scan(ctx, fd, volume_id, profile)
+    publisher = ArtifactPublisher(db, data_root, StubProbe())
+    importer = Importer(db, publisher, data_root, default_timezone="Asia/Tokyo")
+    yield importer, ctx, fd, volume_id, profile
+    os.close(fd)
+
+
+def test_import_mirrors_the_path_on_the_card(importing, db, data_root):
+    importer, ctx, fd, volume_id, profile = importing
+    outcome = importer.run(ctx, fd, volume_id, profile)
+    assert outcome.published == 2
+    assert (
+        data_root / "library/dji-osmo/DCIM/DJI_001/DJI_20260817143000_0001_D.MP4"
+    ).read_bytes() == b"a" * 100
+    assert (data_root / "library/dji-osmo/PANORAMA/PANO_0001.JPG").exists()
+
+
+def test_captured_at_comes_from_the_filename_when_it_matches(importing, db):
+    importer, ctx, fd, volume_id, profile = importing
+    importer.run(ctx, fd, volume_id, profile)
+    row = db.execute(
+        "SELECT * FROM media_file WHERE rel_path LIKE '%DJI_20260817143000%'"
+    ).fetchone()
+    assert row["captured_at"].startswith("2026-08-17T14:30:00")
+    assert row["captured_at_source"] == "filename"
+    assert row["captured_at_tz"] == "Asia/Tokyo"
+
+
+def test_files_without_a_timestamp_in_the_name_fall_back_to_mtime(importing, db):
+    importer, ctx, fd, volume_id, profile = importing
+    importer.run(ctx, fd, volume_id, profile)
+    row = db.execute("SELECT * FROM media_file WHERE rel_path LIKE '%PANO_0001%'").fetchone()
+    assert row["captured_at_source"] == "mtime"
+
+
+def test_reimporting_is_a_no_op(importing, db, data_root):
+    importer, ctx, fd, volume_id, profile = importing
+    importer.run(ctx, fd, volume_id, profile)
+    second = importer.run(ctx, fd, volume_id, profile)
+    assert second.published == 0
+    assert second.skipped == 2
+    assert db.execute("SELECT count(*) FROM media_file").fetchone()[0] == 2
+
+
+def test_missing_timezone_stops_before_touching_anything(db, data_root, importing):
+    """force_offset なのに TZ が無いなら、取り込みを一切開始しない（§12.2）."""
+    _, ctx, fd, volume_id, profile = importing
+    importer = Importer(
+        db, ArtifactPublisher(db, data_root, StubProbe()), data_root, default_timezone=None
+    )
+    with pytest.raises(TimezoneUnresolved):
+        importer.run(ctx, fd, volume_id, profile)
+    assert db.execute("SELECT count(*) FROM media_file").fetchone()[0] == 0
+    assert not list((data_root / "library").rglob("*"))
+
+
+def test_not_enough_space_stops_before_starting(importing, db, monkeypatch):
+    importer, ctx, fd, volume_id, profile = importing
+    monkeypatch.setattr(importer, "_free_bytes", lambda: 1)
+    with pytest.raises(NotEnoughSpace):
+        importer.run(ctx, fd, volume_id, profile)
+    assert db.execute("SELECT count(*) FROM media_file").fetchone()[0] == 0
+
+
+def test_cancelling_stops_between_files(importing, db, data_root):
+    importer, ctx, fd, volume_id, profile = importing
+    JobStore(db).request_cancel(ctx.job_id)
+    outcome = importer.run(ctx, fd, volume_id, profile)
+    assert outcome.published == 0
+
+
+def test_a_failing_file_does_not_stop_the_rest(importing, db, monkeypatch):
+    importer, ctx, fd, volume_id, profile = importing
+    calls = {"n": 0}
+    original = importer._publish_one  # noqa: SLF001
+
+    def flaky(*args, **kwargs):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise OSError("入力エラー")
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(importer, "_publish_one", flaky)
+    outcome = importer.run(ctx, fd, volume_id, profile)
+    assert outcome.failed == 1
+    assert outcome.published == 1
+    assert db.execute(
+        "SELECT count(*) FROM source_entry WHERE state = 'failed'"
+    ).fetchone()[0] == 1
+```
+
+- [ ] **Step 2: 失敗を確認する**
+
+Run: `uv run pytest app/tests/test_importer.py -v`
+Expected: FAIL（`ModuleNotFoundError`）
+
+- [ ] **Step 3: 実装する**
+
+`app/src/mediaferry/jobs/importer.py`:
+
+```python
+"""ソースからライブラリへの取り込み（§9.4）.
+
+ファイルは 1 つずつ順に処理する。USB が律速なので並列化しない。公開は
+ArtifactPublisher に委譲し、中断ファイルが転送先に残る問題は staging と
+no-clobber 公開で構造的に起きないようにしてある。
+"""
+
+from __future__ import annotations
+
+import os
+import sqlite3
+from dataclasses import dataclass
+from pathlib import Path, PurePosixPath
+
+from ..adapters.fs import open_beneath
+from ..adapters.publisher import ArtifactPublisher, ArtifactRequest, HashingWriter
+from ..clock import now_iso
+from ..core.naming import library_rel_path
+from ..core.timestamps import resolve_captured_at
+from ..db.jobs import JobContext
+from ..db.profiles import ProfileRef
+
+COPY_CHUNK = 4 * 1024 * 1024
+# 空き容量の見積りに乗せる余裕。DB とサムネイルの分。
+FREE_SPACE_MARGIN = 512 * 1024 * 1024
+
+
+class NotEnoughSpace(RuntimeError):
+    pass
+
+
+@dataclass(frozen=True)
+class ImportOutcome:
+    published: int
+    skipped: int
+    failed: int
+
+
+class Importer:
+    def __init__(
+        self,
+        conn: sqlite3.Connection,
+        publisher: ArtifactPublisher,
+        data_root: Path,
+        default_timezone: str | None,
+    ) -> None:
+        self._conn = conn
+        self._publisher = publisher
+        self._data_root = data_root
+        self._default_timezone = default_timezone
+
+    def run(
+        self, ctx: JobContext, dirfd: int, volume_instance_id: str, profile: ProfileRef
+    ) -> ImportOutcome:
+        pending = list(
+            self._conn.execute(
+                "SELECT * FROM source_entry WHERE volume_instance_id = ?"
+                " AND state IN ('seen', 'failed') ORDER BY rel_path",
+                (volume_instance_id,),
+            )
+        )
+        skipped = self._conn.execute(
+            "SELECT count(*) FROM source_entry WHERE volume_instance_id = ? AND state = 'published'",
+            (volume_instance_id,),
+        ).fetchone()[0]
+
+        # 取り込みを一切開始しない条件を先に確かめる。途中で止まると
+        # 中途半端な状態がユーザに見えるため。
+        needed = sum(row["size_bytes"] for row in pending)
+        if needed + FREE_SPACE_MARGIN > self._free_bytes():
+            raise NotEnoughSpace(f"{needed} バイトの取り込みに空き容量が足りない")
+        for row in pending:
+            resolve_captured_at(
+                profile.definition, row["rel_path"], row["mtime_ns"], self._default_timezone
+            )
+
+        published = failed = 0
+        for row in pending:
+            if ctx.cancelled():
+                break
+            ctx.heartbeat()
+            try:
+                self._publish_one(ctx, dirfd, row, profile)
+            except Exception as exc:  # noqa: BLE001 - 1 件の失敗で全体を止めない
+                failed += 1
+                self._conn.execute(
+                    "UPDATE source_entry SET state = 'failed' WHERE id = ?", (row["id"],)
+                )
+                ctx.emit("error", f"{row['rel_path']} の取り込みに失敗した: {exc}")
+                continue
+            published += 1
+            ctx.emit("info", f"{row['rel_path']} を取り込んだ")
+        return ImportOutcome(published=published, skipped=skipped, failed=failed)
+
+    def _publish_one(
+        self, ctx: JobContext, dirfd: int, row: sqlite3.Row, profile: ProfileRef
+    ) -> None:
+        captured = resolve_captured_at(
+            profile.definition, row["rel_path"], row["mtime_ns"], self._default_timezone
+        )
+        request = ArtifactRequest(
+            kind="import",
+            role="original",
+            profile_id=profile.profile_id,
+            profile_revision_id=profile.revision_id,
+            desired_rel_path=library_rel_path("original", profile.definition.slug, row["rel_path"]),
+            source_rel_path=row["rel_path"],
+            extension=PurePosixPath(row["rel_path"]).suffix.lstrip(".").upper(),
+            captured=captured,
+            mtime_ns=row["mtime_ns"],
+            source_entry_id=row["id"],
+            merge_group_id=None,
+        )
+        self._conn.execute(
+            "UPDATE source_entry SET state = 'importing', observed_at = ? WHERE id = ?",
+            (now_iso(), row["id"]),
+        )
+
+        def write(writer: HashingWriter) -> None:
+            fd = open_beneath(dirfd, row["rel_path"])
+            with os.fdopen(fd, "rb") as source:
+                while chunk := source.read(COPY_CHUNK):
+                    writer.write(chunk)
+
+        self._publisher.publish(ctx, request, write)
+
+    def _free_bytes(self) -> int:
+        stat = os.statvfs(self._data_root)
+        return stat.f_bavail * stat.f_frsize
+```
+
+- [ ] **Step 4: テストが通ることを確認する**
+
+Run: `uv run pytest app/tests/test_importer.py -v`
+Expected: すべて PASS
+
+- [ ] **Step 5: コミット**
+
+```bash
+git add app/src/mediaferry/jobs/importer.py app/tests/test_importer.py
+git commit -m "feat(mediaferry): import source files into the library"
+```
+
+---
+
+### Task 20: Reconciler
+
+**Files:**
+- Create: `app/src/mediaferry/jobs/reconcile.py`
+- Test: `app/tests/test_reconciler.py`
+
+**Interfaces:**
+- Consumes: `ArtifactPublisher.resume`（Task 17）、`JobStore.sweep_interrupted`（Task 14）
+- Produces:
+  - `mediaferry.jobs.reconcile.OrphanFile(rel_path, size_bytes, sha1)`
+  - `ReconcileReport(discarded, resumed, recommitted, orphans, missing, cleaned_dirs)`
+  - `Reconciler(conn, data_root, publisher, store)` — `.run() -> ReconcileReport`
+
+- [ ] **Step 1: 失敗するテストを書く**
+
+`app/tests/test_reconciler.py`:
+
+```python
+import json
+
+import pytest
+
+from mediaferry.adapters.publisher import ArtifactPublisher
+from mediaferry.db.jobs import JobStore
+from mediaferry.db.profiles import ProfileRegistry
+from mediaferry.jobs.reconcile import Reconciler
+
+from .test_publisher import StubProbe, a_request, write_payload
+from .test_schema_artifacts import a_source_entry
+from .test_schema_sources import a_volume
+
+
+@pytest.fixture
+def world(db, data_root):
+    ProfileRegistry(db).sync_builtins()
+    profile = ProfileRegistry(db).current("dji-osmo")
+    store = JobStore(db)
+    publisher = ArtifactPublisher(db, data_root, StubProbe())
+    volume_id = a_volume(db, profile=(profile.profile_id, profile.revision_id))
+    return store, publisher, profile, volume_id, Reconciler(db, data_root, publisher, store)
+
+
+def test_a_writing_row_is_discarded_with_its_temp_file(world, db, data_root):
+    store, publisher, profile, volume_id, reconciler = world
+    store.enqueue("import", {})
+    ctx = store.claim_next()
+    staging = data_root / "staging" / ctx.job_id / "half-written"
+    staging.parent.mkdir(parents=True)
+    staging.write_bytes(b"half")
+    db.execute(
+        "INSERT INTO artifact_staging (id, kind, job_id, lease_token, state, staging_rel_path,"
+        " source_entry_id, created_at, updated_at)"
+        " VALUES ('s1', 'import', ?, ?, 'writing', ?, ?, '2026-01-01T00:00:00+00:00',"
+        " '2026-01-01T00:00:00+00:00')",
+        (ctx.job_id, ctx.lease_token, f"staging/{ctx.job_id}/half-written",
+         a_source_entry(db, volume_id)),
+    )
+    report = reconciler.run()
+    assert report.discarded == 1
+    assert not staging.exists()
+    assert db.execute("SELECT count(*) FROM artifact_staging").fetchone()[0] == 0
+
+
+def test_a_staged_row_is_published_from_persisted_facts_alone(world, db, data_root):
+    """パスを推測せず、final_rel_path と content_sha1 だけで再開する."""
+    store, publisher, profile, volume_id, reconciler = world
+    store.enqueue("import", {})
+    ctx = store.claim_next()
+    entry_id = a_source_entry(db, volume_id)
+    publisher._checkpoint = _die_after(7)  # noqa: SLF001
+    with pytest.raises(_Crash):
+        publisher.publish(ctx, a_request(profile, entry_id), write_payload(b"payload"))
+    publisher._checkpoint = lambda step: None  # noqa: SLF001
+
+    report = reconciler.run()
+    assert report.resumed == 1
+    assert (data_root / "library/dji-osmo/DCIM/A.MP4").read_bytes() == b"payload"
+    assert db.execute("SELECT count(*) FROM media_file").fetchone()[0] == 1
+
+
+def test_a_crash_between_link_and_commit_still_publishes(world, db, data_root):
+    """手順 10 まで進んだ行は staged のまま残り、再開すると commit だけをやり直す."""
+    store, publisher, profile, volume_id, reconciler = world
+    store.enqueue("import", {})
+    ctx = store.claim_next()
+    entry_id = a_source_entry(db, volume_id)
+    publisher._checkpoint = _die_after(10)  # noqa: SLF001
+    with pytest.raises(_Crash):
+        publisher.publish(ctx, a_request(profile, entry_id), write_payload(b"payload"))
+    publisher._checkpoint = lambda step: None  # noqa: SLF001
+
+    reconciler.run()
+    assert db.execute("SELECT media_file_id FROM source_entry").fetchone()[0] is not None
+    assert (data_root / "library/dji-osmo/DCIM/A.MP4").read_bytes() == b"payload"
+
+
+def test_a_published_row_without_a_media_file_is_recommitted(world, db, data_root):
+    """commit は 1 トランザクションなので通常は起きない. 手で DB を壊した場合の保険."""
+    store, publisher, profile, volume_id, reconciler = world
+    store.enqueue("import", {})
+    ctx = store.claim_next()
+    got = publisher.publish(
+        ctx, a_request(profile, a_source_entry(db, volume_id)), write_payload(b"payload")
+    )
+    db.execute("UPDATE source_entry SET media_file_id = NULL, state = 'importing'")
+    db.execute("DELETE FROM media_file WHERE id = ?", (got.media_file_id,))
+
+    report = reconciler.run()
+    assert report.recommitted == 1
+    assert db.execute("SELECT media_file_id FROM source_entry").fetchone()[0] is not None
+
+
+def test_orphans_are_reported_and_never_deleted(world, data_root):
+    """自動削除するとデータを失う経路になる. 画面に出してユーザの判断に委ねる."""
+    *_, reconciler = world
+    orphan = data_root / "library/dji-osmo/DCIM/UNKNOWN.MP4"
+    orphan.parent.mkdir(parents=True)
+    orphan.write_bytes(b"who put this here")
+    report = reconciler.run()
+    assert [o.rel_path for o in report.orphans] == ["library/dji-osmo/DCIM/UNKNOWN.MP4"]
+    assert orphan.exists()
+
+
+def test_a_missing_file_marks_the_record(world, db, data_root):
+    store, publisher, profile, volume_id, reconciler = world
+    store.enqueue("import", {})
+    ctx = store.claim_next()
+    got = publisher.publish(
+        ctx, a_request(profile, a_source_entry(db, volume_id)), write_payload(b"payload")
+    )
+    (data_root / got.rel_path).unlink()
+    report = reconciler.run()
+    assert report.missing == 1
+    assert db.execute(
+        "SELECT missing_at FROM media_file WHERE id = ?", (got.media_file_id,)
+    ).fetchone()[0] is not None
+
+
+def test_stale_job_directories_are_cleaned_but_live_ones_are_kept(world, db, data_root):
+    """使用中の可能性があるものを消さない. 所有者のジョブの状態を必ず確かめる."""
+    store, publisher, profile, volume_id, reconciler = world
+    dead = store.enqueue("import", {})
+    ctx = store.claim_next()
+    store.finish(dead, ctx.lease_token, "failed")
+    (data_root / "staging" / dead).mkdir(parents=True)
+    (data_root / "work" / dead).mkdir(parents=True)
+
+    queued = store.enqueue("import", {})
+    (data_root / "staging" / queued).mkdir(parents=True)
+
+    report = reconciler.run()
+    assert not (data_root / "staging" / dead).exists()
+    assert not (data_root / "work" / dead).exists()
+    assert (data_root / "staging" / queued).exists()
+    assert report.cleaned_dirs == 2
+
+
+def test_running_jobs_are_marked_interrupted_first(world, db):
+    store, *_, reconciler = world
+    store.enqueue("import", {})
+    ctx = store.claim_next()
+    reconciler.run()
+    assert store.get(ctx.job_id)["status"] == "interrupted"
+
+
+class _Crash(RuntimeError):
+    pass
+
+
+def _die_after(step):
+    def checkpoint(current):
+        if current == step:
+            raise _Crash(f"step {step}")
+
+    return checkpoint
+```
+
+- [ ] **Step 2: 失敗を確認する**
+
+Run: `uv run pytest app/tests/test_reconciler.py -v`
+Expected: FAIL（`ModuleNotFoundError`）
+
+- [ ] **Step 3: 実装する**
+
+`app/src/mediaferry/jobs/reconcile.py`:
+
+```python
+"""起動時の齟齬回収（§9.6）.
+
+library/ と derived/ の両方を対象にする。一時ファイルを無条件に消さないのは、
+別ジョブが使用中の可能性があるため。必ずジョブの所有権とリース状態、および
+artifact_staging の参照を確認してから消す。
+
+孤立ファイルは**削除しない**。自動削除はデータを失う経路になるので、画面に
+出してユーザの判断に委ねる。
+"""
+
+from __future__ import annotations
+
+import hashlib
+import logging
+import shutil
+import sqlite3
+from dataclasses import dataclass, field
+from pathlib import Path
+
+from ..adapters.publisher import ArtifactPublisher
+from ..clock import now_iso
+from ..db.jobs import JobStore
+
+logger = logging.getLogger(__name__)
+
+HASH_CHUNK = 4 * 1024 * 1024
+LIVE_JOB_STATES = ("queued", "running", "cancelling")
+
+
+@dataclass(frozen=True)
+class OrphanFile:
+    rel_path: str
+    size_bytes: int
+    sha1: str
+
+
+@dataclass
+class ReconcileReport:
+    discarded: int = 0
+    resumed: int = 0
+    recommitted: int = 0
+    missing: int = 0
+    cleaned_dirs: int = 0
+    orphans: list[OrphanFile] = field(default_factory=list)
+
+
+class Reconciler:
+    def __init__(
+        self,
+        conn: sqlite3.Connection,
+        data_root: Path,
+        publisher: ArtifactPublisher,
+        store: JobStore,
+    ) -> None:
+        self._conn = conn
+        self._data_root = data_root
+        self._publisher = publisher
+        self._store = store
+
+    def run(self) -> ReconcileReport:
+        report = ReconcileReport()
+        # 先にジョブを倒す。生きているジョブが無いことを確定させてから
+        # staging と work を掃除する。
+        self._store.sweep_interrupted()
+        self._recover_staging(report)
+        self._mark_missing(report)
+        self._collect_orphans(report)
+        self._clean_job_dirs(report)
+        return report
+
+    def _recover_staging(self, report: ReconcileReport) -> None:
+        # published の行は commit と同じトランザクションで media_file を作るので、
+        # 通常は齟齬が出ない。手で DB をいじった場合や将来の版のために拾っておく。
+        rows = list(
+            self._conn.execute(
+                "SELECT s.id AS id, s.state AS state FROM artifact_staging s"
+                " LEFT JOIN media_file m ON m.rel_path = s.final_rel_path"
+                " WHERE s.state <> 'published' OR m.id IS NULL"
+            )
+        )
+        for row in rows:
+            state = row["state"]
+            try:
+                self._publisher.resume(row["id"])
+            except OSError:
+                # 1 件の失敗で回収全体を止めない。行は残るので次回も試す。
+                logger.exception("staging %s の回収に失敗した", row["id"])
+                continue
+            if state == "writing":
+                report.discarded += 1
+            elif state == "staged":
+                report.resumed += 1
+            else:
+                report.recommitted += 1
+
+    def _mark_missing(self, report: ReconcileReport) -> None:
+        for row in self._conn.execute(
+            "SELECT id, rel_path FROM media_file WHERE missing_at IS NULL"
+        ):
+            if not (self._data_root / row["rel_path"]).exists():
+                self._conn.execute(
+                    "UPDATE media_file SET missing_at = ? WHERE id = ?", (now_iso(), row["id"])
+                )
+                report.missing += 1
+
+    def _collect_orphans(self, report: ReconcileReport) -> None:
+        known = {
+            row["rel_path"]
+            for row in self._conn.execute("SELECT rel_path FROM media_file")
+        }
+        staged = {
+            row["final_rel_path"]
+            for row in self._conn.execute(
+                "SELECT final_rel_path FROM artifact_staging WHERE final_rel_path IS NOT NULL"
+            )
+        }
+        for top in ("library", "derived"):
+            base = self._data_root / top
+            if not base.exists():
+                continue
+            for path in sorted(base.rglob("*")):
+                if not path.is_file():
+                    continue
+                rel = str(path.relative_to(self._data_root))
+                if rel in known or rel in staged:
+                    continue
+                report.orphans.append(
+                    OrphanFile(rel_path=rel, size_bytes=path.stat().st_size,
+                               sha1=_sha1_of(path))
+                )
+
+    def _clean_job_dirs(self, report: ReconcileReport) -> None:
+        live_jobs = {
+            row["id"]
+            for row in self._conn.execute(
+                f"SELECT id FROM job WHERE status IN ({','.join('?' * len(LIVE_JOB_STATES))})",  # noqa: S608
+                LIVE_JOB_STATES,
+            )
+        }
+        # 回収できずに残った行が指すディレクトリは消さない。
+        referenced = {
+            row["job_id"]
+            for row in self._conn.execute(
+                "SELECT DISTINCT job_id FROM artifact_staging WHERE state <> 'published'"
+            )
+        }
+        for top in ("staging", "work"):
+            base = self._data_root / top
+            if not base.exists():
+                continue
+            for path in sorted(base.iterdir()):
+                if not path.is_dir():
+                    continue
+                if path.name in live_jobs or path.name in referenced:
+                    continue
+                shutil.rmtree(path)
+                report.cleaned_dirs += 1
+
+
+def _sha1_of(path: Path) -> str:
+    digest = hashlib.sha1(usedforsecurity=False)
+    with path.open("rb") as f:
+        while chunk := f.read(HASH_CHUNK):
+            digest.update(chunk)
+    return digest.hexdigest()
+```
+
+- [ ] **Step 4: テストが通ることを確認する**
+
+Run: `uv run pytest app/tests/test_reconciler.py -v`
+Expected: すべて PASS
+
+- [ ] **Step 5: 変異試験**
+
+`_collect_orphans` に `path.unlink()` を足し、
+`test_orphans_are_reported_and_never_deleted` が落ちることを確認してから戻す。
+
+- [ ] **Step 6: コミット**
+
+```bash
+git add app/src/mediaferry/jobs/reconcile.py app/tests/test_reconciler.py
+git commit -m "feat(mediaferry): recover artifacts and jobs at startup"
+```
+
+---
+
+### Task 21: crash consistency テスト一式
+
+**Files:**
+- Create: `app/tests/crash_child.py`
+- Test: `app/tests/test_crash_consistency.py`
+
+**Interfaces:**
+- Consumes: `ArtifactPublisher`（Task 17）、`Reconciler`（Task 20）
+- Produces: なし（テストのみ）
+
+§9.3 の**手順の数だけ**ケースを作り、import と merge の両方で行う。
+子プロセスを `os._exit` で落とすので、Python の後始末も走らない。
+
+- [ ] **Step 1: 失敗するテストを書く**
+
+`app/tests/crash_child.py`:
+
+```python
+"""公開プロトコルの途中で本当にプロセスを落とす子プロセス.
+
+`os._exit` を使うのは、例外だと `finally` と atexit が走ってしまい、
+「電源が落ちた」状況にならないため。
+"""
+
+from __future__ import annotations
+
+import os
+import sys
+from datetime import datetime
+from pathlib import Path
+
+from mediaferry.adapters.ffprobe import ProbeResult
+from mediaferry.adapters.publisher import ArtifactPublisher, ArtifactRequest
+from mediaferry.core.timestamps import CapturedAt
+from mediaferry.db.connection import open_database
+from mediaferry.db.jobs import JobStore
+from mediaferry.db.migrate import apply_migrations
+from mediaferry.db.profiles import ProfileRegistry
+from mediaferry.ids import new_id
+
+PAYLOAD = b"payload-for-crash-tests"
+
+
+class _Probe:
+    def describe(self, path, extension):  # noqa: ANN001, ANN201
+        return ProbeResult("video", 2.0, "ok")
+
+
+class CrashingPublisher(ArtifactPublisher):
+    def __init__(self, *args, die_after: int, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+        self._die_after = die_after
+
+    def _checkpoint(self, step: int) -> None:
+        if step == self._die_after:
+            os._exit(9)  # noqa: SLF001
+
+
+def main() -> None:
+    data_root = Path(sys.argv[1])
+    die_after = int(sys.argv[2])
+    kind = sys.argv[3]
+
+    conn = open_database(data_root / "var" / "mediaferry.sqlite3")
+    apply_migrations(conn)
+    registry = ProfileRegistry(conn)
+    registry.sync_builtins()
+    profile = registry.current("dji-osmo")
+
+    store = JobStore(conn)
+    store.enqueue(kind if kind == "merge" else "import", {})
+    ctx = store.claim_next()
+
+    source_entry_id = merge_group_id = None
+    if kind == "import":
+        volume_id, source_entry_id = _a_source(conn, profile)
+    else:
+        merge_group_id = _a_merge_group(conn, profile)
+
+    publisher = CrashingPublisher(conn, data_root, _Probe(), die_after=die_after)
+    request = ArtifactRequest(
+        kind=kind,
+        role="original" if kind == "import" else "derived",
+        profile_id=profile.profile_id,
+        profile_revision_id=profile.revision_id,
+        desired_rel_path=(
+            "library/dji-osmo/DCIM/A.MP4" if kind == "import"
+            else "derived/dji-osmo/DCIM/MERGED.MP4"
+        ),
+        source_rel_path="DCIM/A.MP4",
+        extension="MP4",
+        captured=CapturedAt(
+            at=datetime.fromisoformat("2026-08-17T14:30:00+09:00"),
+            source="filename",
+            tz="Asia/Tokyo",
+            note=None,
+        ),
+        mtime_ns=1_700_000_000_000_000_000,
+        source_entry_id=source_entry_id,
+        merge_group_id=merge_group_id,
+    )
+    publisher.publish(ctx, request, lambda writer: writer.write(PAYLOAD))
+    # ここへ来るのは die_after が 11 より大きいときだけ。
+    sys.exit(0)
+
+
+def _a_source(conn, profile):  # noqa: ANN001, ANN202
+    from mediaferry.clock import now_iso
+
+    volume_id, entry_id = new_id(), new_id()
+    conn.execute(
+        "INSERT INTO volume_instance (id, fs_uuid, fs_type, fs_label, size_bytes,"
+        " identity_confidence, profile_id, profile_revision_id, first_seen_at, last_seen_at)"
+        " VALUES (?, '26B1-2FD6', 'exfat', 'SD_Card', 1, 'high', ?, ?, ?, ?)",
+        (volume_id, profile.profile_id, profile.revision_id, now_iso(), now_iso()),
+    )
+    conn.execute(
+        "INSERT INTO source_entry (id, volume_instance_id, rel_path, size_bytes, mtime_ns,"
+        " quick_fingerprint, fingerprint_version, state, observed_at)"
+        " VALUES (?, ?, 'DCIM/A.MP4', ?, 1, 'abc', 1, 'importing', ?)",
+        (entry_id, volume_id, len(PAYLOAD), now_iso()),
+    )
+    return volume_id, entry_id
+
+
+def _a_merge_group(conn, profile):  # noqa: ANN001, ANN202
+    from mediaferry.clock import now_iso
+
+    group_id = new_id()
+    conn.execute(
+        "INSERT INTO merge_group (id, profile_id, profile_revision_id, status, input_digest,"
+        " detected_by, created_at, updated_at)"
+        " VALUES (?, ?, ?, 'merging', 'digest-1', 'auto', ?, ?)",
+        (group_id, profile.profile_id, profile.revision_id, now_iso(), now_iso()),
+    )
+    return group_id
+
+
+if __name__ == "__main__":
+    main()
+```
+
+`app/tests/test_crash_consistency.py`:
+
+```python
+import subprocess
+import sys
+from pathlib import Path
+
+import pytest
+
+from mediaferry.adapters.ffprobe import ProbeResult
+from mediaferry.adapters.publisher import ArtifactPublisher
+from mediaferry.db.connection import open_database
+from mediaferry.db.jobs import JobStore
+from mediaferry.db.migrate import apply_migrations
+from mediaferry.jobs.reconcile import Reconciler
+
+from .crash_child import PAYLOAD
+
+CHILD = Path(__file__).parent / "crash_child.py"
+STEPS = list(range(1, 12))
+
+
+class _Probe:
+    def describe(self, path, extension):
+        return ProbeResult("video", 2.0, "ok")
+
+
+def crash_at(data_root, step, kind):
+    completed = subprocess.run(  # noqa: S603
+        [sys.executable, str(CHILD), str(data_root), str(step), kind],
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=120,
+    )
+    assert completed.returncode == 9, (
+        f"step {step} で落ちなかった: rc={completed.returncode} {completed.stderr}"
+    )
+
+
+def reconcile(data_root):
+    conn = open_database(data_root / "var" / "mediaferry.sqlite3")
+    apply_migrations(conn)
+    publisher = ArtifactPublisher(conn, data_root, _Probe())
+    report = Reconciler(conn, data_root, publisher, JobStore(conn)).run()
+    return conn, report
+
+
+@pytest.mark.parametrize("kind", ["import", "merge"])
+@pytest.mark.parametrize("step", STEPS)
+def test_reconciliation_recovers_from_a_crash_at_any_step(data_root, step, kind):
+    crash_at(data_root, step, kind)
+    conn, report = reconcile(data_root)
+
+    final = (
+        "library/dji-osmo/DCIM/A.MP4" if kind == "import" else "derived/dji-osmo/DCIM/MERGED.MP4"
+    )
+    rows = conn.execute("SELECT count(*) FROM media_file").fetchone()[0]
+
+    if step <= 6:
+        # staged より前は「作業がなかったこと」になる。呼び出し元が再実行する。
+        assert rows == 0
+        assert report.discarded == 1
+        assert not (data_root / final).exists()
+    else:
+        # staged 以降は永続情報だけで公開を再開できる。
+        assert rows == 1
+        assert (data_root / final).read_bytes() == PAYLOAD
+        assert conn.execute(
+            "SELECT state FROM artifact_staging"
+        ).fetchone()["state"] == "published"
+
+    # どの段階で落ちても、staging に中間ファイルは残らない（空のディレクトリは可）。
+    assert [p for p in (data_root / "staging").rglob("*") if p.is_file()] == []
+    assert report.orphans == []
+    conn.close()
+
+
+@pytest.mark.parametrize("step", [8, 9, 10])
+def test_the_source_entry_is_linked_after_recovery(data_root, step):
+    crash_at(data_root, step, "import")
+    conn, _ = reconcile(data_root)
+    row = conn.execute("SELECT * FROM source_entry").fetchone()
+    assert row["state"] == "published"
+    assert row["media_file_id"] is not None
+    conn.close()
+
+
+@pytest.mark.parametrize("step", STEPS)
+def test_reconciliation_is_idempotent(data_root, step):
+    crash_at(data_root, step, "import")
+    conn, _ = reconcile(data_root)
+    before = conn.execute("SELECT count(*) FROM media_file").fetchone()[0]
+    conn.close()
+    conn, second = reconcile(data_root)
+    assert conn.execute("SELECT count(*) FROM media_file").fetchone()[0] == before
+    assert second.orphans == []
+    conn.close()
+
+
+def test_a_crash_after_staging_never_overwrites_a_conflicting_file(data_root):
+    """公開の直前に外から同名の別ファイルが現れても上書きしない."""
+    crash_at(data_root, 7, "import")
+    target = data_root / "library/dji-osmo/DCIM/A.MP4"
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_bytes(b"someone else's file")
+
+    conn, _ = reconcile(data_root)
+    assert target.read_bytes() == b"someone else's file"
+    row = conn.execute("SELECT rel_path FROM media_file").fetchone()
+    assert row["rel_path"] != "library/dji-osmo/DCIM/A.MP4"
+    assert (data_root / row["rel_path"]).read_bytes() == PAYLOAD
+    conn.close()
+```
+
+- [ ] **Step 2: 失敗を確認する**
+
+Run: `uv run pytest app/tests/test_crash_consistency.py -v`
+Expected: FAIL（`crash_child.py` が無い、または回収されない）
+
+- [ ] **Step 3: 通るまで直す**
+
+このタスクは**新しい実装を書かない**。落ちたケースがあれば、
+`ArtifactPublisher` か `Reconciler` の欠陥である。落ちたケースごとに
+どの不変条件が破れたかを特定して直す。想定される修正点:
+
+- `_recover_staging` の SQL が `published` かつ `media_file` 無しの行を拾えていない
+- `_link` の EEXIST 経路で `final_rel_path` の更新を commit していない
+- `resume` が `writing` の staging ファイルを消し損ねている
+
+- [ ] **Step 4: すべて通ることを確認する**
+
+Run: `uv run pytest app/tests/test_crash_consistency.py -v`
+Expected: 22 + 3 + 11 + 1 件すべて PASS
+
+- [ ] **Step 5: 変異試験**
+
+`ArtifactPublisher.publish` の手順 7（`state = 'staged'` の UPDATE）から
+`final_rel_path` の永続化を外し、step 8 以降のケースが落ちることを確認してから戻す。
+
+- [ ] **Step 6: コミット**
+
+```bash
+git add app/tests/crash_child.py app/tests/test_crash_consistency.py
+git commit -m "test(mediaferry): kill the process at every publish step"
+```
+
+---
+
+### Task 22: ボリュームサービス（デバイス検出とプロファイル判定の永続化）
+
+**Files:**
+- Create: `app/src/mediaferry/db/sources.py`
+- Create: `app/src/mediaferry/jobs/volumes.py`
+- Modify: `app/tests/conftest.py`（fake ブローカーのフィクスチャを追加）
+- Test: `app/tests/test_volume_service.py`
+
+**Interfaces:**
+- Consumes: `BrokerClient`（既存）、`DirfdTree`（Task 15）、`resolve_profile`（Task 10）、
+  `ProfileRegistry`（Task 13）
+- Produces:
+  - `mediaferry.jobs.volumes.VolumeView(volume_instance_id, volume, profile_slug, confidence,
+    provisional, trusted, reason)`
+  - `VolumeService(conn, registry, client)` — `.refresh() -> list[VolumeView]`,
+    `.open(volume_instance_id) -> VolumeHandle`, `.close(volume_instance_id)`,
+    `.trust(volume_instance_id)`, `.close_all()`
+  - `mediaferry.db.sources.upsert_device / upsert_volume / record_presence`
+
+- [ ] **Step 1: 失敗するテストを書く**
+
+`app/tests/conftest.py` に追記:
+
+```python
+import os
+import socket
+import threading
+
+from mediaferry.adapters.broker_client import BrokerClient
+from mediaferry_protocol.messages import UsbInfo, VolumeInfo
+from mountd.server import BrokerServer
+
+
+class FakeMountManager:
+    """マウントはせず、用意したディレクトリの dirfd を返す.
+
+    プロトコルは実物の BrokerServer が話すので、取り違えは見逃さない。
+    """
+
+    def __init__(self, target):
+        self.target = target
+        self._open = {}
+        self._n = 0
+
+    def mount(self, volume, expect, verify):
+        self._n += 1
+        handle = f"h{self._n}"
+        verify()
+        self._open[handle] = os.open(self.target, os.O_RDONLY | os.O_DIRECTORY)
+        return handle, self._open[handle]
+
+    def release(self, handle):
+        fd = self._open.pop(handle, None)
+        if fd is not None:
+            os.close(fd)
+
+    def release_all(self):
+        for handle in list(self._open):
+            self.release(handle)
+
+
+@pytest.fixture
+def fake_card(tmp_path):
+    card = tmp_path / "card"
+    (card / "DCIM" / "DJI_001").mkdir(parents=True)
+    (card / "DCIM" / "DJI_001" / "DJI_20260817143000_0001_D.MP4").write_bytes(b"a" * 100)
+    return card
+
+
+@pytest.fixture
+def broker(fake_card, tmp_path):
+    volume = VolumeInfo(
+        volume_key="8:160",
+        device_node="/dev/sdk",
+        major=8,
+        minor=160,
+        sysfs_path="/sys/x",
+        fs_type="exfat",
+        fs_uuid="26B1-2FD6",
+        fs_label="SD_Card",
+        size_bytes=512_000_000_000,
+        usb=UsbInfo(vendor_id="2ca3", product_id="0020", serial="123456789ABCDEF"),
+        broker_epoch="",
+        generation=1,
+    )
+    server = BrokerServer(
+        socket_path=tmp_path / "broker.sock",
+        mount_manager=FakeMountManager(fake_card),
+        lister=lambda: [volume],
+        allowed_uids=None,
+    )
+    client_sock, server_sock = socket.socketpair(socket.AF_UNIX, socket.SOCK_SEQPACKET)
+    thread = threading.Thread(target=server.handle_connection, args=(server_sock,), daemon=True)
+    thread.start()
+    client = BrokerClient.from_socket(client_sock)
+    yield client
+    client.close()
+    thread.join(timeout=5)
+```
+
+`app/tests/test_volume_service.py`:
+
+```python
+from mediaferry.db.profiles import ProfileRegistry
+from mediaferry.jobs.volumes import VolumeService
+
+
+def service(db, broker):
+    registry = ProfileRegistry(db)
+    registry.sync_builtins()
+    return VolumeService(db, registry, broker)
+
+
+def test_refresh_registers_the_device_the_volume_and_the_presence(db, broker):
+    views = service(db, broker).refresh()
+    assert len(views) == 1
+    assert db.execute("SELECT count(*) FROM source_device").fetchone()[0] == 1
+    assert db.execute("SELECT count(*) FROM volume_instance").fetchone()[0] == 1
+    assert db.execute("SELECT count(*) FROM volume_presence").fetchone()[0] == 1
+
+
+def test_the_profile_is_resolved_from_the_contents(db, broker):
+    view = service(db, broker).refresh()[0]
+    assert view.profile_slug == "dji-osmo"
+    assert view.confidence == "high"
+    assert view.provisional is False
+
+
+def test_an_empty_card_is_provisional_and_low_confidence(db, broker, fake_card):
+    for path in (fake_card / "DCIM" / "DJI_001").iterdir():
+        path.unlink()
+    view = service(db, broker).refresh()[0]
+    assert view.profile_slug == "dji-osmo"
+    assert view.provisional is True
+    assert view.confidence == "low"
+
+
+def test_the_volume_is_closed_after_probing(db, broker):
+    """対象を確かめたら dirfd を握り続けない. 明示的に開くまでは閉じておく."""
+    svc = service(db, broker)
+    svc.refresh()
+    assert svc.opened() == []
+
+
+def test_open_and_close_manage_the_dirfd(db, broker):
+    svc = service(db, broker)
+    view = svc.refresh()[0]
+    handle = svc.open(view.volume_instance_id)
+    assert svc.opened() == [view.volume_instance_id]
+    assert "DCIM" in __import__("os").listdir(handle.dirfd)
+    svc.close(view.volume_instance_id)
+    assert svc.opened() == []
+
+
+def test_reopening_returns_the_same_handle(db, broker):
+    svc = service(db, broker)
+    view = svc.refresh()[0]
+    assert svc.open(view.volume_instance_id) is svc.open(view.volume_instance_id)
+
+
+def test_the_same_card_keeps_its_identity_across_refreshes(db, broker):
+    svc = service(db, broker)
+    first = svc.refresh()[0]
+    second = svc.refresh()[0]
+    assert first.volume_instance_id == second.volume_instance_id
+    assert db.execute("SELECT count(*) FROM volume_presence").fetchone()[0] == 2
+
+
+def test_trust_is_recorded_and_reported(db, broker):
+    svc = service(db, broker)
+    view = svc.refresh()[0]
+    assert view.trusted is False
+    svc.trust(view.volume_instance_id)
+    assert svc.refresh()[0].trusted is True
+
+
+def test_the_serial_alone_does_not_identify_the_device(db, broker):
+    """Osmo の serial は Linux ガジェットの既定値だった（Phase 0 実測）."""
+    svc = service(db, broker)
+    svc.refresh()
+    row = db.execute("SELECT * FROM source_device").fetchone()
+    assert row["serial"] == "123456789ABCDEF"
+    assert row["usb_product_id"] == "0020"
+```
+
+- [ ] **Step 2: 失敗を確認する**
+
+Run: `uv run pytest app/tests/test_volume_service.py -v`
+Expected: FAIL（`ModuleNotFoundError`）
+
+- [ ] **Step 3: 実装する**
+
+`app/src/mediaferry/db/sources.py`:
+
+```python
+"""ソース側のレコードの upsert.
+
+デバイスの同定は (vendor, product_id, product, serial) の組で行う。serial 単独は
+機種の既定値でありうるので識別子にしない。ボリュームは (fs_uuid, fs_type,
+size_bytes) で引くが、これは識別子ではなく推測である。
+"""
+
+from __future__ import annotations
+
+import sqlite3
+
+from ..clock import now_iso
+from ..ids import new_id
+
+
+def upsert_device(conn: sqlite3.Connection, usb) -> str | None:  # noqa: ANN001
+    if usb is None:
+        return None
+    key = (usb.vendor_id, usb.product_id, "", usb.serial or "")
+    row = conn.execute(
+        "SELECT id FROM source_device WHERE usb_vendor_id = ? AND usb_product_id = ?"
+        " AND usb_product = ? AND serial = ?",
+        key,
+    ).fetchone()
+    if row is not None:
+        conn.execute(
+            "UPDATE source_device SET last_seen_at = ? WHERE id = ?", (now_iso(), row["id"])
+        )
+        return row["id"]
+    device_id = new_id()
+    conn.execute(
+        "INSERT INTO source_device (id, usb_vendor_id, usb_product_id, usb_product, serial,"
+        " first_seen_at, last_seen_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+        (device_id, *key, now_iso(), now_iso()),
+    )
+    return device_id
+
+
+def upsert_volume(conn: sqlite3.Connection, volume, device_id: str | None) -> str:  # noqa: ANN001
+    row = None
+    if volume.fs_uuid:
+        row = conn.execute(
+            "SELECT id FROM volume_instance WHERE fs_uuid = ? AND fs_type = ? AND size_bytes = ?",
+            (volume.fs_uuid, volume.fs_type or "", volume.size_bytes),
+        ).fetchone()
+    if row is not None:
+        conn.execute(
+            "UPDATE volume_instance SET last_seen_at = ?, last_source_device_id = ?,"
+            " fs_label = ? WHERE id = ?",
+            (now_iso(), device_id, volume.fs_label or "", row["id"]),
+        )
+        return row["id"]
+    volume_id = new_id()
+    conn.execute(
+        "INSERT INTO volume_instance (id, fs_uuid, fs_type, fs_label, size_bytes,"
+        " identity_confidence, last_source_device_id, first_seen_at, last_seen_at)"
+        " VALUES (?, ?, ?, ?, ?, 'low', ?, ?, ?)",
+        (volume_id, volume.fs_uuid or "", volume.fs_type or "", volume.fs_label or "",
+         volume.size_bytes, device_id, now_iso(), now_iso()),
+    )
+    return volume_id
+
+
+def record_presence(conn: sqlite3.Connection, volume_instance_id: str, volume) -> str:  # noqa: ANN001
+    presence_id = new_id()
+    conn.execute(
+        "INSERT INTO volume_presence (id, volume_instance_id, broker_epoch, generation,"
+        " device_node, major, minor, sysfs_path, attached_at)"
+        " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        (presence_id, volume_instance_id, volume.broker_epoch, volume.generation,
+         volume.device_node, volume.major, volume.minor, volume.sysfs_path, now_iso()),
+    )
+    return presence_id
+```
+
+`app/src/mediaferry/jobs/volumes.py`:
+
+```python
+"""接続中ボリュームの列挙とプロファイル判定（§9.2）.
+
+判定はボリュームごとに行う。デバイス単位ではない。記憶したプロファイルは
+候補として使うが、require は必ず再検証する。記憶を無条件に信用しない。
+
+判定のためだけに開いた dirfd は、確かめたらすぐ閉じる。取り込みのために
+開くのは別の操作にする。
+"""
+
+from __future__ import annotations
+
+import contextlib
+import sqlite3
+from dataclasses import dataclass
+
+from ..adapters.broker_client import BrokerClient, VolumeHandle
+from ..adapters.fs import DirfdTree
+from ..clock import now_iso
+from ..core.profiles.matching import VolumeFacts, resolve_profile
+from ..db.profiles import ProfileRegistry
+from ..db.sources import record_presence, upsert_device, upsert_volume
+
+
+@dataclass(frozen=True)
+class VolumeView:
+    volume_instance_id: str
+    volume_key: str
+    fs_label: str
+    size_bytes: int
+    profile_slug: str | None
+    confidence: str
+    provisional: bool
+    trusted: bool
+    reason: str
+
+
+class VolumeService:
+    def __init__(
+        self, conn: sqlite3.Connection, registry: ProfileRegistry, client: BrokerClient
+    ) -> None:
+        self._conn = conn
+        self._registry = registry
+        self._client = client
+        self._open: dict[str, VolumeHandle] = {}
+
+    def refresh(self) -> list[VolumeView]:
+        views = []
+        definitions = [ref.definition for ref in self._registry.active()]
+        for volume in self._client.list_volumes():
+            device_id = upsert_device(self._conn, volume.usb)
+            volume_id = upsert_volume(self._conn, volume, device_id)
+            record_presence(self._conn, volume_id, volume)
+            views.append(self._probe(volume, volume_id, definitions))
+        return views
+
+    def _probe(self, volume, volume_id: str, definitions) -> VolumeView:  # noqa: ANN001
+        remembered = self._conn.execute(
+            "SELECT p.slug AS slug, v.trusted_at AS trusted_at FROM volume_instance v"
+            " LEFT JOIN device_profile p ON p.id = v.profile_id WHERE v.id = ?",
+            (volume_id,),
+        ).fetchone()
+        facts = VolumeFacts(
+            usb_vendor_id=volume.usb.vendor_id if volume.usb else "",
+            usb_product_id=volume.usb.product_id if volume.usb else "",
+            fs_label=volume.fs_label or "",
+        )
+        handle = self._open.get(volume_id) or self._client.open_volume(volume)
+        try:
+            outcome = resolve_profile(
+                definitions, facts, DirfdTree(handle.dirfd), remembered["slug"]
+            )
+        finally:
+            if volume_id not in self._open:
+                with contextlib.suppress(Exception):
+                    self._client.close_volume(handle)
+
+        profile_id = revision_id = None
+        if outcome.slug is not None:
+            ref = self._registry.current(outcome.slug)
+            profile_id, revision_id = ref.profile_id, ref.revision_id
+        self._conn.execute(
+            "UPDATE volume_instance SET profile_id = ?, profile_revision_id = ?,"
+            " identity_confidence = ?, last_seen_at = ? WHERE id = ?",
+            (profile_id, revision_id, outcome.confidence, now_iso(), volume_id),
+        )
+        return VolumeView(
+            volume_instance_id=volume_id,
+            volume_key=volume.volume_key,
+            fs_label=volume.fs_label or "",
+            size_bytes=volume.size_bytes,
+            profile_slug=outcome.slug,
+            confidence=outcome.confidence,
+            provisional=outcome.provisional,
+            trusted=remembered["trusted_at"] is not None,
+            reason=outcome.reason,
+        )
+
+    def open(self, volume_instance_id: str) -> VolumeHandle:
+        if volume_instance_id in self._open:
+            return self._open[volume_instance_id]
+        volume = self._volume_for(volume_instance_id)
+        handle = self._client.open_volume(volume)
+        self._open[volume_instance_id] = handle
+        return handle
+
+    def close(self, volume_instance_id: str) -> None:
+        handle = self._open.pop(volume_instance_id, None)
+        if handle is not None:
+            self._client.close_volume(handle)
+
+    def close_all(self) -> None:
+        for volume_instance_id in list(self._open):
+            self.close(volume_instance_id)
+
+    def opened(self) -> list[str]:
+        return sorted(self._open)
+
+    def trust(self, volume_instance_id: str) -> None:
+        self._conn.execute(
+            "UPDATE volume_instance SET trusted_at = ? WHERE id = ?",
+            (now_iso(), volume_instance_id),
+        )
+
+    def _volume_for(self, volume_instance_id: str):  # noqa: ANN202
+        row = self._conn.execute(
+            "SELECT p.device_node, p.major, p.minor FROM volume_presence p"
+            " WHERE p.volume_instance_id = ? ORDER BY p.attached_at DESC LIMIT 1",
+            (volume_instance_id,),
+        ).fetchone()
+        if row is None:
+            raise LookupError(volume_instance_id)
+        for volume in self._client.list_volumes():
+            if (volume.major, volume.minor) == (row["major"], row["minor"]):
+                return volume
+        raise LookupError(f"ボリューム {volume_instance_id} は接続されていない")
+```
+
+- [ ] **Step 4: テストが通ることを確認する**
+
+Run: `uv run pytest app/tests/test_volume_service.py -v`
+Expected: すべて PASS
+
+- [ ] **Step 5: コミット**
+
+```bash
+git add app/src/mediaferry/db/sources.py app/src/mediaferry/jobs/volumes.py app/tests/test_volume_service.py app/tests/conftest.py
+git commit -m "feat(mediaferry): register volumes and resolve their profiles"
+```
+
+---
+
+### Task 23: API とアプリの組み立て
+
+**Files:**
+- Create: `app/src/mediaferry/api/__init__.py`
+- Create: `app/src/mediaferry/api/app.py`
+- Create: `app/src/mediaferry/api/deps.py`
+- Create: `app/src/mediaferry/api/routes_system.py`
+- Create: `app/src/mediaferry/api/routes_devices.py`
+- Create: `app/src/mediaferry/api/routes_media.py`
+- Create: `app/src/mediaferry/__main__.py`
+- Modify: `app/pyproject.toml`（`fastapi` と `uvicorn` を追加）
+- Modify: `app/Dockerfile`（ffmpeg の導入と、起動コマンドをスパイク CLI から本体へ）
+- Test: `app/tests/test_api.py`
+
+**Interfaces:**
+- Consumes: これまでの全モジュール
+- Produces:
+  - `mediaferry.api.app.create_app(env=os.environ, broker_factory=None) -> FastAPI`
+  - `mediaferry.api.app.AppState`（`conn`, `settings`, `registry`, `store`, `runner`,
+    `volumes`, `publisher`, `last_reconcile`）
+
+**Phase 1 の範囲**: SSE（`GET /events`）は Phase 4 の Web UI と一緒に入れる。
+ここでは `GET /api/jobs/{id}/events?after_seq=` のポーリングを提供する。
+`BIND_HOST` の既定は loopback のまま変えない。
+
+- [ ] **Step 1: 失敗するテストを書く**
+
+`app/tests/test_api.py`:
+
+```python
+import pytest
+from fastapi.testclient import TestClient
+
+from mediaferry.api.app import create_app
+
+
+@pytest.fixture
+def client(data_root, broker, monkeypatch):
+    monkeypatch.setenv("MEDIAFERRY_DATA_ROOT", str(data_root))
+    monkeypatch.setenv("MEDIAFERRY_DEFAULT_TIMEZONE", "Asia/Tokyo")
+    app = create_app(broker_factory=lambda: broker)
+    with TestClient(app) as client:
+        yield client
+
+
+def test_health_reports_the_schema_version(client):
+    body = client.get("/api/health").json()
+    assert body["status"] == "ok"
+    assert body["schema_version"] >= 4
+
+
+def test_startup_seeds_the_builtin_profiles(client):
+    slugs = [p["slug"] for p in client.get("/api/profiles").json()["profiles"]]
+    assert "dji-osmo" in slugs
+
+
+def test_settings_report_their_source_and_lock(client):
+    settings = {s["key"]: s for s in client.get("/api/settings").json()["settings"]}
+    assert settings["DATA_ROOT"]["source"] == "env"
+    assert settings["DATA_ROOT"]["locked"] is True
+    assert settings["LOG_LEVEL"]["source"] == "default"
+
+
+def test_secrets_are_masked_in_the_api(client, monkeypatch):
+    settings = {s["key"]: s for s in client.get("/api/settings").json()["settings"]}
+    assert settings["AUTH_PASSWORD"]["value"] in (None, "********")
+
+
+def test_writing_an_env_locked_setting_is_a_conflict(client):
+    assert client.put("/api/settings", json={"key": "DATA_ROOT", "value": "/x"}).status_code == 409
+
+
+def test_writing_an_invalid_setting_is_a_bad_request(client):
+    assert client.put(
+        "/api/settings", json={"key": "HTTP_PORT", "value": "nope"}
+    ).status_code == 400
+
+
+def test_devices_lists_the_volume_with_its_profile(client):
+    volumes = client.get("/api/devices").json()["volumes"]
+    assert len(volumes) == 1
+    assert volumes[0]["profile_slug"] == "dji-osmo"
+    assert volumes[0]["trusted"] is False
+
+
+def test_scan_then_import_walks_the_whole_path(client, data_root):
+    volume_id = client.get("/api/devices").json()["volumes"][0]["volume_instance_id"]
+    scan = client.post(f"/api/volumes/{volume_id}/scan").json()
+    _await_job(client, scan["job_id"])
+    assert client.get("/api/media").json()["media"] == []
+
+    imported = client.post(f"/api/volumes/{volume_id}/import").json()
+    _await_job(client, imported["job_id"])
+
+    media = client.get("/api/media").json()["media"]
+    assert len(media) == 1
+    assert media[0]["rel_path"].startswith("library/dji-osmo/")
+    assert (data_root / media[0]["rel_path"]).exists()
+
+
+def test_trusting_a_volume_sticks(client):
+    volume_id = client.get("/api/devices").json()["volumes"][0]["volume_instance_id"]
+    assert client.post(f"/api/volumes/{volume_id}/trust").status_code == 200
+    assert client.get("/api/devices").json()["volumes"][0]["trusted"] is True
+
+
+def test_jobs_can_be_listed_cancelled_and_followed(client):
+    volume_id = client.get("/api/devices").json()["volumes"][0]["volume_instance_id"]
+    job_id = client.post(f"/api/volumes/{volume_id}/scan").json()["job_id"]
+    _await_job(client, job_id)
+    assert any(j["id"] == job_id for j in client.get("/api/jobs").json()["jobs"])
+    events = client.get(f"/api/jobs/{job_id}/events", params={"after_seq": 0}).json()["events"]
+    assert events
+    assert client.post(f"/api/jobs/{job_id}/cancel").status_code in (200, 409)
+
+
+def test_orphans_are_exposed(client, data_root):
+    assert client.get("/api/orphans").json()["orphans"] == []
+
+
+def test_closing_a_volume_releases_the_handle(client):
+    volume_id = client.get("/api/devices").json()["volumes"][0]["volume_instance_id"]
+    client.post(f"/api/volumes/{volume_id}/import")
+    assert client.post(f"/api/volumes/{volume_id}/close").status_code == 200
+
+
+def _await_job(client, job_id, timeout=20.0):
+    import time
+
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        status = client.get(f"/api/jobs/{job_id}").json()["status"]
+        if status not in {"queued", "running", "cancelling"}:
+            assert status == "succeeded", client.get(f"/api/jobs/{job_id}").json()
+            return
+        time.sleep(0.05)
+    raise AssertionError(f"ジョブ {job_id} が終わらない")
+```
+
+- [ ] **Step 2: 失敗を確認する**
+
+Run: `uv run pytest app/tests/test_api.py -v`
+Expected: FAIL（`ModuleNotFoundError: No module named 'mediaferry.api'`）
+
+- [ ] **Step 3: 実装する**
+
+`app/pyproject.toml` の `dependencies` に `"fastapi>=0.115"` と `"uvicorn>=0.32"` を
+追加し、`uv sync --all-packages`。
+
+`app/src/mediaferry/api/deps.py`:
+
+```python
+"""リクエストからアプリの状態を取り出す."""
+
+from __future__ import annotations
+
+from typing import TYPE_CHECKING
+
+from fastapi import Request
+
+if TYPE_CHECKING:
+    from .app import AppState
+
+
+def state(request: Request) -> AppState:
+    return request.app.state.mediaferry
+```
+
+`app/src/mediaferry/api/app.py`:
+
+```python
+"""FastAPI の組み立てと起動時の手順.
+
+起動時に必ず行うこと:
+  1. マイグレーション適用
+  2. ビルトインプロファイルの同期
+  3. reconciliation（前回の中断からの回収）
+  4. ワーカーの開始
+
+`BIND_HOST` の既定は loopback。認証と CSRF が入る Phase 4 より前に LAN へ
+公開しない。
+"""
+
+from __future__ import annotations
+
+import asyncio
+import logging
+import os
+from collections.abc import Callable, Mapping
+from contextlib import asynccontextmanager
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Any
+
+from fastapi import FastAPI
+
+from ..adapters.broker_client import BrokerClient
+from ..adapters.ffprobe import MediaProbe
+from ..adapters.publisher import ArtifactPublisher
+from ..db.connection import open_database
+from ..db.jobs import JobStore
+from ..db.migrate import apply_migrations
+from ..db.profiles import ProfileRegistry
+from ..jobs.importer import Importer
+from ..jobs.reconcile import ReconcileReport, Reconciler
+from ..jobs.runner import JobRunner
+from ..jobs.scan import Scanner
+from ..jobs.volumes import VolumeService
+from ..settings import Settings, SettingsService, startup_warnings
+from .routes_devices import router as devices_router
+from .routes_media import router as media_router
+from .routes_system import router as system_router
+
+logger = logging.getLogger(__name__)
+
+
+@dataclass
+class AppState:
+    conn: Any
+    settings: Settings
+    settings_service: SettingsService
+    registry: ProfileRegistry
+    store: JobStore
+    publisher: ArtifactPublisher
+    volumes: VolumeService
+    runner: JobRunner
+    last_reconcile: ReconcileReport = field(default_factory=ReconcileReport)
+
+
+def create_app(
+    env: Mapping[str, str] | None = None,
+    broker_factory: Callable[[], BrokerClient] | None = None,
+) -> FastAPI:
+    env = dict(os.environ if env is None else env)
+
+    @asynccontextmanager
+    async def lifespan(app: FastAPI):  # noqa: ANN202
+        conn = open_database(Path(env.get("MEDIAFERRY_DATA_ROOT", "/data")) / "var"
+                             / "mediaferry.sqlite3")
+        apply_migrations(conn)
+        settings_service = SettingsService(conn, env)
+        settings = settings_service.snapshot()
+        for warning in startup_warnings(settings):
+            logger.warning("%s", warning)
+
+        registry = ProfileRegistry(conn)
+        registry.sync_builtins()
+        store = JobStore(conn)
+        publisher = ArtifactPublisher(conn, settings.data_root, MediaProbe())
+        client = broker_factory() if broker_factory else BrokerClient(settings.broker_socket)
+        volumes = VolumeService(conn, registry, client)
+        runner = JobRunner(store)
+
+        state = AppState(
+            conn=conn,
+            settings=settings,
+            settings_service=settings_service,
+            registry=registry,
+            store=store,
+            publisher=publisher,
+            volumes=volumes,
+            runner=runner,
+        )
+        _register_handlers(state)
+        state.last_reconcile = Reconciler(conn, settings.data_root, publisher, store).run()
+
+        app.state.mediaferry = state
+        worker = asyncio.create_task(runner.run_forever())
+        try:
+            yield
+        finally:
+            await runner.stop()
+            worker.cancel()
+            volumes.close_all()
+            conn.close()
+
+    app = FastAPI(title="mediaferry", lifespan=lifespan)
+    app.include_router(system_router, prefix="/api")
+    app.include_router(devices_router, prefix="/api")
+    app.include_router(media_router, prefix="/api")
+    return app
+
+
+def _register_handlers(state: AppState) -> None:
+    def run_scan(ctx) -> None:  # noqa: ANN001
+        volume_instance_id = ctx.params["volume_instance_id"]
+        profile = _profile_of(state, volume_instance_id)
+        handle = state.volumes.open(volume_instance_id)
+        outcome = Scanner(state.conn).scan(ctx, handle.dirfd, volume_instance_id, profile)
+        ctx.emit("info", f"スキャン完了: 新規 {outcome.new} 件 / 取込済 {outcome.already_imported} 件")
+
+    def run_import(ctx) -> None:  # noqa: ANN001
+        volume_instance_id = ctx.params["volume_instance_id"]
+        profile = _profile_of(state, volume_instance_id)
+        handle = state.volumes.open(volume_instance_id)
+        importer = Importer(
+            state.conn,
+            state.publisher,
+            state.settings.data_root,
+            state.settings.default_timezone,
+        )
+        outcome = importer.run(ctx, handle.dirfd, volume_instance_id, profile)
+        ctx.emit("info", f"取り込み完了: {outcome.published} 件（失敗 {outcome.failed} 件）")
+
+    state.runner.register("scan", run_scan)
+    state.runner.register("import", run_import)
+
+
+def _profile_of(state: AppState, volume_instance_id: str):  # noqa: ANN202
+    row = state.conn.execute(
+        "SELECT profile_id FROM volume_instance WHERE id = ?", (volume_instance_id,)
+    ).fetchone()
+    if row is None or row["profile_id"] is None:
+        raise RuntimeError("このボリュームには対応するプロファイルが無い")
+    return state.registry.by_id(row["profile_id"])
+```
+
+`app/src/mediaferry/api/routes_system.py`:
+
+```python
+"""ヘルス・設定・プロファイル・ジョブ."""
+
+from __future__ import annotations
+
+from typing import Any
+
+from fastapi import APIRouter, Depends, HTTPException
+
+from ..settings import SettingInvalid, SettingLocked
+from .deps import state as get_state
+
+router = APIRouter()
+
+
+@router.get("/health")
+def health(state=Depends(get_state)) -> dict[str, Any]:  # noqa: ANN001, B008
+    version = state.conn.execute("SELECT MAX(version) AS v FROM schema_migration").fetchone()["v"]
+    return {"status": "ok", "schema_version": version}
+
+
+@router.get("/settings")
+def list_settings(state=Depends(get_state)) -> dict[str, Any]:  # noqa: ANN001, B008
+    return {
+        "settings": [
+            {"key": s.key, "value": s.value, "source": s.source, "locked": s.locked}
+            for s in state.settings_service.describe_all()
+        ]
+    }
+
+
+@router.put("/settings")
+def write_setting(body: dict[str, str], state=Depends(get_state)) -> dict[str, str]:  # noqa: ANN001, B008
+    try:
+        state.settings_service.set(body["key"], body["value"])
+    except SettingLocked as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except (SettingInvalid, KeyError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {"status": "ok"}
+
+
+@router.get("/profiles")
+def list_profiles(state=Depends(get_state)) -> dict[str, Any]:  # noqa: ANN001, B008
+    return {
+        "profiles": [
+            {"slug": ref.definition.slug, "name": ref.definition.name, "revision": ref.revision}
+            for ref in state.registry.active()
+        ]
+    }
+
+
+@router.get("/jobs")
+def list_jobs(state=Depends(get_state)) -> dict[str, Any]:  # noqa: ANN001, B008
+    return {"jobs": [_job(row) for row in state.store.list_jobs()]}
+
+
+@router.get("/jobs/{job_id}")
+def get_job(job_id: str, state=Depends(get_state)) -> dict[str, Any]:  # noqa: ANN001, B008
+    row = state.store.get(job_id)
+    if row is None:
+        raise HTTPException(status_code=404, detail="そのジョブは無い")
+    return _job(row)
+
+
+@router.get("/jobs/{job_id}/events")
+def job_events(job_id: str, after_seq: int = 0, state=Depends(get_state)) -> dict[str, Any]:  # noqa: ANN001, B008
+    return {
+        "events": [
+            {"seq": e["seq"], "level": e["level"], "message": e["message"], "at": e["at"]}
+            for e in state.store.events(job_id, after_seq)
+        ]
+    }
+
+
+@router.post("/jobs/{job_id}/cancel")
+def cancel_job(job_id: str, state=Depends(get_state)) -> dict[str, str]:  # noqa: ANN001, B008
+    if not state.store.request_cancel(job_id):
+        raise HTTPException(status_code=409, detail="そのジョブはもう終わっている")
+    return {"status": "cancelling"}
+
+
+def _job(row) -> dict[str, Any]:  # noqa: ANN001
+    return {
+        "id": row["id"],
+        "type": row["type"],
+        "status": row["status"],
+        "created_at": row["created_at"],
+        "finished_at": row["finished_at"],
+        "error": row["error"],
+    }
+```
+
+`app/src/mediaferry/api/routes_devices.py`:
+
+```python
+"""接続中デバイスとボリュームの操作."""
+
+from __future__ import annotations
+
+from typing import Any
+
+from fastapi import APIRouter, Depends, HTTPException
+
+from .deps import state as get_state
+
+router = APIRouter()
+
+
+@router.get("/devices")
+def list_devices(state=Depends(get_state)) -> dict[str, Any]:  # noqa: ANN001, B008
+    return {
+        "volumes": [
+            {
+                "volume_instance_id": view.volume_instance_id,
+                "volume_key": view.volume_key,
+                "fs_label": view.fs_label,
+                "size_bytes": view.size_bytes,
+                "profile_slug": view.profile_slug,
+                "confidence": view.confidence,
+                "provisional": view.provisional,
+                "trusted": view.trusted,
+                "reason": view.reason,
+            }
+            for view in state.volumes.refresh()
+        ]
+    }
+
+
+@router.post("/volumes/{volume_instance_id}/trust")
+def trust(volume_instance_id: str, state=Depends(get_state)) -> dict[str, str]:  # noqa: ANN001, B008
+    state.volumes.trust(volume_instance_id)
+    return {"status": "ok"}
+
+
+@router.post("/volumes/{volume_instance_id}/scan")
+def scan(volume_instance_id: str, state=Depends(get_state)) -> dict[str, str]:  # noqa: ANN001, B008
+    return {"job_id": state.store.enqueue("scan", {"volume_instance_id": volume_instance_id})}
+
+
+@router.post("/volumes/{volume_instance_id}/import")
+def start_import(volume_instance_id: str, state=Depends(get_state)) -> dict[str, str]:  # noqa: ANN001, B008
+    return {"job_id": state.store.enqueue("import", {"volume_instance_id": volume_instance_id})}
+
+
+@router.post("/volumes/{volume_instance_id}/close")
+def close(volume_instance_id: str, state=Depends(get_state)) -> dict[str, str]:  # noqa: ANN001, B008
+    try:
+        state.volumes.close(volume_instance_id)
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    return {"status": "ok"}
+```
+
+`app/src/mediaferry/api/routes_media.py`:
+
+```python
+"""ライブラリの一覧と、reconciliation が見つけた齟齬."""
+
+from __future__ import annotations
+
+from typing import Any
+
+from fastapi import APIRouter, Depends, HTTPException
+
+from .deps import state as get_state
+
+router = APIRouter()
+
+
+@router.get("/media")
+def list_media(limit: int = 200, offset: int = 0, state=Depends(get_state)) -> dict[str, Any]:  # noqa: ANN001, B008
+    rows = state.conn.execute(
+        "SELECT * FROM media_file ORDER BY captured_at DESC LIMIT ? OFFSET ?", (limit, offset)
+    )
+    return {"media": [_media(row) for row in rows]}
+
+
+@router.get("/media/{media_id}")
+def get_media(media_id: str, state=Depends(get_state)) -> dict[str, Any]:  # noqa: ANN001, B008
+    row = state.conn.execute("SELECT * FROM media_file WHERE id = ?", (media_id,)).fetchone()
+    if row is None:
+        raise HTTPException(status_code=404, detail="そのメディアは無い")
+    return _media(row)
+
+
+@router.get("/orphans")
+def list_orphans(state=Depends(get_state)) -> dict[str, Any]:  # noqa: ANN001, B008
+    report = state.last_reconcile
+    missing = state.conn.execute(
+        "SELECT id, rel_path, missing_at FROM media_file WHERE missing_at IS NOT NULL"
+    )
+    return {
+        "orphans": [
+            {"rel_path": o.rel_path, "size_bytes": o.size_bytes, "sha1": o.sha1}
+            for o in report.orphans
+        ],
+        "missing": [
+            {"id": row["id"], "rel_path": row["rel_path"], "missing_at": row["missing_at"]}
+            for row in missing
+        ],
+    }
+
+
+def _media(row) -> dict[str, Any]:  # noqa: ANN001
+    return {
+        "id": row["id"],
+        "role": row["role"],
+        "rel_path": row["rel_path"],
+        "size_bytes": row["size_bytes"],
+        "kind": row["kind"],
+        "captured_at": row["captured_at"],
+        "captured_at_source": row["captured_at_source"],
+        "duration_seconds": row["duration_seconds"],
+        "probe_state": row["probe_state"],
+        "missing_at": row["missing_at"],
+    }
+```
+
+`app/src/mediaferry/__main__.py`:
+
+```python
+"""起動エントリ.
+
+BIND_HOST の既定は loopback。Phase 4 で認証と CSRF が入るまで LAN へ公開しない。
+"""
+
+from __future__ import annotations
+
+import logging
+import os
+
+import uvicorn
+
+from .api.app import create_app
+from .settings import SETTING_SPECS
+
+
+def main() -> None:
+    app = create_app()
+    # 待ち受け先の解決には DB を要しないので、env だけで決める。
+    host = os.environ.get("MEDIAFERRY_BIND_HOST", SETTING_SPECS["BIND_HOST"].default)
+    port = int(os.environ.get("MEDIAFERRY_HTTP_PORT", SETTING_SPECS["HTTP_PORT"].default))
+    logging.basicConfig(level=os.environ.get("MEDIAFERRY_LOG_LEVEL", "info").upper())
+    uvicorn.run(app, host=host, port=port)
+
+
+if __name__ == "__main__":
+    main()
+```
+
+`app/src/mediaferry/api/__init__.py` は空ファイル。
+
+`app/Dockerfile` を Phase 1 の姿にする。ffprobe が無いと `probe_state` が
+すべて `failed` になり、§9.7 の結合グループ検出（Phase 2）が全ファイルを
+境界として扱ってしまう。
+
+```dockerfile
+FROM python:3.12-slim-bookworm
+
+# ffprobe は公開前のメタデータ確定に、ffmpeg は Phase 2 の結合に使う。
+RUN apt-get update \
+    && apt-get install --no-install-recommends -y ffmpeg \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /srv
+COPY protocol/ /srv/protocol/
+COPY app/ /srv/app/
+RUN pip install --no-cache-dir /srv/protocol \
+    && pip install --no-cache-dir /srv/app
+
+ENV MEDIAFERRY_BROKER_SOCKET=/run/mediaferry/broker.sock
+
+CMD ["python", "-m", "mediaferry"]
+```
+
+- [ ] **Step 4: テストが通ることを確認する**
+
+Run: `uv run pytest app/tests/test_api.py -v`
+Expected: すべて PASS
+
+- [ ] **Step 5: 全体を通す**
+
+Run: `uv run pytest && uv run ruff check . && uv run ruff format --check .`
+Expected: すべて PASS
+
+- [ ] **Step 6: コミット**
+
+```bash
+git add app/src/mediaferry/api app/src/mediaferry/__main__.py app/tests/test_api.py app/pyproject.toml app/Dockerfile uv.lock
+git commit -m "feat(mediaferry): expose scan and import over a loopback api"
+```
+
+---
+
+### Task 24: バックアップ手順と実 USB の確認手順
+
+**Files:**
+- Create: `docker/mediaferry/docs/phase1-backup.md`
+- Create: `docker/mediaferry/docs/phase1-manual-checklist.md`
+- Modify: `docker/mediaferry/README.md`
+- Modify: `docker/mediaferry/docs/design.md`（§18-4 を解消済みにする）
+- Modify: `docker/mediaferry/docs/HANDOFF.md`（現在地を Phase 2 へ進める）
+
+**Interfaces:**
+- Consumes: Task 1〜23 の成果
+- Produces: ドキュメントのみ
+
+§18-4 は「Phase 1 で、ライブラリからどこまで再構築できるかを明記し、定期
+バックアップ手順を用意する」と決めてある。ここで閉じる。
+
+- [ ] **Step 1: バックアップ手順を書く**
+
+`docker/mediaferry/docs/phase1-backup.md` に次を含める。
+
+- **DB が唯一の状態保持先である**こと（`failed_merges/` と `upload/` を廃止したため）
+- ライブラリから再構築できるもの / できないもの:
+
+  | 失うもの | 再構築 |
+  | --- | --- |
+  | `media_file`（実体・ハッシュ・撮影日時） | ライブラリを再スキャンすれば作り直せる（ffprobe と ファイル名から） |
+  | `source_entry`（カード側の取込済判定） | カードを再スキャンすれば作り直せる。ただし取込済の判定は一度失われ、全件が新規に見える |
+  | `merge_group`（グループの構成と採用の判断） | 自動検出はやり直せるが、**手動編集と採用の記録は失われる** |
+  | `upload_record`（宛先ごとの送信済み状態） | **再構築できない。** 再送すると Immich 側の重複判定で弾かれるが、`origin` は `unknown` に落ちるので日時補正が承認待ちになる |
+  | `destination_credential`（API キー） | **再構築できない。** 再登録が要る |
+
+- バックアップ対象: `var/mediaferry.sqlite3` と `-wal` / `-shm`。
+  **稼働中にファイルコピーしない。** `sqlite3 var/mediaferry.sqlite3 ".backup out.sqlite3"`
+  または `VACUUM INTO` を使う（WAL と整合した 1 ファイルになる）
+- バックアップファイルは 0600 で保存する（API キーの暗号文を含む）
+- `MEDIAFERRY_SECRET_KEY` は **DB のバックアップと同じ場所に置かない**。
+  同じ場所に置くと §12.3 の境界が消える
+- TrueNAS のスナップショットは DB の整合を保証しないので、
+  `.backup` を定期実行して**その出力をスナップショット対象のデータセットへ置く**
+- リストア手順: アプリを停止 → `var/` に戻す → 起動（起動時の reconciliation が
+  ファイルと DB の齟齬を回収する）
+
+- [ ] **Step 2: 実 USB の確認手順を書く**
+
+`docker/mediaferry/docs/phase1-manual-checklist.md`。実行場所は TrueNAS ホスト。
+**zsh なので行内コメントを書かない、`tail -n 1` を使う**（HANDOFF §4）。
+
+チェック項目:
+
+1. カードを挿し `GET /api/devices` に現れ、`profile_slug` が `dji-osmo` になる
+2. 内蔵ストレージ（空の DCIM）が `provisional: true` / `confidence: low` で出る
+3. `POST /api/volumes/{id}/scan` が新規件数を返す
+4. `POST /api/volumes/{id}/import` でライブラリにカードと同じ相対パスができる
+5. 取り込み中にカードを抜く → ジョブが `failed` で終わり、`library/` に中途半端な
+   ファイルが残らない
+6. 再挿入して再取り込みすると、取込済のファイルはスキップされる
+7. 取り込み中に `docker restart` → 起動時に回収され、`GET /api/orphans` が空
+8. `POST /api/jobs/{id}/cancel` で止まり、`staging/` が残らない
+9. 同名で内容の違うファイルを `library/` に置いてから取り込み、既存が
+   上書きされず別名が付く
+10. `POST /api/volumes/{id}/close` の後にカードを安全に抜ける
+
+- [ ] **Step 3: README と設計仕様書を更新する**
+
+- `README.md`: 「Phase 0 まで完了」→「Phase 1 完了」。開発コマンドに変更なし。
+  `docs/phase1-plan.md` / `phase1-backup.md` / `phase1-manual-checklist.md` を表に足す
+- `design.md` §12 の設定表に **`BROKER_SOCKET`**（既定 `/run/mediaferry/broker.sock`）を
+  足す。`compose.yaml` は既にこのキーを app へ渡しているのに、仕様書の表に無い
+- `design.md` §18 の 4 番（DB のバックアップとリストア）を
+  「**Phase 1 で解消。** 手順は `phase1-backup.md`」に書き換える
+- `design.md` §20 の Phase 1 行に完了の印を付ける
+- `HANDOFF.md`: 「現在地」を Phase 2 に進め、Phase 1 で確定した契約
+  （`ArtifactPublisher` の 11 手順、`artifact_staging` の状態、claim の作法）を
+  「蒸し返さないこと」の表に追記する
+
+- [ ] **Step 4: 検証**
+
+Run: `uv run pytest && uv run ruff check . && uv run ruff format --check .`
+Expected: すべて PASS
+
+`docs/` のリンク切れが無いことを目視で確認する。
+
+- [ ] **Step 5: コミット**
+
+```bash
+git add docker/mediaferry/docs docker/mediaferry/README.md
+git commit -m "docs(mediaferry): document backups and close phase 1"
+```
+
+---
+
+## 実装順序と依存
+
+```
+1 (DB 基盤)
+├─ 2 (job/setting) ─ 6 (settings) ─┐
+├─ 3 (profile/source) ─ 13 (registry) ─┐
+├─ 4 (artifact/merge) ─┐              │
+└─ 5 (dest/upload)     │              │
+                       │              │
+7 (crypto)  8 (fingerprint)  9 (profile model) ─ 10 (matching)
+11 (timestamps)  12 (naming)  15 (fs)  16 (ffprobe)
+                       │              │
+                       └─ 14 (jobs) ─ 17 (publisher) ─ 18 (scanner) ─ 19 (importer)
+                                              └─ 20 (reconciler) ─ 21 (crash tests)
+                                                        └─ 22 (volumes) ─ 23 (api) ─ 24 (docs)
+```
+
+Task 7〜12・15・16 は互いに独立で、Task 1 の後ならいつでも着手できる。
+並行して進める場合はこの 8 つを分けるのが安全。
+
+## Phase 1 の完了条件（§20）
+
+- [ ] 実 USB で取り込める（`phase1-manual-checklist.md` の 10 項目すべて）
+- [ ] §9.3 の**任意の手順**で落としても reconciliation が回収する
+      （Task 21 の 22 ケース）
+- [ ] `uv run pytest` / `ruff check` / `ruff format --check` がすべて通る
+- [ ] API は loopback バインドのまま。認証と CSRF は Phase 4
+
+## Phase 1 でやらないこと（意図的な除外）
+
+| 項目 | いつ |
+| --- | --- |
+| 結合グループの検出・結合・検証 | Phase 2 |
+| §10 の選択肢の提示規則 | Phase 2 |
+| Immich の状態機械・転送先 CRUD・接続検証 | Phase 3（スキーマと暗号フォーマットだけ Phase 1 で固定済み） |
+| SSE（`GET /events`） / React SPA / 認証 / CSRF | Phase 4 |
+| `generic-dcim` / `canon-eos` プロファイル、プロファイル編集 UI | Phase 5 |
+| `DeviceMonitor` の uevent 購読（自動検出） | mountd 側。Phase 1 は `list_volumes` のポーリングで足りる |
+| サムネイル生成 | Phase 4（画面と一緒） |
+| `recompute_timestamps` / `deep_verify` ジョブ | 種別は `job.type` の CHECK に入れてある。実装は必要になった時点 |
+
+
