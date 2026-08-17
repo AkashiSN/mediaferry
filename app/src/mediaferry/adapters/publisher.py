@@ -16,6 +16,8 @@ import hashlib
 import json
 import os
 import sqlite3
+import threading
+import time
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -26,7 +28,7 @@ from ..clock import now_iso
 from ..core.naming import candidate_paths, staging_rel_path
 from ..core.timestamps import CapturedAt
 from ..db.connection import immediate
-from ..db.jobs import JobContext, LeaseLost
+from ..db.jobs import LEASE_SECONDS, JobContext, LeaseLost
 from ..ids import new_id
 from .ffprobe import MediaProbe
 from .fs import fsync_dir
@@ -45,12 +47,25 @@ STEP_COMMITTED = 11
 
 COPY_CHUNK = 4 * 1024 * 1024
 
+# リース (60 秒) の 1/3 ごとに延ばす。30 GiB の走査はリースより長く、
+# 読み出し速度は環境で桁が変わるので、バイト数ではなく時間で決める。
+HEARTBEAT_INTERVAL = LEASE_SECONDS / 3
+
 
 class PublishAborted(RuntimeError):
     """staged へ進む前に中止した.
 
     durable なものは何も残っていない（writing の行だけが残り、次回起動で
     破棄される）。呼び出し元は source_entry を差し戻して再実行してよい。
+    """
+
+
+class PublishCancelled(PublishAborted):
+    """staged へ進む前にキャンセル要求を観測した.
+
+    `PublishAborted` の派生にしてあるので、既存の呼び出し側は今までどおり
+    「durable なものは残っていない」として扱える。結合の呼び出し元は、
+    これを見てグループを detected へ戻す。
     """
 
 
@@ -130,6 +145,37 @@ class ArtifactPublisher:
         request: ArtifactRequest,
         write: Callable[[HashingWriter], None],
     ) -> PublishedArtifact:
+        """staging へ書きながら公開する（取り込み）."""
+        return self._publish(
+            ctx,
+            request,
+            lambda staging_abs: self._materialise_write(staging_abs, write, request.mtime_ns, ctx),
+        )
+
+    def publish_prepared(
+        self, ctx: JobContext, request: ArtifactRequest, prepared_abs: Path
+    ) -> PublishedArtifact:
+        """既にできているファイルを公開する（結合）.
+
+        `work/` と `staging/` は同じファイルシステムなので `os.link` で移せる
+        （§7）。結合物をもう一度書き直さない。SHA-1 は 1 パス読んで確定する。
+        手順 1 と 3 以降は `publish` と同じ経路を通るので、どこで落ちても
+        reconciliation が同じように回収する。
+        """
+        return self._publish(
+            ctx,
+            request,
+            lambda staging_abs: self._materialise_link(
+                staging_abs, prepared_abs, request.mtime_ns, ctx
+            ),
+        )
+
+    def _publish(
+        self,
+        ctx: JobContext,
+        request: ArtifactRequest,
+        materialise: Callable[[Path], tuple[int, str]],
+    ) -> PublishedArtifact:
         staging_id = new_id()
         staging_rel = staging_rel_path(ctx.job_id, staging_id)
         staging_abs = self._data_root / staging_rel
@@ -153,36 +199,24 @@ class ArtifactPublisher:
         )
         self._checkpoint(STEP_WRITING_ROW)
 
-        # 2. 書き込み。SHA-1 はストリームで取る。
-        #    ジョブ用ディレクトリを新しく作ったときは、その名前を持つ親
-        #    （staging/）も fsync する。中のファイルだけ永続化しても、
-        #    <job-id> のエントリが失われれば丸ごと消える。
+        # 2〜3. 実体を staging に置く。ジョブ用ディレクトリを新しく作ったときは、
+        #       その名前を持つ親（staging/）も fsync する。中のファイルだけ
+        #       永続化しても、<job-id> のエントリが失われれば丸ごと消える。
         if not staging_abs.parent.exists():
             staging_abs.parent.mkdir(parents=True, exist_ok=True)
             fsync_dir(staging_abs.parent.parent)
-        with staging_abs.open("wb") as fileobj:
-            writer = HashingWriter(fileobj)
-            write(writer)
-            fileobj.flush()
-            self._checkpoint(STEP_WRITTEN)
-            # mtime は fsync より前に付ける。後に付けると metadata の
-            # 永続化が保証されない。
-            os.utime(fileobj.fileno(), ns=(request.mtime_ns, request.mtime_ns))
-            # 3. 中身とディレクトリエントリの両方を永続化する。親を fsync
-            #    しないと、電源断で「DB は staged、ファイルは無い」になる。
-            os.fsync(fileobj.fileno())
-        fsync_dir(staging_abs.parent)
-        self._checkpoint(STEP_FSYNCED)
+        size, sha1 = materialise(staging_abs)
 
-        # 4. サイズとハッシュの検証
+        # 4. サイズの検証
         on_disk = staging_abs.stat().st_size
-        if on_disk != writer.size:
-            raise PublishAborted(f"書き込みサイズが一致しない（{on_disk} != {writer.size}）")
+        if on_disk != size:
+            raise PublishAborted(f"書き込みサイズが一致しない（{on_disk} != {size}）")
         self._checkpoint(STEP_VERIFIED)
 
         # 5. メタデータは公開前に確定させる。実体はあるがメタデータが欠けたまま
-        #    永久にスキップされる状態を作らない。
-        probe = self._probe.describe(staging_abs, request.extension)
+        #    永久にスキップされる状態を作らない。ffprobe の timeout はリースと
+        #    同値なので、囲まないと手順 7 で失効しうる。
+        probe = _with_lease_pulse(ctx, lambda: self._probe.describe(staging_abs, request.extension))
         metadata = {
             "role": request.role,
             # 衝突時の別名系列は必ず「最初に望んだパス」から辿る。再開時に
@@ -224,8 +258,8 @@ class ArtifactPublisher:
                     " WHERE id = ?",
                     (
                         final_rel,
-                        writer.size,
-                        writer.sha1,
+                        size,
+                        sha1,
                         json.dumps(metadata, ensure_ascii=False),
                         now_iso(),
                         staging_id,
@@ -242,6 +276,62 @@ class ArtifactPublisher:
         except Exception as exc:
             # ここから先の失敗は「取り込み失敗」ではない。回収は起動時に走る。
             raise PublishInterrupted(str(exc)) from exc
+
+    def _materialise_write(
+        self,
+        staging_abs: Path,
+        write: Callable[[HashingWriter], None],
+        mtime_ns: int,
+        ctx: JobContext,
+    ) -> tuple[int, str]:
+        """書きながら SHA-1 を取る. 読み直しを 1 回省く."""
+        with staging_abs.open("wb") as fileobj:
+            writer = HashingWriter(fileobj)
+            write(writer)
+            fileobj.flush()
+            self._checkpoint(STEP_WRITTEN)
+            # mtime は fsync より前に付ける。後に付けると metadata の
+            # 永続化が保証されない。
+            os.utime(fileobj.fileno(), ns=(mtime_ns, mtime_ns))
+            # 3. 中身とディレクトリエントリの両方を永続化する。親を fsync
+            #    しないと、電源断で「DB は staged、ファイルは無い」になる。
+            #    **16 GiB を書いた直後の fsync はリースより長くなりうる。**
+            _with_lease_pulse(ctx, lambda: os.fsync(fileobj.fileno()))
+        fsync_dir(staging_abs.parent)
+        self._checkpoint(STEP_FSYNCED)
+        return writer.size, writer.sha1
+
+    def _materialise_link(
+        self, staging_abs: Path, prepared_abs: Path, mtime_ns: int, ctx: JobContext
+    ) -> tuple[int, str]:
+        """既存のファイルを staging へ link し、1 パス読んで SHA-1 を取る.
+
+        30 GiB の走査はリース（60 秒）より長い。**chunk 境界がキャンセル
+        ポイントで、heartbeat は時間で打つ。** 打たないと、読み切った後の
+        手順 7 でリースが失効し、検証済みの結合物が捨てられる。
+        """
+        os.link(prepared_abs, staging_abs)
+        digest = hashlib.sha1(usedforsecurity=False)
+        size = 0
+        last_beat = time.monotonic()
+        with staging_abs.open("rb") as fileobj:
+            while chunk := fileobj.read(COPY_CHUNK):
+                digest.update(chunk)
+                size += len(chunk)
+                if ctx.cancelled():
+                    raise PublishCancelled("SHA-1 の走査中にキャンセル要求を観測した")
+                if time.monotonic() - last_beat >= HEARTBEAT_INTERVAL:
+                    # **バイト数ではなく経過時間で打つ。** 低速な読み出しでは、
+                    # 閾値バイトに達する前にリースが切れる。
+                    ctx.heartbeat()
+                    last_beat = time.monotonic()
+            self._checkpoint(STEP_WRITTEN)
+            os.utime(staging_abs, ns=(mtime_ns, mtime_ns))
+            # 30 GiB を link した直後の fsync はリースより長くなりうる。
+            _with_lease_pulse(ctx, lambda: os.fsync(fileobj.fileno()))
+        fsync_dir(staging_abs.parent)
+        self._checkpoint(STEP_FSYNCED)
+        return size, digest.hexdigest()
 
     def resume(self, staging_id: str) -> PublishedArtifact | None:
         """reconciliation から呼ぶ. 永続化済みの情報だけを使い、パスを推測しない."""
@@ -398,6 +488,46 @@ class ArtifactPublisher:
         return self._conn.execute(
             "SELECT * FROM artifact_staging WHERE id = ?", (staging_id,)
         ).fetchone()
+
+
+def _with_lease_pulse[T](ctx: JobContext, work: Callable[[], T]) -> T:
+    """リースを延ばしながら、中断できない同期処理を待つ.
+
+    `os.fsync` と ffprobe は、どちらも 1 回でリース (60 秒) を超えうるのに
+    途中で止められない。処理は別スレッドで走らせ、**待つ側（ジョブの
+    スレッド）が heartbeat を打つ**。DB へ触るのは待つ側だけなので、接続は
+    スコープごとに 1 本のままで済む（トランザクションは接続に属する）。
+
+    リースを失ったら、処理の完了を待ってから送出する。走っているスレッドを
+    残したまま抜けると、後から staging へ書き込むことになる。
+    """
+    outcome: list[T] = []
+    failure: list[BaseException] = []
+
+    def run() -> None:
+        try:
+            outcome.append(work())
+        except BaseException as exc:  # noqa: BLE001 - 呼び出し側へそのまま渡す
+            failure.append(exc)
+
+    thread = threading.Thread(target=run, daemon=True)
+    thread.start()
+    lost: LeaseLost | None = None
+    while True:
+        thread.join(timeout=HEARTBEAT_INTERVAL)
+        if not thread.is_alive():
+            break
+        if lost is None:
+            try:
+                ctx.heartbeat()
+            except LeaseLost as exc:
+                # 打てなくなっても待ち続ける。処理の完了を待ってから送出する。
+                lost = exc
+    if lost is not None:
+        raise lost
+    if failure:
+        raise failure[0]
+    return outcome[0]
 
 
 def _collision_stamp(mtime_ns: int) -> str:

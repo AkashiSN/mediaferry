@@ -50,7 +50,7 @@ def main() -> None:
     profile = registry.current("dji-osmo")
 
     store = JobStore(conn)
-    store.enqueue(kind if kind == "merge" else "import", {})
+    store.enqueue("import" if kind == "import" else "merge", {})
     ctx = store.claim_next()
 
     source_entry_id = merge_group_id = None
@@ -61,7 +61,7 @@ def main() -> None:
 
     publisher = CrashingPublisher(conn, data_root, _Probe(), die_after=die_after)
     request = ArtifactRequest(
-        kind=kind,
+        kind="import" if kind == "import" else "merge",
         role="original" if kind == "import" else "derived",
         profile_id=profile.profile_id,
         profile_revision_id=profile.revision_id,
@@ -82,7 +82,14 @@ def main() -> None:
         source_entry_id=source_entry_id,
         merge_group_id=merge_group_id,
     )
-    publisher.publish(ctx, request, lambda writer: writer.write(PAYLOAD))
+    if kind == "merge_prepared":
+        work = data_root / "work" / ctx.job_id
+        work.mkdir(parents=True, exist_ok=True)
+        prepared = work / "MERGED.MP4"
+        prepared.write_bytes(PAYLOAD)
+        publisher.publish_prepared(ctx, request, prepared)
+    else:
+        publisher.publish(ctx, request, lambda writer: writer.write(PAYLOAD))
     # ここへ来るのは die_after が 11 より大きいときだけ。
     sys.exit(0)
 

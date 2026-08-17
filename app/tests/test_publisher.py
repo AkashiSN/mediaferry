@@ -1,6 +1,10 @@
 import hashlib
 import json
+import os
+import shutil
 import sqlite3
+import stat
+import time
 from datetime import datetime
 
 import pytest
@@ -11,14 +15,16 @@ from mediaferry.adapters.publisher import (
     ArtifactRequest,
     HashingWriter,
     PublishAborted,
+    PublishCancelled,
     PublishInterrupted,
     StagingLost,
+    _with_lease_pulse,
 )
 from mediaferry.core.timestamps import CapturedAt
-from mediaferry.db.jobs import JobStore
+from mediaferry.db.jobs import JobStore, LeaseLost
 from mediaferry.db.profiles import ProfileRegistry
 
-from .test_schema_artifacts import a_source_entry
+from .test_schema_artifacts import a_merge_group, a_source_entry
 from .test_schema_sources import a_volume
 
 
@@ -401,3 +407,228 @@ def test_the_hashing_writer_matches_hashlib(tmp_path):
         writer.write(b"cd")
     assert writer.size == 4
     assert writer.sha1 == hashlib.sha1(b"abcd", usedforsecurity=False).hexdigest()
+
+
+def a_prepared(data_root, ctx, payload=b"merged-bytes"):
+    work = data_root / "work" / ctx.job_id
+    work.mkdir(parents=True, exist_ok=True)
+    prepared = work / "MERGED.MP4"
+    prepared.write_bytes(payload)
+    return prepared
+
+
+def a_merge_request(profile, group_id, **over):
+    return a_request(
+        profile,
+        None,
+        kind="merge",
+        role="derived",
+        desired_rel_path="derived/dji-osmo/DCIM/MERGED.MP4",
+        merge_group_id=group_id,
+        **over,
+    )
+
+
+def test_a_prepared_file_is_published_without_being_rewritten(setup, data_root, db):
+    publisher, ctx, profile, _ = setup
+    group_id = a_merge_group(db, (profile.profile_id, profile.revision_id), "digest-1")
+    prepared = a_prepared(data_root, ctx)
+
+    published = publisher.publish_prepared(ctx, a_merge_request(profile, group_id), prepared)
+
+    final = data_root / "derived/dji-osmo/DCIM/MERGED.MP4"
+    assert final.read_bytes() == b"merged-bytes"
+    assert published.sha1 == hashlib.sha1(b"merged-bytes", usedforsecurity=False).hexdigest()
+    assert published.size_bytes == len(b"merged-bytes")
+    row = db.execute("SELECT * FROM media_file WHERE id = ?", (published.media_file_id,)).fetchone()
+    assert row["role"] == "derived"
+    assert (
+        db.execute(
+            "SELECT output_media_file_id FROM merge_group WHERE id = ?", (group_id,)
+        ).fetchone()[0]
+        == published.media_file_id
+    )
+
+
+def test_the_published_file_survives_the_work_directory_being_cleaned(setup, data_root, db):
+    publisher, ctx, profile, _ = setup
+    group_id = a_merge_group(db, (profile.profile_id, profile.revision_id), "digest-1")
+    prepared = a_prepared(data_root, ctx)
+    publisher.publish_prepared(ctx, a_merge_request(profile, group_id), prepared)
+
+    shutil.rmtree(data_root / "work" / ctx.job_id)
+
+    assert (data_root / "derived/dji-osmo/DCIM/MERGED.MP4").read_bytes() == b"merged-bytes"
+
+
+def test_the_prepared_file_is_linked_not_copied(setup, data_root, db):
+    publisher, ctx, profile, _ = setup
+    group_id = a_merge_group(db, (profile.profile_id, profile.revision_id), "digest-1")
+    prepared = a_prepared(data_root, ctx)
+    publisher.publish_prepared(ctx, a_merge_request(profile, group_id), prepared)
+    final = data_root / "derived/dji-osmo/DCIM/MERGED.MP4"
+    assert final.stat().st_ino == prepared.stat().st_ino
+
+
+def test_publishing_a_prepared_file_leaves_no_staging_file(setup, data_root, db):
+    publisher, ctx, profile, _ = setup
+    group_id = a_merge_group(db, (profile.profile_id, profile.revision_id), "digest-1")
+    publisher.publish_prepared(ctx, a_merge_request(profile, group_id), a_prepared(data_root, ctx))
+    assert [p for p in (data_root / "staging").rglob("*") if p.is_file()] == []
+
+
+def test_the_prepared_file_gets_the_requested_mtime(setup, data_root, db):
+    publisher, ctx, profile, _ = setup
+    group_id = a_merge_group(db, (profile.profile_id, profile.revision_id), "digest-1")
+    publisher.publish_prepared(
+        ctx,
+        a_merge_request(profile, group_id, mtime_ns=1_600_000_000_000_000_000),
+        a_prepared(data_root, ctx),
+    )
+    stat = (data_root / "derived/dji-osmo/DCIM/MERGED.MP4").stat()
+    assert stat.st_mtime_ns == 1_600_000_000_000_000_000
+
+
+def test_a_missing_prepared_file_leaves_nothing_durable(setup, data_root, db):
+    publisher, ctx, profile, _ = setup
+    group_id = a_merge_group(db, (profile.profile_id, profile.revision_id), "digest-1")
+    with pytest.raises(OSError):
+        publisher.publish_prepared(
+            ctx,
+            a_merge_request(profile, group_id),
+            data_root / "work" / ctx.job_id / "missing.MP4",
+        )
+    # writing の行だけが残る。次回起動の reconciliation が破棄する。
+    row = db.execute("SELECT state FROM artifact_staging").fetchone()
+    assert row["state"] == "writing"
+    assert db.execute("SELECT count(*) FROM media_file").fetchone()[0] == 0
+
+
+def test_the_hash_scan_pulses_the_lease(setup, data_root, db, monkeypatch):
+    """リースより長い走査でも、手順 7 で失効しない."""
+    publisher, ctx, profile, _ = setup
+    group_id = a_merge_group(db, (profile.profile_id, profile.revision_id), "digest-1")
+    # 2 chunk 以上にして、走査の途中で打つ機会を作る。
+    prepared = a_prepared(data_root, ctx, b"x" * (4 * 1024 * 1024 + 1))
+    monkeypatch.setattr("mediaferry.adapters.publisher.HEARTBEAT_INTERVAL", 0)
+    beats = []
+    monkeypatch.setattr(ctx, "heartbeat", lambda: beats.append(1))
+
+    publisher.publish_prepared(ctx, a_merge_request(profile, group_id), prepared)
+    assert beats
+
+
+def test_a_slow_probe_does_not_lose_the_lease(db, data_root, monkeypatch):
+    """ffprobe の timeout はリースと同値. 囲まないと手順 7 で失効する."""
+    ProfileRegistry(db).sync_builtins()
+    profile = ProfileRegistry(db).current("dji-osmo")
+    store = JobStore(db, lease_seconds=1)
+    store.enqueue("merge", {})
+    ctx = store.claim_next()
+    group_id = a_merge_group(db, (profile.profile_id, profile.revision_id), "digest-1")
+
+    class SlowProbe(StubProbe):
+        def describe(self, path, extension):
+            time.sleep(1.5)  # リース (1 秒) より長い
+            return super().describe(path, extension)
+
+    monkeypatch.setattr("mediaferry.adapters.publisher.HEARTBEAT_INTERVAL", 0.2)
+    publisher = ArtifactPublisher(db, data_root, SlowProbe())
+
+    published = publisher.publish_prepared(
+        ctx, a_merge_request(profile, group_id), a_prepared(data_root, ctx)
+    )
+    assert (data_root / published.rel_path).exists()
+
+
+def test_the_lease_pulse_propagates_the_failure(setup):
+    """囲んだ処理の例外は、そのまま呼び出し側へ渡す."""
+    _, ctx, _, _ = setup
+
+    def boom():
+        raise RuntimeError("fsync に失敗した")
+
+    with pytest.raises(RuntimeError, match="fsync"):
+        _with_lease_pulse(ctx, boom)
+
+
+def test_a_cancelled_hash_scan_leaves_nothing_durable(setup, data_root, db):
+    publisher, ctx, profile, _ = setup
+    group_id = a_merge_group(db, (profile.profile_id, profile.revision_id), "digest-1")
+    prepared = a_prepared(data_root, ctx)
+    db.execute("UPDATE job SET status = 'cancelling' WHERE id = ?", (ctx.job_id,))
+
+    with pytest.raises(PublishCancelled):
+        publisher.publish_prepared(ctx, a_merge_request(profile, group_id), prepared)
+    assert db.execute("SELECT count(*) FROM media_file").fetchone()[0] == 0
+    assert db.execute("SELECT state FROM artifact_staging").fetchone()["state"] == "writing"
+    assert not (data_root / "derived/dji-osmo/DCIM/MERGED.MP4").exists()
+
+
+def test_the_lease_pulse_waits_for_the_work_before_raising(setup, monkeypatch):
+    """リースを失っても、走っている処理の完了を待ってから送出する.
+
+    待たずに抜けると、残ったスレッドが後から staging へ書き込む。
+    """
+    _, ctx, _, _ = setup
+    finished = []
+
+    def slow():
+        time.sleep(0.3)
+        finished.append(1)
+
+    def lost():
+        raise LeaseLost("リースを失った")
+
+    monkeypatch.setattr("mediaferry.adapters.publisher.HEARTBEAT_INTERVAL", 0.05)
+    monkeypatch.setattr(ctx, "heartbeat", lost)
+    with pytest.raises(LeaseLost):
+        _with_lease_pulse(ctx, slow)
+    assert finished
+
+
+def test_a_slow_fsync_does_not_lose_the_lease(db, data_root, monkeypatch):
+    """16 GiB を書いた直後の fsync はリースより長くなりうる（取り込み側の穴）."""
+    ProfileRegistry(db).sync_builtins()
+    profile = ProfileRegistry(db).current("dji-osmo")
+    volume_id = a_volume(db, profile=(profile.profile_id, profile.revision_id))
+    entry_id = a_source_entry(db, volume_id)
+    store = JobStore(db, lease_seconds=1)
+    store.enqueue("import", {})
+    ctx = store.claim_next()
+
+    real_fsync = os.fsync
+
+    def slow_fsync(fd):
+        # 遅くするのはファイルの fsync だけ。ディレクトリの fsync は
+        # メタデータだけなので実際も一瞬で終わる。
+        if not stat.S_ISDIR(os.fstat(fd).st_mode):
+            time.sleep(1.5)  # リース (1 秒) より長い
+        real_fsync(fd)
+
+    from mediaferry.adapters import publisher as publisher_module
+
+    monkeypatch.setattr("mediaferry.adapters.publisher.HEARTBEAT_INTERVAL", 0.2)
+    monkeypatch.setattr(publisher_module.os, "fsync", slow_fsync)
+    publisher = ArtifactPublisher(db, data_root, StubProbe())
+
+    published = publisher.publish(ctx, a_request(profile, entry_id), write_payload(b"payload"))
+    assert (data_root / published.rel_path).exists()
+
+
+def test_a_size_that_disagrees_with_the_disk_is_aborted(setup, data_root, db, monkeypatch):
+    """手順 4。実体と記録が食い違ったまま staged へ進ませない."""
+    publisher, ctx, profile, _ = setup
+    group_id = a_merge_group(db, (profile.profile_id, profile.revision_id), "digest-1")
+    prepared = a_prepared(data_root, ctx)
+    real = publisher._materialise_link  # noqa: SLF001
+
+    def lying(*args, **kwargs):
+        size, sha1 = real(*args, **kwargs)
+        return size + 1, sha1
+
+    monkeypatch.setattr(publisher, "_materialise_link", lying)
+    with pytest.raises(PublishAborted):
+        publisher.publish_prepared(ctx, a_merge_request(profile, group_id), prepared)
+    assert db.execute("SELECT count(*) FROM media_file").fetchone()[0] == 0
+    assert db.execute("SELECT state FROM artifact_staging").fetchone()["state"] == "writing"

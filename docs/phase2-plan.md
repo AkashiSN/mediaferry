@@ -2692,15 +2692,12 @@ Expected: FAIL（`AttributeError: 'ArtifactPublisher' object has no attribute 'p
 ```python
 import threading
 import time
-from typing import TypeVar
 
 from ..db.jobs import LEASE_SECONDS, JobContext, LeaseLost
 
 # リース (60 秒) の 1/3 ごとに延ばす。30 GiB の走査はリースより長く、
 # 読み出し速度は環境で桁が変わるので、バイト数ではなく時間で決める。
 HEARTBEAT_INTERVAL = LEASE_SECONDS / 3
-
-T = TypeVar("T")
 
 
 class PublishCancelled(PublishAborted):
@@ -2712,10 +2709,11 @@ class PublishCancelled(PublishAborted):
     """
 ```
 
-そして、staged より前の**中断できない長い処理**を囲むヘルパ:
+そして、staged より前の**中断できない長い処理**を囲むヘルパ（型引数は PEP 695 の
+記法で書く。`TypeVar` を使うと ruff の `UP047` に当たる）:
 
 ```python
-def _with_lease_pulse(ctx: JobContext, work: Callable[[], T]) -> T:
+def _with_lease_pulse[T](ctx: JobContext, work: Callable[[], T]) -> T:
     """リースを延ばしながら、中断できない同期処理を待つ.
 
     `os.fsync` と ffprobe は、どちらも 1 回でリース (60 秒) を超えうるのに
@@ -2852,15 +2850,15 @@ Expected: PASS（11 段 × 3 種 + 既存の個別ケース）
 | --- | --- |
 | `_materialise_link` の `os.utime` を消す | `test_the_prepared_file_gets_the_requested_mtime` |
 | `ctx.heartbeat()` の pulse を消す | `test_the_hash_scan_pulses_the_lease` |
-| pulse をバイト数（chunk 数）で打つ形にする | **落ちない**。テストの入力が小さいため。**時間で打つ根拠は「読み出し速度が環境で桁違い」なので、`HEARTBEAT_INTERVAL` を 0 にした形でしか観測できない。** 検出できない変異として記録する |
+| pulse をバイト数（chunk 数）で打つ形にする | `test_the_hash_scan_pulses_the_lease`。計画では「落ちない」としていたが、**`HEARTBEAT_INTERVAL` を 0 にしてあるので、時間で打つ実装だけが chunk ごとに打つ**。バイト数の閾値（例: 1 GiB ごと）にすると小さい入力では 1 回も打たず落ちる |
 | `ctx.cancelled()` の確認を消す | `test_a_cancelled_hash_scan_leaves_nothing_durable` |
 | `PublishCancelled` を `PublishAborted` に戻す | 同上（`pytest.raises(PublishCancelled)` が落ちる） |
 | 手順 5 の `_with_lease_pulse` を外す | `test_a_slow_probe_does_not_lose_the_lease` |
 | `_with_lease_pulse` の `failure` の送出を消す | `test_the_lease_pulse_propagates_the_failure` |
-| `_with_lease_pulse` で `LeaseLost` を即座に送出する（thread を待たない） | **落ちない**。リースを失いながら処理が続く筋書きをテストで作っていない。**待ってから送出する根拠は「走っているスレッドが後から staging へ書く」ことなので、観測には競合の再現が要る。** 検出できない変異として記録する |
-| `os.fsync` を囲まない | **落ちない**。テストで使うファイルは小さく、fsync が一瞬で終わる。ffprobe 側の囲みで同じ仕組みを検証している（検出できない変異として記録する） |
+| `_with_lease_pulse` で `LeaseLost` を即座に送出する（thread を待たない） | `test_the_lease_pulse_waits_for_the_work_before_raising`（**追加**）。計画では「落ちない」としていたが、競合の再現は要らない。`heartbeat` が必ず `LeaseLost` を投げる ctx と、0.3 秒かかる処理を渡し、**送出された時点で処理が完了しているか**を見れば固定できる |
+| `_materialise_write` の `os.fsync` を囲まない | `test_a_slow_fsync_does_not_lose_the_lease`（**追加**）。計画では「落ちない」としていたが、`os.fsync` を差し替えて 1.5 秒（リース 1 秒より長く）かかるようにすれば観測できる。**遅くするのはファイルの fsync だけにする** —— ディレクトリの fsync まで遅くすると、`_publish` の中の `fsync_dir`（囲みの外。実際はメタデータだけで一瞬）で先に失効して、狙いの分岐へ届かない。**これは Phase 1 の取り込み側の穴をそのまま塞ぐテスト**でもある |
 | `os.link` を `shutil.copy` にする | **落ちない**（結果は同じになる）。書き直しを避けることが目的なので、検出できない変異として記録する。ただし `test_the_published_file_survives_the_work_directory_being_cleaned` は copy でも通るので、**inode の共有を直接見るテストを足す**（下記） |
-| `size` の検証（手順 4）を消す | 既存の `test_a_short_write_is_aborted`（`publish` 側）が落ちる |
+| `size` の検証（手順 4）を消す | **そのようなテストは Phase 1 に無かった**（計画の思い込み）。`_materialise_link` を差し替えて実体より 1 バイト大きい size を返させる `test_a_size_that_disagrees_with_the_disk_is_aborted` を足した |
 | `_materialise_link` の `os.fsync` を消す | **落ちない**。電源断を再現できないため。検出できない変異として記録する（`os._exit` の crash 試験はページキャッシュを失わない） |
 
 inode を直接見るテストを足す:

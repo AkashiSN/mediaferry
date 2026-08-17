@@ -43,7 +43,7 @@ def reconcile(data_root):
     return conn, report
 
 
-@pytest.mark.parametrize("kind", ["import", "merge"])
+@pytest.mark.parametrize("kind", ["import", "merge", "merge_prepared"])
 @pytest.mark.parametrize("step", STEPS)
 def test_reconciliation_recovers_from_a_crash_at_any_step(data_root, step, kind):
     crash_at(data_root, step, kind)
