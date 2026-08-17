@@ -1,7 +1,7 @@
 # mediaferry 引き継ぎ資料
 
 最終更新: 2026-08-18
-ブランチ: `feat/mediaferry`（`main` から 51 コミット）
+ブランチ: `main`（単独リポジトリ、55 コミット）
 
 このファイルは、別セッションが作業を引き継ぐための出発点。
 **まずここを読み、次に `design.md` §20 と該当フェーズの計画を読む。**
@@ -27,8 +27,12 @@
 uv run pytest                  411 passed
 uv run pytest -m needs_root      1 passed   ← detached mount の実証
 uv run ruff check .            All checks passed
-uv run ruff format --check .   87 files already formatted
+uv run ruff format --check .   88 files already formatted
 ```
+
+`ruff format` の対象が 88 件なのは、`docs/` を `extend-exclude` で外していても
+**ルート直下の `CLAUDE.md` は対象に入る**ため（Markdown 内のコードブロックが
+整形される）。
 
 `docker restart` や電源断に相当する試験は、§9.3 の手順 11 段すべてで子プロセスを
 `os._exit` で落として import と merge の両方を回収できることまで確認済み。
