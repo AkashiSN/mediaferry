@@ -6,6 +6,7 @@ TrueNAS カスタムアプリ。
 | ドキュメント | 内容 |
 | --- | --- |
 | [`docs/HANDOFF.md`](docs/HANDOFF.md) | **まずここ。** 現在地、確定した判断、環境の癖、次にやること |
+| [`CLAUDE.md`](CLAUDE.md) | このリポジトリの規約（コメントと docs の棲み分け、テストの作法） |
 | [`docs/design.md`](docs/design.md) | 設計仕様書（正本） |
 | [`docs/phase0-findings.md`](docs/phase0-findings.md) | Phase 0 の実測結果 |
 | [`docs/phase1-plan.md`](docs/phase1-plan.md) | Phase 1 の実装計画（実行済み） |
