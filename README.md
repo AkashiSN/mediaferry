@@ -32,7 +32,6 @@ mountd の名前空間（ホストから bind した `/dev` を含む）へ到�
 ## 開発
 
 ```bash
-cd docker/mediaferry
 uv sync --all-packages   # ワークスペースメンバーを全て入れる
 uv run pytest
 uv run ruff check .

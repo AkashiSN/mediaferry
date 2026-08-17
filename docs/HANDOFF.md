@@ -49,16 +49,16 @@ TrueNAS ホストで実行する必要がある。
 
 | ファイル | 内容 | 追跡 |
 | --- | --- | --- |
-| `docker/mediaferry/docs/design.md` | **設計仕様書。正本。** | ✅ |
-| `docker/mediaferry/docs/phase1-plan.md` | Phase 1 の実装計画。**実行済み**。実装との差分は都度書き戻してある | ✅ |
-| `docker/mediaferry/docs/phase1-backup.md` | バックアップとリストア、再構築できる範囲（§18-4） | ✅ |
-| `docker/mediaferry/docs/phase1-manual-checklist.md` | 実 USB での確認手順 | ✅ |
-| `docker/mediaferry/docs/phase0-findings.md` | Phase 0 の実測結果と設計への反映 | ✅ |
-| `docker/mediaferry/docs/HANDOFF.md` | このファイル | ✅ |
-| `docker/mediaferry/{protocol,mountd,app,spikes}/` | 実装 | ✅ |
+| `docs/design.md` | **設計仕様書。正本。** | ✅ |
+| `docs/phase1-plan.md` | Phase 1 の実装計画。**実行済み**。実装との差分は都度書き戻してある | ✅ |
+| `docs/phase1-backup.md` | バックアップとリストア、再構築できる範囲（§18-4） | ✅ |
+| `docs/phase1-manual-checklist.md` | 実 USB での確認手順 | ✅ |
+| `docs/phase0-findings.md` | Phase 0 の実測結果と設計への反映 | ✅ |
+| `docs/HANDOFF.md` | このファイル | ✅ |
+| `{protocol,mountd,app,spikes}/` | 実装 | ✅ |
 
 **`docs/superpowers/` は `~/.gitignore_global` で除外されている。** 重要なものは
-`docker/mediaferry/docs/` に置くこと。
+`docs/` に置くこと。
 
 ---
 
@@ -118,7 +118,7 @@ Phase 0 の価値はここにある。**いずれも「実際に動かして」�
 
 - **共有データセット** `/mnt/ssd/develop-server/` が開発コンテナとホストの両方から
   同じパスで見える。ソースは `/mnt/ssd/develop-server/mediaferry/` に配置済み
-  （`git archive HEAD docker/mediaferry | tar -x -C ... --strip-components=2` で更新）
+  （`git archive HEAD | tar -x -C ...` で更新）
 - **既定シェルは zsh**。以下は bash と違うので手順書に書かない
   - 行内コメント（`cmd  # 説明`）が**無効**。`#` 以降が引数として渡る
   - `tail -1` が `option used in invalid context` になる。`tail -n 1` を使う
@@ -217,7 +217,6 @@ codex は `chezmoi` チームに参加済み。落ちていたら
 ## 6. 開発コマンド
 
 ```bash
-cd docker/mediaferry
 uv sync --all-packages        # --all-packages が必須。素の sync ではメンバーが入らない
 uv run pytest
 uv run pytest -m needs_root   # ユーザ名前空間が使える環境でのみ通る

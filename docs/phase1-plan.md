@@ -1,5 +1,9 @@
 # mediaferry Phase 1（基盤 + 取り込み）実装計画
 
+> **この計画は実行済み。** Phase 0 / Phase 1 は dotfiles リポジトリの
+> `docker/mediaferry/` で進め、Phase 1 の完了時にこの独立リポジトリへ移した。
+> 本文中のパスは移設後の配置（リポジトリのルート起点）に直してある。
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** DB スキーマ・`ArtifactPublisher`・`Reconciler`・プロファイルリビジョンを確定し、既知の DJI カードを実 USB から手動 scan / import できる API を作る。
@@ -8,13 +12,13 @@
 
 **Tech Stack:** Python 3.12 / uv workspace / SQLite（WAL）/ FastAPI / cryptography（AES-256-GCM）/ PyYAML / ffprobe / pytest / ruff
 
-**Spec:** `docker/mediaferry/docs/design.md`（正本）。実測で確定した事項は `docker/mediaferry/docs/phase0-findings.md`、作業の前提は `docker/mediaferry/docs/HANDOFF.md`。
+**Spec:** `docs/design.md`（正本）。実測で確定した事項は `docs/phase0-findings.md`、作業の前提は `docs/HANDOFF.md`。
 
 ## Global Constraints
 
 すべてのタスクの要件に、以下が暗黙に含まれる。
 
-- **作業ディレクトリは `docker/mediaferry/`。** コマンドはすべてここから実行する。
+- **作業ディレクトリはリポジトリのルート。** コマンドはすべてここから実行する。
 - Python は `>=3.12`。ruff の `line-length = 100`、`target-version = "py312"`、
   lint は `select = ["E", "F", "I", "UP", "B", "SIM", "ANN", "S"]`（`ANN401` のみ ignore）。
   `**/tests/*` は `S101` / `S105`〜`S107` / `ANN` が免除される
@@ -61,7 +65,6 @@
 ### 検証コマンド
 
 ```bash
-cd docker/mediaferry
 uv sync --all-packages     # --all-packages が必須。素の sync ではメンバーが入らない
 uv run pytest
 uv run ruff check .
@@ -10517,11 +10520,11 @@ git commit -m "feat(mediaferry): expose scan and import over a loopback api"
 ### Task 25: バックアップ手順と実 USB の確認手順
 
 **Files:**
-- Create: `docker/mediaferry/docs/phase1-backup.md`
-- Create: `docker/mediaferry/docs/phase1-manual-checklist.md`
-- Modify: `docker/mediaferry/README.md`
-- Modify: `docker/mediaferry/docs/design.md`（§18-4 を解消済みにする）
-- Modify: `docker/mediaferry/docs/HANDOFF.md`（現在地を Phase 2 へ進める）
+- Create: `docs/phase1-backup.md`
+- Create: `docs/phase1-manual-checklist.md`
+- Modify: `README.md`
+- Modify: `docs/design.md`（§18-4 を解消済みにする）
+- Modify: `docs/HANDOFF.md`（現在地を Phase 2 へ進める）
 
 **Interfaces:**
 - Consumes: Task 1〜23 の成果
@@ -10532,7 +10535,7 @@ git commit -m "feat(mediaferry): expose scan and import over a loopback api"
 
 - [ ] **Step 1: バックアップ手順を書く**
 
-`docker/mediaferry/docs/phase1-backup.md` に次を含める。
+`docs/phase1-backup.md` に次を含める。
 
 - **DB が唯一の状態保持先である**こと（`failed_merges/` と `upload/` を廃止したため）
 - ライブラリから再構築できるもの / できないもの:
@@ -10558,7 +10561,7 @@ git commit -m "feat(mediaferry): expose scan and import over a loopback api"
 
 - [ ] **Step 2: 実 USB の確認手順を書く**
 
-`docker/mediaferry/docs/phase1-manual-checklist.md`。実行場所は TrueNAS ホスト。
+`docs/phase1-manual-checklist.md`。実行場所は TrueNAS ホスト。
 **zsh なので行内コメントを書かない、`tail -n 1` を使う**（HANDOFF §4）。
 
 チェック項目:
@@ -10612,7 +10615,7 @@ Expected: すべて PASS
 - [ ] **Step 5: コミット**
 
 ```bash
-git add docker/mediaferry/docs docker/mediaferry/README.md
+git add docs README.md
 git commit -m "docs(mediaferry): document backups and close phase 1"
 ```
 

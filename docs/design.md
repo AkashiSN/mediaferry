@@ -1586,11 +1586,12 @@ services:
 
 ## 17. リポジトリ構成
 
-初期は本 dotfiles リポジトリの `docker/mediaferry/` で開発し、後に独立リポジトリへ移管する。
-そのため**環境固有の値を一切含めない**。
+Phase 0 と Phase 1 は dotfiles リポジトリの `docker/mediaferry/` で開発し、
+Phase 1 の完了時に独立リポジトリ（`AkashiSN/mediaferry`）へ移管した。移管前から
+**環境固有の値を一切含めない**方針で書いてある。
 
 ```
-docker/mediaferry/
+.
 ├── README.md
 ├── compose.yaml                # サンプル。実値はプレースホルダ
 ├── protocol/                   # ブローカープロトコル定義（両者が参照）
@@ -1628,10 +1629,10 @@ docker/mediaferry/
 
 | # | 項目 | 内容 | 対処 |
 | --- | --- | --- | --- |
-| 1 | fd 受け渡し | ~~未検証~~ **Phase 0 で解消。** コンテナ間の `SCM_RIGHTS`、別 mount namespace の dirfd への `os.listdir` / `dir_fd=` 付き `os.open`、detached マウントによる `..` の固定を実 exfat デバイスで確認した | 詳細は `docker/mediaferry/docs/phase0-findings.md` |
-| 2 | 巨大ファイルのアップロード | ~~未検証~~ **Phase 0 で解消。** 内部エンドポイント経由で 28.36 GiB を完走した（201 created、84.5 秒、343.82 MiB/s）。送信バイト数とサーバ側のサイズが入力と完全一致し、RSS の増分は 0.00 B だった。公開 URL（CDN 経由）は 622 MiB で 502 になるため §12.3 の分離が必須 | 詳細は `docker/mediaferry/docs/phase0-findings.md` |
-| 3 | Immich API の互換性 | ~~未検証~~ **Phase 0 で解消。** 対象版 v3.1.0。サーバインスタンス ID は非公開のため、`remote_user_id` を向き先の変化を検知する guard として観測する（同一性ではない。§8）。`deviceAssetId` は資産応答に無いため、自作判別は応答の `status` と初回 `checking` の結果で行う。checksum は base64 に統一 | 詳細は `docker/mediaferry/docs/phase0-findings.md` |
-| 4 | DB のバックアップとリストア | SQLite が `failed_merges/` に代わる唯一の状態保持先になるため、失うと再構築が必要 | ~~未確定~~ **Phase 1 で解消。** 再構築できる範囲・`.backup` による取得・マスター鍵を同じ搬出先へ置かないこと・リストア手順を `docker/mediaferry/docs/phase1-backup.md` に定めた |
+| 1 | fd 受け渡し | ~~未検証~~ **Phase 0 で解消。** コンテナ間の `SCM_RIGHTS`、別 mount namespace の dirfd への `os.listdir` / `dir_fd=` 付き `os.open`、detached マウントによる `..` の固定を実 exfat デバイスで確認した | 詳細は `docs/phase0-findings.md` |
+| 2 | 巨大ファイルのアップロード | ~~未検証~~ **Phase 0 で解消。** 内部エンドポイント経由で 28.36 GiB を完走した（201 created、84.5 秒、343.82 MiB/s）。送信バイト数とサーバ側のサイズが入力と完全一致し、RSS の増分は 0.00 B だった。公開 URL（CDN 経由）は 622 MiB で 502 になるため §12.3 の分離が必須 | 詳細は `docs/phase0-findings.md` |
+| 3 | Immich API の互換性 | ~~未検証~~ **Phase 0 で解消。** 対象版 v3.1.0。サーバインスタンス ID は非公開のため、`remote_user_id` を向き先の変化を検知する guard として観測する（同一性ではない。§8）。`deviceAssetId` は資産応答に無いため、自作判別は応答の `status` と初回 `checking` の結果で行う。checksum は base64 に統一 | 詳細は `docs/phase0-findings.md` |
+| 4 | DB のバックアップとリストア | SQLite が `failed_merges/` に代わる唯一の状態保持先になるため、失うと再構築が必要 | ~~未確定~~ **Phase 1 で解消。** 再構築できる範囲・`.backup` による取得・マスター鍵を同じ搬出先へ置かないこと・リストア手順を `docs/phase1-backup.md` に定めた |
 | 5 | 同時に複数デバイス | 2 枚のカードを同時に挿すケース | ジョブキューで直列化。`volume_presence` で個別に追跡 |
 | 6 | 内蔵ストレージと SD の同時取り込み | Osmo は 2 ボリュームを同時に出し、同じ `library/dji-osmo/` に合流する | ファイル名が撮影時刻で一意なので実害は出ない見込み。衝突時は §9.3 の規則で処理する |
 | 7 | 孤立ファイルの扱い | reconciliation で見つかった orphan を自動削除するとデータを失う経路になる | 削除せず画面に出し、ユーザの判断に委ねる |
@@ -1741,7 +1742,7 @@ Phase 2 で derived 専用の crash model を後付けすると importer と別�
 ### Phase 0 の実測と利用者の要望による変更（2026-08-17）
 
 実装前の実測と、その過程で出た要望を反映した。詳細は
-`docker/mediaferry/docs/phase0-findings.md`。
+`docs/phase0-findings.md`。
 
 | 変更 | 理由 |
 | --- | --- |
