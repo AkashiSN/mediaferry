@@ -8218,16 +8218,20 @@ def test_a_swapped_card_is_judged_on_its_own_contents(
     epoch も据え置きのままになる。既存 fd は open_tree で切り離した旧カードを
     指したままなので、流用すると旧カードの中身で新カードを判定する。
     """
+    import os
+
     svc = service(db, broker)
     selection = svc.refresh()[0].selection
     handle = svc.open(selection)
     svc.release(selection)
 
-    # 新しく open するものだけが差し替わる。既存 fd は旧カードを見続ける。
+    # ジョブが終われば handle はその場で閉じる。取っておくと、次のジョブが
+    # 差し替え後もこの fd（＝旧カード）を読むことになる。
+    with pytest.raises(OSError):
+        os.listdir(handle.dirfd)
+
+    # 新しく open するものだけが差し替わる（世代も epoch も据え置き）。
     mount_manager.target = a_swapped_card(tmp_path)
-    assert "DJI_001" in __import__("os").listdir(
-        __import__("os").open("DCIM", 0, dir_fd=handle.dirfd)
-    )
 
     view = svc.refresh()[0]
     assert view.profile_slug != "dji-osmo"
@@ -8235,7 +8239,6 @@ def test_a_swapped_card_is_judged_on_its_own_contents(
 
     # 判定だけでなく、次に開く dirfd も新しいカードでなければならない。
     # 画面には新カードが見えるのに取り込むのは旧カード、が最悪の食い違い。
-    os = __import__("os")
     current = svc.open(view.selection)
     dcim = os.open("DCIM", os.O_RDONLY | os.O_DIRECTORY, dir_fd=current.dirfd)
     try:
@@ -8475,9 +8478,13 @@ class VolumeBusy(RuntimeError):
 class VolumeObservation:
     """今この瞬間に観測した「接続」の同一性.
 
-    mountd の起動（`broker_epoch`）と世代（`generation`）を含むので、抜き差しや
-    mountd の再起動をまたいで偶然一致することはない。開いてある dirfd を
-    再利用してよいかの判定も、これが完全一致するときだけに限る。
+    キューに積んだ操作が、選んだ時点と同じ接続に対して実行されることを
+    確かめるために使う。
+
+    **これは「接続」の同一性であって「媒体」の同一性ではない。** mountd の
+    `generation` は観測した集合の指紋が変わったときだけ進むので、同じ UUID・
+    型・容量のカードが観測の合間に同じノードで差し替わると据え置きになる。
+    したがって、**開いてある dirfd を使い回してよい根拠にはできない**。
     """
 
     broker_epoch: str
@@ -9915,6 +9922,13 @@ Task 7〜12・15・16・22 は互いに独立で、Task 1 の後ならいつで�
 `VolumeObservation` は**接続の同一性であって媒体の同一性ではない**。この区別を
 守れる場所（selection の照合）と守れない場所（開いた fd の使い回し）を分け、
 後者を作らないことで解決している。
+
+### 6 巡目（blocker 1 / minor 1）で反映した指摘
+
+| 指摘 | 反映先 |
+| --- | --- |
+| 差し替えテストに旧契約の assertion（`release()` 後の dirfd で旧カードを確認する）が残っており、`EBADF` で判定まで到達しない | その行を「旧 fd がもう使えない」の確認に置き換えた。キャッシュ型へ戻す変異は前半で、stale 再利用は後半で落ちる |
+| `VolumeObservation` の docstring に「完全一致なら dirfd を再利用してよい」が残っていた | 「接続の同一性であって媒体の同一性ではないので、dirfd 再利用の根拠にできない」に置換 |
 
 ### 退けた指摘
 
