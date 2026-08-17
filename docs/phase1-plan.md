@@ -4327,11 +4327,10 @@ def test_a_changed_builtin_creates_a_new_revision_and_keeps_the_old_one(db):
     registry.sync_builtins()
     old = registry.current("dji-osmo")
 
-    db.execute(
-        "UPDATE profile_revision SET id = id",  # 触らない。定義側を変える
+    # profile_revision は trigger で不変なので、行ではなく定義側を差し替える
+    changed = definition_to_json(old.definition).replace(
+        '"tolerance_seconds":5', '"tolerance_seconds":9'
     )
-    changed = definition_to_json(old.definition).replace('"tolerance_seconds":5',
-                                                         '"tolerance_seconds":9')
     registry._upsert_revision("dji-osmo", changed)  # noqa: SLF001
 
     new = registry.current("dji-osmo")
@@ -4448,8 +4447,14 @@ class ProfileRegistry:
                 "INSERT INTO profile_revision"
                 " (id, profile_id, revision, definition_json, schema_version, created_at)"
                 " VALUES (?, ?, ?, ?, ?, ?)",
-                (revision_id, profile_id, revision, definition_json,
-                 PROFILE_SCHEMA_VERSION, now_iso()),
+                (
+                    revision_id,
+                    profile_id,
+                    revision,
+                    definition_json,
+                    PROFILE_SCHEMA_VERSION,
+                    now_iso(),
+                ),
             )
             self._conn.execute(
                 "UPDATE device_profile SET current_revision_id = ? WHERE id = ?",
@@ -4510,7 +4515,13 @@ def _to_ref(row: sqlite3.Row) -> ProfileRef:
 Run: `uv run pytest app/tests/test_profile_registry.py -v`
 Expected: すべて PASS
 
-- [ ] **Step 5: コミット**
+- [ ] **Step 5: 変異試験**
+
+`_upsert_revision` の「定義が同じなら何もしない」判定を削って
+`test_sync_is_idempotent` が、`current_revision_id` の UPDATE を削って
+`test_current_points_at_the_latest_revision` が落ちることを確認してから戻す。
+
+- [ ] **Step 6: コミット**
 
 ```bash
 git add app/src/mediaferry/db/profiles.py app/tests/test_profile_registry.py
