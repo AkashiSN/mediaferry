@@ -4551,8 +4551,24 @@ def test_a_stale_digest_takes_the_derived_output_out_of_the_list(db, profile):
 
 
 def test_a_group_that_is_not_merged_yet_hides_both_sides(db, profile):
+    # 出力の実体があっても、merged になるまでは出さない（結合の途中で
+    # 落ちて output_media_file_id だけが入っている状態がありうる）。
     members = a_pair(db, profile)
-    a_group(db, profile, members, status="merging")
+    a_group(db, profile, members, status="merging", output_id=a_derived(db, profile))
+    assert SelectionService(db, ProfileRegistry(db)).selectable() == []
+
+
+def test_a_superseded_group_is_hidden_even_when_its_digest_matches(db, profile):
+    """supersede の判定は digest の一致とは別に要る.
+
+    member を持つグループなら trigger が active を落とすので digest 側でも
+    弾けるが、それに依存すると「supersede されても出力は出さない」という
+    規則が偶然成り立っているだけになる。
+    """
+    output_id = a_derived(db, profile)
+    old = a_group(db, profile, [], output_id=output_id)
+    newer = a_merge_group(db, (profile.profile_id, profile.revision_id), "digest-new")
+    db.execute("UPDATE merge_group SET superseded_by_id = ? WHERE id = ?", (newer, old))
     assert SelectionService(db, ProfileRegistry(db)).selectable() == []
 
 
@@ -4592,7 +4608,7 @@ def test_the_list_is_capped(db, profile):
     assert len(SelectionService(db, ProfileRegistry(db)).selectable(limit=3)) == 3
 
 
-def test_the_members_are_read_in_one_query(db, profile, monkeypatch):
+def test_the_members_are_read_in_one_query(db, profile):
     """derived 1 件ごとに問い合わせない（グループが増えても query 数が伸びない）."""
     for index in range(3):
         members = a_pair(db, profile, prefix=f"G{index}")
@@ -4600,10 +4616,14 @@ def test_the_members_are_read_in_one_query(db, profile, monkeypatch):
                                  rel_path=f"derived/dji-osmo/DCIM/M{index}.MP4")
         a_group(db, profile, members, output_id=output_id)
 
+    # sqlite3.Connection.execute は読み取り専用なので差し替えられない。
+    # 実際に発行された SQL を trace で数える。
     calls = []
-    real = db.execute
-    monkeypatch.setattr(db, "execute", lambda sql, *args: (calls.append(sql), real(sql, *args))[1])
-    SelectionService(db, ProfileRegistry(db)).selectable()
+    db.set_trace_callback(calls.append)
+    try:
+        SelectionService(db, ProfileRegistry(db)).selectable()
+    finally:
+        db.set_trace_callback(None)
 
     assert len([sql for sql in calls if "merge_member mm" in sql and "JOIN media_file" in sql]) == 1
 
@@ -4812,7 +4832,9 @@ Expected: PASS（15 件）
 | `_ORIGINALS` の `NOT EXISTS` を消す | `test_a_member_of_an_active_group_is_not_selectable` |
 | `missing_at IS NULL` を消す | `test_a_missing_file_is_not_selectable` |
 | `_DERIVED` の `g.status = 'merged'` を消す | `test_a_group_that_is_not_merged_yet_hides_both_sides` |
-| `_DERIVED` の `superseded_by_id IS NULL` を消す | **落ちない**。supersede は Phase 4 で入るので、テストデータに supersede されたグループが無い。**`superseded_by_id` を立てたケースを足す**（下記） |
+| `_DERIVED` の `superseded_by_id IS NULL` を消す | supersede したグループのテスト（下記）を足しても**落ちない**。supersede の trigger が member の `active` を落とすので、digest の再計算が先に不一致になる。**member を持たないグループを supersede する**テスト（`test_a_superseded_group_is_hidden_even_when_its_digest_matches`）で、digest 側に依存せず固定する |
+| `_DERIVED` の `status = 'merged'` を消す | `test_a_group_that_is_not_merged_yet_hides_both_sides`。ただし**そのグループに出力を持たせないと落ちない**（JOIN が空になる）。`output_id` を渡す形に直した |
+| `_MEMBERS_OF_UNMERGED` の `mm.active = 1` を消す | **落ちない**。`active` は `superseded_by_id IS NULL` の写しで、両方向の trigger が一致を強制する（`0003`）。同じ行の `g.superseded_by_id IS NULL` と等価なので、片方だけを消しても結果が変わらない。スキーマが保証する冗長として記録する |
 | `_matching_digests` を常に全件一致にする | `test_a_stale_digest_takes_the_derived_output_out_of_the_list` |
 | member をグループごとに 1 回ずつ引く形へ戻す | `test_the_members_are_read_in_one_query` |
 | `_verification_passed` を `bool(...)` に戻す | `test_a_string_false_is_not_a_pass` |
