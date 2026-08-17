@@ -4571,6 +4571,27 @@ async def test_each_job_gets_its_own_connection(db, database):
 
 
 @pytest.mark.anyio
+async def test_a_job_claimed_while_stopping_is_cancelled(db, database):
+    """claim を待っている間に停止要求が来ると、_current がまだ None なので
+    stop() は cancel を打てない. 掴んだ後に確認しないと、停止が長いジョブの
+    完走待ちになる."""
+    store = JobStore(db)
+    observed = []
+
+    def handler(ctx, conn):
+        observed.append(ctx.cancelled())
+
+    runner = JobRunner(database, poll_interval=0.01)
+    runner.register("import", handler)
+    job_id = store.enqueue("import", {})
+    await runner.stop()
+    await runner.run_forever()
+
+    assert observed == [True]
+    assert store.get(job_id)["status"] == "cancelled"
+
+
+@pytest.mark.anyio
 async def test_stop_waits_for_the_running_handler(db, database):
     """to_thread のハンドラは cancel では止まらない. 待たずに資源を閉じない."""
     store = JobStore(db)
@@ -4907,6 +4928,12 @@ class JobRunner:
                     except TimeoutError:
                         pass
                     continue
+                if self._stopping.is_set():
+                    # claim を待っている間に停止要求が来た。この時点では
+                    # `_current` がまだ None なので stop() は cancel を打てない。
+                    # 掴んでしまったジョブは、ハンドラが最初のキャンセル確認で
+                    # 降りるように cancel を立ててから渡す。
+                    await asyncio.to_thread(poll_store.request_cancel, ctx.job_id)
                 await self._run_one(ctx, poll_store)
         finally:
             self._poll_store = None
@@ -7758,8 +7785,12 @@ git commit -m "feat(mountd): report the usb product string over the wire"
 - Produces:
   - `mediaferry.core.manifest.content_manifest_digest(names: Iterable[str]) -> str`
   - `mediaferry.adapters.fs.exists_beneath(dirfd, rel_path) -> bool`
-  - `mediaferry.jobs.volumes.VolumeSelection(volume_instance_id, presence_id, broker_epoch,
-    generation, volume_key, major, minor, fs_uuid, profile_id, profile_revision_id)`
+  - `mediaferry.db.sources.upsert_device` / `resolve_volume_instance` / `sync_presence` /
+    `detach_absent`
+  - `mediaferry.jobs.volumes.VolumeObservation(broker_epoch, generation, volume_key,
+    major, minor, fs_uuid)` — `.of(volume)`
+  - `mediaferry.jobs.volumes.VolumeSelection(volume_instance_id, presence_id, observation,
+    profile_id, profile_revision_id)` — `.to_params()` / `.from_params()`
   - `mediaferry.jobs.volumes.VolumeView(volume_instance_id, volume_key, fs_label, size_bytes,
     profile_slug, identity_confidence, provisional, trusted, reason, selection)`
   - `VolumeService(conn, registry, client)` — `.refresh() -> list[VolumeView]`,
@@ -8079,7 +8110,7 @@ def test_reinserting_into_another_port_does_not_pin_confidence_low(db, broker, m
     assert svc.refresh()[0].identity_confidence == "high"
 
 
-def test_an_unused_handle_is_retired_when_the_selection_changes(db, broker, monkeypatch):
+def test_an_unused_handle_is_retired_when_the_observation_changes(db, broker, monkeypatch):
     svc = service(db, broker)
     selection = svc.refresh()[0].selection
     svc.open(selection)
@@ -8092,6 +8123,68 @@ def test_an_unused_handle_is_retired_when_the_selection_changes(db, broker, monk
     )
     svc.refresh()
     assert svc.opened() == []
+
+
+def test_two_cards_with_the_same_identity_are_both_low_from_the_first_refresh(db, broker, monkeypatch):
+    """判定を live 集合の確定より前に行うと、先に見た方だけが high になる."""
+    svc = service(db, broker)
+    original = broker.list_volumes
+
+    def twins():
+        first = original()[0]
+        second = type(first)(**{**first.__dict__, "major": 8, "minor": 176,
+                                "volume_key": "8:176"})
+        return [first, second]
+
+    monkeypatch.setattr(broker, "list_volumes", twins)
+    svc.refresh()
+    views = svc.refresh()
+    assert len(views) == 2
+    assert [view.identity_confidence for view in views] == ["low", "low"]
+
+
+def test_a_new_generation_is_judged_on_its_own_contents(db, broker, fake_card, monkeypatch):
+    """開いてある dirfd を使い回すと、別のカードの中身で判定した結果を
+    新しいカードのものとして記録する."""
+    svc = service(db, broker)
+    selection = svc.refresh()[0].selection
+    svc.open(selection)
+    svc.release(selection)
+
+    # 中身を入れ替え、世代を進める（＝別のカードに差し替わった）
+    for path in (fake_card / "DCIM" / "DJI_001").iterdir():
+        path.unlink()
+    (fake_card / "DCIM" / "DJI_001").rmdir()
+    (fake_card / "DCIM" / "SWAPPED").mkdir()
+    (fake_card / "DCIM" / "SWAPPED" / "IMG_0001.JPG").write_bytes(b"other camera")
+    original = broker.list_volumes
+    monkeypatch.setattr(
+        broker,
+        "list_volumes",
+        lambda: [type(v)(**{**v.__dict__, "generation": v.generation + 1}) for v in original()],
+    )
+
+    view = svc.refresh()[0]
+    assert view.profile_slug != "dji-osmo"
+    assert view.identity_confidence == "low"
+
+
+def test_a_card_without_a_uuid_keeps_its_selection_across_refreshes(db, broker, monkeypatch):
+    """毎 refresh で新しい volume_instance を作ると、直前に選んだ selection が
+    次の refresh で detached になる."""
+    original = broker.list_volumes
+    monkeypatch.setattr(
+        broker, "list_volumes", lambda: [type(v)(**{**v.__dict__, "fs_uuid": ""}) for v in original()]
+    )
+    svc = service(db, broker)
+    first = svc.refresh()[0]
+    second = svc.refresh()[0]
+    assert first.volume_instance_id == second.volume_instance_id
+    assert first.selection == second.selection
+    assert db.execute("SELECT count(*) FROM volume_instance").fetchone()[0] == 1
+    handle = svc.open(first.selection)
+    assert "DCIM" in __import__("os").listdir(handle.dirfd)
+    svc.release(first.selection)
 
 
 def test_trust_is_recorded_and_reported(db, broker):
@@ -8160,12 +8253,33 @@ def upsert_device(conn: sqlite3.Connection, usb) -> str | None:  # noqa: ANN001
     return device_id
 
 
-def upsert_volume(conn: sqlite3.Connection, volume, device_id: str | None) -> str:  # noqa: ANN001
+def resolve_volume_instance(conn: sqlite3.Connection, volume, device_id: str | None) -> str:  # noqa: ANN001
+    """観測したボリュームを既存の行に結び付ける. 無ければ作る.
+
+    UUID があれば `(fs_uuid, fs_type, size_bytes)` で引く（これは識別子では
+    なく推測なので、確度は別に判定する）。
+
+    **UUID が無いときは、同じ接続がまだ live かどうかで引く。** 毎回新しい行を
+    作ると、同じカードが挿さったままでも refresh のたびに `volume_instance` と
+    `presence` が変わり、直前に画面で選んだ selection が次の refresh で
+    detached になる。
+
+    ただし世代が変われば同定は継承しない。UUID が無い以上「同じカードだ」と
+    言えないので、抜き差しをまたぐ継承は誤同定になる。
+    """
     row = None
     if volume.fs_uuid:
         row = conn.execute(
             "SELECT id FROM volume_instance WHERE fs_uuid = ? AND fs_type = ? AND size_bytes = ?",
             (volume.fs_uuid, volume.fs_type or "", volume.size_bytes),
+        ).fetchone()
+    else:
+        row = conn.execute(
+            "SELECT v.id AS id FROM volume_instance v"
+            " JOIN volume_presence p ON p.volume_instance_id = v.id"
+            " WHERE v.fs_uuid = '' AND p.detached_at IS NULL AND p.broker_epoch = ?"
+            " AND p.generation = ? AND p.major = ? AND p.minor = ? LIMIT 1",
+            (volume.broker_epoch, volume.generation, volume.major, volume.minor),
         ).fetchone()
     if row is not None:
         conn.execute(
@@ -8258,7 +8372,12 @@ from ..clock import now_iso
 from ..core.manifest import content_manifest_digest
 from ..core.profiles.matching import VolumeFacts, resolve_profile
 from ..db.profiles import ProfileRegistry
-from ..db.sources import detach_absent, sync_presence, upsert_device, upsert_volume
+from ..db.sources import (
+    detach_absent,
+    resolve_volume_instance,
+    sync_presence,
+    upsert_device,
+)
 
 # manifest に含める名前の上限。数万件のカードで全件読まない。
 MANIFEST_LIMIT = 500
@@ -8276,26 +8395,64 @@ class VolumeBusy(RuntimeError):
 
 
 @dataclass(frozen=True)
-class VolumeSelection:
-    """「この操作はこのボリュームのこの接続に対して行う」という固定."""
+class VolumeObservation:
+    """今この瞬間に観測した「接続」の同一性.
 
-    volume_instance_id: str
-    presence_id: str
+    mountd の起動（`broker_epoch`）と世代（`generation`）を含むので、抜き差しや
+    mountd の再起動をまたいで偶然一致することはない。開いてある dirfd を
+    再利用してよいかの判定も、これが完全一致するときだけに限る。
+    """
+
     broker_epoch: str
     generation: int
     volume_key: str
     major: int
     minor: int
     fs_uuid: str
+
+    @classmethod
+    def of(cls, volume) -> VolumeObservation:  # noqa: ANN001
+        return cls(
+            broker_epoch=volume.broker_epoch,
+            generation=volume.generation,
+            volume_key=volume.volume_key,
+            major=volume.major,
+            minor=volume.minor,
+            fs_uuid=volume.fs_uuid or "",
+        )
+
+
+@dataclass(frozen=True)
+class VolumeSelection:
+    """「この操作はこのボリュームのこの接続に対して行う」という固定."""
+
+    volume_instance_id: str
+    presence_id: str
+    observation: VolumeObservation
     profile_id: str
     profile_revision_id: str
 
     def to_params(self) -> dict:
-        return asdict(self)
+        params = asdict(self.observation)
+        params.update(
+            volume_instance_id=self.volume_instance_id,
+            presence_id=self.presence_id,
+            profile_id=self.profile_id,
+            profile_revision_id=self.profile_revision_id,
+        )
+        return params
 
     @classmethod
     def from_params(cls, params: dict) -> VolumeSelection:
-        return cls(**{f.name: params[f.name] for f in fields(cls)})
+        return cls(
+            volume_instance_id=params["volume_instance_id"],
+            presence_id=params["presence_id"],
+            observation=VolumeObservation(
+                **{f.name: params[f.name] for f in fields(VolumeObservation)}
+            ),
+            profile_id=params["profile_id"],
+            profile_revision_id=params["profile_revision_id"],
+        )
 
 
 @dataclass(frozen=True)
@@ -8327,32 +8484,48 @@ class VolumeService:
     def refresh(self) -> list[VolumeView]:
         """今この場にあるものを 1 つのスナップショットとして DB に反映する.
 
-        観測した接続を upsert し、**消えた接続に detached_at を立てる**。
-        列挙のたびに行を増やすと、キュー投入時の presence と実行時のそれが
-        別物になり、同じカードが挿さったままでも stale と判定される。
+        **判定（probe）は、live 集合が確定してから行う。** 各ボリュームを
+        「反映しながら判定」すると、別ポートへ挿し直した直後の refresh では
+        旧 presence がまだ live なので「同一 identity の同時接続」と誤判定して
+        確度が上がらないし、同じ identity の 2 枚を初めて同時に列挙したときは
+        先に判定した方だけが high になる。
         """
         with self._lock:
-            views = []
-            seen: list[str] = []
-            definitions = [ref.definition for ref in self._registry.active()]
-            for volume in self._client.list_volumes():
+            # スナップショットは 1 回だけ取る。pass ごとに取り直すと、
+            # その間の抜き差しで pass の対象がずれる。
+            volumes = self._client.list_volumes()
+
+            # pass 1: 観測を DB へ反映する
+            observed = []
+            seen_presence: list[str] = []
+            for volume in volumes:
                 device_id = upsert_device(self._conn, volume.usb)
-                volume_id = upsert_volume(self._conn, volume, device_id)
+                volume_id = resolve_volume_instance(self._conn, volume, device_id)
                 presence_id = sync_presence(self._conn, volume_id, volume)
-                seen.append(presence_id)
-                views.append(self._probe(volume, volume_id, presence_id, definitions))
-            detach_absent(self._conn, seen)
-            self._retire_stale_handles({view.selection for view in views if view.selection})
-            return views
+                seen_presence.append(presence_id)
+                observed.append((volume, volume_id, presence_id))
 
-    def _retire_stale_handles(self, live: set[VolumeSelection]) -> None:
-        """使われていない handle のうち、選択が変わったものを閉じる.
+            # pass 2: 消えた接続を detach し、使われていない古い handle を捨てる
+            detach_absent(self._conn, seen_presence)
+            self._retire_stale_handles({VolumeObservation.of(v) for v, _, _ in observed})
 
-        抜き差し後に古い detached mount の dirfd を新しいジョブが掴まない
-        ようにする。参照中のものは触らない（ジョブが読んでいる最中）。
+            # pass 3: 確定した live 集合を使って判定する
+            definitions = [ref.definition for ref in self._registry.active()]
+            return [
+                self._probe(volume, volume_id, presence_id, definitions)
+                for volume, volume_id, presence_id in observed
+            ]
+
+    def _retire_stale_handles(self, live: set[VolumeObservation]) -> None:
+        """使われていない handle のうち、観測が変わったものを閉じる.
+
+        判定より前に行う。旧 detached mount の dirfd を使って新しいボリュームの
+        プロファイルや manifest を計算すると、**別のカードの中身で判定した
+        結果を新しいカードのものとして記録する**。参照中のものは触らない
+        （ジョブが読んでいる最中）。
         """
         for volume_instance_id, held in list(self._open.items()):
-            if held.refs == 0 and held.selection not in live:
+            if held.refs == 0 and held.observation not in live:
                 del self._open[volume_instance_id]
                 with contextlib.suppress(Exception):
                     self._client.close_volume(held.handle)
@@ -8369,15 +8542,19 @@ class VolumeService:
             usb_product_id=volume.usb.product_id if volume.usb else "",
             fs_label=volume.fs_label or "",
         )
+        # 開いてある handle は、観測が**完全に一致するときだけ**使う。
+        # 世代が変わっているのに使い回すと、別のカードの中身で判定する。
+        observation = VolumeObservation.of(volume)
         held = self._open.get(volume_id)
-        handle = held.handle if held else self._client.open_volume(volume)
+        reuse = held is not None and held.observation == observation
+        handle = held.handle if reuse else self._client.open_volume(volume)
         try:
             tree = DirfdTree(handle.dirfd)
             outcome = resolve_profile(definitions, facts, tree, remembered["slug"])
             digest = self._manifest_of(handle.dirfd, tree, outcome, definitions)
             confidence = self._identity_confidence(volume, volume_id, remembered, digest, handle)
         finally:
-            if held is None:
+            if not reuse:
                 with contextlib.suppress(Exception):
                     self._client.close_volume(handle)
 
@@ -8396,12 +8573,7 @@ class VolumeService:
             selection = VolumeSelection(
                 volume_instance_id=volume_id,
                 presence_id=presence_id,
-                broker_epoch=volume.broker_epoch,
-                generation=volume.generation,
-                volume_key=volume.volume_key,
-                major=volume.major,
-                minor=volume.minor,
-                fs_uuid=volume.fs_uuid or "",
+                observation=observation,
                 profile_id=profile_id,
                 profile_revision_id=revision_id,
             )
@@ -8493,15 +8665,20 @@ class VolumeService:
         with self._lock:
             held = self._open.get(selection.volume_instance_id)
             if held is not None:
-                if held.selection != selection:
-                    raise StaleSelection("同じボリュームを別の世代で開こうとしている")
-                held.refs += 1
-                return held.handle
+                if held.observation == selection.observation:
+                    held.refs += 1
+                    return held.handle
+                if held.refs > 0:
+                    raise StaleSelection("同じボリュームを別の世代で使っているジョブがある")
+                # 参照が無い古い handle は捨てて開き直す
+                del self._open[selection.volume_instance_id]
+                with contextlib.suppress(Exception):
+                    self._client.close_volume(held.handle)
 
             volume = self._match_selection(selection)
             handle = self._client.open_volume(volume)
             self._open[selection.volume_instance_id] = _OpenVolume(
-                handle=handle, selection=selection, refs=1
+                handle=handle, observation=selection.observation, refs=1
             )
             return handle
 
@@ -8512,14 +8689,7 @@ class VolumeService:
         if presence is None or presence["detached_at"] is not None:
             raise StaleSelection("選択した接続はもう存在しない")
         for volume in self._client.list_volumes():
-            if (
-                volume.volume_key == selection.volume_key
-                and volume.broker_epoch == selection.broker_epoch
-                and volume.generation == selection.generation
-                and volume.major == selection.major
-                and volume.minor == selection.minor
-                and (volume.fs_uuid or "") == selection.fs_uuid
-            ):
+            if VolumeObservation.of(volume) == selection.observation:
                 return volume
         raise StaleSelection("選択した時点のボリュームが見つからない（抜き差しされた）")
 
@@ -8561,7 +8731,7 @@ class VolumeService:
 @dataclass
 class _OpenVolume:
     handle: VolumeHandle
-    selection: VolumeSelection
+    observation: VolumeObservation
     refs: int
 ```
 
@@ -9641,6 +9811,17 @@ Task 7〜12・15・16・22 は互いに独立で、Task 1 の後ならいつで�
 | `merge_member.active` の guard が INSERT と `UPDATE OF active` だけで、親の付け替えで迂回できた | Task 4 で `active` を親の状態の写しとして両方向に強制 |
 | heartbeat をバイト数で決めると、低速なカードでは最初の 1 回の前にリースが切れる | Task 19 で経過時間（リースの 1/3）に変更 |
 | `UsbInfo.product` を必須にすると既存の fixture が `TypeError` で壊れる | Task 22 の Files に既存 4 ファイルを明記（既定値は付けない） |
+
+### 3 巡目（blocker 2 / major 2）で反映した指摘
+
+2 巡目で入れた presence の反映順序に、判定との境界の問題が残っていた。
+
+| 指摘 | 反映先 |
+| --- | --- |
+| **`refresh()` が detach より先に判定していた。** 別ポートへ挿し直した最初の refresh では旧 presence がまだ live なので「同一 identity の同時接続」と誤判定し、2 巡目で追加した再挿入テストが**提示コードのままでは落ちる**。同じ identity の 2 枚を初めて同時に列挙すると、先に判定した方だけ high になる | Task 23 の `refresh()` を 3 パスに分離（① スナップショットを 1 回取って device/volume/presence を反映 → ② `detach_absent` と handle の retire → ③ 確定した live 集合で判定）。同一 identity 2 枚が最初から両方 low になるテストを追加 |
+| **`_probe()` が世代を確認せずに開いてある dirfd を再利用していた。** 差し替えられたカードを、旧カードの中身で判定した結果として記録する。retire も判定の後だった | `VolumeObservation`（epoch / generation / volume_key / major:minor / fs_uuid）を導入し、**完全一致のときだけ**再利用する。retire は判定の前。新旧で中身を変え、新世代が新しい中身で判定されることを固定するテストを追加 |
+| `fs_uuid` が空だと `upsert_volume` が毎回新しい `volume_instance` を作り、同じ broker snapshot を列挙し直しただけで selection が無効になる | `resolve_volume_instance` に改名し、UUID が無いときは同じ観測の live presence から引く。世代が変われば継承しない規則を明記。UUID 無しの fixture で selection が生き続けるテストを追加 |
+| `stop()` と `claim_next()` の間の race。claim 待ちの間に停止要求が来ると `_current` がまだ None なので cancel されず、掴んだ長いジョブの完走待ちになる | Task 14 で claim 直後に `_stopping` を再確認し、立っていれば `request_cancel` してから実行する |
 
 ### 退けた指摘
 
