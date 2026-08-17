@@ -230,13 +230,23 @@ def main() -> int:
     try:
         client = BrokerClient(socket_path)
     except OSError as exc:
+        # ソケットに connect できない。ソケットのパーミッション (DAC) で
+        # 弾かれた場合もここに来る。SO_PEERCRED による拒否とは別物なので、
+        # 終了コードを分けて区別できるようにする。
         print(f"FAIL: ブローカーに接続できません: {exc}", file=sys.stderr)
         return 1
 
     listed = opened = readable = 0
     security_ok = True
+    security_checked = 0
     with client:
-        volumes = client.list_volumes()
+        try:
+            volumes = client.list_volumes()
+        except BrokerError as exc:
+            # connect は通ったがブローカーに拒否された。許可外 UID の確認は
+            # ここに来ることを期待する。
+            print(f"FAIL: ブローカーに拒否されました: {exc.code}: {exc.message}", file=sys.stderr)
+            return 4
         listed = len(volumes)
         for v in volumes:
             print(
@@ -254,6 +264,7 @@ def main() -> int:
                     else:
                         print("  FAIL: このボリュームでは実ファイルを読めなかった")
                     security_ok &= security_checks(handle.dirfd, socket_path, sample)
+                    security_checked += 1
             except BrokerError as exc:
                 print(f"  FAIL: open_volume code={exc.code} {exc.message}")
 
@@ -270,7 +281,13 @@ def main() -> int:
             listed > 0 and readable == listed,
             f"readable={readable}/{listed}",
         ),
-        _check("セキュリティ境界の確認が全て通った", security_ok),
+        # 1 件も検査していないのに PASS にしない。security_ok は初期値が True
+        # なので、ボリュームが 0 件だとループを通らずそのまま通過してしまう。
+        _check(
+            "セキュリティ境界の確認が全て通った",
+            security_checked > 0 and security_checked == opened and security_ok,
+            f"checked={security_checked}/{opened}",
+        ),
     ]
     if all(results):
         print("\nRESULT: PASS — 仕様書 §18-1 は解消")

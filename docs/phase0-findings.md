@@ -38,6 +38,22 @@ USB 実機なしで検証できる範囲は済んでいる。
 | 通常ディレクトリの fd に対する `..` 判定 | **False を返す**（ガードが正しく機能） |
 | `mediaferry-mountd` / `mediaferry-app` イメージのビルド | **成功** |
 | 両イメージでのモジュール import と `mount` / `blkid` の存在 | **成功** |
+| `compose.spike.yaml` の起動と mountd のソケット生成 | **成功**（約 2 秒） |
+| `MOUNTD_SOCKET_GID` による chown | **成功**（`root:10001 srw-rw----`） |
+| 非 root の app（uid 10001）からの `connect` | **成功** |
+| 許可外 UID（10002 / gid 10001）の拒否 | **成功**。`exit=4` と `unauthorized: peer uid is not allowed`。DAC ではなく `SO_PEERCRED` で弾かれている |
+| USB 無しのときの判定 | **正しく FAIL**（`exit=2`、`listed=0`） |
+
+USB 実機が無い状態での配線確認で、次の 2 つの欠陥を見つけて直した。
+
+- **`security_checks` を一度も実行していないのに PASS と表示していた。** `security_ok`
+  の初期値が `True` で、ボリューム 0 件だとループを通らずそのまま通過していた。
+  全体判定は FAIL になるので誤った合格にはならないが、この行を findings に
+  転記すると「セキュリティ確認済み」と記録されてしまう。検査した件数を数え、
+  `checked > 0 かつ checked == opened` を条件に加えた。
+- **ブローカーに拒否されたときトレースバックで落ちていた。** 結果の解釈が
+  曖昧になるので `BrokerError` を捕まえ、`exit=4` と明示メッセージにした。
+  connect 自体の失敗（`exit=1`、DAC で弾かれた疑い）と区別できる。
 
 ### TrueNAS ホストでの実測（要実施）
 
