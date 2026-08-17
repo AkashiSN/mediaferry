@@ -4571,6 +4571,9 @@ def anyio_backend():
 `app/tests/test_job_store.py`:
 
 ```python
+import sqlite3
+import threading
+
 import pytest
 
 from mediaferry.db.jobs import JobStore, LeaseLost
@@ -4593,6 +4596,36 @@ def test_only_one_worker_wins_a_job(db, database):
     claims = [JobStore(db).claim_next(), JobStore(second).claim_next()]
     assert sum(1 for c in claims if c is not None) == 1
     second.close()
+
+
+def test_concurrent_claimers_do_not_both_win(db, database):
+    """逐次に呼ぶと 2 人目の SELECT が既に running を見るだけで、競合にならない.
+
+    本当に確かめたいのは「同時に取りに来ても 1 人しか勝たない」なので、
+    スレッドで同時に走らせる。
+    """
+    JobStore(db).enqueue("scan", {})
+    connections = [database.connect() for _ in range(4)]
+    start = threading.Barrier(len(connections))
+    won: list[object] = []
+    lock = threading.Lock()
+
+    def claim(conn):
+        start.wait(timeout=5)
+        ctx = JobStore(conn).claim_next()
+        if ctx is not None:
+            with lock:
+                won.append(ctx.job_id)
+
+    threads = [threading.Thread(target=claim, args=(conn,)) for conn in connections]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=10)
+
+    for conn in connections:
+        conn.close()
+    assert len(won) == 1
 
 
 def test_claiming_sets_a_lease_and_heartbeat_extends_it(db):
@@ -4680,13 +4713,17 @@ def test_a_cancel_cannot_slip_between_the_lease_check_and_the_transition(db, dat
     store = JobStore(db)
     store.enqueue("import", {})
     ctx = store.claim_next()
-    other = JobStore(database.connect())
-    with immediate(db):
-        ctx.assert_lease()
-        # 別接続の cancel は書き込みロックを取れないので待たされる
-        with pytest.raises(sqlite3.OperationalError):
-            other._conn.execute("PRAGMA busy_timeout = 0")  # noqa: SLF001
-            other.request_cancel(ctx.job_id)
+    other_conn = database.connect()
+    other = JobStore(other_conn)
+    try:
+        with immediate(db):
+            ctx.assert_lease()
+            # 別接続の cancel は書き込みロックを取れないので待たされる
+            with pytest.raises(sqlite3.OperationalError):
+                other_conn.execute("PRAGMA busy_timeout = 0")
+                other.request_cancel(ctx.job_id)
+    finally:
+        other_conn.close()
 
 
 def test_cancelling_a_finished_job_does_nothing(db):
@@ -4722,6 +4759,16 @@ def test_expired_leases_are_reaped(db):
     ctx = store.claim_next()
     assert store.reap_expired_leases() == 1
     assert store.get(ctx.job_id)["status"] == "interrupted"
+
+
+def test_a_live_lease_is_not_reaped(db):
+    """期限を見ずに reap すると、正常に走っているジョブを毎周期で殺す."""
+    store = JobStore(db)
+    store.enqueue("import", {})
+    ctx = store.claim_next()
+    assert store.reap_expired_leases() == 0
+    assert store.get(ctx.job_id)["status"] == "running"
+    ctx.assert_lease()  # リースも無傷
 ```
 
 `app/tests/test_job_runner.py`:
@@ -4987,8 +5034,8 @@ class JobStore:
         now = utcnow()
         with immediate(self._conn):
             row = self._conn.execute(
-                "SELECT id, params_json FROM job WHERE status = 'queued'"
-                " ORDER BY created_at LIMIT 1"
+                "SELECT id, params_json FROM job"
+                " WHERE status = 'queued' ORDER BY created_at LIMIT 1"
             ).fetchone()
             if row is None:
                 return None
@@ -5165,6 +5212,7 @@ SQLite の書き込みを 1 本に絞るため、同時に走るジョブは 1 �
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 import sqlite3
 from collections.abc import Callable
@@ -5208,12 +5256,9 @@ class JobRunner:
             while not self._stopping.is_set():
                 ctx = await asyncio.to_thread(poll_store.claim_next)
                 if ctx is None:
-                    try:
-                        await asyncio.wait_for(
-                            self._stopping.wait(), timeout=self._poll_interval
-                        )
-                    except TimeoutError:
-                        pass
+                    # 停止要求が来るまで待つ。来なければ次の周回で claim を試す。
+                    with contextlib.suppress(TimeoutError):
+                        await asyncio.wait_for(self._stopping.wait(), timeout=self._poll_interval)
                     continue
                 if self._stopping.is_set():
                     # claim を待っている間に停止要求が来た。この時点では
@@ -5263,9 +5308,17 @@ Expected: すべて PASS
 
 - [ ] **Step 5: 変異試験**
 
-`claim_next` の `UPDATE ... WHERE id = ? AND status = 'queued'` から
-`AND status = 'queued'` を外し、`test_only_one_worker_wins_a_job` が
-落ちることを確認してから戻す。
+`assert_lease` と `reap_expired_leases` から `lease_expires_at` の比較を外し、
+`test_assert_lease_refuses_an_expired_lease` と `test_a_live_lease_is_not_reaped`
+が落ちることを確認してから戻す。`finish` からトークンの条件を外し、
+`test_a_stale_token_cannot_touch_the_job` が落ちることも確認する。
+
+**`claim_next` の UPDATE 側の `AND status = 'queued'` は変異させても検出
+できない。** SELECT が `BEGIN IMMEDIATE` の内側にあるので claimer 同士は完全に
+直列化され、2 人目の SELECT はもう queued の行を見ない。この CAS は「将来
+`BEGIN IMMEDIATE` を外したときの保険」であって、現状では到達しない経路。
+テストで確かめられるのは「同時に取りに来ても 1 人しか勝たない」までで、
+それは `test_concurrent_claimers_do_not_both_win` が担う。
 
 - [ ] **Step 6: コミット**
 

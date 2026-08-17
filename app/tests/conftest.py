@@ -5,6 +5,12 @@ from mediaferry.db.migrate import apply_migrations
 
 
 @pytest.fixture
+def anyio_backend():
+    """JobRunner は asyncio ワーカーなので、anyio の trio 側は使わない."""
+    return "asyncio"
+
+
+@pytest.fixture
 def data_root(tmp_path):
     """§7 のレイアウト. staging は library と同じファイルシステムに要る."""
     root = tmp_path / "data"
