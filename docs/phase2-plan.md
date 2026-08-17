@@ -1347,7 +1347,7 @@ BITRATE_SPREAD_LIMIT = 0.1
 # 小さいので、取れなければ推定から外して先へ進む。
 ESTIMABLE_TYPES = frozenset({"video", "audio"})
 
-PASS = "pass"
+PASS = "pass"  # noqa: S105 （検査結果の名前。秘密ではない）
 FAIL = "fail"
 INCONCLUSIVE = "inconclusive"
 
@@ -1625,7 +1625,10 @@ Expected: PASS（19 件）
 | `signatures` の比較（`len != 1`）を消す | `test_parts_that_disagree_with_each_other_fail` |
 | `actual == expected` を `len(actual) == len(expected)` にする | `test_a_missing_kept_stream_fails` は本数も減るので落ちない。**codec だけ違う merged のケースを足す** |
 | `allowance` の `+ FRAME_ALLOWANCE_BASE` を消す | `test_lost_frames_within_the_allowance_pass`（許容 2 になり 4 フレーム欠けが fail） |
-| `lost <= allowance` を `abs(lost) <= allowance` にする | **落ちない**。設計が片側だけを見ると決めているため、結合後が Σ より多いケースは判定していない。検出できない変異として記録する |
+| `lost <= allowance` を `abs(lost) <= allowance` にする | 計画では「検出できない」としていたが、**片側であること自体をテストで固定すれば検出できる**。結合後が Σ より多いケースが `pass` になることを見る `test_extra_frames_do_not_fail_the_check` を足した（§9.8 の条件が片側なので、これが仕様どおり） |
+| `merged_frames is None` の判定を消す | `test_a_merged_file_without_frame_counts_is_inconclusive`（**追加**）。結合後の `nb_frames` が取れないケースを 1 つも試していなかった |
+| 保持ストリーム本数の一致判定（`len({len(selection)...}) != 1`）を消す | `test_parts_with_different_kept_stream_counts_are_inconclusive`（**追加**）。本数が違うパートを 1 つも試していなかった。消すと `zip(..., strict=True)` が例外を投げる |
+| 結合後の duration 欠落を `FAIL` から `INCONCLUSIVE` にする | `test_a_merged_file_without_a_duration_fails`（**追加**）。判定不能で通すと壊れた結合物が合格になる |
 | `spread > BITRATE_SPREAD_LIMIT` を消す | `test_a_wide_bit_rate_spread_makes_the_size_check_inconclusive` |
 | ばらつきをストリームごとではなく合計で見る | `test_a_spread_hidden_by_the_dominant_stream_is_still_caught` |
 | `ESTIMABLE_TYPES` の判定を消して、`bit_rate` が無ければ常に `inconclusive` | `test_a_timecode_without_a_bit_rate_does_not_disable_the_size_check` |
