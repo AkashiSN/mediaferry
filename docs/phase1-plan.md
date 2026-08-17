@@ -7139,7 +7139,7 @@ from mediaferry.adapters.publisher import ArtifactPublisher, PublishInterrupted
 from mediaferry.core.timestamps import TimezoneUnresolved
 from mediaferry.db.jobs import JobStore
 from mediaferry.db.profiles import ProfileRegistry
-from mediaferry.jobs.importer import ImportFailed, Importer, NotEnoughSpace
+from mediaferry.jobs.importer import Importer, ImportFailed, NotEnoughSpace
 from mediaferry.jobs.scan import Scanner
 
 from .test_publisher import StubProbe
@@ -7224,11 +7224,25 @@ def test_not_enough_space_stops_before_starting(importing, db, monkeypatch):
     assert db.execute("SELECT count(*) FROM media_file").fetchone()[0] == 0
 
 
-def test_cancelling_stops_between_files(importing, db, data_root):
+def test_cancelling_stops_between_files(importing, db, data_root, monkeypatch):
+    """キャンセル済みなら 1 件目にも手を付けない.
+
+    ファイル単位の確認が無くても chunk 境界で降りるので結果は同じだが、
+    16GiB のカードでは「開いて読み始めてから降りる」だけで待たされる。
+    """
     importer, ctx, fd, volume_id, profile = importing
+    attempted = []
+    original = importer._publish_one  # noqa: SLF001
+    monkeypatch.setattr(
+        importer,
+        "_publish_one",
+        lambda *a, **k: (attempted.append(1), original(*a, **k))[1],
+    )
+
     JobStore(db).request_cancel(ctx.job_id)
     outcome = importer.run(ctx, fd, volume_id, profile)
     assert outcome.published == 0
+    assert attempted == []
 
 
 def test_a_failing_file_does_not_stop_the_rest_but_fails_the_job(importing, db, monkeypatch):
@@ -7251,9 +7265,10 @@ def test_a_failing_file_does_not_stop_the_rest_but_fails_the_job(importing, db, 
         importer.run(ctx, fd, volume_id, profile)
     assert exc.value.outcome.failed == 1
     assert exc.value.outcome.published == 1
-    assert db.execute(
+    failed_count = db.execute(
         "SELECT count(*) FROM source_entry WHERE state = 'failed'"
-    ).fetchone()[0] == 1
+    ).fetchone()[0]
+    assert failed_count == 1
 
 
 def test_a_vanished_card_stops_the_run_instead_of_grinding_through(importing, db, monkeypatch):
@@ -7281,9 +7296,10 @@ def test_an_interrupted_publish_leaves_the_entry_for_reconciliation(importing, d
     monkeypatch.setattr(importer, "_publish_one", interrupted)
     with pytest.raises(PublishInterrupted):
         importer.run(ctx, fd, volume_id, profile)
-    assert db.execute(
+    failed_count = db.execute(
         "SELECT count(*) FROM source_entry WHERE state = 'failed'"
-    ).fetchone()[0] == 0
+    ).fetchone()[0]
+    assert failed_count == 0
 
 
 def test_the_copy_heartbeats_on_elapsed_time_not_bytes(importing, db, monkeypatch):
@@ -7301,15 +7317,35 @@ def test_the_copy_heartbeats_on_elapsed_time_not_bytes(importing, db, monkeypatc
 
 
 def test_the_copy_stops_at_a_chunk_boundary_when_cancelled(importing, db, monkeypatch):
-    """chunk 境界がキャンセルポイント（§9.9）. 見ないと 16GiB 待たされる."""
+    """chunk 境界がキャンセルポイント（§9.9）. 見ないと 16GiB 待たされる.
+
+    最後まで読んでも staged の直前で assert_lease が止めるので、結果だけを
+    見ると差が出ない。**降りるまでに何バイト読んだか**が違いになる。
+    キャンセルはコピーが始まってから出す。開始前に出すと、ファイル単位の
+    確認で先に抜けてこの境界を通らない。
+    """
+    from mediaferry.adapters.publisher import HashingWriter
     from mediaferry.jobs import importer as importer_module
 
     importer, ctx, fd, volume_id, profile = importing
     monkeypatch.setattr(importer_module, "COPY_CHUNK", 8)
-    JobStore(db).request_cancel(ctx.job_id)
+
+    written = []
+    real_write = HashingWriter.write
+
+    def spy_write(self, data):
+        written.append(len(data))
+        if len(written) == 1:
+            JobStore(db).request_cancel(ctx.job_id)
+        return real_write(self, data)
+
+    monkeypatch.setattr(HashingWriter, "write", spy_write)
+
     outcome = importer.run(ctx, fd, volume_id, profile)
     assert outcome.published == 0
     assert db.execute("SELECT count(*) FROM media_file").fetchone()[0] == 0
+    # 100 バイトのファイルを 8 バイト刻みで読み切る前に降りている
+    assert sum(written) < 100
 ```
 
 - [ ] **Step 2: 失敗を確認する**
@@ -7371,19 +7407,19 @@ class CopyCancelled(RuntimeError):
     """コピーの途中でキャンセル要求を観測した."""
 
 
+@dataclass(frozen=True)
+class ImportOutcome:
+    published: int
+    skipped: int
+    failed: int
+
+
 class ImportFailed(RuntimeError):
     """1 件以上の取り込みに失敗した. ジョブを failed にするために送出する."""
 
     def __init__(self, message: str, outcome: ImportOutcome) -> None:
         super().__init__(message)
         self.outcome = outcome
-
-
-@dataclass(frozen=True)
-class ImportOutcome:
-    published: int
-    skipped: int
-    failed: int
 
 
 class Importer:
@@ -7410,7 +7446,8 @@ class Importer:
             )
         )
         skipped = self._conn.execute(
-            "SELECT count(*) FROM source_entry WHERE volume_instance_id = ? AND state = 'published'",
+            "SELECT count(*) FROM source_entry"
+            " WHERE volume_instance_id = ? AND state = 'published'",
             (volume_instance_id,),
         ).fetchone()[0]
 
@@ -7467,15 +7504,11 @@ class Importer:
         if failed:
             # 1 件でも落ちたらジョブは失敗にする。全件失敗しても succeeded に
             # なると、監視も画面も「取り込めた」と読んでしまう。
-            raise ImportFailed(
-                f"{failed} 件の取り込みに失敗した（成功 {published} 件）", outcome
-            )
+            raise ImportFailed(f"{failed} 件の取り込みに失敗した（成功 {published} 件）", outcome)
         return outcome
 
     def _mark_failed(self, entry_id: str) -> None:
-        self._conn.execute(
-            "UPDATE source_entry SET state = 'failed' WHERE id = ?", (entry_id,)
-        )
+        self._conn.execute("UPDATE source_entry SET state = 'failed' WHERE id = ?", (entry_id,))
 
     def _publish_one(
         self, ctx: JobContext, dirfd: int, row: sqlite3.Row, profile: ProfileRef
@@ -7530,7 +7563,20 @@ class Importer:
 Run: `uv run pytest app/tests/test_importer.py -v`
 Expected: すべて PASS
 
-- [ ] **Step 5: コミット**
+- [ ] **Step 5: 変異試験**
+
+`PublishInterrupted` の except 節を削って
+`test_an_interrupted_publish_leaves_the_entry_for_reconciliation` が、
+`_DEVICE_GONE` の break を削って
+`test_a_vanished_card_stops_the_run_instead_of_grinding_through` が落ちることを
+確認してから戻す。
+
+**キャンセルの 2 箇所は、`run()` の前にキャンセルしても検出できない。**
+どちらを消しても最後は `assert_lease` が止めるので結果が同じになる。差が出るのは
+「何バイト読んだか」「次のファイルに手を付けたか」なので、コピーが始まってから
+キャンセルを出し、その量を測る。
+
+- [ ] **Step 6: コミット**
 
 ```bash
 git add app/src/mediaferry/jobs/importer.py app/tests/test_importer.py
