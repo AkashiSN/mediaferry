@@ -198,10 +198,12 @@ def test_an_overlap_splits_the_group():
 
 
 def test_a_failed_probe_is_a_boundary():
+    # 失敗したパートを列から取り除くだけだと、その前後がつながって
+    # 別の録画が 1 つのグループになる。差が tolerance に収まる並びで確かめる。
     parts = [
         a_part(1, offset_seconds=0),
-        a_part(2, offset_seconds=1502, duration=None, probe_state="failed"),
-        a_part(3, offset_seconds=3004),
+        a_part(2, offset_seconds=1501, duration=None, probe_state="failed"),
+        a_part(3, offset_seconds=1502),
     ]
     assert detect_groups(parts, a_rule()) == []
 
@@ -361,7 +363,7 @@ Expected: PASS（10 件）
 | `_flush` の `< 2` を `< 1` にする | `test_a_single_part_is_not_a_candidate` |
 | `current, gaps = [part], []` を `current, gaps = [], []` にする | `test_a_boundary_does_not_stop_the_scan` |
 | `if not rule.enabled` を消す | `test_a_disabled_rule_detects_nothing` |
-| probe 境界で `current` を捨てずに続ける | `test_a_failed_probe_is_a_boundary` |
+| probe 境界で `current` を捨てずに続ける | `test_a_failed_probe_is_a_boundary`。**当初の並び（失敗パートの次が +3004 秒）では素通りした** —— 失敗パートを飛ばしても前後の差が tolerance を超えるので、変異の有無にかかわらず `[]` になる。前後がつながる並び（+1501 / +1502）に直した |
 
 ```bash
 PYTHONDONTWRITEBYTECODE=1 uv run pytest app/tests/test_merge_grouping.py -q
