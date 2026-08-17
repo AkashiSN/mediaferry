@@ -36,6 +36,13 @@
   （`2026-08-17T14:30:00+09:00`）。UTC へ正規化すると、`force_offset` で復元した
   現地の壁時計が読めなくなる。
 - ID は `uuid4().hex`（32 文字の TEXT）。`job_event.id` だけ整数の自動採番。
+- **migration の SQL ファイルは DDL だけを書く。** `BEGIN` / `COMMIT` も
+  `schema_migration` への INSERT も書かない（runner が所有する）。
+  **適用済みのファイルは編集しない。** 新しい版のファイルを足す
+  （checksum で検出して起動を止める）。
+- **DB 接続はスコープごとに 1 本。** API のリクエスト、ワーカーのジョブ、
+  reconciler がそれぞれ自分の接続を開いて閉じる。サービスのコンストラクタは
+  接続を受け取るが、その寿命は所有しない。
 - テストのマーカー: root を要するものは `needs_root`、実 Immich を要するものは
   `needs_immich`。既定の `pytest` では実行されない。
 - 各タスクの最後に必ず `uv run pytest`・`uv run ruff check .`・`uv run ruff format .` を通す。
@@ -113,11 +120,21 @@ Phase 1 で作る／触るファイルと、それぞれの責務。
   - `mediaferry.clock.iso(dt: datetime) -> str`
   - `mediaferry.clock.now_iso() -> str`
   - `mediaferry.ids.new_id() -> str`（32 文字 hex）
-  - `mediaferry.db.connection.open_database(path: Path) -> sqlite3.Connection`
+  - `mediaferry.db.connection.Database(path: Path)` — `.connect() -> sqlite3.Connection`,
+    `.path`, `.enforce_permissions()`
   - `mediaferry.db.connection.immediate(conn) -> ContextManager[sqlite3.Connection]`
   - `mediaferry.db.migrate.apply_migrations(conn) -> list[int]`
   - `mediaferry.db.migrate.MigrationError`
-  - pytest フィクスチャ `db`（マイグレーション適用済みの接続）と `data_root`
+  - pytest フィクスチャ `database`（`Database`）、`db`（マイグレーション適用済みの接続）、
+    `data_root`
+
+**接続はスコープごとに 1 本作る。使い回さない。** SQLite のトランザクションは
+**接続に属していてスレッドには属さない**。1 本を API のスレッドとワーカーの
+スレッドで共有すると、API の書き込みが publisher の `BEGIN IMMEDIATE` の内側へ
+入り込んで一緒に commit / rollback されるし、同じ接続で 2 つ目の `BEGIN` が
+走れば `cannot start a transaction within a transaction` になる。
+`check_same_thread=False` は接続オブジェクトの破損を防ぐだけで、この問題には
+効かない。
 
 - [ ] **Step 1: 失敗するテストを書く**
 
@@ -129,37 +146,65 @@ import stat
 
 import pytest
 
-from mediaferry.db.connection import immediate, open_database
+from mediaferry.db.connection import Database, immediate
 from mediaferry.db.migrate import MigrationError, apply_migrations
 
 
-def test_open_database_sets_wal_and_foreign_keys(tmp_path):
-    conn = open_database(tmp_path / "var" / "mediaferry.sqlite3")
+def test_connect_sets_wal_and_foreign_keys(tmp_path):
+    conn = Database(tmp_path / "var" / "mediaferry.sqlite3").connect()
     assert conn.execute("PRAGMA journal_mode").fetchone()[0] == "wal"
     assert conn.execute("PRAGMA foreign_keys").fetchone()[0] == 1
     assert conn.execute("PRAGMA synchronous").fetchone()[0] == 2  # FULL
     conn.close()
 
 
+def test_every_connect_is_a_separate_connection(tmp_path):
+    """トランザクションは接続に属する. スコープごとに 1 本作る."""
+    database = Database(tmp_path / "db.sqlite3")
+    first, second = database.connect(), database.connect()
+    assert first is not second
+    apply_migrations(first)
+    with immediate(first):
+        # 別接続なので、こちらのトランザクションには巻き込まれない
+        assert second.execute("SELECT 1").fetchone()[0] == 1
+    first.close()
+    second.close()
+
+
 def test_database_file_is_not_world_readable(tmp_path):
     """API キーの暗号文と履歴が入るので、DB は 0600・親は 0700 にする."""
     path = tmp_path / "var" / "mediaferry.sqlite3"
-    conn = open_database(path)
+    conn = Database(path).connect()
+    conn.execute("CREATE TABLE t (x)")  # WAL を実際に作らせる
+    assert stat.S_IMODE(path.stat().st_mode) == 0o600
+    assert stat.S_IMODE(path.parent.stat().st_mode) == 0o700
+    wal = path.with_name(path.name + "-wal")
+    assert stat.S_IMODE(wal.stat().st_mode) == 0o600
     conn.close()
+
+
+def test_permissions_are_repaired_on_every_connect(tmp_path):
+    """緩い権限で作られた既存 DB をそのまま運用しない."""
+    path = tmp_path / "var" / "mediaferry.sqlite3"
+    Database(path).connect().close()
+    path.chmod(0o644)
+    path.parent.chmod(0o755)
+    Database(path).connect().close()
     assert stat.S_IMODE(path.stat().st_mode) == 0o600
     assert stat.S_IMODE(path.parent.stat().st_mode) == 0o700
 
 
 def test_apply_migrations_is_idempotent(tmp_path):
-    conn = open_database(tmp_path / "db.sqlite3")
+    conn = Database(tmp_path / "db.sqlite3").connect()
     first = apply_migrations(conn)
     assert first  # 1 版以上が適用される
     assert apply_migrations(conn) == []
     conn.close()
 
 
-def test_apply_migrations_rejects_a_file_that_does_not_record_its_version(tmp_path, monkeypatch):
-    """版を記録しない migration は、再起動のたびに再適用されて壊れる."""
+def test_a_migration_that_manages_its_own_transaction_is_rejected(tmp_path, monkeypatch):
+    """トランザクションは runner が所有する. ファイル側が COMMIT すると、
+    版の記録と DDL が別トランザクションに割れる."""
     from mediaferry.db import migrate
 
     bogus = tmp_path / "migrations"
@@ -167,8 +212,67 @@ def test_apply_migrations_rejects_a_file_that_does_not_record_its_version(tmp_pa
     (bogus / "0001_bogus.sql").write_text("BEGIN;\nCREATE TABLE t (x);\nCOMMIT;\n")
     monkeypatch.setattr(migrate, "MIGRATIONS_DIR", bogus)
 
-    conn = open_database(tmp_path / "db.sqlite3")
-    with pytest.raises(MigrationError, match="0001_bogus.sql"):
+    conn = Database(tmp_path / "db.sqlite3").connect()
+    with pytest.raises(MigrationError, match="BEGIN"):
+        apply_migrations(conn)
+    conn.close()
+
+
+def test_a_trigger_body_is_not_mistaken_for_a_transaction(tmp_path, monkeypatch):
+    """trigger は BEGIN ... END; と書く. スキーマの大半が trigger を使う."""
+    from mediaferry.db import migrate
+
+    folder = tmp_path / "migrations"
+    folder.mkdir()
+    (folder / "0001_trigger.sql").write_text(
+        "CREATE TABLE t (x);\n"
+        "CREATE TRIGGER t_ro BEFORE UPDATE ON t\n"
+        "BEGIN\n"
+        "    SELECT RAISE(ABORT, 'immutable');\n"
+        "END;\n"
+    )
+    monkeypatch.setattr(migrate, "MIGRATIONS_DIR", folder)
+
+    conn = Database(tmp_path / "db.sqlite3").connect()
+    assert apply_migrations(conn) == [1]
+    conn.execute("INSERT INTO t VALUES (1)")
+    with pytest.raises(sqlite3.IntegrityError, match="immutable"):
+        conn.execute("UPDATE t SET x = 2")
+    conn.close()
+
+
+def test_a_failing_migration_leaves_no_partial_schema(tmp_path, monkeypatch):
+    from mediaferry.db import migrate
+
+    bogus = tmp_path / "migrations"
+    bogus.mkdir()
+    (bogus / "0001_bad.sql").write_text("CREATE TABLE ok (x);\nCREATE TABLE ok (x);\n")
+    monkeypatch.setattr(migrate, "MIGRATIONS_DIR", bogus)
+
+    conn = Database(tmp_path / "db.sqlite3").connect()
+    with pytest.raises(sqlite3.OperationalError):
+        apply_migrations(conn)
+    assert conn.in_transaction is False
+    assert conn.execute(
+        "SELECT count(*) FROM sqlite_master WHERE name = 'ok'"
+    ).fetchone()[0] == 0
+    conn.close()
+
+
+def test_editing_an_applied_migration_is_refused(tmp_path, monkeypatch):
+    """適用済みの版を書き換えると、環境ごとにスキーマが食い違う."""
+    from mediaferry.db import migrate
+
+    folder = tmp_path / "migrations"
+    folder.mkdir()
+    path = folder / "0001_first.sql"
+    path.write_text("CREATE TABLE t (x);\n")
+    monkeypatch.setattr(migrate, "MIGRATIONS_DIR", folder)
+
+    conn = Database(tmp_path / "db.sqlite3").connect()
+    apply_migrations(conn)
+    path.write_text("CREATE TABLE t (x, y);\n")
+    with pytest.raises(MigrationError, match="0001_first.sql"):
         apply_migrations(conn)
     conn.close()
 
@@ -184,10 +288,10 @@ def test_immediate_rolls_back_on_error(db):
 
 def test_immediate_takes_the_write_lock_immediately(tmp_path):
     """BEGIN IMMEDIATE でないと、後から昇格するときに SQLITE_BUSY で失敗しうる."""
-    path = tmp_path / "db.sqlite3"
-    a = open_database(path)
+    database = Database(tmp_path / "db.sqlite3")
+    a = database.connect()
     apply_migrations(a)
-    b = open_database(path)
+    b = database.connect()
     b.execute("PRAGMA busy_timeout = 0")
     with immediate(a):
         with pytest.raises(sqlite3.OperationalError):
@@ -201,7 +305,7 @@ def test_immediate_takes_the_write_lock_immediately(tmp_path):
 ```python
 import pytest
 
-from mediaferry.db.connection import open_database
+from mediaferry.db.connection import Database
 from mediaferry.db.migrate import apply_migrations
 
 
@@ -215,8 +319,13 @@ def data_root(tmp_path):
 
 
 @pytest.fixture
-def db(data_root):
-    conn = open_database(data_root / "var" / "mediaferry.sqlite3")
+def database(data_root):
+    return Database(data_root / "var" / "mediaferry.sqlite3")
+
+
+@pytest.fixture
+def db(database):
+    conn = database.connect()
     apply_migrations(conn)
     yield conn
     conn.close()
@@ -279,41 +388,64 @@ def new_id() -> str:
 ```python
 """SQLite 接続の作法をここに集約する.
 
+**接続はスコープ（API のリクエスト、ワーカーのジョブ、reconciler）ごとに
+1 本作る。** トランザクションは接続に属していてスレッドには属さないので、
+1 本を共有すると、あるスレッドの UPDATE が別スレッドの `BEGIN IMMEDIATE` の
+内側に入り、一緒に commit / rollback されてしまう。2 つ目の `BEGIN` は
+`cannot start a transaction within a transaction` で落ちる。
+
 PRAGMA の大半は接続ごとの状態で、ファイルに永続するのは `journal_mode` だけ。
 接続を開くたびに設定しないと、外部キーが無効な接続が混ざる。
 """
 
 from __future__ import annotations
 
-import os
 import sqlite3
+import stat
 from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
 
 BUSY_TIMEOUT_MS = 5000
 
+DB_MODE = 0o600
+DIR_MODE = 0o700
+SIDECAR_SUFFIXES = ("-wal", "-shm")
 
-def open_database(path: Path) -> sqlite3.Connection:
-    """DB を開く. 親ディレクトリは 0700、ファイルは 0600 で作る.
 
-    WAL と SHM は SQLite が DB ファイルと同じ権限で作るので、個別に
-    chmod しなくても秘密が世界可読にはならない。
+class Database:
+    """DB ファイルの場所と、そこへの接続の作り方.
+
+    接続を保持しない。呼び出し側が自分のスコープで開いて閉じる。
     """
-    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-    fresh = not path.exists()
-    # API のスレッドとワーカーのスレッドが同じ接続を使う。SQLite 自体は
-    # serialized モードで動くので同時アクセスは安全で、書き込みの競合は
-    # BEGIN IMMEDIATE と busy_timeout が引き受ける。
-    conn = sqlite3.connect(path, isolation_level=None, check_same_thread=False)
-    conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA journal_mode = WAL")
-    conn.execute("PRAGMA synchronous = FULL")
-    conn.execute(f"PRAGMA busy_timeout = {BUSY_TIMEOUT_MS}")
-    conn.execute("PRAGMA foreign_keys = ON")
-    if fresh:
-        os.chmod(path, 0o600)
-    return conn
+
+    def __init__(self, path: Path) -> None:
+        self.path = path
+
+    def connect(self) -> sqlite3.Connection:
+        self.path.parent.mkdir(parents=True, exist_ok=True, mode=DIR_MODE)
+        conn = sqlite3.connect(self.path, isolation_level=None)
+        conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA journal_mode = WAL")
+        conn.execute("PRAGMA synchronous = FULL")
+        conn.execute(f"PRAGMA busy_timeout = {BUSY_TIMEOUT_MS}")
+        conn.execute("PRAGMA foreign_keys = ON")
+        self.enforce_permissions()
+        return conn
+
+    def enforce_permissions(self) -> None:
+        """毎回直す. 緩い権限で作られた既存 DB をそのまま運用しない.
+
+        WAL と SHM は SQLite が DB ファイルの権限を写して作るが、既に存在する
+        ファイルの権限は直さないので、こちらで揃える。API キーの暗号文と
+        アップロード履歴が入る。
+        """
+        if stat.S_IMODE(self.path.parent.stat().st_mode) != DIR_MODE:
+            self.path.parent.chmod(DIR_MODE)
+        for target in (self.path, *(self.path.with_name(self.path.name + s)
+                                    for s in SIDECAR_SUFFIXES)):
+            if target.exists() and stat.S_IMODE(target.stat().st_mode) != DB_MODE:
+                target.chmod(DB_MODE)
 
 
 @contextmanager
@@ -338,14 +470,19 @@ def immediate(conn: sqlite3.Connection) -> Iterator[sqlite3.Connection]:
 ```python
 """マイグレーションの適用.
 
-各 SQL ファイルは自分で `BEGIN` / `COMMIT` を書き、最後に自分の版を
-`schema_migration` へ INSERT する。`executescript` は保留中のトランザクションを
-暗黙に COMMIT してしまうので、Python 側でトランザクションを囲んでも
-DDL と版の記録を原子的にできない。
+**トランザクションは runner が所有する。** SQL ファイルは DDL だけを書き、
+`BEGIN` / `COMMIT` も版の記録も書かない。ファイル側に任せると、記録の
+INSERT を書き忘れた版が DDL だけ commit された状態で失敗し、次回起動で
+再適用されて「table already exists」になる。
+
+`executescript` は保留中のトランザクションを暗黙に COMMIT するので、Python の
+`BEGIN` で囲むことはできない。代わりに、トランザクションを含む 1 本のスクリプトを
+runner が組み立てて渡す。
 """
 
 from __future__ import annotations
 
+import hashlib
 import re
 import sqlite3
 from pathlib import Path
@@ -353,6 +490,12 @@ from pathlib import Path
 MIGRATIONS_DIR = Path(__file__).parent / "migrations"
 
 _VERSION_RE = re.compile(r"^(\d{4})_")
+# trigger 本体の `BEGIN ... END;` と区別する。トランザクションの BEGIN は
+# 直後がセミコロン（またはモード指定 + セミコロン）で終わる。
+_TRANSACTION_RE = re.compile(
+    r"^\s*(BEGIN(\s+(IMMEDIATE|DEFERRED|EXCLUSIVE))?\s*;|COMMIT\s*;|ROLLBACK\s*;)",
+    re.IGNORECASE | re.MULTILINE,
+)
 
 
 class MigrationError(RuntimeError):
@@ -364,26 +507,63 @@ def apply_migrations(conn: sqlite3.Connection) -> list[int]:
     conn.execute(
         "CREATE TABLE IF NOT EXISTS schema_migration ("
         " version INTEGER PRIMARY KEY,"
+        " name TEXT NOT NULL,"
+        " checksum TEXT NOT NULL,"
         " applied_at TEXT NOT NULL)"
     )
-    applied = _applied_versions(conn)
+    applied = {row["version"]: row for row in conn.execute("SELECT * FROM schema_migration")}
     done: list[int] = []
     for path in sorted(MIGRATIONS_DIR.glob("*.sql")):
-        match = _VERSION_RE.match(path.name)
-        if match is None:
-            raise MigrationError(f"{path.name} のファイル名が 4 桁の版番号で始まっていない")
-        version = int(match.group(1))
+        version = _version_of(path)
+        body = path.read_text(encoding="utf-8")
+        checksum = hashlib.sha256(body.encode("utf-8")).hexdigest()
+
         if version in applied:
+            if applied[version]["checksum"] != checksum:
+                # 適用済みの版を書き換えると、開発機と本番でスキーマが食い違う。
+                raise MigrationError(
+                    f"{path.name} は適用済みだが内容が変わっている。"
+                    "新しい版のファイルを足すこと（開発中の DB なら作り直す）"
+                )
             continue
-        conn.executescript(path.read_text(encoding="utf-8"))
-        if version not in _applied_versions(conn):
-            raise MigrationError(f"{path.name} が schema_migration に版 {version} を記録していない")
+
+        if _TRANSACTION_RE.search(body):
+            raise MigrationError(
+                f"{path.name} が BEGIN / COMMIT を含んでいる。"
+                "トランザクションは runner が所有する"
+            )
+        _apply_one(conn, version, path.name, body, checksum)
         done.append(version)
     return done
 
 
-def _applied_versions(conn: sqlite3.Connection) -> set[int]:
-    return {row["version"] for row in conn.execute("SELECT version FROM schema_migration")}
+def _apply_one(
+    conn: sqlite3.Connection, version: int, name: str, body: str, checksum: str
+) -> None:
+    """DDL と版の記録を 1 つのトランザクションで適用する.
+
+    version は int、checksum は hex、name はファイル名なので、いずれも
+    リテラルに埋めても SQL の構造を壊す文字を含まない。
+    """
+    record = (
+        "INSERT INTO schema_migration (version, name, checksum, applied_at)"
+        f" VALUES ({version}, '{name}', '{checksum}', datetime('now'));"
+    )
+    try:
+        conn.executescript(f"BEGIN IMMEDIATE;\n{body}\n{record}\nCOMMIT;")
+    except Exception:
+        # executescript の途中で失敗するとトランザクションが開いたまま残り、
+        # 以後の SQL がその中で走ってしまう。
+        if conn.in_transaction:
+            conn.execute("ROLLBACK")
+        raise
+
+
+def _version_of(path: Path) -> int:
+    match = _VERSION_RE.match(path.name)
+    if match is None:
+        raise MigrationError(f"{path.name} のファイル名が 4 桁の版番号で始まっていない")
+    return int(match.group(1))
 ```
 
 `app/src/mediaferry/db/__init__.py` と `app/src/mediaferry/db/migrations/__init__.py` は空ファイル。
@@ -529,7 +709,6 @@ Expected: FAIL（`sqlite3.OperationalError: no such table: job`）
 ```sql
 -- ジョブと設定。artifact_staging と upload_record が job.id を参照するので
 -- 最初の版に置く。
-BEGIN;
 
 CREATE TABLE job (
     id               TEXT PRIMARY KEY,
@@ -572,10 +751,6 @@ CREATE TABLE app_setting (
     value      TEXT NOT NULL,
     updated_at TEXT NOT NULL
 );
-
-INSERT INTO schema_migration (version, applied_at) VALUES (1, datetime('now'));
-
-COMMIT;
 ```
 
 `app/tests/test_db_migrate.py` の `test_apply_migrations_is_idempotent` から
@@ -765,7 +940,6 @@ Expected: FAIL（`no such table: device_profile`）
 
 ```sql
 -- プロファイルとソース側（デバイス・ボリューム・スキャン結果）。
-BEGIN;
 
 CREATE TABLE device_profile (
     id                  TEXT PRIMARY KEY,
@@ -870,10 +1044,6 @@ CREATE TABLE source_entry (
     observed_at         TEXT NOT NULL,
     UNIQUE (volume_instance_id, rel_path)
 );
-
-INSERT INTO schema_migration (version, applied_at) VALUES (2, datetime('now'));
-
-COMMIT;
 ```
 
 `source_entry.media_file_id` に外部キーを付けないのは、`media_file` が
@@ -1095,6 +1265,36 @@ def test_superseding_a_group_frees_its_members(db):
     ).fetchone()[0] == 0
 
 
+def test_a_superseded_group_cannot_gain_active_members(db):
+    """旧グループの再構成で active member が復活すると、候補の除外が誤る."""
+    profile = a_profile(db)
+    first = a_merge_group(db, profile, digest="d1")
+    second = a_merge_group(db, profile, digest="d2")
+    db.execute("UPDATE merge_group SET superseded_by_id = ? WHERE id = ?", (second, first))
+    with pytest.raises(sqlite3.IntegrityError, match="superseded"):
+        db.execute("INSERT INTO merge_member VALUES (?, ?, 0, 1)", (first, a_media_file(db, profile)))
+    # 非 active としてなら履歴に残せる
+    db.execute("INSERT INTO merge_member VALUES (?, ?, 0, 0)", (first, a_media_file(db, profile)))
+    with pytest.raises(sqlite3.IntegrityError, match="superseded"):
+        db.execute("UPDATE merge_member SET active = 1 WHERE merge_group_id = ?", (first,))
+
+
+def test_supersede_cannot_be_undone(db):
+    profile = a_profile(db)
+    first = a_merge_group(db, profile, digest="d1")
+    second = a_merge_group(db, profile, digest="d2")
+    db.execute("UPDATE merge_group SET superseded_by_id = ? WHERE id = ?", (second, first))
+    with pytest.raises(sqlite3.IntegrityError, match="irreversible"):
+        db.execute("UPDATE merge_group SET superseded_by_id = NULL WHERE id = ?", (first,))
+
+
+def test_a_group_cannot_supersede_itself(db):
+    profile = a_profile(db)
+    group = a_merge_group(db, profile, digest="d1")
+    with pytest.raises(sqlite3.IntegrityError, match="itself"):
+        db.execute("UPDATE merge_group SET superseded_by_id = ? WHERE id = ?", (group, group))
+
+
 def test_member_positions_are_unique_within_a_group(db):
     profile = a_profile(db)
     group = a_merge_group(db, profile, digest="d1")
@@ -1116,7 +1316,6 @@ Expected: FAIL（`no such table: media_file`）
 
 ```sql
 -- 公開されたメディアと、公開途中の状態、結合グループ。
-BEGIN;
 
 CREATE TABLE media_file (
     id                  TEXT PRIMARY KEY,
@@ -1191,6 +1390,40 @@ BEGIN
     UPDATE merge_member SET active = 0 WHERE merge_group_id = NEW.id;
 END;
 
+-- supersede は不可逆。戻せると active と親の状態が乖離し、旧グループの
+-- member が復活して現グループの候補判定を壊す。
+CREATE TRIGGER merge_group_supersede_is_final
+BEFORE UPDATE OF superseded_by_id ON merge_group
+WHEN OLD.superseded_by_id IS NOT NULL AND NEW.superseded_by_id IS NOT OLD.superseded_by_id
+BEGIN
+    SELECT RAISE(ABORT, 'supersede is irreversible');
+END;
+
+CREATE TRIGGER merge_group_no_self_supersede
+BEFORE UPDATE OF superseded_by_id ON merge_group
+WHEN NEW.superseded_by_id = NEW.id
+BEGIN
+    SELECT RAISE(ABORT, 'a group cannot supersede itself');
+END;
+
+-- active の denormalize は片方向の trigger だけだと、既に superseded の
+-- グループへ後から active な member を足して壊せる。
+CREATE TRIGGER merge_member_insert_respects_supersede
+BEFORE INSERT ON merge_member
+WHEN NEW.active = 1
+ AND (SELECT superseded_by_id FROM merge_group WHERE id = NEW.merge_group_id) IS NOT NULL
+BEGIN
+    SELECT RAISE(ABORT, 'a superseded group cannot gain active members');
+END;
+
+CREATE TRIGGER merge_member_activate_respects_supersede
+BEFORE UPDATE OF active ON merge_member
+WHEN NEW.active = 1
+ AND (SELECT superseded_by_id FROM merge_group WHERE id = NEW.merge_group_id) IS NOT NULL
+BEGIN
+    SELECT RAISE(ABORT, 'a superseded group cannot gain active members');
+END;
+
 -- 取り込みと結合が同じ公開プロトコルを通る。片方だけ回収不能にしない。
 CREATE TABLE artifact_staging (
     id               TEXT PRIMARY KEY,
@@ -1235,10 +1468,6 @@ CREATE TABLE source_entry_new (
 INSERT INTO source_entry_new SELECT * FROM source_entry;
 DROP TABLE source_entry;
 ALTER TABLE source_entry_new RENAME TO source_entry;
-
-INSERT INTO schema_migration (version, applied_at) VALUES (3, datetime('now'));
-
-COMMIT;
 ```
 
 - [ ] **Step 4: テストが通ることを確認する**
@@ -1373,10 +1602,24 @@ def test_upload_record_revision_must_match_destination_and_epoch(db):
     dest = a_destination(db)
     media_id = a_media_file(db, profile)
     an_upload(db, dest, media_id, destination_revision_id=dest[1])
+    another_revision(db, dest, epoch=2)
     with pytest.raises(sqlite3.IntegrityError):
+        # epoch 2 の行に epoch 1 の revision を掴ませる
         an_upload(
             db, dest, a_media_file(db, profile), target_epoch=2, destination_revision_id=dest[1]
         )
+
+
+def another_revision(db, dest, epoch):
+    """向き先を変えて epoch を進めた新しいリビジョン."""
+    dest_id, _, cred_id = dest
+    rev_id = new_id()
+    db.execute(
+        "INSERT INTO destination_revision (id, destination_id, revision, target_epoch, base_url,"
+        " credential_id, created_at) VALUES (?, ?, 2, ?, 'http://other.invalid', ?, ?)",
+        (rev_id, dest_id, epoch, cred_id, now_iso()),
+    )
+    return rev_id
 
 
 def test_one_record_per_destination_epoch_and_media(db):
@@ -1387,7 +1630,49 @@ def test_one_record_per_destination_epoch_and_media(db):
     with pytest.raises(sqlite3.IntegrityError):
         an_upload(db, dest, media_id)
     # epoch を進めれば、旧記録を監査履歴として残したまま送り直せる
+    another_revision(db, dest, epoch=2)
     an_upload(db, dest, media_id, target_epoch=2)
+
+
+def test_a_record_cannot_name_an_epoch_that_has_no_revision(db):
+    """複合 FK は destination_revision_id が NULL だと効かない."""
+    profile = a_profile(db)
+    dest = a_destination(db)
+    with pytest.raises(sqlite3.IntegrityError, match="epoch"):
+        an_upload(db, dest, a_media_file(db, profile), target_epoch=7)
+
+
+def test_an_active_record_must_name_its_owner_and_revision(db):
+    profile = a_profile(db)
+    dest = a_destination(db)
+    with pytest.raises(sqlite3.IntegrityError):
+        an_upload(db, dest, a_media_file(db, profile), state="uploading")
+
+
+def test_a_terminal_record_must_not_keep_a_claim(db):
+    profile = a_profile(db)
+    dest = a_destination(db)
+    job_id = a_job(db, type="upload")
+    with pytest.raises(sqlite3.IntegrityError):
+        an_upload(
+            db,
+            dest,
+            a_media_file(db, profile),
+            state="complete",
+            destination_revision_id=dest[1],
+            claim_job_id=job_id,
+            claim_token="t",
+            claim_expires_at=now_iso(),
+        )
+
+
+def test_a_complete_record_remembers_which_revision_it_used(db):
+    profile = a_profile(db)
+    dest = a_destination(db)
+    with pytest.raises(sqlite3.IntegrityError):
+        an_upload(db, dest, a_media_file(db, profile), state="complete")
+    an_upload(db, dest, a_media_file(db, profile), state="complete",
+              destination_revision_id=dest[1])
 
 
 def test_claim_columns_are_all_null_or_all_set(db):
@@ -1396,11 +1681,14 @@ def test_claim_columns_are_all_null_or_all_set(db):
     dest = a_destination(db)
     job_id = a_job(db, type="upload")
     with pytest.raises(sqlite3.IntegrityError):
-        an_upload(db, dest, a_media_file(db, profile), claim_job_id=job_id)
+        an_upload(db, dest, a_media_file(db, profile), state="checking",
+                  destination_revision_id=dest[1], claim_job_id=job_id)
     an_upload(
         db,
         dest,
         a_media_file(db, profile),
+        state="checking",
+        destination_revision_id=dest[1],
         claim_job_id=job_id,
         claim_token="t",
         claim_expires_at=now_iso(),
@@ -1415,7 +1703,8 @@ def test_selection_rule_cannot_be_rewritten(db):
     with pytest.raises(sqlite3.IntegrityError, match="immutable"):
         db.execute("UPDATE upload_record SET selection_rule = 'adopted_derived' WHERE id = ?",
                    (record_id,))
-    db.execute("UPDATE upload_record SET state = 'checking' WHERE id = ?", (record_id,))
+    # 状態を進めること自体は妨げない
+    db.execute("UPDATE upload_record SET state = 'needs_recheck' WHERE id = ?", (record_id,))
 
 
 def test_first_check_result_is_write_once(db):
@@ -1462,7 +1751,6 @@ Expected: FAIL（`no such table: upload_destination`）
 ```sql
 -- 転送先プロファイルとアップロード履歴。
 -- 宛先の取り違えはアプリの検証だけに頼らず、複合外部キーで DB が防ぐ。
-BEGIN;
 
 CREATE TABLE upload_destination (
     id                  TEXT PRIMARY KEY,
@@ -1563,9 +1851,31 @@ CREATE TABLE upload_record (
     UNIQUE (destination_id, target_epoch, media_file_id),
     CHECK ((claim_job_id IS NULL AND claim_token IS NULL AND claim_expires_at IS NULL)
         OR (claim_job_id IS NOT NULL AND claim_token IS NOT NULL AND claim_expires_at IS NOT NULL)),
+    -- 進行中なら所有者と、どの設定で送っているかが必ず分かる。
+    CHECK (state NOT IN ('checking', 'uploading', 'asset_known', 'tagging', 'fixing_datetime')
+        OR (claim_job_id IS NOT NULL AND destination_revision_id IS NOT NULL)),
+    -- 終端と待機状態に claim が残っていると、明示操作しても期限まで claim できない。
+    CHECK (state NOT IN ('pending', 'needs_recheck', 'complete', 'failed',
+                         'awaiting_datetime_approval')
+        OR claim_job_id IS NULL),
+    -- 送信済みなのにどの設定へ送ったか分からない、を作らない。
+    CHECK (state <> 'complete' OR destination_revision_id IS NOT NULL),
     FOREIGN KEY (destination_id, target_epoch, destination_revision_id)
         REFERENCES destination_revision(destination_id, target_epoch, id) ON DELETE RESTRICT
 );
+
+-- 複合外部キーは destination_revision_id が NULL だと効かない。pending の行が
+-- 存在しない epoch を名乗れると、後から同じ epoch の revision が別の意味で
+-- 作られたときに、どの設定へ送ったかを復元できなくなる。
+CREATE TRIGGER upload_record_epoch_must_exist
+BEFORE INSERT ON upload_record
+WHEN NOT EXISTS (
+    SELECT 1 FROM destination_revision
+     WHERE destination_id = NEW.destination_id AND target_epoch = NEW.target_epoch
+)
+BEGIN
+    SELECT RAISE(ABORT, 'no revision exists for this destination and epoch');
+END;
 
 CREATE INDEX upload_record_by_media ON upload_record (media_file_id);
 CREATE INDEX upload_record_claimable
@@ -1584,10 +1894,6 @@ WHEN OLD.first_check_result IS NOT NULL AND NEW.first_check_result IS NOT OLD.fi
 BEGIN
     SELECT RAISE(ABORT, 'first_check_result is immutable');
 END;
-
-INSERT INTO schema_migration (version, applied_at) VALUES (4, datetime('now'));
-
-COMMIT;
 ```
 
 - [ ] **Step 4: テストが通ることを確認する**
@@ -1621,14 +1927,30 @@ git commit -m "feat(mediaferry): add the destination and upload tables"
 - Consumes: `app_setting` テーブル（Task 2）、`mediaferry.clock.now_iso`
 - Produces:
   - `mediaferry.settings.SETTING_SPECS: dict[str, SettingSpec]`
-  - `mediaferry.settings.SettingValue(key, value, source, locked)`
-  - `mediaferry.settings.SettingsService(conn, env)` — `.snapshot()`, `.describe_all()`, `.set(key, value)`
+  - `mediaferry.settings.Tier`（`BOOTSTRAP` / `RESTART` / `RUNTIME`）
+  - `mediaferry.settings.SettingValue(key, value, source, locked, tier, writable)`
+  - `mediaferry.settings.SettingsService(conn, env)` — `.snapshot()`, `.describe_all()`, `.set(key, value) -> Tier`
   - `mediaferry.settings.Settings`（型付きスナップショット。`data_root`, `bind_host`,
     `http_port`, `auth_password`, `secret_key`, `upload_concurrency`,
     `upload_timeout_seconds`, `upload_max_attempts`, `auto_import`,
     `default_timezone`, `log_level`）
   - 例外 `SettingLocked` / `SettingInvalid`
   - `mediaferry.settings.startup_warnings(settings) -> list[str]`
+  - `mediaferry.settings.bootstrap_data_root(env) -> Path`
+
+**設定を 3 層に分ける。** どこで値が効くかを型に載せないと、「UI で変えたのに
+反映されない」「DB に置いてはいけない秘密が置ける」が両方起きる。
+
+| 層 | 意味 | キー |
+| --- | --- | --- |
+| `BOOTSTRAP` | **env のみ。DB に保存できない。** DB 自身の場所を決める値と、DB の外に無いと意味が無い秘密 | `DATA_ROOT`, `BROKER_SOCKET`, `SECRET_KEY`, `AUTH_PASSWORD` |
+| `RESTART` | DB に保存でき、次回起動から効く | `BIND_HOST`, `HTTP_PORT` |
+| `RUNTIME` | DB に保存でき、次のジョブ／リクエストから効く | `DEFAULT_TIMEZONE`, `LOG_LEVEL`, `AUTO_IMPORT`, `UPLOAD_*` |
+
+`SECRET_KEY` が `BOOTSTRAP` なのは §12.3 の境界そのものだから。DB に置けると
+「暗号文と復号鍵が同じバックアップに入る」ので、暗号化が何も守らなくなる。
+`AUTH_PASSWORD` も Phase 1 では env のみとする（Phase 4 で認証を入れるときに
+Argon2 ハッシュの保存先を別に作る。平文を `app_setting` に置く経路は作らない）。
 
 - [ ] **Step 1: 失敗するテストを書く**
 
@@ -1638,7 +1960,13 @@ git commit -m "feat(mediaferry): add the destination and upload tables"
 import pytest
 
 from mediaferry.clock import now_iso
-from mediaferry.settings import SettingInvalid, SettingLocked, SettingsService, startup_warnings
+from mediaferry.settings import (
+    SettingInvalid,
+    SettingLocked,
+    SettingsService,
+    Tier,
+    startup_warnings,
+)
 
 
 def service(db, **env):
@@ -1678,6 +2006,29 @@ def test_writing_a_locked_setting_is_refused(db):
         service(db, HTTP_PORT="9000").set("HTTP_PORT", "9001")
 
 
+def test_bootstrap_secrets_cannot_be_stored_in_the_db(db):
+    """暗号文と復号鍵が同じバックアップに入ると、暗号化が何も守らなくなる."""
+    svc = service(db)
+    for key in ("SECRET_KEY", "AUTH_PASSWORD", "DATA_ROOT", "BROKER_SOCKET"):
+        with pytest.raises(SettingLocked, match="env"):
+            svc.set(key, "x")
+    assert db.execute("SELECT count(*) FROM app_setting").fetchone()[0] == 0
+
+
+def test_set_reports_when_the_value_takes_effect(db):
+    svc = service(db)
+    assert svc.set("HTTP_PORT", "9001") is Tier.RESTART
+    assert svc.set("LOG_LEVEL", "debug") is Tier.RUNTIME
+
+
+def test_runtime_values_are_visible_to_the_next_snapshot(db):
+    """UI で TZ を設定した直後の取り込みが古い値を見ないこと."""
+    svc = service(db)
+    assert svc.snapshot().default_timezone is None
+    svc.set("DEFAULT_TIMEZONE", "Asia/Tokyo")
+    assert svc.snapshot().default_timezone == "Asia/Tokyo"
+
+
 def test_set_validates_before_storing(db):
     svc = service(db)
     with pytest.raises(SettingInvalid):
@@ -1704,6 +2055,7 @@ def test_secrets_are_masked_when_described(db):
     described = {s.key: s for s in service(db, AUTH_PASSWORD="s3cret").describe_all()}
     assert described["AUTH_PASSWORD"].value == "********"
     assert "s3cret" not in repr(described["AUTH_PASSWORD"])
+    assert described["AUTH_PASSWORD"].writable is False
 
 
 def test_non_loopback_without_auth_warns(db):
@@ -1739,6 +2091,7 @@ import binascii
 import sqlite3
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
+from enum import Enum
 from ipaddress import ip_address
 from pathlib import Path
 from typing import Any
@@ -1750,8 +2103,16 @@ ENV_PREFIX = "MEDIAFERRY_"
 MASK = "********"
 
 
+class Tier(Enum):
+    """値がどこに置けて、いつ効くか."""
+
+    BOOTSTRAP = "bootstrap"  # env のみ。DB に保存できない
+    RESTART = "restart"  # DB に保存でき、次回起動から効く
+    RUNTIME = "runtime"  # DB に保存でき、次のジョブ／リクエストから効く
+
+
 class SettingLocked(RuntimeError):
-    """env で固定されている項目を書こうとした."""
+    """env で固定されているか、DB へ保存してはいけない項目を書こうとした."""
 
 
 class SettingInvalid(ValueError):
@@ -1763,6 +2124,7 @@ class SettingSpec:
     key: str
     default: str | None
     parse: Callable[[str], Any]
+    tier: Tier
     secret: bool = False
 
 
@@ -1772,6 +2134,8 @@ class SettingValue:
     value: str | None
     source: str  # env / db / default
     locked: bool
+    tier: Tier
+    writable: bool
 
 
 @dataclass(frozen=True)
@@ -1833,23 +2197,34 @@ def _secret_key(raw: str) -> bytes:
 SETTING_SPECS: dict[str, SettingSpec] = {
     spec.key: spec
     for spec in (
-        SettingSpec("DATA_ROOT", "/data", Path),
+        # DB 自身の置き場所を決めるので、DB に保存できない。
+        SettingSpec("DATA_ROOT", "/data", Path, Tier.BOOTSTRAP),
         # compose.yaml が既にこのキーを app に渡している。
-        SettingSpec("BROKER_SOCKET", "/run/mediaferry/broker.sock", Path),
-        SettingSpec("BIND_HOST", "127.0.0.1", str),
-        SettingSpec("HTTP_PORT", "8080", _port),
-        SettingSpec("AUTH_PASSWORD", None, str, secret=True),
-        SettingSpec("SECRET_KEY", None, _secret_key, secret=True),
-        SettingSpec("UPLOAD_CONCURRENCY", "2", _positive_int),
-        SettingSpec("UPLOAD_TIMEOUT_SECONDS", "86400", _positive_int),
-        SettingSpec("UPLOAD_MAX_ATTEMPTS", "3", _positive_int),
-        SettingSpec("AUTO_IMPORT", "trusted", _choice("trusted", "off")),
+        SettingSpec("BROKER_SOCKET", "/run/mediaferry/broker.sock", Path, Tier.BOOTSTRAP),
+        # マスター鍵を DB へ置けると、暗号文と復号鍵が同じバックアップに入る。
+        SettingSpec("SECRET_KEY", None, _secret_key, Tier.BOOTSTRAP, secret=True),
+        # Phase 4 で認証を入れるときに Argon2 ハッシュの保存先を別に作る。
+        # 平文を app_setting へ置く経路は作らない。
+        SettingSpec("AUTH_PASSWORD", None, str, Tier.BOOTSTRAP, secret=True),
+        SettingSpec("BIND_HOST", "127.0.0.1", str, Tier.RESTART),
+        SettingSpec("HTTP_PORT", "8080", _port, Tier.RESTART),
+        SettingSpec("UPLOAD_CONCURRENCY", "2", _positive_int, Tier.RUNTIME),
+        SettingSpec("UPLOAD_TIMEOUT_SECONDS", "86400", _positive_int, Tier.RUNTIME),
+        SettingSpec("UPLOAD_MAX_ATTEMPTS", "3", _positive_int, Tier.RUNTIME),
+        SettingSpec("AUTO_IMPORT", "trusted", _choice("trusted", "off"), Tier.RUNTIME),
         # 既定値を置かない。UTC を既定にすると force_offset が補正にならないまま
         # 誤った時刻で確定する（§12.2）。
-        SettingSpec("DEFAULT_TIMEZONE", None, _timezone),
-        SettingSpec("LOG_LEVEL", "info", _choice("debug", "info", "warning", "error")),
+        SettingSpec("DEFAULT_TIMEZONE", None, _timezone, Tier.RUNTIME),
+        SettingSpec(
+            "LOG_LEVEL", "info", _choice("debug", "info", "warning", "error"), Tier.RUNTIME
+        ),
     )
 }
+
+
+def bootstrap_data_root(env: Mapping[str, str]) -> Path:
+    """DB を開く前に要る値. env と既定値だけで決まる."""
+    return Path(env.get(ENV_PREFIX + "DATA_ROOT", SETTING_SPECS["DATA_ROOT"].default))
 
 
 class SettingsService:
@@ -1858,26 +2233,45 @@ class SettingsService:
         self._env = env
 
     def _raw(self, key: str) -> tuple[str | None, str]:
+        spec = SETTING_SPECS[key]
         from_env = self._env.get(ENV_PREFIX + key)
         if from_env is not None:
             return from_env, "env"
-        row = self._conn.execute("SELECT value FROM app_setting WHERE key = ?", (key,)).fetchone()
-        if row is not None:
-            return row["value"], "db"
-        return SETTING_SPECS[key].default, "default"
+        # BOOTSTRAP は DB を見ない。書けないだけでなく、読みもしない
+        # （書けてしまった行が後から効くことを防ぐ）。
+        if spec.tier is not Tier.BOOTSTRAP:
+            row = self._conn.execute(
+                "SELECT value FROM app_setting WHERE key = ?", (key,)
+            ).fetchone()
+            if row is not None:
+                return row["value"], "db"
+        return spec.default, "default"
 
     def describe_all(self) -> list[SettingValue]:
         out = []
         for key, spec in SETTING_SPECS.items():
             raw, source = self._raw(key)
             value = MASK if (spec.secret and raw is not None) else raw
-            out.append(SettingValue(key=key, value=value, source=source, locked=source == "env"))
+            locked = source == "env"
+            out.append(
+                SettingValue(
+                    key=key,
+                    value=value,
+                    source=source,
+                    locked=locked,
+                    tier=spec.tier,
+                    writable=not locked and spec.tier is not Tier.BOOTSTRAP,
+                )
+            )
         return out
 
-    def set(self, key: str, value: str) -> None:
+    def set(self, key: str, value: str) -> Tier:
+        """保存して、その値がいつ効くかを返す."""
         spec = SETTING_SPECS.get(key)
         if spec is None:
             raise SettingInvalid(f"未知の設定キー: {key}")
+        if spec.tier is Tier.BOOTSTRAP:
+            raise SettingLocked(f"{key} は env でのみ設定できる（DB には保存しない）")
         if ENV_PREFIX + key in self._env:
             raise SettingLocked(f"{key} は環境変数で固定されている")
         spec.parse(value)
@@ -1887,6 +2281,7 @@ class SettingsService:
             " updated_at = excluded.updated_at",
             (key, value, now_iso()),
         )
+        return spec.tier
 
     def snapshot(self) -> Settings:
         parsed: dict[str, Any] = {}
@@ -2883,8 +3278,7 @@ git commit -m "feat(mediaferry): add device profile definitions and the dji buil
   - `mediaferry.core.profiles.matching.VolumeFacts(usb_vendor_id, usb_product_id, fs_label)`
   - `Protocol SourceTree`: `.has_root(name: str) -> bool`,
     `.iter_names(root: str, limit: int) -> Iterable[str]`
-  - `MatchOutcome(slug, confidence, provisional, reason)`（`confidence` は `high` / `low`、
-    `slug` が `None` なら対象外）
+  - `MatchOutcome(slug, provisional, reason)`（`slug` が `None` なら対象外）
   - `resolve_profile(definitions, facts, tree, remembered_slug=None) -> MatchOutcome`
   - `hint_score(defn, facts) -> int`
 
@@ -2944,7 +3338,6 @@ def test_content_confirms_the_profile():
     tree = DictTree({"DCIM": ["DJI_20260817120000_0001_D.MP4"]})
     outcome = resolve_profile([dji(), generic()], dji_facts(), tree)
     assert outcome.slug == "dji-osmo"
-    assert outcome.confidence == "high"
     assert outcome.provisional is False
 
 
@@ -2961,7 +3354,6 @@ def test_an_empty_dcim_is_a_provisional_match_with_low_confidence():
     outcome = resolve_profile([dji(), generic()], dji_facts(), tree)
     assert outcome.slug == "dji-osmo"
     assert outcome.provisional is True
-    assert outcome.confidence == "low"
     assert "空" in outcome.reason
 
 
@@ -3049,8 +3441,15 @@ class SourceTree(Protocol):
 
 @dataclass(frozen=True)
 class MatchOutcome:
+    """プロファイル判定の結果.
+
+    **ボリュームの同定確度 (`identity_confidence`) はここに含めない。**
+    「中身がプロファイルに一致したか」と「前回と同じカードか」は別の問いで、
+    混ぜると、同じ UUID の別カードが DJI のファイルを持っているだけで
+    信頼を引き継いでしまう。
+    """
+
     slug: str | None
-    confidence: str  # high / low
     provisional: bool
     reason: str
 
@@ -3091,7 +3490,6 @@ def resolve_profile(
         if matches >= defn.require.min_matching_files:
             return MatchOutcome(
                 slug=defn.slug,
-                confidence="high",
                 provisional=False,
                 reason=f"{', '.join(roots)} に一致するファイルが {matches} 件",
             )
@@ -3100,13 +3498,12 @@ def resolve_profile(
             # 対象だと分かるように残すが、自動取り込みの対象にはしない。
             provisional = MatchOutcome(
                 slug=defn.slug,
-                confidence="low",
                 provisional=True,
                 reason=f"{', '.join(roots)} はあるが一致するファイルが無い（空）",
             )
     if provisional is not None:
         return provisional
-    return MatchOutcome(slug=None, confidence="low", provisional=False, reason="対象外")
+    return MatchOutcome(slug=None, provisional=False, reason="対象外")
 
 
 def _count_matching_files(
@@ -3369,7 +3766,7 @@ git commit -m "feat(mediaferry): resolve captured_at from filenames and mtimes"
   - `mediaferry.core.naming.library_rel_path(role, profile_slug, source_rel_path) -> str`
   - `mediaferry.core.naming.staging_rel_path(job_id, artifact_id) -> str`
   - `mediaferry.core.naming.work_rel_path(job_id) -> str`
-  - `mediaferry.core.naming.candidate_paths(rel_path, wall_clock, sha1_hex) -> Iterator[str]`
+  - `mediaferry.core.naming.candidate_paths(rel_path, stamp, sha1_hex) -> Iterator[str]`
   - `mediaferry.core.naming.safe_source_rel_path(rel_path) -> str`
   - 例外 `UnsafePath`
 
@@ -3378,7 +3775,6 @@ git commit -m "feat(mediaferry): resolve captured_at from filenames and mtimes"
 `app/tests/test_naming.py`:
 
 ```python
-from datetime import datetime
 from itertools import islice
 
 import pytest
@@ -3413,13 +3809,15 @@ def test_unsafe_source_paths_are_refused(path):
 
 
 def test_the_first_candidate_is_the_plain_path():
-    at = datetime(2026, 8, 17, 14, 30, 5)
-    assert next(candidate_paths("library/x/DCIM/A.MP4", at, "abcdef1234")) == "library/x/DCIM/A.MP4"
+    stamp = "20260817143005"
+    assert next(
+        candidate_paths("library/x/DCIM/A.MP4", stamp, "abcdef1234")
+    ) == "library/x/DCIM/A.MP4"
 
 
 def test_the_series_is_deterministic():
-    at = datetime(2026, 8, 17, 14, 30, 5)
-    got = list(islice(candidate_paths("library/x/DCIM/A.MP4", at, "abcdef1234"), 5))
+    stamp = "20260817143005"
+    got = list(islice(candidate_paths("library/x/DCIM/A.MP4", stamp, "abcdef1234"), 5))
     assert got == [
         "library/x/DCIM/A.MP4",
         "library/x/DCIM/A_20260817143005.MP4",
@@ -3430,8 +3828,9 @@ def test_the_series_is_deterministic():
 
 
 def test_the_series_keeps_the_extension_and_the_directory():
-    at = datetime(2026, 1, 2, 3, 4, 5)
-    second = list(islice(candidate_paths("derived/x/DCIM/B.tar.gz", at, "0" * 40), 2))[1]
+    second = list(islice(candidate_paths("derived/x/DCIM/B.tar.gz", "20260102030405", "0" * 40), 2))[
+        1
+    ]
     assert second == "derived/x/DCIM/B.tar_20260102030405.gz"
 
 
@@ -3464,7 +3863,6 @@ upload_record が壊れる。
 from __future__ import annotations
 
 from collections.abc import Iterator
-from datetime import datetime
 from pathlib import PurePosixPath
 
 SHA1_PREFIX_CHARS = 8
@@ -3498,16 +3896,16 @@ def work_rel_path(job_id: str) -> str:
     return f"work/{job_id}"
 
 
-def candidate_paths(rel_path: str, wall_clock: datetime, sha1_hex: str) -> Iterator[str]:
+def candidate_paths(rel_path: str, stamp: str, sha1_hex: str) -> Iterator[str]:
     """公開先の候補を決定的な順序で無限に返す.
 
-    途中で落ちて再実行しても同じ名前に落ち着くよう、乱数も時刻も使わない
-    （`wall_clock` はソースの mtime 由来で、再実行しても同じ値になる）。
+    途中で落ちて再実行しても同じ名前に落ち着くよう、乱数も現在時刻も使わない。
+    `stamp` はソースの mtime 由来の壁時計（`YYYYMMDDHHMMSS`）で、staged の
+    時点で永続化されたものをそのまま受け取る。
     """
     path = PurePosixPath(rel_path)
     stem, suffix = path.stem, path.suffix
     parent = path.parent
-    stamp = wall_clock.strftime("%Y%m%d%H%M%S")
     short = sha1_hex[:SHA1_PREFIX_CHARS]
 
     yield rel_path
@@ -3796,8 +4194,9 @@ git commit -m "feat(mediaferry): resolve profiles through immutable revisions"
     `.reap_expired_leases() -> int`, `.get(job_id) -> sqlite3.Row | None`,
     `.list_jobs(limit) -> list[sqlite3.Row]`, `.events(job_id, after_seq) -> list[sqlite3.Row]`
   - 例外 `LeaseLost`
-  - `mediaferry.jobs.runner.JobRunner(store)` — `.register(job_type, handler)`,
-    `await .run_forever()`, `await .stop()`
+  - `mediaferry.jobs.runner.JobRunner(database, poll_interval=0.5)` —
+    `.register(job_type, handler)`（`handler(ctx, conn)`）、
+    `await .run_forever()`、`await .stop()`
 
 - [ ] **Step 1: 失敗するテストを書く**
 
@@ -3815,9 +4214,7 @@ def anyio_backend():
 ```python
 import pytest
 
-from mediaferry.db.connection import open_database
 from mediaferry.db.jobs import JobStore, LeaseLost
-from mediaferry.db.migrate import apply_migrations
 
 
 def test_enqueue_then_claim(db):
@@ -3830,16 +4227,12 @@ def test_enqueue_then_claim(db):
     assert store.get(job_id)["status"] == "running"
 
 
-def test_only_one_worker_wins_a_job(data_root):
+def test_only_one_worker_wins_a_job(db, database):
     """SQLite に行ロックは無い。BEGIN IMMEDIATE の中の条件付き UPDATE で所有権を取る."""
-    path = data_root / "var" / "mediaferry.sqlite3"
-    first = open_database(path)
-    apply_migrations(first)
-    second = open_database(path)
-    JobStore(first).enqueue("scan", {})
-    claims = [JobStore(first).claim_next(), JobStore(second).claim_next()]
+    second = database.connect()
+    JobStore(db).enqueue("scan", {})
+    claims = [JobStore(db).claim_next(), JobStore(second).claim_next()]
     assert sum(1 for c in claims if c is not None) == 1
-    first.close()
     second.close()
 
 
@@ -3880,6 +4273,61 @@ def test_cancel_is_cooperative(db):
     assert ctx.cancelled() is False
     assert store.request_cancel(ctx.job_id) is True
     assert ctx.cancelled() is True
+
+
+def test_cancelling_a_queued_job_finishes_it_immediately(db):
+    """queued を cancelling にすると、claim_next が拾わないので誰も終わらせられない."""
+    store = JobStore(db)
+    job_id = store.enqueue("import", {})
+    assert store.request_cancel(job_id) is True
+    row = store.get(job_id)
+    assert row["status"] == "cancelled"
+    assert row["finished_at"] is not None
+    assert store.claim_next() is None
+
+
+def test_assert_lease_refuses_a_cancelling_job(db):
+    """「キャンセル済み」と表示した後に公開されることを防ぐ境界."""
+    store = JobStore(db)
+    store.enqueue("import", {})
+    ctx = store.claim_next()
+    ctx.assert_lease()
+    store.request_cancel(ctx.job_id)
+    with pytest.raises(LeaseLost):
+        ctx.assert_lease()
+
+
+def test_assert_lease_refuses_an_expired_lease(db):
+    store = JobStore(db, lease_seconds=-1)
+    store.enqueue("import", {})
+    ctx = store.claim_next()
+    with pytest.raises(LeaseLost):
+        ctx.assert_lease()
+
+
+def test_heartbeat_cannot_revive_an_expired_lease(db):
+    """失効したジョブは reap されて interrupted になる. 復活させない."""
+    store = JobStore(db, lease_seconds=-1)
+    store.enqueue("import", {})
+    ctx = store.claim_next()
+    with pytest.raises(LeaseLost):
+        ctx.heartbeat()
+
+
+def test_a_cancel_cannot_slip_between_the_lease_check_and_the_transition(db, database):
+    """BEGIN IMMEDIATE の中で確認してから同じ transaction で進める."""
+    from mediaferry.db.connection import immediate
+
+    store = JobStore(db)
+    store.enqueue("import", {})
+    ctx = store.claim_next()
+    other = JobStore(database.connect())
+    with immediate(db):
+        ctx.assert_lease()
+        # 別接続の cancel は書き込みロックを取れないので待たされる
+        with pytest.raises(sqlite3.OperationalError):
+            other._conn.execute("PRAGMA busy_timeout = 0")  # noqa: SLF001
+            other.request_cancel(ctx.job_id)
 
 
 def test_cancelling_a_finished_job_does_nothing(db):
@@ -3928,12 +4376,12 @@ from mediaferry.jobs.runner import JobRunner
 
 
 @pytest.mark.anyio
-async def test_the_runner_executes_a_handler(db):
+async def test_the_runner_executes_a_handler(db, database):
     store = JobStore(db)
     seen = []
 
-    runner = JobRunner(store, poll_interval=0.01)
-    runner.register("scan", lambda ctx: seen.append(ctx.params["v"]))
+    runner = JobRunner(database, poll_interval=0.01)
+    runner.register("scan", lambda ctx, conn: seen.append(ctx.params["v"]))
     job_id = store.enqueue("scan", {"v": 7})
 
     async with anyio.create_task_group() as tg:
@@ -3950,13 +4398,13 @@ async def test_the_runner_executes_a_handler(db):
 
 
 @pytest.mark.anyio
-async def test_a_failing_handler_records_the_error_and_keeps_the_worker_alive(db):
+async def test_a_failing_handler_records_the_error_and_keeps_the_worker_alive(db, database):
     store = JobStore(db)
 
-    def boom(ctx):
+    def boom(ctx, conn):
         raise RuntimeError("ffprobe が見つからない")
 
-    runner = JobRunner(store, poll_interval=0.01)
+    runner = JobRunner(database, poll_interval=0.01)
     runner.register("scan", boom)
     failing = store.enqueue("scan", {})
     later = store.enqueue("scan", {})
@@ -3973,16 +4421,16 @@ async def test_a_failing_handler_records_the_error_and_keeps_the_worker_alive(db
 
 
 @pytest.mark.anyio
-async def test_a_cancelled_job_ends_as_cancelled(db):
+async def test_a_cancelled_job_ends_as_cancelled(db, database):
     store = JobStore(db)
     started = anyio.Event()
 
-    def slow(ctx):
+    def slow(ctx, conn):
         started.set()
         while not ctx.cancelled():
             pass
 
-    runner = JobRunner(store, poll_interval=0.01)
+    runner = JobRunner(database, poll_interval=0.01)
     runner.register("import", slow)
     job_id = store.enqueue("import", {})
 
@@ -3997,6 +4445,60 @@ async def test_a_cancelled_job_ends_as_cancelled(db):
         await runner.stop()
 
     assert store.get(job_id)["status"] == "cancelled"
+
+
+@pytest.mark.anyio
+async def test_each_job_gets_its_own_connection(db, database):
+    """ハンドラの接続がワーカーの poller と同じだと、claim と publish の
+    トランザクションが混ざる."""
+    store = JobStore(db)
+    seen = []
+
+    def capture(ctx, conn):
+        seen.append(conn)
+
+    runner = JobRunner(database, poll_interval=0.01)
+    runner.register("scan", capture)
+    first = store.enqueue("scan", {})
+    second = store.enqueue("scan", {})
+
+    async with anyio.create_task_group() as tg:
+        tg.start_soon(runner.run_forever)
+        with anyio.fail_after(5):
+            while store.get(second)["status"] in {"queued", "running"}:
+                await anyio.sleep(0.01)
+        await runner.stop()
+
+    assert len(seen) == 2
+    assert seen[0] is not seen[1]
+    assert store.get(first)["status"] == "succeeded"
+
+
+@pytest.mark.anyio
+async def test_stop_waits_for_the_running_handler(db, database):
+    """to_thread のハンドラは cancel では止まらない. 待たずに資源を閉じない."""
+    store = JobStore(db)
+    started = anyio.Event()
+    finished = []
+
+    def slow(ctx, conn):
+        started.set()
+        while not ctx.cancelled():
+            pass
+        finished.append(ctx.job_id)
+
+    runner = JobRunner(database, poll_interval=0.01)
+    runner.register("import", slow)
+    job_id = store.enqueue("import", {})
+
+    async with anyio.create_task_group() as tg:
+        tg.start_soon(runner.run_forever)
+        with anyio.fail_after(5):
+            await started.wait()
+        store.request_cancel(job_id)
+        await runner.stop()
+
+    assert finished == [job_id]
 ```
 
 - [ ] **Step 2: 失敗を確認する**
@@ -4054,8 +4556,8 @@ class JobContext:
         self._store.extend_lease(self.job_id, self.lease_token)
 
     def assert_lease(self) -> None:
-        """外部への副作用の直前に呼ぶ."""
-        self._store.extend_lease(self.job_id, self.lease_token)
+        """外部への副作用の直前に呼ぶ. 延長はしない."""
+        self._store.assert_lease(self.job_id, self.lease_token)
 
     def emit(self, level: str, message: str, data: dict[str, Any] | None = None) -> None:
         self._store.emit(self.job_id, level, message, data)
@@ -4101,11 +4603,30 @@ class JobStore:
             _store=self,
         )
 
+    def assert_lease(self, job_id: str, token: str) -> None:
+        """自分がまだ実行者かを確かめる. 延長はしない.
+
+        `cancelling` を通さないのが要点。通すと「キャンセル済みと表示した後に
+        公開される」経路が開く。期限切れも通さない（延長で復活させない）。
+
+        SELECT だけなので、呼び出し側の `BEGIN IMMEDIATE` の中で使える。
+        書き込みロックを取った状態で確認してから同じトランザクションで
+        状態を進めれば、確認と遷移の間にキャンセルが割り込めない。
+        """
+        row = self._conn.execute(
+            "SELECT 1 FROM job WHERE id = ? AND lease_token = ? AND status = 'running'"
+            " AND lease_expires_at > ?",
+            (job_id, token, iso(utcnow())),
+        ).fetchone()
+        if row is None:
+            raise LeaseLost(f"ジョブ {job_id} のリースが無効（キャンセル・失効・別の所有者）")
+
     def extend_lease(self, job_id: str, token: str) -> None:
+        """heartbeat. 期限切れのリースは復活させない."""
         updated = self._conn.execute(
             "UPDATE job SET lease_expires_at = ? WHERE id = ? AND lease_token = ?"
-            " AND status IN ('running', 'cancelling')",
-            (self._expiry(), job_id, token),
+            " AND status IN ('running', 'cancelling') AND lease_expires_at > ?",
+            (self._expiry(), job_id, token, iso(utcnow())),
         )
         if updated.rowcount != 1:
             raise LeaseLost(f"ジョブ {job_id} のリースを失っている")
@@ -4121,11 +4642,24 @@ class JobStore:
             raise LeaseLost(f"ジョブ {job_id} のリースを失っている")
 
     def request_cancel(self, job_id: str) -> bool:
-        updated = self._conn.execute(
-            "UPDATE job SET status = 'cancelling' WHERE id = ? AND status IN ('queued', 'running')",
-            (job_id,),
-        )
-        return updated.rowcount == 1
+        """queued は即 cancelled、running だけ cancelling にする.
+
+        queued を cancelling にすると、claim_next は queued しか取らないので
+        誰も終わらせられず、画面に永遠に「キャンセル中」が残る。
+        """
+        with immediate(self._conn):
+            done = self._conn.execute(
+                "UPDATE job SET status = 'cancelled', finished_at = ?"
+                " WHERE id = ? AND status = 'queued'",
+                (iso(utcnow()), job_id),
+            )
+            if done.rowcount == 1:
+                return True
+            updated = self._conn.execute(
+                "UPDATE job SET status = 'cancelling' WHERE id = ? AND status = 'running'",
+                (job_id,),
+            )
+            return updated.rowcount == 1
 
     def sweep_interrupted(self) -> int:
         """起動時に、前回落ちたまま running だったジョブを倒す."""
@@ -4195,24 +4729,35 @@ SQLite の書き込みを 1 本に絞るため、同時に走るジョブは 1 �
 実処理は同期関数として書き、`asyncio.to_thread` へ逃がしてイベントループを
 塞がないようにする。キャンセルは協調的で、ハンドラが `ctx.cancelled()` を
 見て自分で降りる。
+
+**ジョブごとに DB 接続を開く。** ハンドラにはその接続を渡し、`JobContext` も
+同じ接続に束ね直す。§9.3 の手順 7 は「リースの確認」と「staged への遷移」を
+1 つの `BEGIN IMMEDIATE` に入れるので、両者が別接続だと成立しない。
+
+`stop()` は「今のジョブが終わったら降りる」を意味する。`to_thread` で
+走っているハンドラは task の cancel では止まらないので、呼び出し側は
+`run_forever()` の完了を待つ。
 """
 
 from __future__ import annotations
 
 import asyncio
 import logging
+import sqlite3
 from collections.abc import Callable
+from dataclasses import replace
 
+from ..db.connection import Database
 from ..db.jobs import JobContext, JobStore
 
 logger = logging.getLogger(__name__)
 
-Handler = Callable[[JobContext], None]
+Handler = Callable[[JobContext, sqlite3.Connection], None]
 
 
 class JobRunner:
-    def __init__(self, store: JobStore, poll_interval: float = 0.5) -> None:
-        self._store = store
+    def __init__(self, database: Database, poll_interval: float = 0.5) -> None:
+        self._database = database
         self._poll_interval = poll_interval
         self._handlers: dict[str, Handler] = {}
         self._stopping = asyncio.Event()
@@ -4221,35 +4766,55 @@ class JobRunner:
         self._handlers[job_type] = handler
 
     async def stop(self) -> None:
+        """降りるよう伝える. 実際に終わるのは run_forever() の完了時."""
         self._stopping.set()
 
     async def run_forever(self) -> None:
-        while not self._stopping.is_set():
-            ctx = await asyncio.to_thread(self._store.claim_next)
-            if ctx is None:
-                try:
-                    await asyncio.wait_for(self._stopping.wait(), timeout=self._poll_interval)
-                except TimeoutError:
-                    pass
-                continue
-            await self._run_one(ctx)
+        poller = self._database.connect()
+        poll_store = JobStore(poller)
+        try:
+            while not self._stopping.is_set():
+                ctx = await asyncio.to_thread(poll_store.claim_next)
+                if ctx is None:
+                    try:
+                        await asyncio.wait_for(
+                            self._stopping.wait(), timeout=self._poll_interval
+                        )
+                    except TimeoutError:
+                        pass
+                    continue
+                await self._run_one(ctx, poll_store)
+        finally:
+            poller.close()
 
-    async def _run_one(self, ctx: JobContext) -> None:
-        row = self._store.get(ctx.job_id)
+    async def _run_one(self, ctx: JobContext, poll_store: JobStore) -> None:
+        row = poll_store.get(ctx.job_id)
         handler = self._handlers.get(row["type"])
         if handler is None:
-            self._store.finish(
+            poll_store.finish(
                 ctx.job_id, ctx.lease_token, "failed", f"未登録のジョブ種別: {row['type']}"
             )
             return
+
+        conn = await asyncio.to_thread(self._database.connect)
+        store = JobStore(conn)
+        # ハンドラの中の JobStore と ArtifactPublisher を同じ接続に揃える。
+        ctx = replace(ctx, _store=store)
         try:
-            await asyncio.to_thread(handler, ctx)
+            await asyncio.to_thread(handler, ctx, conn)
         except Exception as exc:  # noqa: BLE001 - どのジョブが落ちてもワーカーは生かす
             logger.exception("ジョブ %s が失敗した", ctx.job_id)
-            self._store.finish(ctx.job_id, ctx.lease_token, "failed", str(exc))
+            store.finish(ctx.job_id, ctx.lease_token, "failed", str(exc))
             return
-        status = "cancelled" if self._store.get(ctx.job_id)["status"] == "cancelling" else "succeeded"
-        self._store.finish(ctx.job_id, ctx.lease_token, status)
+        finally:
+            if not conn.in_transaction:
+                conn.close()
+            else:  # pragma: no cover - 取りこぼしの検出用
+                logger.error("ジョブ %s がトランザクションを開いたまま終わった", ctx.job_id)
+                conn.execute("ROLLBACK")
+                conn.close()
+        status = "cancelled" if poll_store.get(ctx.job_id)["status"] == "cancelling" else "succeeded"
+        poll_store.finish(ctx.job_id, ctx.lease_token, status)
 ```
 
 - [ ] **Step 4: テストが通ることを確認する**
@@ -4286,7 +4851,8 @@ git commit -m "feat(mediaferry): add the job store and the single asyncio worker
   - `mediaferry.adapters.fs.iter_media_files(dirfd, roots, extensions) -> Iterator[FoundFile]`
   - `mediaferry.adapters.fs.open_beneath(dirfd, rel_path) -> int`
   - `mediaferry.adapters.fs.fsync_dir(path: Path) -> None`
-  - 例外 `EscapeAttempt`
+  - `mediaferry.adapters.fs.assert_same_filesystem(*paths: Path) -> None`
+  - 例外 `EscapeAttempt` / `CrossDeviceLayout`
 
 - [ ] **Step 1: 失敗するテストを書く**
 
@@ -4294,12 +4860,15 @@ git commit -m "feat(mediaferry): add the job store and the single asyncio worker
 
 ```python
 import os
+from pathlib import Path
 
 import pytest
 
 from mediaferry.adapters.fs import (
+    CrossDeviceLayout,
     DirfdTree,
     EscapeAttempt,
+    assert_same_filesystem,
     iter_media_files,
     open_beneath,
 )
@@ -4382,6 +4951,25 @@ def test_the_tree_view_answers_the_matching_questions(tree):
 def test_the_tree_view_walks_into_subdirectories(tree):
     """DJI は DCIM/DJI_001/ の下にファイルを置く. 直下だけ見ると 0 件になる."""
     assert "A.MP4" in list(DirfdTree(tree).iter_names("DCIM", 100))
+
+
+def test_same_filesystem_check_passes_for_one_dataset(data_root):
+    assert_same_filesystem(data_root / "staging", data_root / "library", data_root / "derived")
+
+
+def test_same_filesystem_check_reports_a_split_layout(data_root, monkeypatch):
+    """別デバイスだと os.link が EXDEV で必ず失敗する. 起動時に気づく."""
+    real_stat = Path.stat
+
+    def fake_stat(self, *args, **kwargs):
+        result = real_stat(self, *args, **kwargs)
+        if self.name == "staging":
+            return os.stat_result(tuple(result)[:2] + (result.st_dev + 1,) + tuple(result)[3:])
+        return result
+
+    monkeypatch.setattr(Path, "stat", fake_stat)
+    with pytest.raises(CrossDeviceLayout):
+        assert_same_filesystem(data_root / "staging", data_root / "library")
 ```
 
 - [ ] **Step 2: 失敗を確認する**
@@ -4416,6 +5004,10 @@ APPLE_DOUBLE_PREFIX = "._"
 
 class EscapeAttempt(ValueError):
     """マウントルートの外へ出ようとするパス."""
+
+
+class CrossDeviceLayout(RuntimeError):
+    """staging と公開先が別のファイルシステムにある."""
 
 
 @dataclass(frozen=True)
@@ -4533,6 +5125,21 @@ def fsync_dir(path: Path) -> None:
         os.fsync(fd)
     finally:
         os.close(fd)
+
+
+def assert_same_filesystem(*paths: Path) -> None:
+    """staging と公開先が同じファイルシステムにあることを起動時に確かめる.
+
+    公開は `os.link` による原子的操作である必要がある。別デバイスにあると
+    `EXDEV` で必ず失敗し、それが分かるのは最初の取り込みの最中になる。
+    """
+    devices = {path: path.stat().st_dev for path in paths}
+    if len(set(devices.values())) > 1:
+        detail = ", ".join(f"{path}={dev}" for path, dev in devices.items())
+        raise CrossDeviceLayout(
+            f"staging と公開先が別のファイルシステムにある（{detail}）。"
+            "DATA_ROOT の下に 1 つのデータセットとして置くこと"
+        )
 ```
 
 - [ ] **Step 4: テストが通ることを確認する**
@@ -4752,10 +5359,17 @@ git commit -m "feat(mediaferry): finalise media metadata with ffprobe"
   - `ArtifactPublisher(conn, data_root, probe)` —
     `.publish(ctx, request, write) -> PublishedArtifact`,
     `.resume(staging_id) -> PublishedArtifact | None`
-  - 例外 `PublishAborted`
+  - 例外 `PublishAborted`（staged 前。durable なものは残っていない）/
+    `PublishInterrupted`（staged 以降。reconciliation が完遂する）/
+    `StagingLost`（回収不能。自動では続行しない）
 
 **この契約は import と merge の両方を想定して固定する。** Phase 2 で derived 専用の
 crash model を後付けすると、importer と別実装になって結合物だけが回収不能になる。
+
+**`ArtifactPublisher` と `JobContext` は同じ接続を使う。** 手順 7 は
+「リースの確認」と「staged への遷移」を 1 つの `BEGIN IMMEDIATE` に入れる必要が
+あり、別々の接続だと同じトランザクションにできない。ワーカーは 1 ジョブにつき
+1 本の接続を開き、`JobStore` と `ArtifactPublisher` の両方をそれに束ねる。
 
 - [ ] **Step 1: 失敗するテストを書く**
 
@@ -4774,6 +5388,8 @@ from mediaferry.adapters.publisher import (
     ArtifactRequest,
     HashingWriter,
     PublishAborted,
+    PublishInterrupted,
+    StagingLost,
 )
 from mediaferry.core.timestamps import CapturedAt
 from mediaferry.db.jobs import JobStore
@@ -4921,6 +5537,76 @@ def test_a_lost_lease_stops_the_publish_before_it_touches_the_library(setup, db,
     assert not (data_root / "library/dji-osmo/DCIM/A.MP4").exists()
 
 
+def test_a_cancel_requested_during_the_write_stops_the_publish(setup, db, data_root):
+    """cancelling でも extend_lease が通ってしまうと、この境界が破れる."""
+    publisher, ctx, profile, volume_id = setup
+
+    def write(writer):
+        writer.write(b"payload")
+        JobStore(db).request_cancel(ctx.job_id)
+
+    with pytest.raises(PublishAborted):
+        publisher.publish(ctx, a_request(profile, a_source_entry(db, volume_id)), write)
+    assert not (data_root / "library/dji-osmo/DCIM/A.MP4").exists()
+    # writing のまま残るので、次回起動の reconciliation が破棄する
+    assert db.execute("SELECT state FROM artifact_staging").fetchone()["state"] == "writing"
+
+
+def test_a_failure_after_staging_is_not_reported_as_an_import_failure(setup, db, data_root):
+    """staged 以降は reconciliation が完遂する. 呼び出し元が failed に倒すと二重取り込みになる."""
+    publisher, ctx, profile, volume_id = setup
+    publisher._checkpoint = _die_after(8)  # noqa: SLF001
+    with pytest.raises(PublishInterrupted):
+        publisher.publish(
+            ctx, a_request(profile, a_source_entry(db, volume_id)), write_payload(b"payload")
+        )
+
+
+def test_resume_after_the_staging_file_is_gone(setup, db, data_root):
+    """手順 10 まで進んで落ちた行は staged のまま. os.link を試すと必ず失敗する."""
+    publisher, ctx, profile, volume_id = setup
+    publisher._checkpoint = _die_after(10)  # noqa: SLF001
+    with pytest.raises(PublishInterrupted):
+        publisher.publish(
+            ctx, a_request(profile, a_source_entry(db, volume_id)), write_payload(b"payload")
+        )
+    publisher._checkpoint = lambda step: None  # noqa: SLF001
+
+    staging_id = db.execute("SELECT id FROM artifact_staging").fetchone()["id"]
+    got = publisher.resume(staging_id)
+    assert got.rel_path == "library/dji-osmo/DCIM/A.MP4"
+    assert (data_root / got.rel_path).read_bytes() == b"payload"
+    assert db.execute("SELECT state FROM artifact_staging").fetchone()["state"] == "published"
+
+
+def test_a_staged_row_whose_files_are_all_gone_is_not_silently_dropped(setup, db, data_root):
+    publisher, ctx, profile, volume_id = setup
+    publisher._checkpoint = _die_after(10)  # noqa: SLF001
+    with pytest.raises(PublishInterrupted):
+        publisher.publish(
+            ctx, a_request(profile, a_source_entry(db, volume_id)), write_payload(b"payload")
+        )
+    publisher._checkpoint = lambda step: None  # noqa: SLF001
+    (data_root / "library/dji-osmo/DCIM/A.MP4").unlink()
+
+    staging_id = db.execute("SELECT id FROM artifact_staging").fetchone()["id"]
+    with pytest.raises(StagingLost):
+        publisher.resume(staging_id)
+    assert db.execute("SELECT count(*) FROM artifact_staging").fetchone()[0] == 1
+
+
+class _Crash(RuntimeError):
+    pass
+
+
+def _die_after(step):
+    def checkpoint(current):
+        if current == step:
+            raise _Crash(f"step {step}")
+
+    return checkpoint
+
+
 def test_the_staged_row_carries_everything_needed_to_resume(setup, db, data_root):
     publisher, ctx, profile, volume_id = setup
     entry_id = a_source_entry(db, volume_id)
@@ -4977,6 +5663,41 @@ def test_merge_artifacts_use_the_same_protocol(setup, db, data_root):
     ).fetchone()[0] == got.media_file_id
 
 
+def test_durability_order_is_utime_then_fsync_then_dir_then_staged(setup, db, monkeypatch):
+    """os._exit のテストは page cache を失わないので、この順序は測れない.
+
+    mtime を fsync の後に付けると metadata が永続化されず、staging の親を
+    fsync しないと「DB は staged、ファイルは無い」になる。
+    """
+    from mediaferry.adapters import publisher as publisher_module
+
+    calls = []
+    monkeypatch.setattr(publisher_module.os, "utime", lambda *a, **k: calls.append("utime"))
+    real_fsync = publisher_module.os.fsync
+    monkeypatch.setattr(
+        publisher_module.os,
+        "fsync",
+        lambda fd: (calls.append("fsync"), real_fsync(fd))[1],
+    )
+    monkeypatch.setattr(
+        publisher_module, "fsync_dir", lambda path: calls.append(f"fsync_dir:{path.name}")
+    )
+
+    publisher, ctx, profile, volume_id = setup
+    original = publisher._checkpoint  # noqa: SLF001
+    monkeypatch.setattr(
+        publisher,
+        "_checkpoint",
+        lambda step: (calls.append(f"step{step}"), original(step))[1],
+    )
+    publisher.publish(ctx, a_request(profile, a_source_entry(db, volume_id)), write_payload(b"x"))
+
+    upto_staged = calls[: calls.index("step7") + 1]
+    assert upto_staged.index("utime") < upto_staged.index("fsync")
+    assert upto_staged.index("fsync") < upto_staged.index(f"fsync_dir:{ctx.job_id}")
+    assert upto_staged.index(f"fsync_dir:{ctx.job_id}") < upto_staged.index("step7")
+
+
 def test_the_hashing_writer_matches_hashlib(tmp_path):
     with (tmp_path / "f").open("wb") as f:
         writer = HashingWriter(f)
@@ -5016,6 +5737,7 @@ import os
 import sqlite3
 from collections.abc import Callable
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import BinaryIO
 
@@ -5044,7 +5766,28 @@ COPY_CHUNK = 4 * 1024 * 1024
 
 
 class PublishAborted(RuntimeError):
-    """リースを失ったか、キャンセルされた."""
+    """staged へ進む前に中止した.
+
+    durable なものは何も残っていない（writing の行だけが残り、次回起動で
+    破棄される）。呼び出し元は source_entry を差し戻して再実行してよい。
+    """
+
+
+class PublishInterrupted(RuntimeError):
+    """staged 以降で失敗した.
+
+    **呼び出し元はこれを「取り込み失敗」として扱ってはならない。**
+    ファイルは検証済みで、公開に必要な情報はすべて永続化されているので、
+    起動時の reconciliation が公開を完遂する。source_entry を failed に
+    戻すと、次のスキャンで新規と判定されて二重に取り込む。
+    """
+
+
+class StagingLost(RuntimeError):
+    """staging も final も無い（または内容が一致しない）.
+
+    自動では続行しない。reconciliation は行を残したまま画面に出す。
+    """
 
 
 @dataclass(frozen=True)
@@ -5127,15 +5870,19 @@ class ArtifactPublisher:
             write(writer)
             fileobj.flush()
             self._checkpoint(STEP_WRITTEN)
-            # 3. fsync
+            # mtime は fsync より前に付ける。後に付けると metadata の
+            # 永続化が保証されない。
+            os.utime(fileobj.fileno(), ns=(request.mtime_ns, request.mtime_ns))
+            # 3. 中身とディレクトリエントリの両方を永続化する。親を fsync
+            #    しないと、電源断で「DB は staged、ファイルは無い」になる。
             os.fsync(fileobj.fileno())
+        fsync_dir(staging_abs.parent)
         self._checkpoint(STEP_FSYNCED)
 
-        # 4. サイズとハッシュの検証、および mtime の付与
+        # 4. サイズとハッシュの検証
         on_disk = staging_abs.stat().st_size
         if on_disk != writer.size:
             raise PublishAborted(f"書き込みサイズが一致しない（{on_disk} != {writer.size}）")
-        os.utime(staging_abs, ns=(request.mtime_ns, request.mtime_ns))
         self._checkpoint(STEP_VERIFIED)
 
         # 5. メタデータは公開前に確定させる。実体はあるがメタデータが欠けたまま
@@ -5157,6 +5904,9 @@ class ArtifactPublisher:
             "duration_seconds": probe.duration_seconds,
             "probe_state": probe.probe_state,
             "mtime_ns": request.mtime_ns,
+            # 衝突時の別名に使う壁時計。ここで確定して永続化する。再開のたびに
+            # 計算し直すと、算出方法を変えた版で別の名前へ落ちる。
+            "collision_stamp": _collision_stamp(request.mtime_ns),
         }
         self._checkpoint(STEP_METADATA)
 
@@ -5164,25 +5914,33 @@ class ArtifactPublisher:
         final_rel = request.desired_rel_path
         self._checkpoint(STEP_FINAL_PATH)
 
-        # staged は後戻りできない点である（以後 reconciliation が公開を完遂する）。
-        # キャンセル済みと表示した後に公開されることを防ぐため、その手前で
-        # リースを確認する。ここで落ちた行は writing のまま次回起動で破棄される。
+        # 7. staged。ここが後戻りできない点で、以後は reconciliation が公開を
+        #    完遂する。だからリースの確認は手順 8 の直前ではなくここで行う。
+        #
+        #    確認と遷移を 1 つの BEGIN IMMEDIATE に入れるのが要点。別々にすると
+        #    その隙間にキャンセルが commit でき、「キャンセル済みと表示した後に
+        #    公開される」経路が残る。
         try:
-            ctx.assert_lease()
+            with immediate(self._conn):
+                ctx.assert_lease()
+                self._conn.execute(
+                    "UPDATE artifact_staging SET state = 'staged', final_rel_path = ?,"
+                    " expected_size = ?, content_sha1 = ?, metadata_json = ?, updated_at = ?"
+                    " WHERE id = ?",
+                    (final_rel, writer.size, writer.sha1,
+                     json.dumps(metadata, ensure_ascii=False), now_iso(), staging_id),
+                )
         except LeaseLost as exc:
             raise PublishAborted(str(exc)) from exc
-
-        # 7. staged。ここで永続化した情報だけで reconciliation が再開できる。
-        self._conn.execute(
-            "UPDATE artifact_staging SET state = 'staged', final_rel_path = ?,"
-            " expected_size = ?, content_sha1 = ?, metadata_json = ?, updated_at = ?"
-            " WHERE id = ?",
-            (final_rel, writer.size, writer.sha1,
-             json.dumps(metadata, ensure_ascii=False), now_iso(), staging_id),
-        )
         self._checkpoint(STEP_STAGED)
 
-        return self._finish(staging_id)
+        try:
+            return self._finish(staging_id)
+        except PublishInterrupted:
+            raise
+        except Exception as exc:
+            # ここから先の失敗は「取り込み失敗」ではない。回収は起動時に走る。
+            raise PublishInterrupted(str(exc)) from exc
 
     def resume(self, staging_id: str) -> PublishedArtifact | None:
         """reconciliation から呼ぶ. 永続化済みの情報だけを使い、パスを推測しない."""
@@ -5211,9 +5969,16 @@ class ArtifactPublisher:
         row = self._row(staging_id)
         staging_abs = self._data_root / row["staging_rel_path"]
         metadata = json.loads(row["metadata_json"])
+
+        if not staging_abs.exists():
+            # 手順 10（staging の unlink）まで進んだ後に落ちた場合。state は
+            # staged のままなので、ここを通らないと再開のたびに os.link が
+            # FileNotFoundError になり、永久に commit できない。
+            return self._adopt_published_final(row)
+
         names = candidate_paths(
             metadata["desired_rel_path"],
-            _wall_clock(metadata["mtime_ns"]),
+            metadata["collision_stamp"],
             row["content_sha1"],
         )
         reused = False
@@ -5230,7 +5995,7 @@ class ArtifactPublisher:
                 os.link(staging_abs, final_abs)
                 break
             except FileExistsError:
-                if _sha1_of(final_abs) == row["content_sha1"]:
+                if _is_same_content(final_abs, row["expected_size"], row["content_sha1"]):
                     reused = True
                     break
                 final_rel = next(names)
@@ -5251,6 +6016,23 @@ class ArtifactPublisher:
             fsync_dir(staging_abs.parent)
         self._checkpoint(STEP_STAGING_UNLINKED)
         return reused
+
+    def _adopt_published_final(self, row: sqlite3.Row) -> bool:
+        """staging が無い staged 行を、final の実体だけで判定して引き取る.
+
+        永続化した expected_size と content_sha1 だけを使う。パスも内容も
+        推測しない。一致しなければ自動では続行せず、画面に出して判断を仰ぐ。
+        """
+        final_abs = self._data_root / row["final_rel_path"]
+        if _is_same_content(final_abs, row["expected_size"], row["content_sha1"]):
+            fsync_dir(final_abs.parent)
+            self._checkpoint(STEP_DIR_FSYNCED)
+            self._checkpoint(STEP_STAGING_UNLINKED)
+            return True
+        raise StagingLost(
+            f"staging {row['id']} の一時ファイルが無く、{row['final_rel_path']} も"
+            "記録した大きさ・ハッシュと一致しない"
+        )
 
     def _commit(self, row: sqlite3.Row, reused: bool) -> PublishedArtifact:
         """11. media_file を作り、呼び出し元のレコードを更新する."""
@@ -5307,10 +6089,22 @@ class ArtifactPublisher:
         ).fetchone()
 
 
-def _wall_clock(mtime_ns: int):  # noqa: ANN202 - datetime を返す小さな補助
-    from datetime import UTC, datetime
+def _collision_stamp(mtime_ns: int) -> str:
+    """衝突時の別名に使う、カード上の壁時計.
 
-    return datetime.fromtimestamp(mtime_ns / 1e9, tz=UTC).replace(tzinfo=None)
+    exFAT はローカル時刻を保持し、カーネルはそれをオフセット 0 として epoch に
+    するので、epoch を UTC で描画したものがカード上の壁時計になる。
+    プロファイルの `timezone` を付けても表示される桁は変わらない
+    （オフセットの付与は瞬間を移動しない）。
+    """
+    return datetime.fromtimestamp(mtime_ns / 1e9, tz=UTC).strftime("%Y%m%d%H%M%S")
+
+
+def _is_same_content(path: Path, expected_size: int, expected_sha1: str) -> bool:
+    """大きさとハッシュの両方で判定する. ハッシュだけだと stat の齟齬を見逃す."""
+    if not path.exists() or path.stat().st_size != expected_size:
+        return False
+    return _sha1_of(path) == expected_sha1
 
 
 def _sha1_of(path: Path) -> str:
@@ -5595,6 +6389,7 @@ git commit -m "feat(mediaferry): scan source volumes into source entries"
   `resolve_captured_at`（Task 11）、`library_rel_path`（Task 12）、`ProfileRef`（Task 13）
 - Produces:
   - `mediaferry.jobs.importer.ImportOutcome(published, skipped, failed)`
+  - `mediaferry.jobs.importer.ImportFailed(message, outcome)`
   - `Importer(conn, publisher, data_root, default_timezone)` —
     `.run(ctx, dirfd, volume_instance_id, profile) -> ImportOutcome`
   - 例外 `NotEnoughSpace`
@@ -5604,15 +6399,16 @@ git commit -m "feat(mediaferry): scan source volumes into source entries"
 `app/tests/test_importer.py`:
 
 ```python
+import errno
 import os
 
 import pytest
 
-from mediaferry.adapters.publisher import ArtifactPublisher
+from mediaferry.adapters.publisher import ArtifactPublisher, PublishInterrupted
 from mediaferry.core.timestamps import TimezoneUnresolved
 from mediaferry.db.jobs import JobStore
 from mediaferry.db.profiles import ProfileRegistry
-from mediaferry.jobs.importer import Importer, NotEnoughSpace
+from mediaferry.jobs.importer import ImportFailed, Importer, NotEnoughSpace
 from mediaferry.jobs.scan import Scanner
 
 from .test_publisher import StubProbe
@@ -5704,7 +6500,11 @@ def test_cancelling_stops_between_files(importing, db, data_root):
     assert outcome.published == 0
 
 
-def test_a_failing_file_does_not_stop_the_rest(importing, db, monkeypatch):
+def test_a_failing_file_does_not_stop_the_rest_but_fails_the_job(importing, db, monkeypatch):
+    """ファイル単位では続行する. ただしジョブは failed で終わる.
+
+    全件失敗しても succeeded になると、監視も画面も「取り込めた」と読む。
+    """
     importer, ctx, fd, volume_id, profile = importing
     calls = {"n": 0}
     original = importer._publish_one  # noqa: SLF001
@@ -5712,16 +6512,61 @@ def test_a_failing_file_does_not_stop_the_rest(importing, db, monkeypatch):
     def flaky(*args, **kwargs):
         calls["n"] += 1
         if calls["n"] == 1:
-            raise OSError("入力エラー")
+            raise ValueError("メタデータが読めない")
         return original(*args, **kwargs)
 
     monkeypatch.setattr(importer, "_publish_one", flaky)
-    outcome = importer.run(ctx, fd, volume_id, profile)
-    assert outcome.failed == 1
-    assert outcome.published == 1
+    with pytest.raises(ImportFailed) as exc:
+        importer.run(ctx, fd, volume_id, profile)
+    assert exc.value.outcome.failed == 1
+    assert exc.value.outcome.published == 1
     assert db.execute(
         "SELECT count(*) FROM source_entry WHERE state = 'failed'"
     ).fetchone()[0] == 1
+
+
+def test_a_vanished_card_stops_the_run_instead_of_grinding_through(importing, db, monkeypatch):
+    """取り込み中にカードを抜くケース（手動チェックリスト #5）."""
+    importer, ctx, fd, volume_id, profile = importing
+
+    def gone(*args, **kwargs):
+        raise OSError(errno.EIO, "Input/output error")
+
+    monkeypatch.setattr(importer, "_publish_one", gone)
+    with pytest.raises(ImportFailed) as exc:
+        importer.run(ctx, fd, volume_id, profile)
+    assert exc.value.outcome.published == 0
+    # 2 件目は試さずに降りる
+    assert exc.value.outcome.failed == 1
+
+
+def test_an_interrupted_publish_leaves_the_entry_for_reconciliation(importing, db, monkeypatch):
+    """staged 以降の失敗で failed に戻すと、次のスキャンで二重に取り込む."""
+    importer, ctx, fd, volume_id, profile = importing
+
+    def interrupted(*args, **kwargs):
+        raise PublishInterrupted("link に失敗した")
+
+    monkeypatch.setattr(importer, "_publish_one", interrupted)
+    with pytest.raises(PublishInterrupted):
+        importer.run(ctx, fd, volume_id, profile)
+    assert db.execute(
+        "SELECT count(*) FROM source_entry WHERE state = 'failed'"
+    ).fetchone()[0] == 0
+
+
+def test_the_copy_heartbeats_so_a_long_file_does_not_lose_its_lease(importing, db, monkeypatch):
+    """16GiB のコピーは既定のリース (60 秒) より長い."""
+    from mediaferry.jobs import importer as importer_module
+
+    importer, ctx, fd, volume_id, profile = importing
+    monkeypatch.setattr(importer_module, "COPY_CHUNK", 8)
+    monkeypatch.setattr(importer_module, "HEARTBEAT_BYTES", 8)
+    beats = []
+    monkeypatch.setattr(ctx, "heartbeat", lambda: beats.append(1))
+    importer.run(ctx, fd, volume_id, profile)
+    # 100 バイトを 8 バイトずつなので、ファイル単位の 1 回より多く打つ
+    assert len(beats) > 2
 ```
 
 - [ ] **Step 2: 失敗を確認する**
@@ -5743,13 +6588,20 @@ no-clobber 公開で構造的に起きないようにしてある。
 
 from __future__ import annotations
 
+import errno
 import os
 import sqlite3
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 
 from ..adapters.fs import open_beneath
-from ..adapters.publisher import ArtifactPublisher, ArtifactRequest, HashingWriter
+from ..adapters.publisher import (
+    ArtifactPublisher,
+    ArtifactRequest,
+    HashingWriter,
+    PublishAborted,
+    PublishInterrupted,
+)
 from ..clock import now_iso
 from ..core.naming import library_rel_path
 from ..core.timestamps import resolve_captured_at
@@ -5759,10 +6611,24 @@ from ..db.profiles import ProfileRef
 COPY_CHUNK = 4 * 1024 * 1024
 # 空き容量の見積りに乗せる余裕。DB とサムネイルの分。
 FREE_SPACE_MARGIN = 512 * 1024 * 1024
+# リースは 60 秒で切れる。16GiB のコピーはそれより長くかかるので、
+# コピーの途中でも延長する。
+HEARTBEAT_BYTES = 256 * 1024 * 1024
+
+# カードが抜けたときに出る errno。残りを試しても同じように失敗する。
+_DEVICE_GONE = frozenset({errno.EIO, errno.ENODEV, errno.ENXIO, errno.ESTALE, errno.EBADF})
 
 
 class NotEnoughSpace(RuntimeError):
     pass
+
+
+class ImportFailed(RuntimeError):
+    """1 件以上の取り込みに失敗した. ジョブを failed にするために送出する."""
+
+    def __init__(self, message: str, outcome: ImportOutcome) -> None:
+        super().__init__(message)
+        self.outcome = outcome
 
 
 @dataclass(frozen=True)
@@ -5817,16 +6683,51 @@ class Importer:
             ctx.heartbeat()
             try:
                 self._publish_one(ctx, dirfd, row, profile)
+            except PublishAborted:
+                # リースを失った（キャンセル・失効）。durable なものは残って
+                # いないので差し戻す。キャンセルなら降りる。失効なら失敗。
+                self._conn.execute(
+                    "UPDATE source_entry SET state = 'seen' WHERE id = ?", (row["id"],)
+                )
+                if ctx.cancelled():
+                    break
+                raise
+            except PublishInterrupted:
+                # staged 以降で失敗した。ファイルは検証済みで、起動時の
+                # reconciliation が公開を完遂する。**failed に戻さない**
+                # （戻すと次のスキャンで新規と判定され、二重に取り込む）。
+                ctx.emit("warning", f"{row['rel_path']} の公開は起動時に再開される")
+                raise
+            except OSError as exc:
+                failed += 1
+                self._mark_failed(row["id"])
+                ctx.emit("error", f"{row['rel_path']} の取り込みに失敗した: {exc}")
+                if exc.errno in _DEVICE_GONE:
+                    # カードが抜かれた。残りを試しても同じように失敗する。
+                    ctx.emit("error", "ソースが読めなくなったので中断する")
+                    break
+                continue
             except Exception as exc:  # noqa: BLE001 - 1 件の失敗で全体を止めない
                 failed += 1
-                self._conn.execute(
-                    "UPDATE source_entry SET state = 'failed' WHERE id = ?", (row["id"],)
-                )
+                self._mark_failed(row["id"])
                 ctx.emit("error", f"{row['rel_path']} の取り込みに失敗した: {exc}")
                 continue
             published += 1
             ctx.emit("info", f"{row['rel_path']} を取り込んだ")
-        return ImportOutcome(published=published, skipped=skipped, failed=failed)
+
+        outcome = ImportOutcome(published=published, skipped=skipped, failed=failed)
+        if failed:
+            # 1 件でも落ちたらジョブは失敗にする。全件失敗しても succeeded に
+            # なると、監視も画面も「取り込めた」と読んでしまう。
+            raise ImportFailed(
+                f"{failed} 件の取り込みに失敗した（成功 {published} 件）", outcome
+            )
+        return outcome
+
+    def _mark_failed(self, entry_id: str) -> None:
+        self._conn.execute(
+            "UPDATE source_entry SET state = 'failed' WHERE id = ?", (entry_id,)
+        )
 
     def _publish_one(
         self, ctx: JobContext, dirfd: int, row: sqlite3.Row, profile: ProfileRef
@@ -5854,9 +6755,16 @@ class Importer:
 
         def write(writer: HashingWriter) -> None:
             fd = open_beneath(dirfd, row["rel_path"])
+            since_heartbeat = 0
             with os.fdopen(fd, "rb") as source:
                 while chunk := source.read(COPY_CHUNK):
                     writer.write(chunk)
+                    since_heartbeat += len(chunk)
+                    if since_heartbeat >= HEARTBEAT_BYTES:
+                        # 16GiB のコピーはリースより長い。延ばさないと、
+                        # 公開の直前でリース切れになって全件が中止される。
+                        ctx.heartbeat()
+                        since_heartbeat = 0
 
         self._publisher.publish(ctx, request, write)
 
@@ -5901,12 +6809,12 @@ import json
 
 import pytest
 
-from mediaferry.adapters.publisher import ArtifactPublisher
+from mediaferry.adapters.publisher import ArtifactPublisher, PublishInterrupted
 from mediaferry.db.jobs import JobStore
 from mediaferry.db.profiles import ProfileRegistry
 from mediaferry.jobs.reconcile import Reconciler
 
-from .test_publisher import StubProbe, a_request, write_payload
+from .test_publisher import StubProbe, _Crash, _die_after, a_request, write_payload
 from .test_schema_artifacts import a_source_entry
 from .test_schema_sources import a_volume
 
@@ -5966,7 +6874,7 @@ def test_a_crash_between_link_and_commit_still_publishes(world, db, data_root):
     ctx = store.claim_next()
     entry_id = a_source_entry(db, volume_id)
     publisher._checkpoint = _die_after(10)  # noqa: SLF001
-    with pytest.raises(_Crash):
+    with pytest.raises(PublishInterrupted):
         publisher.publish(ctx, a_request(profile, entry_id), write_payload(b"payload"))
     publisher._checkpoint = lambda step: None  # noqa: SLF001
 
@@ -6002,19 +6910,45 @@ def test_orphans_are_reported_and_never_deleted(world, data_root):
     assert orphan.exists()
 
 
-def test_a_missing_file_marks_the_record(world, db, data_root):
+def test_a_missing_file_marks_the_record_and_a_restored_one_clears_it(world, db, data_root):
+    """一時的に dataset が見えなかっただけで永久に欠損扱いにしない."""
     store, publisher, profile, volume_id, reconciler = world
     store.enqueue("import", {})
     ctx = store.claim_next()
     got = publisher.publish(
         ctx, a_request(profile, a_source_entry(db, volume_id)), write_payload(b"payload")
     )
-    (data_root / got.rel_path).unlink()
-    report = reconciler.run()
-    assert report.missing == 1
+    path = data_root / got.rel_path
+    payload = path.read_bytes()
+
+    path.unlink()
+    assert reconciler.run().missing == 1
     assert db.execute(
         "SELECT missing_at FROM media_file WHERE id = ?", (got.media_file_id,)
     ).fetchone()[0] is not None
+
+    path.write_bytes(payload)
+    assert reconciler.run().restored == 1
+    assert db.execute(
+        "SELECT missing_at FROM media_file WHERE id = ?", (got.media_file_id,)
+    ).fetchone()[0] is None
+
+
+def test_an_unrecoverable_staging_row_is_reported_not_dropped(world, db, data_root):
+    store, publisher, profile, volume_id, reconciler = world
+    store.enqueue("import", {})
+    ctx = store.claim_next()
+    publisher._checkpoint = _die_after(10)  # noqa: SLF001
+    with pytest.raises(PublishInterrupted):
+        publisher.publish(
+            ctx, a_request(profile, a_source_entry(db, volume_id)), write_payload(b"payload")
+        )
+    publisher._checkpoint = lambda step: None  # noqa: SLF001
+    (data_root / "library/dji-osmo/DCIM/A.MP4").unlink()
+
+    report = reconciler.run()
+    assert len(report.unrecoverable) == 1
+    assert db.execute("SELECT count(*) FROM artifact_staging").fetchone()[0] == 1
 
 
 def test_stale_job_directories_are_cleaned_but_live_ones_are_kept(world, db, data_root):
@@ -6042,18 +6976,6 @@ def test_running_jobs_are_marked_interrupted_first(world, db):
     ctx = store.claim_next()
     reconciler.run()
     assert store.get(ctx.job_id)["status"] == "interrupted"
-
-
-class _Crash(RuntimeError):
-    pass
-
-
-def _die_after(step):
-    def checkpoint(current):
-        if current == step:
-            raise _Crash(f"step {step}")
-
-    return checkpoint
 ```
 
 - [ ] **Step 2: 失敗を確認する**
@@ -6085,7 +7007,7 @@ import sqlite3
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from ..adapters.publisher import ArtifactPublisher
+from ..adapters.publisher import ArtifactPublisher, StagingLost
 from ..clock import now_iso
 from ..db.jobs import JobStore
 
@@ -6108,8 +7030,12 @@ class ReconcileReport:
     resumed: int = 0
     recommitted: int = 0
     missing: int = 0
+    restored: int = 0
     cleaned_dirs: int = 0
     orphans: list[OrphanFile] = field(default_factory=list)
+    # 自動では続行できなかった staging（実体が無い、内容が一致しない）。
+    # 行は残す。画面に出して判断を仰ぐ。
+    unrecoverable: list[str] = field(default_factory=list)
 
 
 class Reconciler:
@@ -6131,7 +7057,7 @@ class Reconciler:
         # staging と work を掃除する。
         self._store.sweep_interrupted()
         self._recover_staging(report)
-        self._mark_missing(report)
+        self._sync_missing(report)
         self._collect_orphans(report)
         self._clean_job_dirs(report)
         return report
@@ -6150,9 +7076,15 @@ class Reconciler:
             state = row["state"]
             try:
                 self._publisher.resume(row["id"])
+            except StagingLost:
+                # 実体が無いか内容が合わない。黙って消さず、画面に出す。
+                logger.warning("staging %s は自動で回収できない", row["id"])
+                report.unrecoverable.append(row["id"])
+                continue
             except OSError:
                 # 1 件の失敗で回収全体を止めない。行は残るので次回も試す。
                 logger.exception("staging %s の回収に失敗した", row["id"])
+                report.unrecoverable.append(row["id"])
                 continue
             if state == "writing":
                 report.discarded += 1
@@ -6161,15 +7093,24 @@ class Reconciler:
             else:
                 report.recommitted += 1
 
-    def _mark_missing(self, report: ReconcileReport) -> None:
-        for row in self._conn.execute(
-            "SELECT id, rel_path FROM media_file WHERE missing_at IS NULL"
-        ):
-            if not (self._data_root / row["rel_path"]).exists():
+    def _sync_missing(self, report: ReconcileReport) -> None:
+        """欠損を立てるだけでなく、戻ってきたら消す.
+
+        データセットが一時的に見えなかっただけで永久に「欠損」のまま残ると、
+        そのメディアはアップロードの安全条件（§10）から外れ続ける。
+        """
+        for row in self._conn.execute("SELECT id, rel_path, missing_at FROM media_file"):
+            exists = (self._data_root / row["rel_path"]).exists()
+            if not exists and row["missing_at"] is None:
                 self._conn.execute(
                     "UPDATE media_file SET missing_at = ? WHERE id = ?", (now_iso(), row["id"])
                 )
                 report.missing += 1
+            elif exists and row["missing_at"] is not None:
+                self._conn.execute(
+                    "UPDATE media_file SET missing_at = NULL WHERE id = ?", (row["id"],)
+                )
+                report.restored += 1
 
     def _collect_orphans(self, report: ReconcileReport) -> None:
         known = {
@@ -6286,7 +7227,7 @@ from pathlib import Path
 from mediaferry.adapters.ffprobe import ProbeResult
 from mediaferry.adapters.publisher import ArtifactPublisher, ArtifactRequest
 from mediaferry.core.timestamps import CapturedAt
-from mediaferry.db.connection import open_database
+from mediaferry.db.connection import Database
 from mediaferry.db.jobs import JobStore
 from mediaferry.db.migrate import apply_migrations
 from mediaferry.db.profiles import ProfileRegistry
@@ -6315,7 +7256,7 @@ def main() -> None:
     die_after = int(sys.argv[2])
     kind = sys.argv[3]
 
-    conn = open_database(data_root / "var" / "mediaferry.sqlite3")
+    conn = Database(data_root / "var" / "mediaferry.sqlite3").connect()
     apply_migrations(conn)
     registry = ProfileRegistry(conn)
     registry.sync_builtins()
@@ -6405,7 +7346,7 @@ import pytest
 
 from mediaferry.adapters.ffprobe import ProbeResult
 from mediaferry.adapters.publisher import ArtifactPublisher
-from mediaferry.db.connection import open_database
+from mediaferry.db.connection import Database
 from mediaferry.db.jobs import JobStore
 from mediaferry.db.migrate import apply_migrations
 from mediaferry.jobs.reconcile import Reconciler
@@ -6435,7 +7376,7 @@ def crash_at(data_root, step, kind):
 
 
 def reconcile(data_root):
-    conn = open_database(data_root / "var" / "mediaferry.sqlite3")
+    conn = Database(data_root / "var" / "mediaferry.sqlite3").connect()
     apply_migrations(conn)
     publisher = ArtifactPublisher(conn, data_root, _Probe())
     report = Reconciler(conn, data_root, publisher, JobStore(conn)).run()
@@ -6543,11 +7484,115 @@ git commit -m "test(mediaferry): kill the process at every publish step"
 
 ---
 
-### Task 22: ボリュームサービス（デバイス検出とプロファイル判定の永続化）
+### Task 22: USB の product をプロトコルに乗せる
+
+**Files:**
+- Modify: `protocol/src/mediaferry_protocol/messages.py`（`UsbInfo` に `product`）
+- Modify: `mountd/src/mountd/devices.py`（sysfs から `product` を読む）
+- Modify: `protocol/tests/test_messages.py`
+- Modify: `mountd/tests/test_devices.py`
+
+**Interfaces:**
+- Consumes: なし
+- Produces: `UsbInfo(vendor_id, product_id, product, serial)`
+
+Phase 0 の実測で、**DJI Osmo Pocket 4 の `serial` は Linux ガジェットの既定値
+`123456789ABCDEF` だった**。機体を識別する文字列は `product`
+（`OsmoPocket4-<機体固有>`）側にある。ところが現在の `UsbInfo` に `product` が
+無く、`source_device` は常に空文字を保存することになる。**同じ機種を 2 台使うと
+同一デバイスと誤認する。** スキーマ（Task 3）は 4 つ組で一意にしてあるので、
+値を運ぶ側を先に直す。
+
+- [ ] **Step 1: 失敗するテストを書く**
+
+`protocol/tests/test_messages.py` に追記:
+
+```python
+def test_usb_info_carries_the_product_string():
+    """serial は機種の既定値でありうる. 機体固有の文字列は product 側にある."""
+    usb = usb_from_wire(
+        {
+            "vendor_id": "2ca3",
+            "product_id": "0020",
+            "product": "OsmoPocket4-ABC123",
+            "serial": "123456789ABCDEF",
+        }
+    )
+    assert usb.product == "OsmoPocket4-ABC123"
+
+
+def test_usb_product_may_be_absent():
+    """product を公開しないデバイスもある. null を受け付ける."""
+    usb = usb_from_wire(
+        {"vendor_id": "2ca3", "product_id": "0020", "product": None, "serial": None}
+    )
+    assert usb.product is None
+```
+
+`mountd/tests/test_devices.py` に追記（既存の sysfs fake の作法に合わせる）:
+
+```python
+def test_usb_product_is_read_from_sysfs(fake_sysfs):
+    """/sys/.../product に機体固有の文字列がある."""
+    fake_sysfs.write_usb_attrs(vendor="2ca3", product_id="0020",
+                               product="OsmoPocket4-ABC123", serial="123456789ABCDEF")
+    volume = fake_sysfs.enumerate()[0]
+    assert volume.usb.product == "OsmoPocket4-ABC123"
+
+
+def test_a_missing_product_attribute_is_none(fake_sysfs):
+    fake_sysfs.write_usb_attrs(vendor="2ca3", product_id="0020", product=None, serial=None)
+    assert fake_sysfs.enumerate()[0].usb.product is None
+```
+
+- [ ] **Step 2: 失敗を確認する**
+
+Run: `uv run pytest protocol/tests/test_messages.py mountd/tests/test_devices.py -v`
+Expected: FAIL（`UsbInfo` に `product` が無い / `missing field: product`）
+
+- [ ] **Step 3: 実装する**
+
+`protocol/src/mediaferry_protocol/messages.py`:
+
+```python
+@dataclass(frozen=True)
+class UsbInfo:
+    vendor_id: str
+    product_id: str
+    # 機体固有の文字列。serial は機種の既定値でありうるので、デバイスの
+    # 同定にはこれを含めた 4 つ組を使う。
+    product: str | None
+    serial: str | None
+```
+
+`usb_from_wire` に `product=_optional(d, "product", str)` を足す。
+
+`mountd/src/mountd/devices.py` の USB 属性読み出しに `product` を加える。
+`vendor`・`serial` と同じ経路（`/sys/.../product` を読み、無ければ `None`）で
+取得する。
+
+- [ ] **Step 4: テストが通ることを確認する**
+
+Run: `uv run pytest protocol mountd -v`
+Expected: すべて PASS（`needs_root` は既定で skip）
+
+- [ ] **Step 5: コミット**
+
+```bash
+git add protocol mountd
+git commit -m "feat(mountd): report the usb product string over the wire"
+```
+
+---
+
+### Task 23: ボリュームサービス（デバイス検出とプロファイル判定の永続化）
 
 **Files:**
 - Create: `app/src/mediaferry/db/sources.py`
+- Create: `app/src/mediaferry/core/manifest.py`
 - Create: `app/src/mediaferry/jobs/volumes.py`
+- Modify: `app/src/mediaferry/adapters/broker_client.py`（呼び出しを直列化する）
+- Modify: `app/src/mediaferry/adapters/fs.py`（`exists_beneath` を追加）
 - Modify: `app/tests/conftest.py`（fake ブローカーのフィクスチャを追加）
 - Test: `app/tests/test_volume_service.py`
 
@@ -6555,12 +7600,39 @@ git commit -m "test(mediaferry): kill the process at every publish step"
 - Consumes: `BrokerClient`（既存）、`DirfdTree`（Task 15）、`resolve_profile`（Task 10）、
   `ProfileRegistry`（Task 13）
 - Produces:
-  - `mediaferry.jobs.volumes.VolumeView(volume_instance_id, volume, profile_slug, confidence,
-    provisional, trusted, reason)`
+  - `mediaferry.core.manifest.content_manifest_digest(names: Iterable[str]) -> str`
+  - `mediaferry.adapters.fs.exists_beneath(dirfd, rel_path) -> bool`
+  - `mediaferry.jobs.volumes.VolumeSelection(volume_instance_id, presence_id, broker_epoch,
+    generation, volume_key, major, minor, fs_uuid, profile_id, profile_revision_id)`
+  - `mediaferry.jobs.volumes.VolumeView(volume_instance_id, volume_key, fs_label, size_bytes,
+    profile_slug, identity_confidence, provisional, trusted, reason, selection)`
   - `VolumeService(conn, registry, client)` — `.refresh() -> list[VolumeView]`,
-    `.open(volume_instance_id) -> VolumeHandle`, `.close(volume_instance_id)`,
-    `.trust(volume_instance_id)`, `.close_all()`
-  - `mediaferry.db.sources.upsert_device / upsert_volume / record_presence`
+    `.selection_for(volume_instance_id) -> VolumeSelection`,
+    `.open(selection) -> VolumeHandle`, `.release(selection)`,
+    `.close(volume_instance_id)`, `.trust(volume_instance_id)`, `.close_all()`,
+    `.opened() -> list[str]`
+  - 例外 `StaleSelection` / `VolumeBusy`
+
+**この 3 つを Phase 1 で確定させる。** どれも「polling で足りる」の判断とは
+独立に必要で、後から入れると呼び出し側を全部書き直すことになる。
+
+1. **ジョブは選択した瞬間の presence を持つ。** `volume_instance_id` だけを
+   渡して実行時に「最新の presence」を選ぶと、抜き差しでカードが入れ替わって
+   いても、そのカードの現在値から正しい `expect` を組み立ててしまい、
+   **ブローカー側の TOCTOU 検証をすり抜ける**（§9.2）。
+2. **ブローカーの呼び出しを直列化する。** `BrokerClient` は 1 本の
+   `SOCK_SEQPACKET` で要求と応答を対応付けるので、API のスレッドとワーカーの
+   スレッドが同時に使うと応答を取り違える。
+3. **プロファイルの一致度とボリュームの同定確度を混ぜない。**
+   `identity_confidence`（§8）は「前回と同じカードだと言えるか」であって、
+   「中身がプロファイルに何件一致したか」ではない。混ぜると、同じ UUID・
+   同じ容量の別カードが DJI のファイルを持っているだけで `high` になり、
+   前のカードの `trusted_at` を引き継ぐ。
+
+**`VolumeService` は長寿命で、自分専用の DB 接続を持つ。** その接続は他の
+どのコンポーネントとも共有しない。DB を触るメソッドはすべて自分のロックの
+中で実行するので、複数のリクエストスレッドから呼ばれても、他のコンポーネントの
+トランザクションに巻き込まれることも、巻き込むこともない。
 
 - [ ] **Step 1: 失敗するテストを書く**
 
@@ -6624,7 +7696,12 @@ def broker(fake_card, tmp_path):
         fs_uuid="26B1-2FD6",
         fs_label="SD_Card",
         size_bytes=512_000_000_000,
-        usb=UsbInfo(vendor_id="2ca3", product_id="0020", serial="123456789ABCDEF"),
+        usb=UsbInfo(
+            vendor_id="2ca3",
+            product_id="0020",
+            product="OsmoPocket4-ABC123",
+            serial="123456789ABCDEF",
+        ),
         broker_epoch="",
         generation=1,
     )
@@ -6646,8 +7723,13 @@ def broker(fake_card, tmp_path):
 `app/tests/test_volume_service.py`:
 
 ```python
+import threading
+from dataclasses import replace
+
+import pytest
+
 from mediaferry.db.profiles import ProfileRegistry
-from mediaferry.jobs.volumes import VolumeService
+from mediaferry.jobs.volumes import StaleSelection, VolumeBusy, VolumeService
 
 
 def service(db, broker):
@@ -6667,17 +7749,61 @@ def test_refresh_registers_the_device_the_volume_and_the_presence(db, broker):
 def test_the_profile_is_resolved_from_the_contents(db, broker):
     view = service(db, broker).refresh()[0]
     assert view.profile_slug == "dji-osmo"
-    assert view.confidence == "high"
     assert view.provisional is False
 
 
-def test_an_empty_card_is_provisional_and_low_confidence(db, broker, fake_card):
+def test_an_empty_card_is_provisional(db, broker, fake_card):
     for path in (fake_card / "DCIM" / "DJI_001").iterdir():
         path.unlink()
     view = service(db, broker).refresh()[0]
     assert view.profile_slug == "dji-osmo"
     assert view.provisional is True
-    assert view.confidence == "low"
+
+
+def test_a_first_sighting_is_never_high_confidence(db, broker):
+    """初めて見るカードは §12.1 のとおり必ず承認を待つ."""
+    view = service(db, broker).refresh()[0]
+    assert view.identity_confidence == "low"
+    assert view.trusted is False
+
+
+def test_a_returning_card_with_a_matching_manifest_becomes_high(db, broker):
+    svc = service(db, broker)
+    svc.refresh()
+    assert svc.refresh()[0].identity_confidence == "high"
+
+
+def test_a_reformatted_card_drops_back_to_low(db, broker, fake_card):
+    """UUID を保持したまま中身が入れ替わったカードを high のままにしない."""
+    svc = service(db, broker)
+    svc.refresh()
+    svc.refresh()
+    (fake_card / "DCIM" / "DJI_001" / "DJI_20260817143000_0001_D.MP4").unlink()
+    (fake_card / "DCIM" / "DJI_001").rmdir()
+    (fake_card / "DCIM" / "OTHER").mkdir()
+    assert svc.refresh()[0].identity_confidence == "low"
+
+
+def test_a_card_without_a_uuid_is_always_low(db, broker, monkeypatch):
+    svc = service(db, broker)
+    original = broker.list_volumes
+
+    def anonymous():
+        return [
+            type(v)(**{**v.__dict__, "fs_uuid": ""}) for v in original()
+        ]
+
+    monkeypatch.setattr(broker, "list_volumes", anonymous)
+    svc.refresh()
+    assert svc.refresh()[0].identity_confidence == "low"
+
+
+def test_profile_match_does_not_raise_identity_confidence(db, broker, fake_card):
+    """中身が DJI のファイルであることは「同じカードだ」の証明にならない."""
+    view = service(db, broker).refresh()[0]
+    assert view.profile_slug == "dji-osmo"
+    assert view.provisional is False
+    assert view.identity_confidence == "low"  # 初回なので low のまま
 
 
 def test_the_volume_is_closed_after_probing(db, broker):
@@ -6687,20 +7813,64 @@ def test_the_volume_is_closed_after_probing(db, broker):
     assert svc.opened() == []
 
 
-def test_open_and_close_manage_the_dirfd(db, broker):
+def test_open_and_release_manage_the_dirfd(db, broker):
     svc = service(db, broker)
     view = svc.refresh()[0]
-    handle = svc.open(view.volume_instance_id)
+    handle = svc.open(view.selection)
     assert svc.opened() == [view.volume_instance_id]
     assert "DCIM" in __import__("os").listdir(handle.dirfd)
-    svc.close(view.volume_instance_id)
+    svc.release(view.selection)
     assert svc.opened() == []
 
 
-def test_reopening_returns_the_same_handle(db, broker):
+def test_a_selection_from_an_older_generation_is_refused(db, broker):
+    """抜き差しで /dev/sdX が再利用され、別のカードが同じノードに来る."""
     svc = service(db, broker)
     view = svc.refresh()[0]
-    assert svc.open(view.volume_instance_id) is svc.open(view.volume_instance_id)
+    stale = replace(view.selection, generation=view.selection.generation - 1)
+    with pytest.raises(StaleSelection):
+        svc.open(stale)
+
+
+def test_a_selection_from_a_previous_mountd_run_is_refused(db, broker):
+    """generation は mountd の再起動で 0 に戻る. epoch が無いと偶然一致する."""
+    svc = service(db, broker)
+    view = svc.refresh()[0]
+    stale = replace(view.selection, broker_epoch="a-previous-run")
+    with pytest.raises(StaleSelection):
+        svc.open(stale)
+
+
+def test_closing_a_volume_a_job_is_using_is_refused(db, broker):
+    """実行中のワーカーの fd を、API の別スレッドから閉じない."""
+    svc = service(db, broker)
+    view = svc.refresh()[0]
+    svc.open(view.selection)
+    with pytest.raises(VolumeBusy):
+        svc.close(view.volume_instance_id)
+    svc.release(view.selection)
+    svc.close(view.volume_instance_id)
+
+
+def test_the_broker_is_not_called_concurrently(db, broker):
+    """1 本の SOCK_SEQPACKET を同時に使うと応答を取り違える."""
+    svc = service(db, broker)
+    svc.refresh()
+    errors = []
+
+    def hammer():
+        try:
+            for _ in range(20):
+                svc.refresh()
+        except Exception as exc:  # noqa: BLE001
+            errors.append(exc)
+
+    threads = [threading.Thread(target=hammer) for _ in range(4)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=30)
+    assert errors == []
 
 
 def test_the_same_card_keeps_its_identity_across_refreshes(db, broker):
@@ -6756,7 +7926,7 @@ from ..ids import new_id
 def upsert_device(conn: sqlite3.Connection, usb) -> str | None:  # noqa: ANN001
     if usb is None:
         return None
-    key = (usb.vendor_id, usb.product_id, "", usb.serial or "")
+    key = (usb.vendor_id, usb.product_id, usb.product or "", usb.serial or "")
     row = conn.execute(
         "SELECT id FROM source_device WHERE usb_vendor_id = ? AND usb_product_id = ?"
         " AND usb_product = ? AND serial = ?",
@@ -6829,14 +7999,53 @@ from __future__ import annotations
 
 import contextlib
 import sqlite3
-from dataclasses import dataclass
+import threading
+from dataclasses import asdict, dataclass, fields
 
 from ..adapters.broker_client import BrokerClient, VolumeHandle
-from ..adapters.fs import DirfdTree
+from ..adapters.fs import DirfdTree, exists_beneath
 from ..clock import now_iso
+from ..core.manifest import content_manifest_digest
 from ..core.profiles.matching import VolumeFacts, resolve_profile
 from ..db.profiles import ProfileRegistry
 from ..db.sources import record_presence, upsert_device, upsert_volume
+
+# manifest に含める名前の上限。数万件のカードで全件読まない。
+MANIFEST_LIMIT = 500
+# 既知ファイルの残存率をどれだけ標本し、どこから「連続的」と見なすか。
+SURVIVAL_SAMPLE = 50
+SURVIVAL_THRESHOLD = 0.5
+
+
+class StaleSelection(RuntimeError):
+    """選択した時点のボリュームが、もうそこに無い."""
+
+
+class VolumeBusy(RuntimeError):
+    """実行中のジョブが掴んでいる."""
+
+
+@dataclass(frozen=True)
+class VolumeSelection:
+    """「この操作はこのボリュームのこの接続に対して行う」という固定."""
+
+    volume_instance_id: str
+    presence_id: str
+    broker_epoch: str
+    generation: int
+    volume_key: str
+    major: int
+    minor: int
+    fs_uuid: str
+    profile_id: str
+    profile_revision_id: str
+
+    def to_params(self) -> dict:
+        return asdict(self)
+
+    @classmethod
+    def from_params(cls, params: dict) -> VolumeSelection:
+        return cls(**{f.name: params[f.name] for f in fields(cls)})
 
 
 @dataclass(frozen=True)
@@ -6846,10 +8055,12 @@ class VolumeView:
     fs_label: str
     size_bytes: int
     profile_slug: str | None
-    confidence: str
+    # §8 の「前回と同じカードだと言えるか」。プロファイルの一致度ではない。
+    identity_confidence: str
     provisional: bool
     trusted: bool
     reason: str
+    selection: VolumeSelection | None
 
 
 class VolumeService:
@@ -6859,21 +8070,25 @@ class VolumeService:
         self._conn = conn
         self._registry = registry
         self._client = client
-        self._open: dict[str, VolumeHandle] = {}
+        # volume_instance_id -> (handle, selection, 参照カウント)
+        self._open: dict[str, _OpenVolume] = {}
+        self._lock = threading.RLock()
 
     def refresh(self) -> list[VolumeView]:
-        views = []
-        definitions = [ref.definition for ref in self._registry.active()]
-        for volume in self._client.list_volumes():
-            device_id = upsert_device(self._conn, volume.usb)
-            volume_id = upsert_volume(self._conn, volume, device_id)
-            record_presence(self._conn, volume_id, volume)
-            views.append(self._probe(volume, volume_id, definitions))
-        return views
+        with self._lock:
+            views = []
+            definitions = [ref.definition for ref in self._registry.active()]
+            for volume in self._client.list_volumes():
+                device_id = upsert_device(self._conn, volume.usb)
+                volume_id = upsert_volume(self._conn, volume, device_id)
+                presence_id = record_presence(self._conn, volume_id, volume)
+                views.append(self._probe(volume, volume_id, presence_id, definitions))
+            return views
 
-    def _probe(self, volume, volume_id: str, definitions) -> VolumeView:  # noqa: ANN001
+    def _probe(self, volume, volume_id, presence_id, definitions) -> VolumeView:  # noqa: ANN001
         remembered = self._conn.execute(
-            "SELECT p.slug AS slug, v.trusted_at AS trusted_at FROM volume_instance v"
+            "SELECT p.slug AS slug, v.trusted_at AS trusted_at,"
+            " v.content_manifest_digest AS digest FROM volume_instance v"
             " LEFT JOIN device_profile p ON p.id = v.profile_id WHERE v.id = ?",
             (volume_id,),
         ).fetchone()
@@ -6882,13 +8097,15 @@ class VolumeService:
             usb_product_id=volume.usb.product_id if volume.usb else "",
             fs_label=volume.fs_label or "",
         )
-        handle = self._open.get(volume_id) or self._client.open_volume(volume)
+        held = self._open.get(volume_id)
+        handle = held.handle if held else self._client.open_volume(volume)
         try:
-            outcome = resolve_profile(
-                definitions, facts, DirfdTree(handle.dirfd), remembered["slug"]
-            )
+            tree = DirfdTree(handle.dirfd)
+            outcome = resolve_profile(definitions, facts, tree, remembered["slug"])
+            digest = self._manifest_of(handle.dirfd, tree, outcome, definitions)
+            confidence = self._identity_confidence(volume, volume_id, remembered, digest, handle)
         finally:
-            if volume_id not in self._open:
+            if held is None:
                 with contextlib.suppress(Exception):
                     self._client.close_volume(handle)
 
@@ -6898,60 +8115,243 @@ class VolumeService:
             profile_id, revision_id = ref.profile_id, ref.revision_id
         self._conn.execute(
             "UPDATE volume_instance SET profile_id = ?, profile_revision_id = ?,"
-            " identity_confidence = ?, last_seen_at = ? WHERE id = ?",
-            (profile_id, revision_id, outcome.confidence, now_iso(), volume_id),
+            " identity_confidence = ?, content_manifest_digest = ?, last_seen_at = ?"
+            " WHERE id = ?",
+            (profile_id, revision_id, confidence, digest, now_iso(), volume_id),
         )
+        selection = None
+        if profile_id is not None:
+            selection = VolumeSelection(
+                volume_instance_id=volume_id,
+                presence_id=presence_id,
+                broker_epoch=volume.broker_epoch,
+                generation=volume.generation,
+                volume_key=volume.volume_key,
+                major=volume.major,
+                minor=volume.minor,
+                fs_uuid=volume.fs_uuid or "",
+                profile_id=profile_id,
+                profile_revision_id=revision_id,
+            )
         return VolumeView(
             volume_instance_id=volume_id,
             volume_key=volume.volume_key,
             fs_label=volume.fs_label or "",
             size_bytes=volume.size_bytes,
             profile_slug=outcome.slug,
-            confidence=outcome.confidence,
+            identity_confidence=confidence,
             provisional=outcome.provisional,
             trusted=remembered["trusted_at"] is not None,
             reason=outcome.reason,
+            selection=selection,
         )
 
-    def open(self, volume_instance_id: str) -> VolumeHandle:
-        if volume_instance_id in self._open:
-            return self._open[volume_instance_id]
-        volume = self._volume_for(volume_instance_id)
-        handle = self._client.open_volume(volume)
-        self._open[volume_instance_id] = handle
-        return handle
+    def _manifest_of(self, dirfd, tree, outcome, definitions) -> str:  # noqa: ANN001
+        roots = ("DCIM",)
+        if outcome.slug is not None:
+            roots = next(d.scan.roots for d in definitions if d.slug == outcome.slug)
+        names = []
+        for root in roots:
+            names.extend(f"{root}/{name}" for name in tree.iter_names(root, MANIFEST_LIMIT))
+        return content_manifest_digest(names)
+
+    def _identity_confidence(self, volume, volume_id, remembered, digest, handle) -> str:  # noqa: ANN001
+        """§8 の確度. **プロファイルの一致度とは無関係**.
+
+        `high` にできるのは「前回と連続的だ」と言えるときだけ。read-only で
+        扱う以上ボリュームに永続マーカーを書けないので、これは推測である
+        （§12.1 に限界を明示する）。
+        """
+        if not volume.fs_uuid:
+            return "low"
+        if self._has_other_live_presence(volume_id, volume):
+            return "low"
+        if remembered["digest"] is None:
+            # 初めて見るカードは §12.1 のとおり必ず承認を待つ。
+            return "low"
+        if remembered["digest"] == digest:
+            return "high"
+        return "high" if self._known_files_survive(volume_id, handle) else "low"
+
+    def _has_other_live_presence(self, volume_id: str, volume) -> bool:  # noqa: ANN001
+        row = self._conn.execute(
+            "SELECT count(*) AS n FROM volume_presence WHERE volume_instance_id = ?"
+            " AND detached_at IS NULL AND (major <> ? OR minor <> ?)",
+            (volume_id, volume.major, volume.minor),
+        ).fetchone()
+        return row["n"] > 0
+
+    def _known_files_survive(self, volume_id: str, handle) -> bool:  # noqa: ANN001
+        rows = list(
+            self._conn.execute(
+                "SELECT rel_path FROM source_entry WHERE volume_instance_id = ?"
+                " AND state = 'published' LIMIT ?",
+                (volume_id, SURVIVAL_SAMPLE),
+            )
+        )
+        if not rows:
+            return False
+        alive = sum(1 for row in rows if exists_beneath(handle.dirfd, row["rel_path"]))
+        return alive / len(rows) >= SURVIVAL_THRESHOLD
+
+    # ------------------------------------------------------------------
+    def selection_for(self, volume_instance_id: str) -> VolumeSelection:
+        for view in self.refresh():
+            if view.volume_instance_id == volume_instance_id and view.selection is not None:
+                return view.selection
+        raise StaleSelection(f"ボリューム {volume_instance_id} は今この場に無い")
+
+    def open(self, selection: VolumeSelection) -> VolumeHandle:
+        """選択した瞬間の接続と同じものだけを開く.
+
+        `volume_instance_id` だけで開き直すと、抜き差しで別のカードが同じ
+        ノードに来ていても、その現在値から正しい expect を作ってしまい、
+        ブローカーの検証をすり抜ける。
+        """
+        with self._lock:
+            held = self._open.get(selection.volume_instance_id)
+            if held is not None:
+                if held.selection != selection:
+                    raise StaleSelection("同じボリュームを別の世代で開こうとしている")
+                held.refs += 1
+                return held.handle
+
+            volume = self._match_selection(selection)
+            handle = self._client.open_volume(volume)
+            self._open[selection.volume_instance_id] = _OpenVolume(
+                handle=handle, selection=selection, refs=1
+            )
+            return handle
+
+    def _match_selection(self, selection: VolumeSelection):  # noqa: ANN202
+        presence = self._conn.execute(
+            "SELECT detached_at FROM volume_presence WHERE id = ?", (selection.presence_id,)
+        ).fetchone()
+        if presence is None or presence["detached_at"] is not None:
+            raise StaleSelection("選択した接続はもう存在しない")
+        for volume in self._client.list_volumes():
+            if (
+                volume.volume_key == selection.volume_key
+                and volume.broker_epoch == selection.broker_epoch
+                and volume.generation == selection.generation
+                and volume.major == selection.major
+                and volume.minor == selection.minor
+                and (volume.fs_uuid or "") == selection.fs_uuid
+            ):
+                return volume
+        raise StaleSelection("選択した時点のボリュームが見つからない（抜き差しされた）")
+
+    def release(self, selection: VolumeSelection) -> None:
+        """ジョブが自分の参照を返す. 参照が 0 になっても閉じない."""
+        with self._lock:
+            held = self._open.get(selection.volume_instance_id)
+            if held is not None and held.refs > 0:
+                held.refs -= 1
 
     def close(self, volume_instance_id: str) -> None:
-        handle = self._open.pop(volume_instance_id, None)
-        if handle is not None:
-            self._client.close_volume(handle)
+        with self._lock:
+            held = self._open.get(volume_instance_id)
+            if held is None:
+                return
+            if held.refs > 0:
+                raise VolumeBusy("実行中のジョブがこのボリュームを使っている")
+            del self._open[volume_instance_id]
+            self._client.close_volume(held.handle)
 
     def close_all(self) -> None:
-        for volume_instance_id in list(self._open):
-            self.close(volume_instance_id)
+        with self._lock:
+            for volume_instance_id, held in list(self._open.items()):
+                del self._open[volume_instance_id]
+                with contextlib.suppress(Exception):
+                    self._client.close_volume(held.handle)
 
     def opened(self) -> list[str]:
         return sorted(self._open)
 
     def trust(self, volume_instance_id: str) -> None:
-        self._conn.execute(
-            "UPDATE volume_instance SET trusted_at = ? WHERE id = ?",
-            (now_iso(), volume_instance_id),
-        )
+        with self._lock:
+            self._conn.execute(
+                "UPDATE volume_instance SET trusted_at = ? WHERE id = ?",
+                (now_iso(), volume_instance_id),
+            )
 
-    def _volume_for(self, volume_instance_id: str):  # noqa: ANN202
-        row = self._conn.execute(
-            "SELECT p.device_node, p.major, p.minor FROM volume_presence p"
-            " WHERE p.volume_instance_id = ? ORDER BY p.attached_at DESC LIMIT 1",
-            (volume_instance_id,),
-        ).fetchone()
-        if row is None:
-            raise LookupError(volume_instance_id)
-        for volume in self._client.list_volumes():
-            if (volume.major, volume.minor) == (row["major"], row["minor"]):
-                return volume
-        raise LookupError(f"ボリューム {volume_instance_id} は接続されていない")
+
+@dataclass
+class _OpenVolume:
+    handle: VolumeHandle
+    selection: VolumeSelection
+    refs: int
 ```
+
+`app/src/mediaferry/core/manifest.py`:
+
+```python
+"""ボリュームの中身の軽い要約.
+
+「前回と同じカードか」を推測するために使う。フォーマット直後や別カードへの
+差し替えを検出することが目的で、完全な保証ではない（§8）。
+"""
+
+from __future__ import annotations
+
+import hashlib
+from collections.abc import Iterable
+
+DOMAIN = b"mfm"
+VERSION = 1
+
+
+def content_manifest_digest(names: Iterable[str]) -> str:
+    """名前の集合から決定的なダイジェストを作る.
+
+    順序に依存しないよう並べ替える。ディレクトリを走査する順序は
+    ファイルシステムによって変わる。
+    """
+    digest = hashlib.sha256()
+    digest.update(DOMAIN)
+    digest.update(bytes([VERSION]))
+    for name in sorted(set(names)):
+        digest.update(name.encode("utf-8"))
+        digest.update(b"\0")
+    return digest.hexdigest()
+```
+
+`app/src/mediaferry/adapters/fs.py` に追記:
+
+```python
+def exists_beneath(dirfd: int, rel_path: str) -> bool:
+    """dirfd の下にそのパスがあるか. 開けるかどうかで判定する."""
+    try:
+        fd = open_beneath(dirfd, rel_path)
+    except (OSError, EscapeAttempt):
+        return False
+    os.close(fd)
+    return True
+```
+
+`app/src/mediaferry/adapters/broker_client.py` を直列化する。Phase 0 で
+**`BrokerClient` は thread-safe ではない**と確定している。1 本の
+`SOCK_SEQPACKET` で要求と応答を対応付けるので、同時に使うと別の要求の応答を
+受け取る（fd を含む応答なら、別のボリュームの dirfd を掴む）。
+
+```python
+class BrokerClient:
+    def __init__(self, socket_path: Path) -> None:
+        self._sock = socket.socket(socket.AF_UNIX, socket.SOCK_SEQPACKET)
+        self._sock.connect(str(socket_path))
+        self._handles: dict[str, VolumeHandle] = {}
+        # 要求と応答は 1 本のソケットで対応付ける。API のスレッドと
+        # ワーカーのスレッドが同時に使うと、応答を取り違える。
+        self._lock = threading.Lock()
+
+    def _call(self, payload: dict, expect_fd: bool = False) -> tuple[dict, list[int]]:
+        with self._lock:
+            send_message(self._sock, payload)
+            reply, fds = recv_message(self._sock, max_fds=1 if expect_fd else 0)
+        ...  # 以降は現状のまま
+```
+
+`from_socket` にも同じ初期化を入れる（`client._lock = threading.Lock()`）。
 
 - [ ] **Step 4: テストが通ることを確認する**
 
@@ -6967,12 +8367,13 @@ git commit -m "feat(mediaferry): register volumes and resolve their profiles"
 
 ---
 
-### Task 23: API とアプリの組み立て
+### Task 24: API とアプリの組み立て
 
 **Files:**
 - Create: `app/src/mediaferry/api/__init__.py`
 - Create: `app/src/mediaferry/api/app.py`
 - Create: `app/src/mediaferry/api/deps.py`
+- Create: `app/src/mediaferry/api/jobs_wiring.py`
 - Create: `app/src/mediaferry/api/routes_system.py`
 - Create: `app/src/mediaferry/api/routes_devices.py`
 - Create: `app/src/mediaferry/api/routes_media.py`
@@ -6985,12 +8386,28 @@ git commit -m "feat(mediaferry): register volumes and resolve their profiles"
 - Consumes: これまでの全モジュール
 - Produces:
   - `mediaferry.api.app.create_app(env=os.environ, broker_factory=None) -> FastAPI`
-  - `mediaferry.api.app.AppState`（`conn`, `settings`, `registry`, `store`, `runner`,
-    `volumes`, `publisher`, `last_reconcile`）
+  - `mediaferry.api.app.AppState`（`database`, `env`, `registry_conn`, `volumes`,
+    `runner`, `last_reconcile`）
+  - `mediaferry.api.deps.state(request) -> AppState`
+  - `mediaferry.api.deps.conn(request) -> Iterator[sqlite3.Connection]`（リクエスト単位）
 
 **Phase 1 の範囲**: SSE（`GET /events`）は Phase 4 の Web UI と一緒に入れる。
 ここでは `GET /api/jobs/{id}/events?after_seq=` のポーリングを提供する。
 `BIND_HOST` の既定は loopback のまま変えない。
+
+**接続のスコープを守る。**
+
+| スコープ | 接続 | 用途 |
+| --- | --- | --- |
+| 起動 | 1 本。手順を終えたら閉じる | migration、ビルトイン同期、reconciliation |
+| API リクエスト | リクエストごとに 1 本 | ルータの読み書き |
+| ジョブ 1 件 | ジョブごとに 1 本 | `JobStore` と `ArtifactPublisher` の両方をこれに束ねる |
+| `VolumeService` | 専用に 1 本（長寿命） | 自分のロックの中でだけ使う |
+
+**停止時は、走っているジョブが終わるのを待ってから資源を閉じる。**
+`asyncio.to_thread` で走っているハンドラは `task.cancel()` では止まらない。
+待たずに `close_all()` や `conn.close()` を呼ぶと、コピーの途中の
+バックグラウンドスレッドから見て dirfd と DB が突然消える。
 
 - [ ] **Step 1: 失敗するテストを書く**
 
@@ -7023,16 +8440,33 @@ def test_startup_seeds_the_builtin_profiles(client):
     assert "dji-osmo" in slugs
 
 
-def test_settings_report_their_source_and_lock(client):
+def test_settings_report_their_source_lock_and_tier(client):
     settings = {s["key"]: s for s in client.get("/api/settings").json()["settings"]}
     assert settings["DATA_ROOT"]["source"] == "env"
     assert settings["DATA_ROOT"]["locked"] is True
+    assert settings["DATA_ROOT"]["tier"] == "bootstrap"
     assert settings["LOG_LEVEL"]["source"] == "default"
+    assert settings["LOG_LEVEL"]["writable"] is True
 
 
 def test_secrets_are_masked_in_the_api(client, monkeypatch):
     settings = {s["key"]: s for s in client.get("/api/settings").json()["settings"]}
     assert settings["AUTH_PASSWORD"]["value"] in (None, "********")
+    assert settings["SECRET_KEY"]["writable"] is False
+
+
+def test_the_master_key_cannot_be_stored_through_the_api(client):
+    """暗号文と復号鍵が同じバックアップに入ると、暗号化が何も守らなくなる."""
+    assert client.put(
+        "/api/settings", json={"key": "SECRET_KEY", "value": "A" * 44}
+    ).status_code == 409
+
+
+def test_a_written_setting_reports_when_it_applies(client):
+    body = client.put("/api/settings", json={"key": "LOG_LEVEL", "value": "debug"}).json()
+    assert body["applies"] == "runtime"
+    body = client.put("/api/settings", json={"key": "HTTP_PORT", "value": "9001"}).json()
+    assert body["applies"] == "restart"
 
 
 def test_writing_an_env_locked_setting_is_a_conflict(client):
@@ -7089,8 +8523,27 @@ def test_orphans_are_exposed(client, data_root):
 
 def test_closing_a_volume_releases_the_handle(client):
     volume_id = client.get("/api/devices").json()["volumes"][0]["volume_instance_id"]
-    client.post(f"/api/volumes/{volume_id}/import")
+    job_id = client.post(f"/api/volumes/{volume_id}/import").json()["job_id"]
+    _await_job(client, job_id)
     assert client.post(f"/api/volumes/{volume_id}/close").status_code == 200
+
+
+def test_a_job_carries_the_presence_it_was_queued_against(client, data_root):
+    """volume_instance_id だけだと、抜き差し後に別のカードを取り込みうる（§9.2）."""
+    from mediaferry.db.connection import Database
+
+    volume_id = client.get("/api/devices").json()["volumes"][0]["volume_instance_id"]
+    job_id = client.post(f"/api/volumes/{volume_id}/scan").json()["job_id"]
+    conn = Database(data_root / "var" / "mediaferry.sqlite3").connect()
+    params = conn.execute("SELECT params_json FROM job WHERE id = ?", (job_id,)).fetchone()[0]
+    conn.close()
+    for key in ("presence_id", "broker_epoch", "generation", "volume_key", "profile_revision_id"):
+        assert key in params
+
+
+def test_the_device_list_reports_identity_confidence(client):
+    volume = client.get("/api/devices").json()["volumes"][0]
+    assert volume["identity_confidence"] in {"high", "low"}
 
 
 def _await_job(client, job_id, timeout=20.0):
@@ -7119,13 +8572,15 @@ Expected: FAIL（`ModuleNotFoundError: No module named 'mediaferry.api'`）
 `app/src/mediaferry/api/deps.py`:
 
 ```python
-"""リクエストからアプリの状態を取り出す."""
+"""リクエストからアプリの状態と、そのリクエスト専用の DB 接続を取り出す."""
 
 from __future__ import annotations
 
+import sqlite3
+from collections.abc import Iterator
 from typing import TYPE_CHECKING
 
-from fastapi import Request
+from fastapi import Depends, Request
 
 if TYPE_CHECKING:
     from .app import AppState
@@ -7133,6 +8588,19 @@ if TYPE_CHECKING:
 
 def state(request: Request) -> AppState:
     return request.app.state.mediaferry
+
+
+def conn(app_state: AppState = Depends(state)) -> Iterator[sqlite3.Connection]:  # noqa: B008
+    """リクエストごとに接続を開いて閉じる.
+
+    トランザクションは接続に属するので、ワーカーと共有するとお互いの
+    トランザクションに入り込む。
+    """
+    connection = app_state.database.connect()
+    try:
+        yield connection
+    finally:
+        connection.close()
 ```
 
 `app/src/mediaferry/api/app.py`:
@@ -7165,17 +8633,17 @@ from fastapi import FastAPI
 
 from ..adapters.broker_client import BrokerClient
 from ..adapters.ffprobe import MediaProbe
+from ..adapters.fs import assert_same_filesystem
 from ..adapters.publisher import ArtifactPublisher
-from ..db.connection import open_database
+from ..db.connection import Database
 from ..db.jobs import JobStore
 from ..db.migrate import apply_migrations
 from ..db.profiles import ProfileRegistry
-from ..jobs.importer import Importer
 from ..jobs.reconcile import ReconcileReport, Reconciler
 from ..jobs.runner import JobRunner
-from ..jobs.scan import Scanner
 from ..jobs.volumes import VolumeService
-from ..settings import Settings, SettingsService, startup_warnings
+from ..settings import SettingsService, bootstrap_data_root, startup_warnings
+from .jobs_wiring import JobWorld
 from .routes_devices import router as devices_router
 from .routes_media import router as media_router
 from .routes_system import router as system_router
@@ -7183,14 +8651,13 @@ from .routes_system import router as system_router
 logger = logging.getLogger(__name__)
 
 
+SHUTDOWN_GRACE_SECONDS = 30
+
+
 @dataclass
 class AppState:
-    conn: Any
-    settings: Settings
-    settings_service: SettingsService
-    registry: ProfileRegistry
-    store: JobStore
-    publisher: ArtifactPublisher
+    database: Database
+    env: Mapping[str, str]
     volumes: VolumeService
     runner: JobRunner
     last_reconcile: ReconcileReport = field(default_factory=ReconcileReport)
@@ -7204,84 +8671,152 @@ def create_app(
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):  # noqa: ANN202
-        conn = open_database(Path(env.get("MEDIAFERRY_DATA_ROOT", "/data")) / "var"
-                             / "mediaferry.sqlite3")
-        apply_migrations(conn)
-        settings_service = SettingsService(conn, env)
-        settings = settings_service.snapshot()
-        for warning in startup_warnings(settings):
-            logger.warning("%s", warning)
+        database = Database(bootstrap_data_root(env) / "var" / "mediaferry.sqlite3")
 
-        registry = ProfileRegistry(conn)
-        registry.sync_builtins()
-        store = JobStore(conn)
-        publisher = ArtifactPublisher(conn, settings.data_root, MediaProbe())
+        # 起動の手順はこの 1 本で行い、終わったら閉じる。
+        startup = database.connect()
+        try:
+            apply_migrations(startup)
+            settings = SettingsService(startup, env).snapshot()
+            for warning in startup_warnings(settings):
+                logger.warning("%s", warning)
+            # 公開は os.link なので、staging と公開先が別デバイスだと必ず失敗する。
+            assert_same_filesystem(
+                settings.data_root / "staging",
+                settings.data_root / "library",
+                settings.data_root / "derived",
+            )
+            ProfileRegistry(startup).sync_builtins()
+            report = Reconciler(
+                startup,
+                settings.data_root,
+                ArtifactPublisher(startup, settings.data_root, MediaProbe()),
+                JobStore(startup),
+            ).run()
+        finally:
+            startup.close()
+
         client = broker_factory() if broker_factory else BrokerClient(settings.broker_socket)
-        volumes = VolumeService(conn, registry, client)
-        runner = JobRunner(store)
+        # VolumeService は長寿命なので専用の接続を持つ。他とは共有しない。
+        volumes_conn = database.connect()
+        volumes = VolumeService(volumes_conn, ProfileRegistry(volumes_conn), client)
+        world = JobWorld(database, env, volumes)
+        runner = JobRunner(database)
+        runner.register("scan", world.run_scan)
+        runner.register("import", world.run_import)
 
         state = AppState(
-            conn=conn,
-            settings=settings,
-            settings_service=settings_service,
-            registry=registry,
-            store=store,
-            publisher=publisher,
-            volumes=volumes,
-            runner=runner,
+            database=database, env=env, volumes=volumes, runner=runner, last_reconcile=report
         )
-        _register_handlers(state)
-        state.last_reconcile = Reconciler(conn, settings.data_root, publisher, store).run()
-
         app.state.mediaferry = state
+
         worker = asyncio.create_task(runner.run_forever())
         try:
             yield
         finally:
+            # 走っているジョブに降りるよう伝え、実際に終わるのを待ってから
+            # 資源を閉じる。to_thread のハンドラは cancel では止まらない。
             await runner.stop()
-            worker.cancel()
-            volumes.close_all()
-            conn.close()
+            try:
+                await asyncio.wait_for(worker, timeout=SHUTDOWN_GRACE_SECONDS)
+            except TimeoutError:
+                logger.warning("ジョブが猶予内に終わらなかった。プロセス終了に任せる")
+            else:
+                volumes.close_all()
+                volumes_conn.close()
 
     app = FastAPI(title="mediaferry", lifespan=lifespan)
     app.include_router(system_router, prefix="/api")
     app.include_router(devices_router, prefix="/api")
     app.include_router(media_router, prefix="/api")
     return app
+```
+
+ジョブは 1 件ごとに自分の接続を開く。`JobRunner` にその作り方を渡す。
+
+`app/src/mediaferry/api/jobs_wiring.py`:
+
+```python
+"""ジョブ 1 件ぶんの世界を組み立てる.
+
+ジョブごとに DB 接続を開き、JobStore と ArtifactPublisher の両方をそれに
+束ねる。手順 7（§9.3）でリースの確認と staged への遷移を 1 つの
+BEGIN IMMEDIATE に入れる必要があり、別接続だと同じトランザクションに
+できない。
+"""
+
+from __future__ import annotations
+
+import sqlite3
+from collections.abc import Mapping
+
+from ..adapters.ffprobe import MediaProbe
+from ..adapters.publisher import ArtifactPublisher
+from ..db.connection import Database
+from ..db.jobs import JobContext, JobStore
+from ..db.profiles import ProfileRegistry
+from ..jobs.importer import Importer
+from ..jobs.scan import Scanner
+from ..jobs.volumes import VolumeSelection, VolumeService
+from ..settings import SettingsService
 
 
-def _register_handlers(state: AppState) -> None:
-    def run_scan(ctx) -> None:  # noqa: ANN001
-        volume_instance_id = ctx.params["volume_instance_id"]
-        profile = _profile_of(state, volume_instance_id)
-        handle = state.volumes.open(volume_instance_id)
-        outcome = Scanner(state.conn).scan(ctx, handle.dirfd, volume_instance_id, profile)
-        ctx.emit("info", f"スキャン完了: 新規 {outcome.new} 件 / 取込済 {outcome.already_imported} 件")
+class JobWorld:
+    def __init__(self, database: Database, env: Mapping[str, str], volumes: VolumeService) -> None:
+        self._database = database
+        self._env = env
+        self._volumes = volumes
 
-    def run_import(ctx) -> None:  # noqa: ANN001
-        volume_instance_id = ctx.params["volume_instance_id"]
-        profile = _profile_of(state, volume_instance_id)
-        handle = state.volumes.open(volume_instance_id)
-        importer = Importer(
-            state.conn,
-            state.publisher,
-            state.settings.data_root,
-            state.settings.default_timezone,
+    def store(self, conn: sqlite3.Connection) -> JobStore:
+        return JobStore(conn)
+
+    def connect(self) -> sqlite3.Connection:
+        return self._database.connect()
+
+    def run_scan(self, ctx: JobContext, conn: sqlite3.Connection) -> None:
+        selection = VolumeSelection.from_params(ctx.params)
+        profile = _fixed_profile(conn, selection)
+        handle = self._volumes.open(selection)
+        try:
+            outcome = Scanner(conn).scan(
+                ctx, handle.dirfd, selection.volume_instance_id, profile
+            )
+        finally:
+            self._volumes.release(selection)
+        ctx.emit(
+            "info",
+            f"スキャン完了: 新規 {outcome.new} 件 / 取込済 {outcome.already_imported} 件",
         )
-        outcome = importer.run(ctx, handle.dirfd, volume_instance_id, profile)
-        ctx.emit("info", f"取り込み完了: {outcome.published} 件（失敗 {outcome.failed} 件）")
 
-    state.runner.register("scan", run_scan)
-    state.runner.register("import", run_import)
+    def run_import(self, ctx: JobContext, conn: sqlite3.Connection) -> None:
+        selection = VolumeSelection.from_params(ctx.params)
+        profile = _fixed_profile(conn, selection)
+        # RUNTIME 層の設定はジョブの開始時に読み直す（画面での変更を待たせない）。
+        settings = SettingsService(conn, self._env).snapshot()
+        publisher = ArtifactPublisher(conn, settings.data_root, MediaProbe())
+        importer = Importer(conn, publisher, settings.data_root, settings.default_timezone)
+        handle = self._volumes.open(selection)
+        try:
+            outcome = importer.run(ctx, handle.dirfd, selection.volume_instance_id, profile)
+        finally:
+            self._volumes.release(selection)
+        ctx.emit("info", f"取り込み完了: {outcome.published} 件")
 
 
-def _profile_of(state: AppState, volume_instance_id: str):  # noqa: ANN202
-    row = state.conn.execute(
-        "SELECT profile_id FROM volume_instance WHERE id = ?", (volume_instance_id,)
-    ).fetchone()
-    if row is None or row["profile_id"] is None:
-        raise RuntimeError("このボリュームには対応するプロファイルが無い")
-    return state.registry.by_id(row["profile_id"])
+def _fixed_profile(conn: sqlite3.Connection, selection: VolumeSelection):  # noqa: ANN202
+    """キュー投入時に固定したリビジョンを読む.
+
+    現行リビジョンを読み直すと、キューで待っている間にプロファイルを
+    編集しただけで、確認画面と違う規則で取り込まれる。
+    """
+    registry = ProfileRegistry(conn)
+    definition = registry.definition_of(selection.profile_revision_id)
+    return ProfileRef(
+        profile_id=selection.profile_id,
+        revision_id=selection.profile_revision_id,
+        revision=0,
+        definition=definition,
+    )
 ```
 
 `app/src/mediaferry/api/routes_system.py`:
@@ -7295,75 +8830,88 @@ from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException
 
-from ..settings import SettingInvalid, SettingLocked
+from ..db.jobs import JobStore
+from ..db.profiles import ProfileRegistry
+from ..settings import SettingInvalid, SettingLocked, SettingsService
+from .deps import conn as get_conn
 from .deps import state as get_state
 
 router = APIRouter()
 
 
 @router.get("/health")
-def health(state=Depends(get_state)) -> dict[str, Any]:  # noqa: ANN001, B008
-    version = state.conn.execute("SELECT MAX(version) AS v FROM schema_migration").fetchone()["v"]
+def health(conn=Depends(get_conn)) -> dict[str, Any]:  # noqa: ANN001, B008
+    version = conn.execute("SELECT MAX(version) AS v FROM schema_migration").fetchone()["v"]
     return {"status": "ok", "schema_version": version}
 
 
 @router.get("/settings")
-def list_settings(state=Depends(get_state)) -> dict[str, Any]:  # noqa: ANN001, B008
+def list_settings(state=Depends(get_state), conn=Depends(get_conn)) -> dict[str, Any]:  # noqa: ANN001, B008
     return {
         "settings": [
-            {"key": s.key, "value": s.value, "source": s.source, "locked": s.locked}
-            for s in state.settings_service.describe_all()
+            {
+                "key": s.key,
+                "value": s.value,
+                "source": s.source,
+                "locked": s.locked,
+                "tier": s.tier.value,
+                "writable": s.writable,
+            }
+            for s in SettingsService(conn, state.env).describe_all()
         ]
     }
 
 
 @router.put("/settings")
-def write_setting(body: dict[str, str], state=Depends(get_state)) -> dict[str, str]:  # noqa: ANN001, B008
+def write_setting(  # noqa: ANN001
+    body: dict[str, str], state=Depends(get_state), conn=Depends(get_conn)  # noqa: B008
+) -> dict[str, str]:
     try:
-        state.settings_service.set(body["key"], body["value"])
+        tier = SettingsService(conn, state.env).set(body["key"], body["value"])
     except SettingLocked as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     except (SettingInvalid, KeyError) as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
-    return {"status": "ok"}
+    # いつ効くかを返す。RESTART の値を変えて「反映されない」と見えるのを防ぐ。
+    return {"status": "ok", "applies": tier.value}
 
 
 @router.get("/profiles")
-def list_profiles(state=Depends(get_state)) -> dict[str, Any]:  # noqa: ANN001, B008
+def list_profiles(conn=Depends(get_conn)) -> dict[str, Any]:  # noqa: ANN001, B008
     return {
         "profiles": [
             {"slug": ref.definition.slug, "name": ref.definition.name, "revision": ref.revision}
-            for ref in state.registry.active()
+            for ref in ProfileRegistry(conn).active()
         ]
     }
 
 
 @router.get("/jobs")
-def list_jobs(state=Depends(get_state)) -> dict[str, Any]:  # noqa: ANN001, B008
-    return {"jobs": [_job(row) for row in state.store.list_jobs()]}
+def list_jobs(conn=Depends(get_conn)) -> dict[str, Any]:  # noqa: ANN001, B008
+    return {"jobs": [_job(row) for row in JobStore(conn).list_jobs()]}
 
 
 @router.get("/jobs/{job_id}")
-def get_job(job_id: str, state=Depends(get_state)) -> dict[str, Any]:  # noqa: ANN001, B008
-    row = state.store.get(job_id)
+def get_job(job_id: str, conn=Depends(get_conn)) -> dict[str, Any]:  # noqa: ANN001, B008
+    row = JobStore(conn).get(job_id)
     if row is None:
         raise HTTPException(status_code=404, detail="そのジョブは無い")
     return _job(row)
 
 
 @router.get("/jobs/{job_id}/events")
-def job_events(job_id: str, after_seq: int = 0, state=Depends(get_state)) -> dict[str, Any]:  # noqa: ANN001, B008
+def job_events(job_id: str, after_seq: int = 0, conn=Depends(get_conn)) -> dict[str, Any]:  # noqa: ANN001, B008
     return {
         "events": [
             {"seq": e["seq"], "level": e["level"], "message": e["message"], "at": e["at"]}
-            for e in state.store.events(job_id, after_seq)
+            for e in JobStore(conn).events(job_id, after_seq)
         ]
     }
 
 
 @router.post("/jobs/{job_id}/cancel")
-def cancel_job(job_id: str, state=Depends(get_state)) -> dict[str, str]:  # noqa: ANN001, B008
-    if not state.store.request_cancel(job_id):
+def cancel_job(job_id: str, conn=Depends(get_conn)) -> dict[str, str]:  # noqa: ANN001, B008
+    if not JobStore(conn).request_cancel(job_id):
         raise HTTPException(status_code=409, detail="そのジョブはもう終わっている")
     return {"status": "cancelling"}
 
@@ -7390,6 +8938,9 @@ from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException
 
+from ..db.jobs import JobStore
+from ..jobs.volumes import StaleSelection, VolumeBusy
+from .deps import conn as get_conn
 from .deps import state as get_state
 
 router = APIRouter()
@@ -7405,7 +8956,7 @@ def list_devices(state=Depends(get_state)) -> dict[str, Any]:  # noqa: ANN001, B
                 "fs_label": view.fs_label,
                 "size_bytes": view.size_bytes,
                 "profile_slug": view.profile_slug,
-                "confidence": view.confidence,
+                "identity_confidence": view.identity_confidence,
                 "provisional": view.provisional,
                 "trusted": view.trusted,
                 "reason": view.reason,
@@ -7422,19 +8973,39 @@ def trust(volume_instance_id: str, state=Depends(get_state)) -> dict[str, str]: 
 
 
 @router.post("/volumes/{volume_instance_id}/scan")
-def scan(volume_instance_id: str, state=Depends(get_state)) -> dict[str, str]:  # noqa: ANN001, B008
-    return {"job_id": state.store.enqueue("scan", {"volume_instance_id": volume_instance_id})}
+def scan(  # noqa: ANN001
+    volume_instance_id: str, state=Depends(get_state), conn=Depends(get_conn)  # noqa: B008
+) -> dict[str, str]:
+    return {"job_id": _enqueue(state, conn, "scan", volume_instance_id)}
 
 
 @router.post("/volumes/{volume_instance_id}/import")
-def start_import(volume_instance_id: str, state=Depends(get_state)) -> dict[str, str]:  # noqa: ANN001, B008
-    return {"job_id": state.store.enqueue("import", {"volume_instance_id": volume_instance_id})}
+def start_import(  # noqa: ANN001
+    volume_instance_id: str, state=Depends(get_state), conn=Depends(get_conn)  # noqa: B008
+) -> dict[str, str]:
+    return {"job_id": _enqueue(state, conn, "import", volume_instance_id)}
+
+
+def _enqueue(state, conn, job_type: str, volume_instance_id: str) -> str:  # noqa: ANN001
+    """選択した瞬間の presence とプロファイルリビジョンを params に固定する.
+
+    volume_instance_id だけを渡すと、実行時に「最新の presence」を選ぶことに
+    なり、抜き差しで別のカードが同じノードに来ていても、その現在値から
+    正しい expect を組み立ててブローカーの TOCTOU 検証をすり抜ける（§9.2）。
+    """
+    try:
+        selection = state.volumes.selection_for(volume_instance_id)
+    except StaleSelection as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    return JobStore(conn).enqueue(job_type, selection.to_params())
 
 
 @router.post("/volumes/{volume_instance_id}/close")
 def close(volume_instance_id: str, state=Depends(get_state)) -> dict[str, str]:  # noqa: ANN001, B008
     try:
         state.volumes.close(volume_instance_id)
+    except VolumeBusy as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     except LookupError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     return {"status": "ok"}
@@ -7451,31 +9022,32 @@ from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException
 
+from .deps import conn as get_conn
 from .deps import state as get_state
 
 router = APIRouter()
 
 
 @router.get("/media")
-def list_media(limit: int = 200, offset: int = 0, state=Depends(get_state)) -> dict[str, Any]:  # noqa: ANN001, B008
-    rows = state.conn.execute(
+def list_media(limit: int = 200, offset: int = 0, conn=Depends(get_conn)) -> dict[str, Any]:  # noqa: ANN001, B008
+    rows = conn.execute(
         "SELECT * FROM media_file ORDER BY captured_at DESC LIMIT ? OFFSET ?", (limit, offset)
     )
     return {"media": [_media(row) for row in rows]}
 
 
 @router.get("/media/{media_id}")
-def get_media(media_id: str, state=Depends(get_state)) -> dict[str, Any]:  # noqa: ANN001, B008
-    row = state.conn.execute("SELECT * FROM media_file WHERE id = ?", (media_id,)).fetchone()
+def get_media(media_id: str, conn=Depends(get_conn)) -> dict[str, Any]:  # noqa: ANN001, B008
+    row = conn.execute("SELECT * FROM media_file WHERE id = ?", (media_id,)).fetchone()
     if row is None:
         raise HTTPException(status_code=404, detail="そのメディアは無い")
     return _media(row)
 
 
 @router.get("/orphans")
-def list_orphans(state=Depends(get_state)) -> dict[str, Any]:  # noqa: ANN001, B008
+def list_orphans(state=Depends(get_state), conn=Depends(get_conn)) -> dict[str, Any]:  # noqa: ANN001, B008
     report = state.last_reconcile
-    missing = state.conn.execute(
+    missing = conn.execute(
         "SELECT id, rel_path, missing_at FROM media_file WHERE missing_at IS NOT NULL"
     )
     return {
@@ -7483,6 +9055,7 @@ def list_orphans(state=Depends(get_state)) -> dict[str, Any]:  # noqa: ANN001, B
             {"rel_path": o.rel_path, "size_bytes": o.size_bytes, "sha1": o.sha1}
             for o in report.orphans
         ],
+        "unrecoverable": report.unrecoverable,
         "missing": [
             {"id": row["id"], "rel_path": row["rel_path"], "missing_at": row["missing_at"]}
             for row in missing
@@ -7521,16 +9094,25 @@ import os
 import uvicorn
 
 from .api.app import create_app
-from .settings import SETTING_SPECS
+from .db.connection import Database
+from .db.migrate import apply_migrations
+from .settings import SettingsService, bootstrap_data_root
 
 
 def main() -> None:
-    app = create_app()
-    # 待ち受け先の解決には DB を要しないので、env だけで決める。
-    host = os.environ.get("MEDIAFERRY_BIND_HOST", SETTING_SPECS["BIND_HOST"].default)
-    port = int(os.environ.get("MEDIAFERRY_HTTP_PORT", SETTING_SPECS["HTTP_PORT"].default))
-    logging.basicConfig(level=os.environ.get("MEDIAFERRY_LOG_LEVEL", "info").upper())
-    uvicorn.run(app, host=host, port=port)
+    env = dict(os.environ)
+    # BIND_HOST / HTTP_PORT / LOG_LEVEL は RESTART 層で、DB にも保存できる。
+    # env だけで決めると、画面で変えて再起動しても反映されない。
+    database = Database(bootstrap_data_root(env) / "var" / "mediaferry.sqlite3")
+    conn = database.connect()
+    try:
+        apply_migrations(conn)
+        settings = SettingsService(conn, env).snapshot()
+    finally:
+        conn.close()
+
+    logging.basicConfig(level=settings.log_level.upper())
+    uvicorn.run(create_app(env=env), host=settings.bind_host, port=settings.http_port)
 
 
 if __name__ == "__main__":
@@ -7581,7 +9163,7 @@ git commit -m "feat(mediaferry): expose scan and import over a loopback api"
 
 ---
 
-### Task 24: バックアップ手順と実 USB の確認手順
+### Task 25: バックアップ手順と実 USB の確認手順
 
 **Files:**
 - Create: `docker/mediaferry/docs/phase1-backup.md`
@@ -7676,21 +9258,22 @@ git commit -m "docs(mediaferry): document backups and close phase 1"
 
 ```
 1 (DB 基盤)
-├─ 2 (job/setting) ─ 6 (settings) ─┐
-├─ 3 (profile/source) ─ 13 (registry) ─┐
-├─ 4 (artifact/merge) ─┐              │
-└─ 5 (dest/upload)     │              │
-                       │              │
+├─ 2 (job/setting) ─ 6 (settings)
+├─ 3 (profile/source) ─ 13 (registry)
+├─ 4 (artifact/merge)
+└─ 5 (dest/upload)
+
 7 (crypto)  8 (fingerprint)  9 (profile model) ─ 10 (matching)
-11 (timestamps)  12 (naming)  15 (fs)  16 (ffprobe)
-                       │              │
-                       └─ 14 (jobs) ─ 17 (publisher) ─ 18 (scanner) ─ 19 (importer)
-                                              └─ 20 (reconciler) ─ 21 (crash tests)
-                                                        └─ 22 (volumes) ─ 23 (api) ─ 24 (docs)
+11 (timestamps)  12 (naming)  15 (fs)  16 (ffprobe)  22 (usb product)
+
+14 (jobs) ─ 17 (publisher) ─ 18 (scanner) ─ 19 (importer)
+                  └─ 20 (reconciler) ─ 21 (crash tests)
+                            └─ 23 (volumes) ─ 24 (api) ─ 25 (docs)
 ```
 
-Task 7〜12・15・16 は互いに独立で、Task 1 の後ならいつでも着手できる。
-並行して進める場合はこの 8 つを分けるのが安全。
+Task 7〜12・15・16・22 は互いに独立で、Task 1 の後ならいつでも着手できる
+（22 は Task 1 にも依存しない）。並行して進める場合はこの 9 つを分けるのが安全。
+23 は 10・13・15・22 を、24 は 14・19・20・23 を必要とする。
 
 ## Phase 1 の完了条件（§20）
 
@@ -7712,5 +9295,42 @@ Task 7〜12・15・16 は互いに独立で、Task 1 の後ならいつでも着
 | `DeviceMonitor` の uevent 購読（自動検出） | mountd 側。Phase 1 は `list_volumes` のポーリングで足りる |
 | サムネイル生成 | Phase 4（画面と一緒） |
 | `recompute_timestamps` / `deep_verify` ジョブ | 種別は `job.type` の CHECK に入れてある。実装は必要になった時点 |
+
+## レビュー記録
+
+2026-08-17、codex にレビューを依頼した（blocker 8 / major 8 / minor 1）。
+
+### 反映した blocker
+
+| 指摘 | 反映先 |
+| --- | --- |
+| 手順 10 の後を再開できない。`_link` は staging を unlink した後も `staged` のままなので、再開時の `os.link` が必ず `FileNotFoundError` になる | Task 17 に `_adopt_published_final`（staging が無ければ final の大きさと SHA-1 だけで引き取る／一致しなければ `StagingLost`）。Task 20 で `unrecoverable` として報告 |
+| `assert_lease` が `extend_lease` を呼んでいたため、`cancelling` でも成功し、期限切れも復活していた。確認と staged 遷移が別トランザクションで、その隙間に cancel が入れた | Task 14 で `assert_lease`（SELECT のみ・`running` かつ期限内）と `extend_lease` を分離。Task 17 で両者を 1 つの `BEGIN IMMEDIATE` に入れる。Task 19 でコピー中に heartbeat |
+| 1 本の `sqlite3.Connection` を API スレッドとワーカースレッドで共有していた。トランザクションは接続に属するので、API の書き込みが publisher の `BEGIN IMMEDIATE` に混ざる | Task 1 を `Database` ファクトリに変更。API はリクエストごと、ジョブは 1 件ごと、`VolumeService` は専用の接続を持つ |
+| ジョブが `volume_instance_id` しか持たず、実行時に「最新の presence」を選んでいた。§9.2 の TOCTOU 対策が外れていた | Task 23 に `VolumeSelection`（presence / broker_epoch / generation / volume_key / major:minor / fs_uuid / profile_revision）。Task 24 で params に固定し、実行時に照合 |
+| `BrokerClient` を複数スレッドから同時に使っていた。1 本の SEQPACKET なので応答を取り違える。handle が presence に束縛されておらず、実行中に別スレッドから close できた | Task 23 で `_call` をロックで直列化。handle を selection に束縛し参照カウントを持たせ、使用中の close は 409 |
+| 停止時に `to_thread` のハンドラを待たずに fd と DB を閉じていた | Task 24 で `stop()` → `run_forever()` の完了を待ってから資源を閉じる。猶予超過はプロセス終了に任せる |
+| `SECRET_KEY` を DB に保存できてしまい、§12.3 の境界（暗号文と鍵を別の場所に置く）が消えていた。`AUTH_PASSWORD` も平文保存になっていた | Task 6 で設定を 3 層に分け、`BOOTSTRAP`（env のみ）は DB に書けも読めもしない |
+| 取り込み中にカードを抜いても、全件失敗でジョブが `succeeded` になっていた | Task 19 で `ImportFailed` を送出。デバイス消失の errno なら残りを試さず降りる。staged 以降の失敗は `PublishInterrupted` として区別し、`source_entry` を failed に戻さない |
+
+### 反映した major / minor
+
+| 指摘 | 反映先 |
+| --- | --- |
+| `os.utime` が fsync の後で、staging の親を fsync していなかった（`os._exit` では検出できない） | Task 17 で順序を入れ替え、staging の親を staged commit の前に fsync。順序を spy で固定するテストを追加。Task 24 起動時に `assert_same_filesystem` |
+| プロファイルの一致度を `identity_confidence` として保存し、`content_manifest_digest` を一度も計算していなかった。`UsbInfo` に `product` が無く常に空文字だった | Task 10 から `confidence` を削除。Task 22 を新設して wire に `product` を追加。Task 23 で manifest と既知ファイルの残存率から確度を出す |
+| `upload_record` の複合 FK が NULL で迂回でき、存在しない `target_epoch` を作れた。state と claim/revision の整合が無かった | Task 5 に epoch 存在の trigger と 3 つの CHECK |
+| `merge_member.active` の trigger が片方向だけで、superseded なグループに後から active な member を足せた | Task 4 に insert/update の trigger と supersede の不可逆性 |
+| migration の失敗で rollback せず、版を記録しないファイルが DDL だけ commit されていた。既存 DB の権限を直していなかった | Task 1 で runner がトランザクションを所有（ファイルは DDL のみ）。checksum で改変を検出。権限は接続のたびに直す |
+| queued の cancel が永久に `cancelling` で残った | Task 14 で queued は即 `cancelled` |
+| `__main__` が DB の設定を無視し、`AppState.settings` が古いままだった | Task 24 で起動時に DB + env から解決。RUNTIME 層はジョブ開始時に読み直す |
+| `missing_at` が一度立つと復元しても消えなかった | Task 20 で `_sync_missing` にして復帰も扱う |
+| 衝突時の同内容判定が SHA-1 だけだった | Task 17 で大きさと SHA-1 の両方を比較 |
+
+### 退けた指摘
+
+| 指摘 | 判断 |
+| --- | --- |
+| 衝突名の壁時計が「profile timezone ではなく UTC」なので Asia/Tokyo のカードで 9 時間ずれる | **ずれない。** exFAT はローカル時刻を保持し、カーネルはオフセット 0 で epoch にするので、epoch を UTC で描画したものがカード上の壁時計になる。プロファイルの `timezone` を付けても表示される桁は変わらない（オフセットの付与は瞬間を移動しない）。§6 の `force_offset` も同じ前提に立っている。ただし「staged の metadata に永続化して、再開時に再計算しない」という提案自体は正しいので、そちらは採用した |
 
 
