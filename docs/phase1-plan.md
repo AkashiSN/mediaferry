@@ -2102,6 +2102,8 @@ Argon2 ハッシュの保存先を別に作る。平文を `app_setting` に置�
 `app/tests/test_settings.py`:
 
 ```python
+import base64
+
 import pytest
 
 from mediaferry.clock import now_iso
@@ -2160,6 +2162,31 @@ def test_bootstrap_secrets_cannot_be_stored_in_the_db(db):
     assert db.execute("SELECT count(*) FROM app_setting").fetchone()[0] == 0
 
 
+def test_bootstrap_rows_in_the_db_are_ignored(db):
+    """書けないだけでなく読みもしない.
+
+    set() は BOOTSTRAP を弾くが、旧版・手動編集・将来の不具合で行が紛れ込むと、
+    読む側が拾った瞬間に「鍵は DB の外」という境界が崩れる。
+    """
+    for key, value in (
+        ("SECRET_KEY", base64.b64encode(bytes(32)).decode()),
+        ("AUTH_PASSWORD", "s3cret"),
+        ("DATA_ROOT", "/elsewhere"),
+        ("BROKER_SOCKET", "/tmp/evil.sock"),  # noqa: S108
+    ):
+        db.execute("INSERT INTO app_setting VALUES (?, ?, ?)", (key, value, now_iso()))
+
+    snapshot = service(db).snapshot()
+    assert snapshot.secret_key is None
+    assert snapshot.auth_password is None
+    assert str(snapshot.data_root) == "/data"
+    assert str(snapshot.broker_socket) == "/run/mediaferry/broker.sock"
+
+    described = {s.key: s for s in service(db).describe_all()}
+    assert described["SECRET_KEY"].source == "default"
+    assert described["DATA_ROOT"].source == "default"
+
+
 def test_set_reports_when_the_value_takes_effect(db):
     svc = service(db)
     assert svc.set("HTTP_PORT", "9001") is Tier.RESTART
@@ -2191,8 +2218,15 @@ def test_unknown_keys_are_refused(db):
 
 
 def test_secret_key_must_be_32_random_bytes_in_base64(db):
-    with pytest.raises(SettingInvalid, match="32"):
+    # base64 として読めない
+    with pytest.raises(SettingInvalid, match="base64"):
         service(db, SECRET_KEY="hunter2").snapshot()
+    # base64 としては読めるが 256bit ではない（パスワードを base64 にしただけ）
+    short = base64.b64encode(b"hunter2").decode()
+    with pytest.raises(SettingInvalid, match="32"):
+        service(db, SECRET_KEY=short).snapshot()
+    ok = base64.b64encode(bytes(32)).decode()
+    assert service(db, SECRET_KEY=ok).snapshot().secret_key == bytes(32)
 
 
 def test_secrets_are_masked_when_described(db):
