@@ -48,7 +48,7 @@ def a_volume() -> VolumeInfo:
         fs_uuid="26B1-2FD6",
         fs_label="SD_Card",
         size_bytes=1024,
-        usb=UsbInfo(vendor_id="2ca3", product_id="0020", serial="X"),
+        usb=UsbInfo(vendor_id="2ca3", product_id="0020", product="OsmoPocket4-ABC", serial="X"),
         broker_epoch="",
         generation=0,
     )

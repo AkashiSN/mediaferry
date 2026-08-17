@@ -8382,22 +8382,40 @@ def test_usb_product_may_be_absent():
         {"vendor_id": "2ca3", "product_id": "0020", "product": None, "serial": None}
     )
     assert usb.product is None
+
+
+def test_a_wire_message_without_the_product_field_is_rejected():
+    """「値が無い」と「欄ごと無い」を分ける.
+
+    product を送らない mountd を黙って通すと、serial が機種の既定値である
+    機体を 2 台挿したときに同一デバイスと誤認する。
+    """
+    with pytest.raises(ProtocolError, match="product"):
+        usb_from_wire({"vendor_id": "2ca3", "product_id": "0020", "serial": None})
+
+
+def test_usb_info_has_no_default_values():
+    """既定値を付けると、product を埋め忘れた組み立てが黙って通る."""
+    assert [f.name for f in fields(UsbInfo) if f.default is not MISSING] == []
 ```
 
 `mountd/tests/test_devices.py` に追記（既存の sysfs fake の作法に合わせる）:
 
+既存の `make_sysfs` に `product` 属性を足したうえで:
+
 ```python
-def test_usb_product_is_read_from_sysfs(fake_sysfs):
+def test_usb_product_is_read_from_sysfs(tmp_path):
     """/sys/.../product に機体固有の文字列がある."""
-    fake_sysfs.write_usb_attrs(vendor="2ca3", product_id="0020",
-                               product="OsmoPocket4-ABC123", serial="123456789ABCDEF")
-    volume = fake_sysfs.enumerate()[0]
-    assert volume.usb.product == "OsmoPocket4-ABC123"
+    make_sysfs(tmp_path)
+    vols = {v.device_node: v for v in enumerate_volumes(sysfs_root=tmp_path, probe=fake_probe)}
+    assert vols["/dev/sdk"].usb.product == "OsmoPocket4-ABC123"
 
 
-def test_a_missing_product_attribute_is_none(fake_sysfs):
-    fake_sysfs.write_usb_attrs(vendor="2ca3", product_id="0020", product=None, serial=None)
-    assert fake_sysfs.enumerate()[0].usb.product is None
+def test_a_missing_product_attribute_is_none(tmp_path):
+    make_sysfs(tmp_path)
+    (tmp_path / "devices/pci0000:00/usb2/2-4/product").unlink()
+    vols = {v.device_node: v for v in enumerate_volumes(sysfs_root=tmp_path, probe=fake_probe)}
+    assert vols["/dev/sdk"].usb.product is None
 ```
 
 - [ ] **Step 2: 失敗を確認する**
@@ -8424,17 +8442,26 @@ class UsbInfo:
 
 `mountd/src/mountd/devices.py` の USB 属性読み出しに `product` を加える。
 `vendor`・`serial` と同じ経路（`/sys/.../product` を読み、無ければ `None`）で
-取得する。
+取得する。**`_resolve_usb` の局所変数 `product` は `idProduct` を指しているので、
+`product_id` へ改名してから足す**（そのままだと機体名で上書きされる）。
 
 - [ ] **Step 4: テストが通ることを確認する**
 
 Run: `uv run pytest protocol mountd -v`
 Expected: すべて PASS（`needs_root` は既定で skip）
 
-- [ ] **Step 5: コミット**
+- [ ] **Step 5: 変異試験**
+
+`usb_from_wire` の `_optional` を `d.get` に変えて
+`test_a_wire_message_without_the_product_field_is_rejected` が、`UsbInfo` の欄に
+既定値を付けて `test_usb_info_has_no_default_values` が落ちることを確認してから
+戻す。**この 2 つは別々の穴**で、前者は wire の欠落、後者は Python 側の
+組み立て漏れを塞ぐ。
+
+- [ ] **Step 6: コミット**
 
 ```bash
-git add protocol mountd
+git add protocol mountd app/tests/test_broker_client.py
 git commit -m "feat(mountd): report the usb product string over the wire"
 ```
 

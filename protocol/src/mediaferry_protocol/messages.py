@@ -22,6 +22,9 @@ REQUEST_TYPES = frozenset({REQ_LIST_VOLUMES, REQ_OPEN_VOLUME, REQ_CLOSE_VOLUME})
 class UsbInfo:
     vendor_id: str
     product_id: str
+    # 機体固有の文字列。serial は機種の既定値でありうるので、デバイスの
+    # 同定にはこれを含めた 4 つ組を使う。
+    product: str | None
     serial: str | None
 
 
@@ -92,6 +95,7 @@ def usb_from_wire(d: dict[str, Any] | None) -> UsbInfo | None:
     return UsbInfo(
         vendor_id=_require(d, "vendor_id", str),
         product_id=_require(d, "product_id", str),
+        product=_optional(d, "product", str),
         serial=_optional(d, "serial", str),
     )
 

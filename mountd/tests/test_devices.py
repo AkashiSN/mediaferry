@@ -56,6 +56,7 @@ def make_sysfs(root: Path) -> None:
     usb_dev = root / "devices/pci0000:00/usb2/2-4"
     (usb_dev / "idVendor").write_text("2ca3\n")
     (usb_dev / "idProduct").write_text("0020\n")
+    (usb_dev / "product").write_text("OsmoPocket4-ABC123\n")
     (usb_dev / "serial").write_text("TESTSERIAL0001\n")
     (usb_dev / "subsystem").symlink_to(bus_usb)
 
@@ -113,6 +114,20 @@ def test_usb_identity_is_resolved_from_ancestors(tmp_path):
     usb = vols["/dev/sdk"].usb
     assert usb is not None
     assert (usb.vendor_id, usb.product_id, usb.serial) == ("2ca3", "0020", "TESTSERIAL0001")
+
+
+def test_usb_product_is_read_from_sysfs(tmp_path):
+    """/sys/.../product に機体固有の文字列がある."""
+    make_sysfs(tmp_path)
+    vols = {v.device_node: v for v in enumerate_volumes(sysfs_root=tmp_path, probe=fake_probe)}
+    assert vols["/dev/sdk"].usb.product == "OsmoPocket4-ABC123"
+
+
+def test_a_missing_product_attribute_is_none(tmp_path):
+    make_sysfs(tmp_path)
+    (tmp_path / "devices/pci0000:00/usb2/2-4/product").unlink()
+    vols = {v.device_node: v for v in enumerate_volumes(sysfs_root=tmp_path, probe=fake_probe)}
+    assert vols["/dev/sdk"].usb.product is None
 
 
 def test_generation_and_epoch_are_stamped(tmp_path):

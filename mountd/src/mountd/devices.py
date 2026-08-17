@@ -62,12 +62,13 @@ def _read_str(path: Path) -> str | None:
 def _resolve_usb(device_dir: Path) -> UsbInfo | None:
     """ブロックデバイスの祖先を遡って USB デバイスの属性を探す."""
     for ancestor in [device_dir, *device_dir.parents]:
-        vendor = _read_str(ancestor / "idVendor")
-        product = _read_str(ancestor / "idProduct")
-        if vendor and product:
+        vendor_id = _read_str(ancestor / "idVendor")
+        product_id = _read_str(ancestor / "idProduct")
+        if vendor_id and product_id:
             return UsbInfo(
-                vendor_id=vendor,
-                product_id=product,
+                vendor_id=vendor_id,
+                product_id=product_id,
+                product=_read_str(ancestor / "product"),
                 serial=_read_str(ancestor / "serial"),
             )
     return None
