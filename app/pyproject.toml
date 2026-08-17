@@ -8,6 +8,8 @@ dependencies = [
     "httpx>=0.28",
     "cryptography>=43",
     "pyyaml>=6",
+    "fastapi>=0.115",
+    "uvicorn>=0.32",
 ]
 
 # テストは fake サーバではなく mountd の実物に対して行う。プロトコルの

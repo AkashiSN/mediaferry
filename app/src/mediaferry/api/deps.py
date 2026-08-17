@@ -1,0 +1,29 @@
+"""リクエストからアプリの状態と、そのリクエスト専用の DB 接続を取り出す."""
+
+from __future__ import annotations
+
+import sqlite3
+from collections.abc import Iterator
+from typing import TYPE_CHECKING
+
+from fastapi import Depends, Request
+
+if TYPE_CHECKING:
+    from .app import AppState
+
+
+def state(request: Request) -> AppState:
+    return request.app.state.mediaferry
+
+
+def conn(app_state: AppState = Depends(state)) -> Iterator[sqlite3.Connection]:  # noqa: B008
+    """リクエストごとに接続を開いて閉じる.
+
+    トランザクションは接続に属するので、ワーカーと共有するとお互いの
+    トランザクションに入り込む。
+    """
+    connection = app_state.database.connect()
+    try:
+        yield connection
+    finally:
+        connection.close()
