@@ -1243,8 +1243,17 @@ def test_staged_rows_must_carry_everything_needed_to_resume(db):
     """reconciliation はパスを推測しない。staged になった時点で
     final_rel_path / content_sha1 / expected_size / metadata_json が揃う."""
     job_id = a_job(db)
-    with pytest.raises(sqlite3.IntegrityError):
-        a_staging(db, job_id, state="staged", final_rel_path="library/x/A.MP4")
+    entry_id = a_source_entry(db, a_volume(db))
+    # match で、狙いの CHECK （揃っているか）で落ちたことを確かめる。
+    # kind 側の CHECK で落ちると、欠けた列を見逃したまま通ってしまう。
+    with pytest.raises(sqlite3.IntegrityError, match="final_rel_path"):
+        a_staging(
+            db,
+            job_id,
+            state="staged",
+            final_rel_path="library/x/A.MP4",
+            source_entry_id=entry_id,
+        )
     a_staging(
         db,
         job_id,
@@ -1253,6 +1262,7 @@ def test_staged_rows_must_carry_everything_needed_to_resume(db):
         content_sha1="0" * 40,
         expected_size=10,
         metadata_json="{}",
+        source_entry_id=entry_id,
     )
 
 
@@ -1322,9 +1332,10 @@ def test_superseding_a_group_frees_its_members(db):
     db.execute("INSERT INTO merge_member VALUES (?, ?, 0, 1)", (first, media_id))
     db.execute("UPDATE merge_group SET superseded_by_id = ? WHERE id = ?", (second, first))
     db.execute("INSERT INTO merge_member VALUES (?, ?, 0, 1)", (second, media_id))
-    assert db.execute(
+    active = db.execute(
         "SELECT active FROM merge_member WHERE merge_group_id = ?", (first,)
-    ).fetchone()[0] == 0
+    ).fetchone()[0]
+    assert active == 0
 
 
 def test_a_superseded_group_cannot_gain_active_members(db):
@@ -1334,7 +1345,9 @@ def test_a_superseded_group_cannot_gain_active_members(db):
     second = a_merge_group(db, profile, digest="d2")
     db.execute("UPDATE merge_group SET superseded_by_id = ? WHERE id = ?", (second, first))
     with pytest.raises(sqlite3.IntegrityError, match="supersede"):
-        db.execute("INSERT INTO merge_member VALUES (?, ?, 0, 1)", (first, a_media_file(db, profile)))
+        db.execute(
+            "INSERT INTO merge_member VALUES (?, ?, 0, 1)", (first, a_media_file(db, profile))
+        )
     # 非 active としてなら履歴に残せる
     db.execute("INSERT INTO merge_member VALUES (?, ?, 0, 0)", (first, a_media_file(db, profile)))
     with pytest.raises(sqlite3.IntegrityError, match="supersede"):
@@ -1362,7 +1375,9 @@ def test_an_active_group_cannot_hold_an_inactive_member(db):
     profile = a_profile(db)
     group = a_merge_group(db, profile, digest="d1")
     with pytest.raises(sqlite3.IntegrityError, match="supersede"):
-        db.execute("INSERT INTO merge_member VALUES (?, ?, 0, 0)", (group, a_media_file(db, profile)))
+        db.execute(
+            "INSERT INTO merge_member VALUES (?, ?, 0, 0)", (group, a_media_file(db, profile))
+        )
 
 
 def test_supersede_cannot_be_undone(db):
