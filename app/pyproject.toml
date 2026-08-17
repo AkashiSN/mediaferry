@@ -6,6 +6,7 @@ requires-python = ">=3.12"
 dependencies = [
     "mediaferry-protocol",
     "httpx>=0.28",
+    "cryptography>=43",
 ]
 
 # テストは fake サーバではなく mountd の実物に対して行う。プロトコルの
