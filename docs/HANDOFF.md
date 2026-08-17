@@ -1,7 +1,7 @@
 # mediaferry 引き継ぎ資料
 
 最終更新: 2026-08-18
-ブランチ: `main`（単独リポジトリ、55 コミット）
+ブランチ: `main`（単独リポジトリ、59 コミット。先頭は `5b3d174`）
 
 このファイルは、別セッションが作業を引き継ぐための出発点。
 **まずここを読み、次に `design.md` §20 と該当フェーズの計画を読む。**
@@ -10,13 +10,14 @@
 
 ## 1. 現在地
 
-**Phase 1 は実装・検証とも完了。次は Phase 2（結合）の計画づくりから。**
+**Phase 1 は実装・検証とも完了。Phase 2 は計画とレビューが完了し、実装は未着手。
+次は `docs/phase2-plan.md` の Task 1 から。**
 
 | Phase | 内容 | 状態 |
 | --- | --- | --- |
 | 0 | スパイク。未検証項目の実測とブローカーの最小実装 | **完了** |
 | 1 | 基盤 + 取り込み。`ArtifactPublisher` / `Reconciler` / DB スキーマ / scan / import / API | **完了**（実 USB の確認だけ残り） |
-| 2 | 結合 | 未着手 |
+| 2 | 結合 | **計画完了・未実装**（`phase2-plan.md`、14 タスク。codex レビュー 2 巡を反映済み） |
 | 3 | Immich 同期（転送先プロファイル、状態機械） | 未着手 |
 | 4 | Web UI | 未着手 |
 | 5 | 汎用化（Canon、プロファイル編集 UI、複数デバイス） | 未着手 |
@@ -39,13 +40,18 @@ uv run ruff format --check .   88 files already formatted
 
 ### 残っていること
 
-**実 USB での手動確認（`phase1-manual-checklist.md` の 11 項目）だけ未実施。**
-開発コンテナ（入れ子の非特権 LXC）ではマウントが AppArmor に阻まれるので、
-TrueNAS ホストで実行する必要がある。
+1. **Phase 2 の実装（`docs/phase2-plan.md` の Task 1〜14）。** 計画は書き終わり、
+   codex のレビューを 2 巡通してある。コードはまだ 1 行も書いていない。
+2. **実 USB での手動確認（`phase1-manual-checklist.md` の 11 項目）。**
+   開発コンテナ（入れ子の非特権 LXC）ではマウントが AppArmor に阻まれるので、
+   TrueNAS ホストで実行する必要がある。
 
-特に **11 番（mtime の解釈の実測）は実装の前提の確認**なので、Phase 2 へ進む前に
-済ませたい。前提が崩れていれば `timestamps.py` の `_wall_clock` と
-`publisher._collision_stamp` を直す必要がある。
+   特に **11 番（mtime の解釈の実測）は実装の前提の確認**。前提が崩れていれば
+   `timestamps.py` の `_wall_clock` と `publisher._collision_stamp` を直す。
+   Phase 2 の派生物の mtime も同じ前提に乗っているので、**実測は早い方がよい**。
+
+この 2 つは依存していない。**Phase 2 の実装は開発コンテナで進められる**
+（結合のテストは実 ffmpeg を使うが、マウントは要らない）。
 
 ---
 
@@ -115,6 +121,30 @@ Phase 0 の価値はここにある。**いずれも「実際に動かして」�
 | **孤立ファイルは報告するだけ。削除しない** | 自動削除はデータを失う経路になる |
 | **停止は走っているジョブの完了を待つ** | `to_thread` のハンドラは task の cancel では止まらない。待たずに接続と dirfd を閉じると、コピー中のスレッドから見て資源が突然消える。timeout を付けて worker を cancel しても同じ |
 
+### Phase 2 の計画で確定した契約（蒸し返さないこと）
+
+**まだ実装していないが、判断は済んでいる。** 根拠は `phase2-plan.md` の
+各タスクとレビュー記録。**6 件は codex のレビューで blocker として指摘された
+もの**で、理屈で戻すと同じ穴に落ちる。
+
+| 判断 | 理由 |
+| --- | --- |
+| **結合物の公開は `publish_prepared`（`work` → `staging` を `os.link`）** | `write` コールバックのままだと 30 GiB をもう一度書く。`work/` と `staging/` は同一ファイルシステム（§7）なので link で移せる。11 手順と回収の性質は `publish` と同じ |
+| **`publish_prepared` の SHA-1 走査中も heartbeat とキャンセル確認を続ける** | 30 GiB の走査はリース（60 秒）より長い。打たないと手順 7 の `assert_lease` で失効し、**正しく生成・検証済みの結合物が捨てられる** |
+| **staged より前の「中断できない長い処理」は `_with_lease_pulse` で囲む** | `os.fsync`（30 GiB の直後は数十秒）と ffprobe（timeout がリースと同値）は途中で止められず、chunk の合間の heartbeat では守れない。処理を別スレッドへ出し、待つ側が打つ（DB へ触るのは待つ側だけなので接続は 1 本のまま）。**取り込み側にも同じ穴がある**（§7） |
+| **キャンセルは例外で `JobRunner` まで上げない** | `_run_one` は例外をすべて `failed` にするので、利用者が押したキャンセルが失敗として記録される。ハンドラが受け止めて正常 return し、`finish_claimed` の `cancelling -> cancelled` に決着させる（取り込みも同じ形で降りている） |
+| **map はパートごとに、そのパート自身の ffprobe 結果から作る** | 保持 signature が同じでも、保持しない data track の挿入位置が違えば絶対 index は変わる。先頭の index を使い回すと、**同じ codec の別トラックを失敗せずに拾う** |
+| **concat demuxer は preflight してから使う** | demuxer は最初のファイルの構成を全体に適用する。全ストリームの構成と保持対象の index の並びが一致しないときは、試さずに TS へ送る |
+| **TS 経路は mpegts が運べないストリームを外して記録する** | `mpegts` は QuickTime の data track（`tmcd` / `djmd`）を運べない。map に残すと mux が拒否して**検証できる出力そのものができない**（既定の DJI プロファイルは `timecode: true` なので fallback が常に使えなくなる） |
+| **検証結果は公開の前に commit する** | 公開の途中で落ちても検証をやり直さない |
+| **`merging` のまま残ったグループは、出力の有無で merged / detected へ倒す** | 倒さないと再試行もできない。`_recover_staging` の後に走らせる。**回収できない `artifact_staging` を抱えたグループは動かさない**（再試行させると、古い staged 行と新しい公開が同じグループを指す） |
+| **公開後にできる操作は採用だけ。破棄と再結合は Phase 4** | どちらも公開済みの `media_file` を取り残す。旧グループを `superseded_by_id` で向け直す仕組みが要り、それは手動編集と共通なので画面と一緒に入れる。**何も公開していない `failed` からの結合実行は Phase 2 でできる** |
+| **派生物の mtime は「壁時計を UTC として解釈した epoch」** | 取り込みの mtime と同じ表現にする。オフセット付きの瞬間を使うと `library/` と `derived/` で衝突接尾辞の壁時計がずれる |
+| **期待サイズは `bit_rate` が取れた保持ストリームだけで組み立てる** | `tmcd` は `bit_rate` を持たない。それを理由に全体を `inconclusive` にすると、**既定のプロファイルでサイズ検査が常に無効**になる（Phase 0 で直した検査が死ぬ）。ばらつきも合計ではなく対応するストリームごとに見る |
+| **検証器の版は `verification_json.pipeline_version`。`input_digest` には入れない** | `input_digest` は §8 で入力の同一性の判定と定義されている。混ぜると、閾値を 1 つ変えただけで既存の結合物がそろって選択肢から消え、再結合するまで戻らない。**codex の指摘を退けた 1 件**（先方も受け入れた） |
+| **検出は「アクティブな member」を境界として扱う** | 列から取り除くだけだと、その前後がつながって別の録画を 1 つのグループにする |
+| **`record_verification` と `mark_merged` は成立条件を DB 側で確かめる** | 呼び出し順のバグ 1 つで「merged なのに出力が無い」行ができ、選択肢の側が隠すので静かに残る |
+
 ---
 
 ## 4. 環境の癖と罠
@@ -151,16 +181,37 @@ Phase 0 の価値はここにある。**いずれも「実際に動かして」�
   `VolumeHandle` の `dirfd` は -1 なので、「閉じた」ことを `pytest.raises(OSError)`
   で確かめられない。`handle.closed` を見る
 
+### ffmpeg / ffprobe
+
+- 開発コンテナに `~/.local/bin/ffmpeg` と `ffprobe` が入っている。**結合の
+  テストは実バイナリを使う**（`shutil.which("ffmpeg")` が無いときだけ skip。
+  `needs_root` のようなマーカーは付けない。既存の `test_adapter_ffprobe.py` と
+  同じ作法）
+- テスト用のクリップは lavfi で作る（`testsrc` + `sine`）。`-map` の順が
+  そのまま出力のストリーム順になるので、**並びの違うパートを意図的に作れる**
+- `-timecode 00:00:00:00` を付けると `tmcd` の data ストリームが増える。
+  TS 経路が運べないケースの再現に使う
+
 ### agmsg（codex とのやり取り）
 
-- **watcher が落ちることがある。** `delivery.sh status` の
-  `watch processes: N alive` を確認する。0 なら Monitor を起動し直す
+- **`delivery.sh status` の `watch processes: 0 alive` は「codex が死んでいる」
+  ことを意味しない。** codex 側は自前の bridge と `watch-once.sh` で受け取る。
+  生死は `pgrep -af codex` で `codex-bridge.js` と `watch-once.sh` を見る方が確実
+- `team.sh chezmoi` で名簿を確認できる（`claude-code` と `codex` が参加済み）
 - `history.sh` は全件を渡すと `sqlite3: Argument list too long` で落ちる。
   **件数を指定する**（`history.sh chezmoi claude-code 3`）
-- **長文メッセージは配送が遅れる。** 変更点の全文を貼らず、ファイルを読ませて
-  §21 の変更履歴を指す方が確実
-- codex がレビューする版が**編集の反映前**だったことがある。送る前に
-  仕様書の mtime を確認するか、送信後に「最新版か」を確認させる
+- **返信は待ち方を用意しておく。** 直近 1 件が codex 発になるまで回す:
+
+  ```bash
+  until bash ~/.agents/skills/agmsg/scripts/history.sh chezmoi claude-code 1 \
+      | grep -q "codex → claude-code"; do sleep 20; done
+  ```
+
+  4800 行の計画のレビューで**返信まで約 6 分**だった
+- **長文メッセージは配送が遅れる。** 変更点の全文を貼らず、**commit hash と
+  ファイル名を渡して読ませる**方が速くて確実
+- codex がレビューする版が**編集の反映前**だったことがある。**先にコミットして
+  から hash を伝える**と取り違えが起きない
 
 ---
 
@@ -168,16 +219,14 @@ Phase 0 の価値はここにある。**いずれも「実際に動かして」�
 
 ### 手順
 
-1. **`phase1-manual-checklist.md` を TrueNAS ホストで実行する。** 特に 11 番
-   （mtime の解釈）は実装の前提の確認なので、結果を `phase0-findings.md` に残す
-2. ~~Phase 2 の実装計画を書く~~ → `docs/phase2-plan.md`（codex のレビュー 2 巡を反映済み）
-3. **`docs/phase2-plan.md` を Task 1 から実行する**
+1. **`docs/phase2-plan.md` を Task 1 から実行する。** 依存の順序は計画の
+   「実装順序と依存」にある（1〜5 が純粋ロジック、6〜8 が副作用と DB、
+   9〜12 がジョブと回収、13〜14 が API と統合）
+2. **`phase1-manual-checklist.md` を TrueNAS ホストで実行する。** 特に 11 番
+   （mtime の解釈）は実装の前提の確認なので、結果を `phase0-findings.md` に残す。
+   Phase 2 の Task 3 で **12 番（`attached_pic` の確認）** を足す
 
-Phase 2 のレビューで、**取り込み側にも同じ形で存在する穴**が 1 つ見つかっている。
-`publish` は 16 GiB のコピーの後に `os.fsync` と ffprobe（timeout がリースと同値）を
-通るが、その間 heartbeat が無い。実 USB の確認が 100 バイトのファイルでしか
-通っていないので表に出ていない。**Phase 2 の Task 7（`_with_lease_pulse`）が
-共通の `_publish` を直すので、両方が同時に塞がる。**
+この 2 つは並行してよい。1 は開発コンテナで進められる。
 
 ### Phase 2 の範囲（`design.md` §20）
 
@@ -186,10 +235,16 @@ Phase 2 のレビューで、**取り込み側にも同じ形で存在する穴*
 >
 > 完了条件: 分割動画が結合され、検証結果と選択肢が API で取れる。
 
+範囲の線引きは `phase2-plan.md` の冒頭にある。**§10 は (b)（既定で選択肢に
+出す条件）まで**で、(a) 安全条件と (c) `selection_rule` ごとの条件は
+`upload_record` と一緒に Phase 3。継ぎ目は**秒数を `verification_json` に残す
+ところまで**で、サムネイルの画像生成は Phase 4。
+
 Phase 1 側で既に用意してあるもの:
 
 - `merge_group` / `merge_member` のスキーマ（supersede の不可逆性、active の
-  両方向 trigger まで含む）
+  両方向 trigger まで含む）。**Phase 2 でマイグレーションは足さない**
+- `job.type` の `detect_groups` と `merge`（`0001` の CHECK に入っている）
 - `ArtifactPublisher` の `kind="merge"` 経路（crash 試験も通っている）
 - `MediaProbe`（`duration_seconds` は §9.7 の境界判定が使う。失敗を 0 秒に
   丸めていない）
@@ -199,7 +254,7 @@ Phase 1 側で既に用意してあるもの:
 ### 作業の作法
 
 1. 各タスクは「失敗するテストを書く → 失敗を確認 → 最小実装 → 通ることを確認 →
-   コミット」で完結させる
+   変異試験 → コミット」で完結させる
 2. **変異試験のステップを省かない。** Phase 1 では、計画のテストが「通っては
    いるが実装の判断を検証していない」箇所が **30 件以上**見つかった。特に多い
    パターンは次の 3 つ:
@@ -209,7 +264,9 @@ Phase 1 側で既に用意してあるもの:
    - 順序規則を、たまたま同じ順になるデータで試している
 3. **検出できない変異は、検出できないことを計画に書く。** Phase 1 では
    `claim_next` の CAS 条件（`BEGIN IMMEDIATE` が claimer を直列化するので到達
-   しない）のように、構造的にテスト不能な保険が複数あった
+   しない）のように、構造的にテスト不能な保険が複数あった。**Phase 2 の計画
+   には、書いた時点で 12 件を記録済み**（`os.fsync` を消す変異、SIGKILL 段、
+   `start_new_session`、`sort_keys` 等）。実装中に増えたら足す
 4. 計画から外れる判断をしたら、その場で計画側にも書き戻す
 5. 詰まったら codex に相談する
 
@@ -222,6 +279,10 @@ bash ~/.agents/skills/agmsg/scripts/history.sh chezmoi claude-code 3
 
 codex は `chezmoi` チームに参加済み。落ちていたら
 `bash ~/.agents/skills/agmsg/scripts/spawn.sh codex codex --project "$(pwd)" --team chezmoi`
+
+**先にコミットしてから、hash とファイル名を渡して読ませる。** 本文に全文を
+貼ると配送が遅れるうえ、反映前の版をレビューされることがある。返信の待ち方と
+生死の確認は §4 の agmsg にある。
 
 ---
 
@@ -246,7 +307,10 @@ uv run ruff format --check .
 | 項目 | 状況 |
 | --- | --- |
 | 実 USB での確認 | `phase1-manual-checklist.md` に手順を用意済み。未実施 |
-| mtime の解釈 | `timestamps.py` は「カードの時刻欄に UTC オフセットが無い」前提。チェックリスト 11 番で実測する |
+| mtime の解釈 | `timestamps.py` は「カードの時刻欄に UTC オフセットが無い」前提。チェックリスト 11 番で実測する。**派生物の mtime も同じ前提に乗る** |
+| **取り込み側のリースの穴** | `publish` は 16 GiB のコピーの後に `os.fsync` と ffprobe（timeout がリースと同値）を通るが、その間 heartbeat が無い。実 USB の確認が 100 バイトのファイルでしか通っていないので表に出ていない。**Phase 2 の Task 7（`_with_lease_pulse`）が共通の `_publish` を直すので、両方が同時に塞がる** |
+| `disposition.attached_pic` | 結合の「最初の映像ストリームのみ」の判定が、埋め込みサムネイルをこれで見分ける。実機の DJI ファイルで立っているかは未確認（`keep_streams.video` が `primary` の間は影響しない）。チェックリスト 12 番で見る |
+| TS フォールバックの実運用 | Phase 0 の実測では DJI は concat 経路で通っており、TS 経路は**まだ実データで走っていない**。テストは lavfi のクリップで両経路を通す |
 | 5 パート連続録画（70 GiB 級）のアップロード | 28.36 GiB は完走した。同じ経路で扱える見込みだが未実測。タイムアウトは比例して伸びる |
 | Canon EOS 70D のプロファイル | Phase 5。カードリーダー経由の UMS のみ対応と決定済み（PTP はスコープ外） |
 | 認証を既定 off のままにするか | ユーザの判断で off。`BIND_HOST` の既定を loopback にし、認証無効で非 loopback にバインドしていたら警告する緩和のみ |
@@ -270,4 +334,17 @@ uv run ruff format --check .
   サーバと不整合になっていた、ビルトインが 1 つしか無い前提を見落としていた）
 - **codex のレビューは鵜呑みにしない。** 設計で反論したのは 2 点だけだったが、
   その 2 点（SHA-256 の追加、認証の必須化）は退けて正解だった。逆に
-  「暗号化は無意味」という自分の理屈は誤りで、指摘を受けて撤回した
+  「暗号化は無意味」という自分の理屈は誤りで、指摘を受けて撤回した。
+  Phase 2 の計画では 12 件を反映し、1 件（検証器の版を `input_digest` に入れる）
+  を**設計の定義を根拠に退けて、先方も受け入れた**
+- **レビューは 1 巡で終わらせない。** Phase 2 の計画では、1 巡目の blocker 4 件を
+  直した後の 2 巡目で、**さらに blocker が 2 件出た**。しかもどちらも
+  「直した箇所の周辺」だった（pulse を read loop に入れたが、その後の `fsync` と
+  ffprobe が守られていない／キャンセル例外を上げると `JobRunner` が `failed` に
+  する）。**修正が新しい境界を作るので、そこをもう一度見せる**
+- **既存コードとの接続部を疑う。** Phase 2 で見つかった blocker のうち 2 件は、
+  新しいコードではなく**既存の `JobRunner` と `ArtifactPublisher` との境界**に
+  あった。片方は Phase 1 の取り込み側にも同じ形で存在していた（§7）
+- **計画にコードを全部書くと、レビューで実際の穴が出る。** 「ここで heartbeat を
+  打つ」と散文で書いていたら、`fsync` と ffprobe が守られていないことは
+  見つからなかった。手順の順序と例外の流れまで書いてあったから指摘できた
