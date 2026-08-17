@@ -50,6 +50,10 @@
 - テストのマーカー: root を要するものは `needs_root`、実 Immich を要するものは
   `needs_immich`。既定の `pytest` では実行されない。
 - 各タスクの最後に必ず `uv run pytest`・`uv run ruff check .`・`uv run ruff format .` を通す。
+- **変異試験は `PYTHONDONTWRITEBYTECODE=1` を付けて実行する。** 変異の前後で
+  バイト数が変わらない書き換え（`>` を `<` にする、`a or b` を `b or a` にする等）
+  では、`.pyc` の無効化条件（mtime の秒＋サイズ）をすり抜けて古いバイトコードが
+  使われ、変異が効いているかを読み違える。
 - コミットは Conventional Commits + 日本語の本文（例: `feat(mediaferry): add the artifact publisher`）。
   **本文に Claude のセッション URL を書かない**（`CLAUDE.md` の規約）。
 - **Phase 1 は配布可能なリリースにしない。** `BIND_HOST` の既定は `127.0.0.1` のまま。
@@ -3903,6 +3907,18 @@ def test_the_default_timezone_is_used_when_the_profile_has_none():
     assert got.tz == "Europe/Berlin"
 
 
+def test_the_profile_timezone_wins_over_the_default():
+    """既定値は「プロファイルが決めていないとき」の受け皿.
+
+    逆順にすると、機種に固定した TZ が全体設定で黙って上書きされる。
+    """
+    got = resolve_captured_at(
+        defn(timezone="Asia/Tokyo"), "DCIM/DJI_20260817143000_0001_D.MP4", 0, "Europe/Berlin"
+    )
+    assert got.tz == "Asia/Tokyo"
+    assert got.at.isoformat() == "2026-08-17T14:30:00+09:00"
+
+
 def test_force_offset_without_any_timezone_is_an_error():
     """UTC を既定にすると補正にならないまま誤った時刻で確定する（§12.2）."""
     with pytest.raises(TimezoneUnresolved):
@@ -3911,7 +3927,9 @@ def test_force_offset_without_any_timezone_is_an_error():
 
 def test_files_that_miss_the_pattern_fall_back_to_mtime():
     got = resolve_captured_at(
-        defn(timezone="Asia/Tokyo"), "PANORAMA/PANO_0001.JPG", mtime_ns_of("2026-08-17T05:00:00"),
+        defn(timezone="Asia/Tokyo"),
+        "PANORAMA/PANO_0001.JPG",
+        mtime_ns_of("2026-08-17T05:00:00"),
         None,
     )
     assert got.source == "mtime"
@@ -3951,8 +3969,10 @@ def test_a_nonexistent_wall_clock_shifts_forward_and_says_so():
 
 def test_an_unparsable_timestamp_in_the_name_falls_back():
     got = resolve_captured_at(
-        defn(timezone="Asia/Tokyo"), "DCIM/DJI_99999999999999_0001_D.MP4",
-        mtime_ns_of("2026-08-17T05:00:00"), None,
+        defn(timezone="Asia/Tokyo"),
+        "DCIM/DJI_99999999999999_0001_D.MP4",
+        mtime_ns_of("2026-08-17T05:00:00"),
+        None,
     )
     assert got.source == "mtime"
 ```
@@ -4019,9 +4039,7 @@ def resolve_captured_at(
 
     name = defn.timestamp.timezone or default_timezone
     if name is None:
-        raise TimezoneUnresolved(
-            f"プロファイル {defn.slug} は force_offset だが timezone が未設定"
-        )
+        raise TimezoneUnresolved(f"プロファイル {defn.slug} は force_offset だが timezone が未設定")
     at, note = _attach_offset(wall, ZoneInfo(name))
     return CapturedAt(at=at, source=source, tz=name, note=note)
 
