@@ -5930,6 +5930,7 @@ crash model を後付けすると、importer と別実装になって結合物�
 ```python
 import hashlib
 import json
+import sqlite3
 from datetime import datetime
 
 import pytest
@@ -6104,6 +6105,43 @@ def test_a_cancel_requested_during_the_write_stops_the_publish(setup, db, data_r
     assert db.execute("SELECT state FROM artifact_staging").fetchone()["state"] == "writing"
 
 
+def test_a_cancel_cannot_land_between_the_lease_check_and_the_staged_transition(
+    setup, db, database, data_root
+):
+    """確認と遷移が同じ BEGIN IMMEDIATE の中にあることを、書き込みロックで確かめる.
+
+    分けると、その隙間に別接続の cancel が commit でき、「キャンセル済みと
+    表示した後に公開される」経路が残る。ここでは確認の直後に別接続から
+    cancel を試み、書き込みロックに阻まれることを見る。
+    """
+    publisher, ctx, profile, volume_id = setup
+    other_conn = database.connect()
+    other_conn.execute("PRAGMA busy_timeout = 0")
+    other = JobStore(other_conn)
+    outcome = []
+
+    real_assert = ctx.assert_lease
+
+    def assert_then_try_to_cancel():
+        real_assert()
+        try:
+            other.request_cancel(ctx.job_id)
+        except sqlite3.OperationalError:
+            outcome.append("blocked")
+        else:
+            outcome.append("slipped in")
+
+    ctx.assert_lease = assert_then_try_to_cancel
+    try:
+        publisher.publish(
+            ctx, a_request(profile, a_source_entry(db, volume_id)), write_payload(b"payload")
+        )
+    finally:
+        other_conn.close()
+
+    assert outcome == ["blocked"]
+
+
 def test_a_failure_after_staging_is_not_reported_as_an_import_failure(setup, db, data_root):
     """staged 以降は reconciliation が完遂する. 呼び出し元が failed に倒すと二重取り込みになる."""
     publisher, ctx, profile, volume_id = setup
@@ -6129,6 +6167,41 @@ def test_resume_after_the_staging_file_is_gone(setup, db, data_root):
     assert got.rel_path == "library/dji-osmo/DCIM/A.MP4"
     assert (data_root / got.rel_path).read_bytes() == b"payload"
     assert db.execute("SELECT state FROM artifact_staging").fetchone()["state"] == "published"
+
+
+def test_resume_does_not_retry_names_it_already_rejected(setup, db, data_root, monkeypatch):
+    """再開は現在の final_rel_path から続ける.
+
+    先頭へ戻しても落ち着く名前は同じだが、棄却済みの名前を試すたびに
+    その既存ファイルの SHA-1 を読み直す。16GiB のカードでは実費になる。
+    """
+    from mediaferry.adapters import publisher as publisher_module
+
+    publisher, ctx, profile, volume_id = setup
+    # A.MP4 を別内容で占有させ、1 本目を別名へ追いやる
+    publisher.publish(ctx, a_request(profile, a_source_entry(db, volume_id)), write_payload(b"XX"))
+    publisher._checkpoint = _die_after(8)  # noqa: SLF001
+    with pytest.raises(PublishInterrupted):
+        publisher.publish(
+            ctx, a_request(profile, a_source_entry(db, volume_id)), write_payload(b"YY")
+        )
+    publisher._checkpoint = lambda step: None  # noqa: SLF001
+
+    row = db.execute("SELECT * FROM artifact_staging WHERE state = 'staged'").fetchone()
+    (data_root / row["final_rel_path"]).write_bytes(b"ZZZ")  # 第三者が別内容で占有
+
+    attempts = []
+    real_link = publisher_module.os.link
+    monkeypatch.setattr(
+        publisher_module.os,
+        "link",
+        lambda src, dst: (attempts.append(str(dst)), real_link(src, dst))[1],
+    )
+    publisher.resume(row["id"])
+
+    assert not any(a.endswith("/A.MP4") for a in attempts), (
+        f"棄却済みの名前を試し直している: {attempts}"
+    )
 
 
 def test_a_staged_row_whose_files_are_all_gone_is_not_silently_dropped(setup, db, data_root):
@@ -6210,9 +6283,10 @@ def test_merge_artifacts_use_the_same_protocol(setup, db, data_root):
         write_payload(b"merged"),
     )
     assert (data_root / "derived/dji-osmo/DCIM/MERGED.MP4").read_bytes() == b"merged"
-    assert db.execute(
+    output_id = db.execute(
         "SELECT output_media_file_id FROM merge_group WHERE id = ?", (group_id,)
-    ).fetchone()[0] == got.media_file_id
+    ).fetchone()[0]
+    assert output_id == got.media_file_id
 
 
 def test_durability_order_is_utime_then_fsync_then_dir_then_staged(setup, db, monkeypatch):
@@ -6410,8 +6484,17 @@ class ArtifactPublisher:
             "INSERT INTO artifact_staging (id, kind, job_id, lease_token, state,"
             " staging_rel_path, source_entry_id, merge_group_id, created_at, updated_at)"
             " VALUES (?, ?, ?, ?, 'writing', ?, ?, ?, ?, ?)",
-            (staging_id, request.kind, ctx.job_id, ctx.lease_token, staging_rel,
-             request.source_entry_id, request.merge_group_id, now_iso(), now_iso()),
+            (
+                staging_id,
+                request.kind,
+                ctx.job_id,
+                ctx.lease_token,
+                staging_rel,
+                request.source_entry_id,
+                request.merge_group_id,
+                now_iso(),
+                now_iso(),
+            ),
         )
         self._checkpoint(STEP_WRITING_ROW)
 
@@ -6484,8 +6567,14 @@ class ArtifactPublisher:
                     "UPDATE artifact_staging SET state = 'staged', final_rel_path = ?,"
                     " expected_size = ?, content_sha1 = ?, metadata_json = ?, updated_at = ?"
                     " WHERE id = ?",
-                    (final_rel, writer.size, writer.sha1,
-                     json.dumps(metadata, ensure_ascii=False), now_iso(), staging_id),
+                    (
+                        final_rel,
+                        writer.size,
+                        writer.sha1,
+                        json.dumps(metadata, ensure_ascii=False),
+                        now_iso(),
+                        staging_id,
+                    ),
                 )
         except LeaseLost as exc:
             raise PublishAborted(str(exc)) from exc
@@ -6540,8 +6629,9 @@ class ArtifactPublisher:
         )
         reused = False
         final_rel = row["final_rel_path"]
-        # 系列を現在の final_rel_path まで進める。再開時に先頭へ戻ると
-        # すでに使った名前を試し直し、接尾辞が二重に付く。
+        # 系列を現在の final_rel_path まで進める。先頭へ戻しても落ち着く名前は
+        # 同じだが、棄却済みの名前を試すたびにその既存ファイルの SHA-1 を
+        # 読み直すので、大きなファイルほど無駄が効く。
         for candidate in names:
             if candidate == final_rel:
                 break
@@ -6609,12 +6699,22 @@ class ArtifactPublisher:
                     " captured_at_tz, captured_at_note, duration_seconds, probe_state, created_at)"
                     " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                     (
-                        media_file_id, metadata["role"], metadata["profile_id"],
-                        metadata["profile_revision_id"], final_rel, row["expected_size"],
-                        metadata["mtime_ns"], row["content_sha1"], metadata["kind"],
-                        metadata["captured_at"], metadata["captured_at_source"],
-                        metadata["captured_at_tz"], metadata["captured_at_note"],
-                        metadata["duration_seconds"], metadata["probe_state"], now_iso(),
+                        media_file_id,
+                        metadata["role"],
+                        metadata["profile_id"],
+                        metadata["profile_revision_id"],
+                        final_rel,
+                        row["expected_size"],
+                        metadata["mtime_ns"],
+                        row["content_sha1"],
+                        metadata["kind"],
+                        metadata["captured_at"],
+                        metadata["captured_at_source"],
+                        metadata["captured_at_tz"],
+                        metadata["captured_at_note"],
+                        metadata["duration_seconds"],
+                        metadata["probe_state"],
+                        now_iso(),
                     ),
                 )
             if row["source_entry_id"] is not None:
@@ -6680,6 +6780,10 @@ Expected: すべて PASS
 
 `os.link` を `os.replace` に変え、
 `test_an_existing_different_file_is_never_overwritten` が落ちることを確認してから戻す。
+手順 7 の `ctx.assert_lease()` を `immediate()` の外へ出し、
+`test_a_cancel_cannot_land_between_the_lease_check_and_the_staged_transition` が
+落ちることも確認する（**リースの確認そのものを消すだけでは、確認と遷移が
+同じトランザクションにあるかを検証できない**）。
 
 - [ ] **Step 6: コミット**
 
