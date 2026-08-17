@@ -8118,7 +8118,8 @@ def main() -> None:
         profile_id=profile.profile_id,
         profile_revision_id=profile.revision_id,
         desired_rel_path=(
-            "library/dji-osmo/DCIM/A.MP4" if kind == "import"
+            "library/dji-osmo/DCIM/A.MP4"
+            if kind == "import"
             else "derived/dji-osmo/DCIM/MERGED.MP4"
         ),
         source_rel_path="DCIM/A.MP4",
@@ -8242,9 +8243,8 @@ def test_reconciliation_recovers_from_a_crash_at_any_step(data_root, step, kind)
         # staged 以降は永続情報だけで公開を再開できる。
         assert rows == 1
         assert (data_root / final).read_bytes() == PAYLOAD
-        assert conn.execute(
-            "SELECT state FROM artifact_staging"
-        ).fetchone()["state"] == "published"
+        state = conn.execute("SELECT state FROM artifact_staging").fetchone()["state"]
+        assert state == "published"
 
     # どの段階で落ちても、staging に中間ファイルは残らない（空のディレクトリは可）。
     assert [p for p in (data_root / "staging").rglob("*") if p.is_file()] == []
@@ -8296,6 +8296,8 @@ Expected: FAIL（`crash_child.py` が無い、または回収されない）
 
 - [ ] **Step 3: 通るまで直す**
 
+（実際には Task 17 と Task 20 が正しく実装されていれば、ここは一発で通る。）
+
 このタスクは**新しい実装を書かない**。落ちたケースがあれば、
 `ArtifactPublisher` か `Reconciler` の欠陥である。落ちたケースごとに
 どの不変条件が破れたかを特定して直す。想定される修正点:
@@ -8313,6 +8315,14 @@ Expected: 22 + 3 + 11 + 1 件すべて PASS
 
 `ArtifactPublisher.publish` の手順 7（`state = 'staged'` の UPDATE）から
 `final_rel_path` の永続化を外し、step 8 以降のケースが落ちることを確認してから戻す。
+`_link` の衝突経路で `final_rel_path` の更新を commit しないようにして
+`test_a_crash_after_staging_never_overwrites_a_conflicting_file` が、
+`_adopt_published_final` の分岐を削って step 10 のケースが落ちることも確認する。
+
+**手順 10 の `staging_abs.unlink()` は、この一式では検出できない。** 残っても
+Reconciler の `_clean_job_dirs` が同じ回でジョブのディレクトリごと消すため。
+これは Task 17 の `test_the_staging_file_is_gone_and_the_row_is_published` が
+担う（公開直後の状態を見るので、掃除に覆い隠されない）。
 
 - [ ] **Step 6: コミット**
 
