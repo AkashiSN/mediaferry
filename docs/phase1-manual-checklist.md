@@ -1,0 +1,147 @@
+# 実 USB での確認手順（Phase 1）
+
+自動テストは実カードを扱えない。マウントは開発コンテナ（入れ子の非特権 LXC）
+では AppArmor に阻まれるので、**TrueNAS ホストで実行する**。
+
+既定シェルは zsh。以下の 2 点で bash と違う（`HANDOFF.md` §4）。
+
+- 行内コメント（`cmd  # 説明`）が**無効**。`#` 以降が引数として渡る
+- `tail -1` が `option used in invalid context` になる。`tail -n 1` を使う
+
+API は loopback にしか出ていないので、ホストから `curl` で叩く。
+
+```bash
+BASE=http://127.0.0.1:8080/api
+```
+
+## チェック項目
+
+### 1. カードが認識され、プロファイルが当たる
+
+DJI の SD カードを挿す。
+
+```bash
+curl -s $BASE/devices
+```
+
+- 一覧に現れる
+- `profile_slug` が `dji-osmo`
+- `provisional` が `false`
+- 初回は `identity_confidence` が `low`、`trusted` が `false`
+
+### 2. 空の内蔵ストレージが暫定一致になる
+
+Osmo の内蔵ストレージ（`DCIM` はあるが空）を挿す。Phase 0 の実測どおりの形。
+
+- `profile_slug` が `dji-osmo`
+- `provisional` が `true`
+- `identity_confidence` が `low`
+
+### 3. スキャン
+
+```bash
+VOL=<volume_instance_id>
+curl -s -X POST $BASE/volumes/$VOL/scan
+```
+
+- `job_id` が返る
+- `GET $BASE/jobs/<job_id>` が `succeeded` になる
+- `GET $BASE/jobs/<job_id>/events?after_seq=0` にファイル名が出る
+- この時点では `GET $BASE/media` は空
+
+### 4. 取り込み
+
+```bash
+curl -s -X POST $BASE/volumes/$VOL/import
+```
+
+- `GET $BASE/media` にファイルが並ぶ
+- `library/dji-osmo/` の下が**カードと同じ相対パス**になっている
+  （`DCIM/DJI_001/DJI_....MP4` の階層がそのまま）
+- `captured_at` がファイル名の壁時計にオフセットが付いた形
+- `.LRF` が取り込まれていない
+
+### 5. 取り込み中にカードを抜く
+
+大きめのファイルの取り込み中に物理的に抜く。
+
+- ジョブが `failed` で終わる
+- `library/` に中途半端なファイルが残らない
+- `staging/` にファイルが残らない（空のディレクトリは可）
+
+### 6. 再挿入して再取り込み
+
+- 取込済のファイルはスキップされる（`skipped` に計上）
+- `library/` に重複が作られない
+
+### 7. 取り込み中に再起動
+
+大きめのファイルの取り込み中に。
+
+```bash
+docker restart <app コンテナ>
+```
+
+- 起動時に回収され、ログに reconciliation の結果が出る
+- `GET $BASE/orphans` の `orphans` が空
+- 途中まで書いたファイルが `library/` に現れない
+
+### 8. キャンセル
+
+```bash
+curl -s -X POST $BASE/jobs/<job_id>/cancel
+```
+
+- ジョブが `cancelled` で終わる
+- `staging/` にファイルが残らない
+- `library/` に中途半端なファイルが残らない
+
+### 9. 同名衝突
+
+`library/dji-osmo/DCIM/DJI_001/` に、カード上と同名で**内容の違う**ファイルを
+置いてから取り込む。
+
+- 既存が**上書きされない**（中身が変わらない）
+- 新しい方に別名が付く（`_<壁時計>` などの接尾辞）
+- `GET $BASE/media` に両方が並ぶ
+
+### 10. 取り外し
+
+```bash
+curl -s -X POST $BASE/volumes/$VOL/close
+```
+
+- 200 が返る
+- カードを安全に抜ける（`dmesg` に I/O エラーが出ない）
+
+### 11. mtime の解釈を実測する
+
+**これは実装の前提の確認で、他の項目と性質が違う。**
+
+`timestamps.py` と `publisher._collision_stamp` は「カードの時刻欄に UTC
+オフセットが書かれていない（または 0）」ことを前提に、mtime の**UTC 表現**を
+壁時計として使っている。DJI はファイル名に壁時計をそのまま埋めるので、両者が
+一致するかで前提を確かめられる。
+
+```bash
+ls /path/to/DCIM/DJI_001
+TZ=UTC stat -c '%y %n' /path/to/DCIM/DJI_001/DJI_20260817143000_0001_D.MP4
+```
+
+- ファイル名の `20260817143000` と、`TZ=UTC stat` が出す `2026-08-17 14:30:00`
+  が**一致する** → 前提が成り立っている
+- **一致しない** → その機種は exFAT の `OffsetFromUtc` を書いている。
+  `timestamps.py` の `_wall_clock` を、mtime をプロファイルの `timezone` で
+  描画する形へ変える必要がある
+
+Linux の exfat ドライバは `OffsetFromUtc` の valid bit が立っていればその
+オフセットで UTC へ変換し、立っていないときだけマウントの `time_offset`
+（既定 0）を使う（`fs/exfat/misc.c` の `exfat_get_entry_time`）。
+
+**結果はどちらであっても `phase0-findings.md` に 1 件として残す。**
+
+## 関連
+
+- [`phase1-backup.md`](phase1-backup.md)（バックアップとリストア）
+- [`phase0-findings.md`](phase0-findings.md)（実測で覆った設計判断）
+- `HANDOFF.md` §4（TrueNAS ホストと開発コンテナの癖）

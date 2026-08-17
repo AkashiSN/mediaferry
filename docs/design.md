@@ -1292,6 +1292,7 @@ claim では **(a) を必ず評価し、`selection_rule` に対応する現在�
 | キー（`MEDIAFERRY_` 接頭辞） | 既定値 | 内容 |
 | --- | --- | --- |
 | `DATA_ROOT` | `/data` | データルート |
+| `BROKER_SOCKET` | `/run/mediaferry/broker.sock` | mountd のソケット。`compose.yaml` が app へ渡す |
 | `BIND_HOST` | `127.0.0.1` | 待ち受けアドレス。公開するには明示的に変更する |
 | `HTTP_PORT` | `8080` | 待ち受けポート |
 | `AUTH_PASSWORD` | 未設定 | 設定すると認証が有効になる |
@@ -1630,7 +1631,7 @@ docker/mediaferry/
 | 1 | fd 受け渡し | ~~未検証~~ **Phase 0 で解消。** コンテナ間の `SCM_RIGHTS`、別 mount namespace の dirfd への `os.listdir` / `dir_fd=` 付き `os.open`、detached マウントによる `..` の固定を実 exfat デバイスで確認した | 詳細は `docker/mediaferry/docs/phase0-findings.md` |
 | 2 | 巨大ファイルのアップロード | ~~未検証~~ **Phase 0 で解消。** 内部エンドポイント経由で 28.36 GiB を完走した（201 created、84.5 秒、343.82 MiB/s）。送信バイト数とサーバ側のサイズが入力と完全一致し、RSS の増分は 0.00 B だった。公開 URL（CDN 経由）は 622 MiB で 502 になるため §12.3 の分離が必須 | 詳細は `docker/mediaferry/docs/phase0-findings.md` |
 | 3 | Immich API の互換性 | ~~未検証~~ **Phase 0 で解消。** 対象版 v3.1.0。サーバインスタンス ID は非公開のため、`remote_user_id` を向き先の変化を検知する guard として観測する（同一性ではない。§8）。`deviceAssetId` は資産応答に無いため、自作判別は応答の `status` と初回 `checking` の結果で行う。checksum は base64 に統一 | 詳細は `docker/mediaferry/docs/phase0-findings.md` |
-| 4 | DB のバックアップとリストア | SQLite が `failed_merges/` に代わる唯一の状態保持先になるため、失うと再構築が必要 | Phase 1 で、ライブラリからどこまで再構築できるか（ファイルは残るが upload 状態は失われる）を明記し、定期バックアップ手順を用意する |
+| 4 | DB のバックアップとリストア | SQLite が `failed_merges/` に代わる唯一の状態保持先になるため、失うと再構築が必要 | ~~未確定~~ **Phase 1 で解消。** 再構築できる範囲・`.backup` による取得・マスター鍵を同じ搬出先へ置かないこと・リストア手順を `docker/mediaferry/docs/phase1-backup.md` に定めた |
 | 5 | 同時に複数デバイス | 2 枚のカードを同時に挿すケース | ジョブキューで直列化。`volume_presence` で個別に追跡 |
 | 6 | 内蔵ストレージと SD の同時取り込み | Osmo は 2 ボリュームを同時に出し、同じ `library/dji-osmo/` に合流する | ファイル名が撮影時刻で一意なので実害は出ない見込み。衝突時は §9.3 の規則で処理する |
 | 7 | 孤立ファイルの扱い | reconciliation で見つかった orphan を自動削除するとデータを失う経路になる | 削除せず画面に出し、ユーザの判断に委ねる |
@@ -1673,7 +1674,7 @@ Phase 0 と Phase 1 に集める**という基準で切った。
 | Phase | 内容 | 完了条件 |
 | --- | --- | --- |
 | **0. スパイク** | ① コンテナ間 `SCM_RIGHTS` fd 受け渡しとブローカープロトコルの確定（UID/GID、ソケット権限含む）② 対象 Immich 版の固定、`deviceAssetId` の永続性、サーバインスタンス ID とユーザ ID の取得可否 ③ 32GiB アップロードの疎通と、不可の場合に §10 の選択肢規則をどう変えるかの決定 | §18-1〜3 が解消し、代替が必要な場合は方式が確定している |
-| **1. 基盤 + 取り込み** | 共通の `ArtifactPublisher` / `Reconciler` の契約、DB スキーマとマイグレーション、プロファイルリビジョン（編集 UI は後でも ID の記録は今から）、既知 DJI カードの手動 scan / import、crash consistency テスト一式。API のみ、loopback バインド | 実 USB で取り込め、§9.3 の任意の手順で落としても reconciliation が回収する |
+| **1. 基盤 + 取り込み**（完了） | 共通の `ArtifactPublisher` / `Reconciler` の契約、DB スキーマとマイグレーション、プロファイルリビジョン（編集 UI は後でも ID の記録は今から）、既知 DJI カードの手動 scan / import、crash consistency テスト一式。API のみ、loopback バインド | 実 USB で取り込め、§9.3 の任意の手順で落としても reconciliation が回収する。**手順 11 段すべてで子プロセスを落とす試験は import / merge の両方で通っている。実 USB の確認は `phase1-manual-checklist.md`** |
 | **2. 結合** | グループ検出、結合、検証、§10 の選択肢規則。公開は Phase 1 の `ArtifactPublisher` をそのまま使う | 分割動画が結合され、検証結果と選択肢が API で取れる |
 | **3. Immich 同期** | 状態機械、**転送先プロファイルの CRUD と接続検証**、`origin` 判別、タグ、タイムゾーン補正、複数宛先への同時アップロード | 実 Immich にアップロードでき、途中で落としても再開し、既存アセットを勝手に変更しない。2 つの宛先へ同じメディアを送って独立に追跡できる |
 | **4. Web UI** | React SPA、SSE、認証、CSRF。ここで初めて非 loopback バインドを既定にできる | エンドユーザが CLI に触れず一連の操作を完了できる |

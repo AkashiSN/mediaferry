@@ -8,8 +8,12 @@ TrueNAS カスタムアプリ。
 | [`docs/HANDOFF.md`](docs/HANDOFF.md) | **まずここ。** 現在地、確定した判断、環境の癖、次にやること |
 | [`docs/design.md`](docs/design.md) | 設計仕様書（正本） |
 | [`docs/phase0-findings.md`](docs/phase0-findings.md) | Phase 0 の実測結果 |
+| [`docs/phase1-plan.md`](docs/phase1-plan.md) | Phase 1 の実装計画（実行済み） |
+| [`docs/phase1-backup.md`](docs/phase1-backup.md) | バックアップとリストア、再構築できる範囲 |
+| [`docs/phase1-manual-checklist.md`](docs/phase1-manual-checklist.md) | 実 USB での確認手順 |
 
-**Phase 0（スパイク）まで完了。** 配布可能なリリースではない。
+**Phase 1（基盤 + 取り込み）まで完了。** 配布可能なリリースではない
+（認証と CSRF が入る Phase 4 より前に LAN へ公開しない）。
 
 ## 構成
 
