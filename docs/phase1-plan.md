@@ -7639,8 +7639,12 @@ def test_a_writing_row_is_discarded_with_its_temp_file(world, db, data_root):
         " source_entry_id, created_at, updated_at)"
         " VALUES ('s1', 'import', ?, ?, 'writing', ?, ?, '2026-01-01T00:00:00+00:00',"
         " '2026-01-01T00:00:00+00:00')",
-        (ctx.job_id, ctx.lease_token, f"staging/{ctx.job_id}/half-written",
-         a_source_entry(db, volume_id)),
+        (
+            ctx.job_id,
+            ctx.lease_token,
+            f"staging/{ctx.job_id}/half-written",
+            a_source_entry(db, volume_id),
+        ),
     )
     report = reconciler.run()
     assert report.discarded == 1
@@ -7721,15 +7725,17 @@ def test_a_missing_file_marks_the_record_and_a_restored_one_clears_it(world, db,
 
     path.unlink()
     assert reconciler.run().missing == 1
-    assert db.execute(
+    missing_at = db.execute(
         "SELECT missing_at FROM media_file WHERE id = ?", (got.media_file_id,)
-    ).fetchone()[0] is not None
+    ).fetchone()[0]
+    assert missing_at is not None
 
     path.write_bytes(payload)
     assert reconciler.run().restored == 1
-    assert db.execute(
+    missing_at = db.execute(
         "SELECT missing_at FROM media_file WHERE id = ?", (got.media_file_id,)
-    ).fetchone()[0] is None
+    ).fetchone()[0]
+    assert missing_at is None
 
 
 def test_an_unrecoverable_staging_row_is_reported_not_dropped(world, db, data_root):
@@ -7747,6 +7753,40 @@ def test_an_unrecoverable_staging_row_is_reported_not_dropped(world, db, data_ro
     report = reconciler.run()
     assert len(report.unrecoverable) == 1
     assert db.execute("SELECT count(*) FROM artifact_staging").fetchone()[0] == 1
+
+
+def test_a_row_that_could_not_be_recovered_keeps_its_files_for_the_next_startup(
+    world, db, data_root, monkeypatch
+):
+    """回収に失敗した行は次回も試す。その材料を同じ回で捨てない.
+
+    手順 9（公開先の fsync）で落ちた行は、公開先の実体も staging の一時
+    ファイルも残っている。ここで staging のディレクトリを消すと次回は
+    回収できず、公開先を孤立ファイルとして報告すると、公開途中のファイルを
+    ユーザに「素性の分からないファイル」として見せることになる。
+    """
+    store, publisher, profile, volume_id, reconciler = world
+    store.enqueue("import", {})
+    ctx = store.claim_next()
+    publisher._checkpoint = _die_after(9)  # noqa: SLF001
+    with pytest.raises(PublishInterrupted):
+        publisher.publish(
+            ctx, a_request(profile, a_source_entry(db, volume_id)), write_payload(b"payload")
+        )
+    publisher._checkpoint = lambda step: None  # noqa: SLF001
+
+    staging_dir = data_root / "staging" / ctx.job_id
+    assert list(staging_dir.iterdir())  # 一時ファイルはまだある
+
+    def unavailable(staging_id):
+        raise OSError("データセットが一時的に見えない")
+
+    monkeypatch.setattr(publisher, "resume", unavailable)
+    report = reconciler.run()
+
+    assert len(report.unrecoverable) == 1
+    assert staging_dir.exists()
+    assert [o.rel_path for o in report.orphans] == []
 
 
 def test_stale_job_directories_are_cleaned_but_live_ones_are_kept(world, db, data_root):
@@ -7911,10 +7951,7 @@ class Reconciler:
                 report.restored += 1
 
     def _collect_orphans(self, report: ReconcileReport) -> None:
-        known = {
-            row["rel_path"]
-            for row in self._conn.execute("SELECT rel_path FROM media_file")
-        }
+        known = {row["rel_path"] for row in self._conn.execute("SELECT rel_path FROM media_file")}
         staged = {
             row["final_rel_path"]
             for row in self._conn.execute(
@@ -7932,8 +7969,7 @@ class Reconciler:
                 if rel in known or rel in staged:
                     continue
                 report.orphans.append(
-                    OrphanFile(rel_path=rel, size_bytes=path.stat().st_size,
-                               sha1=_sha1_of(path))
+                    OrphanFile(rel_path=rel, size_bytes=path.stat().st_size, sha1=_sha1_of(path))
                 )
 
     def _clean_job_dirs(self, report: ReconcileReport) -> None:
@@ -7981,6 +8017,11 @@ Expected: すべて PASS
 
 `_collect_orphans` に `path.unlink()` を足し、
 `test_orphans_are_reported_and_never_deleted` が落ちることを確認してから戻す。
+`_clean_job_dirs` から `referenced` の除外を、`_collect_orphans` から `staged` の
+除外をそれぞれ外し、
+`test_a_row_that_could_not_be_recovered_keeps_its_files_for_the_next_startup` が
+落ちることも確認する。**この 2 つは、回収がすべて成功する筋書きでは検出
+できない**（成功した行は published になって known に入るため）。
 
 - [ ] **Step 6: コミット**
 
