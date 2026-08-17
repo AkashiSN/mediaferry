@@ -55,6 +55,7 @@ TrueNAS ホストで実行する必要がある。
 | --- | --- | --- |
 | `docs/design.md` | **設計仕様書。正本。** | ✅ |
 | `docs/phase1-plan.md` | Phase 1 の実装計画。**実行済み**。実装との差分は都度書き戻してある | ✅ |
+| `docs/phase2-plan.md` | Phase 2（結合）の実装計画。**未実行**。codex のレビュー 2 巡（blocker 6 / major 7 / minor 1）を反映済み | ✅ |
 | `docs/phase1-backup.md` | バックアップとリストア、再構築できる範囲（§18-4） | ✅ |
 | `docs/phase1-manual-checklist.md` | 実 USB での確認手順 | ✅ |
 | `docs/phase0-findings.md` | Phase 0 の実測結果と設計への反映 | ✅ |
@@ -169,8 +170,14 @@ Phase 0 の価値はここにある。**いずれも「実際に動かして」�
 
 1. **`phase1-manual-checklist.md` を TrueNAS ホストで実行する。** 特に 11 番
    （mtime の解釈）は実装の前提の確認なので、結果を `phase0-findings.md` に残す
-2. Phase 2（結合）の実装計画を書く。範囲は `design.md` §20 の 2 行目と §9.7
-3. 計画を codex にレビューさせる（下記）
+2. ~~Phase 2 の実装計画を書く~~ → `docs/phase2-plan.md`（codex のレビュー 2 巡を反映済み）
+3. **`docs/phase2-plan.md` を Task 1 から実行する**
+
+Phase 2 のレビューで、**取り込み側にも同じ形で存在する穴**が 1 つ見つかっている。
+`publish` は 16 GiB のコピーの後に `os.fsync` と ffprobe（timeout がリースと同値）を
+通るが、その間 heartbeat が無い。実 USB の確認が 100 バイトのファイルでしか
+通っていないので表に出ていない。**Phase 2 の Task 7（`_with_lease_pulse`）が
+共通の `_publish` を直すので、両方が同時に塞がる。**
 
 ### Phase 2 の範囲（`design.md` §20）
 
