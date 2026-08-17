@@ -1,0 +1,34 @@
+[project]
+name = "mediaferry-workspace"
+version = "0.0.0"
+description = "mediaferry workspace root"
+requires-python = ">=3.12"
+
+[tool.uv.workspace]
+members = ["protocol", "mountd", "app"]
+
+[tool.uv.sources]
+mediaferry-protocol = { workspace = true }
+mountd = { workspace = true }
+
+[dependency-groups]
+dev = ["pytest>=8"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM", "ANN", "S"]
+ignore = ["ANN401"]
+
+[tool.ruff.lint.per-file-ignores]
+"**/tests/*" = ["S101", "ANN"]
+
+[tool.pytest.ini_options]
+testpaths = ["protocol/tests", "mountd/tests", "app/tests"]
+addopts = "-m 'not needs_root and not needs_immich'"
+markers = [
+    "needs_root: マウントを伴うためコンテナか root でのみ実行できる",
+    "needs_immich: 実 Immich サーバが必要",
+]
