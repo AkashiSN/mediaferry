@@ -36,6 +36,7 @@ from ..settings import SettingsService, bootstrap_data_root, startup_warnings
 from .jobs_wiring import JobWorld
 from .routes_devices import router as devices_router
 from .routes_media import router as media_router
+from .routes_merges import router as merges_router
 from .routes_system import router as system_router
 
 logger = logging.getLogger(__name__)
@@ -91,6 +92,8 @@ def create_app(
         runner = JobRunner(database)
         runner.register("scan", world.run_scan)
         runner.register("import", world.run_import)
+        runner.register("detect_groups", world.run_detect_groups)
+        runner.register("merge", world.run_merge)
 
         state = AppState(
             database=database, env=env, volumes=volumes, runner=runner, last_reconcile=report
@@ -117,4 +120,5 @@ def create_app(
     app.include_router(system_router, prefix="/api")
     app.include_router(devices_router, prefix="/api")
     app.include_router(media_router, prefix="/api")
+    app.include_router(merges_router, prefix="/api")
     return app

@@ -3,8 +3,10 @@ import socket
 import threading
 
 import pytest
+from fastapi.testclient import TestClient
 
 from mediaferry.adapters.broker_client import BrokerClient
+from mediaferry.api.app import create_app
 from mediaferry.db.connection import Database
 from mediaferry.db.migrate import apply_migrations
 from mediaferry_protocol.messages import UsbInfo, VolumeInfo
@@ -131,3 +133,13 @@ def db(database):
     apply_migrations(conn)
     yield conn
     conn.close()
+
+
+@pytest.fixture
+def client(data_root, broker, monkeypatch):
+    """起動時に migration とビルトインの同期、reconciliation が走る."""
+    monkeypatch.setenv("MEDIAFERRY_DATA_ROOT", str(data_root))
+    monkeypatch.setenv("MEDIAFERRY_DEFAULT_TIMEZONE", "Asia/Tokyo")
+    app = create_app(broker_factory=lambda: broker)
+    with TestClient(app) as client:
+        yield client

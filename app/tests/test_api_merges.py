@@ -1,0 +1,193 @@
+import json
+
+import pytest
+
+from mediaferry.db.connection import Database
+from mediaferry.db.profiles import ProfileRegistry
+
+from .test_schema_artifacts import a_media_file, a_merge_group
+
+
+@pytest.fixture
+def api_db(client, data_root):
+    """API と同じ DB ファイルを、テスト用の別接続で開く.
+
+    **接続は共有しない**（トランザクションは接続に属する）。`client` に依存
+    させるのは、アプリの起動で migration とビルトインの同期を先に済ませるため。
+    """
+    conn = Database(data_root / "var" / "mediaferry.sqlite3").connect()
+    yield conn
+    conn.close()
+
+
+def test_detecting_enqueues_one_job_per_profile(client):
+    response = client.post("/api/merge-groups/detect")
+    assert response.status_code == 200
+    jobs = response.json()["jobs"]
+    assert [entry["profile_slug"] for entry in jobs] == ["dji-osmo"]
+
+
+def test_detecting_an_unknown_profile_is_a_404(client):
+    assert client.post("/api/merge-groups/detect?profile_slug=nope").status_code == 404
+
+
+def test_the_group_list_carries_its_members_and_verification(client, api_db):
+    profile = ProfileRegistry(api_db).current("dji-osmo")
+    media_id = a_media_file(api_db, (profile.profile_id, profile.revision_id))
+    group_id = a_merge_group(
+        api_db,
+        (profile.profile_id, profile.revision_id),
+        "digest-1",
+        verification_json=json.dumps({"passed": True, "route": "concat"}),
+    )
+    api_db.execute(
+        "INSERT INTO merge_member (merge_group_id, media_file_id, position, active)"
+        " VALUES (?, ?, 0, 1)",
+        (group_id, media_id),
+    )
+    body = client.get("/api/merge-groups").json()
+    assert [group["id"] for group in body["groups"]] == [group_id]
+    assert body["groups"][0]["verification"]["passed"] is True
+    assert [member["media_file_id"] for member in body["groups"][0]["members"]] == [media_id]
+
+
+def test_merging_fixes_the_digest_and_the_revision_in_the_job(client, api_db):
+    profile = ProfileRegistry(api_db).current("dji-osmo")
+    group_id = a_merge_group(api_db, (profile.profile_id, profile.revision_id), "digest-1")
+    job_id = client.post(f"/api/merge-groups/{group_id}/merge").json()["job_id"]
+    params = json.loads(
+        api_db.execute("SELECT params_json FROM job WHERE id = ?", (job_id,)).fetchone()[0]
+    )
+    assert params["merge_group_id"] == group_id
+    assert params["input_digest"] == "digest-1"
+    assert params["profile_revision_id"] == profile.revision_id
+
+
+def _bump_revision(api_db, profile, new_id="rev-new"):
+    """プロファイルを編集した状態を作る（新しいリビジョンが現行になる）."""
+    api_db.execute(
+        "INSERT INTO profile_revision (id, profile_id, revision, definition_json,"
+        " schema_version, created_at)"
+        " SELECT ?, profile_id, revision + 1, definition_json, schema_version, created_at"
+        " FROM profile_revision WHERE id = ?",
+        (new_id, profile.revision_id),
+    )
+    api_db.execute(
+        "UPDATE device_profile SET current_revision_id = ? WHERE id = ?",
+        (new_id, profile.profile_id),
+    )
+
+
+def test_the_job_keeps_the_revision_the_group_was_detected_with(client, api_db):
+    """**編集してから投入しても、グループが検出されたときの規則で結合する。**
+
+    現行を読み直すと、確認画面で見た構成と違う規則で結合される。
+    """
+    profile = ProfileRegistry(api_db).current("dji-osmo")
+    group_id = a_merge_group(api_db, (profile.profile_id, profile.revision_id), "digest-1")
+    _bump_revision(api_db, profile)
+
+    job_id = client.post(f"/api/merge-groups/{group_id}/merge").json()["job_id"]
+
+    params = json.loads(
+        api_db.execute("SELECT params_json FROM job WHERE id = ?", (job_id,)).fetchone()[0]
+    )
+    assert params["profile_revision_id"] == profile.revision_id
+
+
+def test_adopting_a_group_without_an_output_is_a_409(client, api_db):
+    profile = ProfileRegistry(api_db).current("dji-osmo")
+    group_id = a_merge_group(api_db, (profile.profile_id, profile.revision_id), "digest-1")
+    assert client.patch(f"/api/merge-groups/{group_id}?action=adopt").status_code == 409
+
+
+def test_discarding_is_not_offered_in_this_phase(client, api_db):
+    """破棄は公開済みの media_file を取り残す. supersede が入る Phase 4 で足す."""
+    profile = ProfileRegistry(api_db).current("dji-osmo")
+    group_id = a_merge_group(api_db, (profile.profile_id, profile.revision_id), "digest-1")
+    assert client.patch(f"/api/merge-groups/{group_id}?action=discard").status_code == 400
+
+
+def test_an_unknown_action_is_a_400(client, api_db):
+    profile = ProfileRegistry(api_db).current("dji-osmo")
+    group_id = a_merge_group(api_db, (profile.profile_id, profile.revision_id), "digest-1")
+    assert client.patch(f"/api/merge-groups/{group_id}?action=explode").status_code == 400
+
+
+def test_a_missing_group_is_a_404(client):
+    assert client.get("/api/merge-groups/nope").status_code == 404
+    assert client.post("/api/merge-groups/nope/merge").status_code == 404
+
+
+def test_the_selectable_list_is_served(client, api_db):
+    profile = ProfileRegistry(api_db).current("dji-osmo")
+    media_id = a_media_file(api_db, (profile.profile_id, profile.revision_id))
+    body = client.get("/api/uploads/selectable").json()
+    assert [item["media_file_id"] for item in body["selectable"]] == [media_id]
+    assert body["selectable"][0]["reason"] == "default"
+
+
+def test_the_preview_does_not_store_anything(client, api_db):
+    profile = ProfileRegistry(api_db).current("dji-osmo")
+    for index in (1, 2):
+        a_media_file(
+            api_db,
+            (profile.profile_id, profile.revision_id),
+            rel_path=f"library/dji-osmo/DCIM/DJI_001/DJI_20260817143000_{index:04d}_D.MP4",
+            sha1=f"{index:040d}",
+            size_bytes=16 * 1024**3,
+            duration_seconds=1500.0,
+            captured_at=f"2026-08-17T14:{30 + 25 * (index - 1):02d}:00+00:00",
+        )
+
+    body = client.post("/api/merge-groups/preview?profile_slug=dji-osmo").json()
+
+    assert len(body["candidates"]) == 1
+    assert body["candidates"][0]["output_rel_path"].endswith("_0001-0002_MERGED.MP4")
+    assert api_db.execute("SELECT count(*) FROM merge_group").fetchone()[0] == 0
+
+
+def test_the_selectable_list_reports_when_it_was_truncated(client, api_db):
+    profile = ProfileRegistry(api_db).current("dji-osmo")
+    for index in (1, 2):
+        a_media_file(
+            api_db,
+            (profile.profile_id, profile.revision_id),
+            rel_path=f"library/dji-osmo/DCIM/T{index}.MP4",
+        )
+    body = client.get("/api/uploads/selectable?limit=1").json()
+    assert len(body["selectable"]) == 1
+    assert body["truncated"] is True
+
+
+def test_profiles_that_do_not_merge_are_not_detected(client, api_db):
+    """`archived` ではなく `merge.enabled = false` で確かめる.
+
+    archive は `registry.active()` が先に外すので、`_targets` から
+    `merge.enabled` の条件を消しても通ってしまう。
+    """
+    when = "2026-08-17T00:00:00+00:00"
+    profile = ProfileRegistry(api_db).current("dji-osmo")
+    definition = json.loads(
+        api_db.execute(
+            "SELECT definition_json FROM profile_revision WHERE id = ?", (profile.revision_id,)
+        ).fetchone()[0]
+    )
+    definition["slug"] = "no-merge"
+    definition["merge"]["enabled"] = False
+    api_db.execute(
+        "INSERT INTO device_profile (id, slug, name, builtin, created_at)"
+        " VALUES ('p-nomerge', 'no-merge', 'No merge', 0, ?)",
+        (when,),
+    )
+    api_db.execute(
+        "INSERT INTO profile_revision (id, profile_id, revision, definition_json,"
+        " schema_version, created_at) VALUES ('r-nomerge', 'p-nomerge', 1, ?, 1, ?)",
+        (json.dumps(definition), when),
+    )
+    api_db.execute(
+        "UPDATE device_profile SET current_revision_id = 'r-nomerge' WHERE id = 'p-nomerge'"
+    )
+
+    jobs = client.post("/api/merge-groups/detect").json()["jobs"]
+    assert [entry["profile_slug"] for entry in jobs] == ["dji-osmo"]

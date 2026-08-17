@@ -5468,14 +5468,16 @@ Expected: PASS
 | 変異 | 落ちるべきテスト |
 | --- | --- |
 | `start_merge` の params から `input_digest` を落とす | `test_merging_fixes_the_digest_and_the_revision_in_the_job` |
-| `start_merge` の params で現行リビジョンを読み直す | 同上（リビジョンは一致するので**落ちない**。プロファイルを編集してから enqueue するケースを足す） |
+| `start_merge` の params で現行リビジョンを読み直す | 同上では**落ちない**（投入時点では現行と一致する）。**編集してから投入する**テスト（`test_the_job_keeps_the_revision_the_group_was_detected_with`）を足した。グループが検出されたときの版で結合するのが正しい |
 | `patch_group` の `action` の検証を消す | `test_an_unknown_action_is_a_400` |
 | `patch_group` に `discard`（`mark_skipped`）を足す | `test_discarding_is_not_offered_in_this_phase` |
 | `adopt` の `GroupNotClaimable` を 500 のまま通す | `test_adopting_a_group_without_an_output_is_a_409` |
 | `_found` を消す | `test_a_missing_group_is_a_404` |
 | `_targets` の `merge.enabled` の絞り込みを消す | `test_profiles_that_do_not_merge_are_not_detected` |
 | `preview` が `save_detected` を呼ぶ | `test_the_preview_does_not_store_anything` |
-| `truncated` を常に `False` にする | **落ちない**。上限に届くデータを API のテストで作っていない。`SelectionService` 側の `test_the_list_is_capped` が上限そのものを見ている（検出できない変異として記録する） |
+| `truncated` を常に `False` にする | `test_the_selectable_list_reports_when_it_was_truncated`（**追加**）。`limit=1` で 2 件を返させれば API の層で観測できる |
+| `preview` が `save_detected` を呼ぶ | `test_the_preview_does_not_store_anything`。ただし**候補が 1 件も出ないデータでは素通りする**。グループになる 2 件を先に作る形へ直した |
+| `_profile_ref` が現行リビジョンを読み直す | `test_the_handler_reads_the_revision_pinned_in_the_params`（**追加**）。投入後に「連番を読めない `sequence_pattern`」の版を現行にする。読み直していれば出力名を決められずに失敗するので見分けられる |
 | `run_merge` の `except (MergeCancelled, PublishCancelled)` を消して送出する | `test_a_cancelled_merge_job_ends_as_cancelled`（ジョブが `failed` になる） |
 | `run_merge` がキャンセルを握りつぶして `succeeded` で返す（`return` を消して続行） | 同上（`MergeResult` が無いので `AttributeError` になり、やはり `failed`） |
 

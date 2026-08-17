@@ -1,16 +1,6 @@
-import pytest
 from fastapi.testclient import TestClient
 
 from mediaferry.api.app import create_app
-
-
-@pytest.fixture
-def client(data_root, broker, monkeypatch):
-    monkeypatch.setenv("MEDIAFERRY_DATA_ROOT", str(data_root))
-    monkeypatch.setenv("MEDIAFERRY_DEFAULT_TIMEZONE", "Asia/Tokyo")
-    app = create_app(broker_factory=lambda: broker)
-    with TestClient(app) as client:
-        yield client
 
 
 def test_health_reports_the_schema_version(client):
