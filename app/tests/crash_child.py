@@ -117,10 +117,12 @@ def _a_merge_group(conn, profile):  # noqa: ANN001, ANN202
     from mediaferry.clock import now_iso
 
     group_id = new_id()
+    # verification_json も埋める。_settle_merges が merged へ倒すときの前提
+    # （mark_merged の CAS が検証結果を要求する）を crash 試験でも満たす。
     conn.execute(
         "INSERT INTO merge_group (id, profile_id, profile_revision_id, status, input_digest,"
-        " detected_by, created_at, updated_at)"
-        " VALUES (?, ?, ?, 'merging', 'digest-1', 'auto', ?, ?)",
+        " detected_by, verification_json, tool_version, created_at, updated_at)"
+        " VALUES (?, ?, ?, 'merging', 'digest-1', 'auto', '{\"passed\": true}', 'ffmpeg', ?, ?)",
         (group_id, profile.profile_id, profile.revision_id, now_iso(), now_iso()),
     )
     return group_id

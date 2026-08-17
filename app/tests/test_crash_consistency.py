@@ -66,6 +66,20 @@ def test_reconciliation_recovers_from_a_crash_at_any_step(data_root, step, kind)
         state = conn.execute("SELECT state FROM artifact_staging").fetchone()["state"]
         assert state == "published"
 
+    if kind != "import":
+        # 結合グループの決着も見る。**`_settle_merges` を `_recover_staging` の
+        # 前へ動かすと、手順 7 で落とした場合に「detected なのに出力 ID が
+        # 入っている」状態になり、ここで落ちる。**
+        group = conn.execute("SELECT status, output_media_file_id FROM merge_group").fetchone()
+        if step <= 6:
+            # 公開へ進んでいない。再試行できる状態へ戻す。
+            assert group["status"] == "detected"
+            assert group["output_media_file_id"] is None
+        else:
+            # 公開は完遂している。出力 ID が入り、merged になる。
+            assert group["status"] == "merged"
+            assert group["output_media_file_id"] is not None
+
     # どの段階で落ちても、staging に中間ファイルは残らない（空のディレクトリは可）。
     assert [p for p in (data_root / "staging").rglob("*") if p.is_file()] == []
     assert report.orphans == []

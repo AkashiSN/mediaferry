@@ -1,7 +1,7 @@
 # mediaferry 引き継ぎ資料
 
 最終更新: 2026-08-18
-ブランチ: `main`（単独リポジトリ、59 コミット。先頭は `5b3d174`）
+ブランチ: `main`（単独リポジトリ、72 コミット。先頭は Phase 2 の実装）
 
 このファイルは、別セッションが作業を引き継ぐための出発点。
 **まずここを読み、次に `design.md` §20 と該当フェーズの計画を読む。**
@@ -10,14 +10,13 @@
 
 ## 1. 現在地
 
-**Phase 1 は実装・検証とも完了。Phase 2 は計画とレビューが完了し、実装は未着手。
-次は `docs/phase2-plan.md` の Task 1 から。**
+**Phase 1 と Phase 2 は実装・検証とも完了。次は Phase 3（Immich 同期）の計画から。**
 
 | Phase | 内容 | 状態 |
 | --- | --- | --- |
 | 0 | スパイク。未検証項目の実測とブローカーの最小実装 | **完了** |
 | 1 | 基盤 + 取り込み。`ArtifactPublisher` / `Reconciler` / DB スキーマ / scan / import / API | **完了**（実 USB の確認だけ残り） |
-| 2 | 結合 | **計画完了・未実装**（`phase2-plan.md`、14 タスク。codex レビュー 2 巡を反映済み） |
+| 2 | 結合。検出 / ffmpeg / 検証 / 公開 / 回収 / 選択肢 / API | **完了**（`phase2-plan.md` の 14 タスク。実装との差分は書き戻し済み） |
 | 3 | Immich 同期（転送先プロファイル、状態機械） | 未着手 |
 | 4 | Web UI | 未着手 |
 | 5 | 汎用化（Canon、プロファイル編集 UI、複数デバイス） | 未着手 |
@@ -25,33 +24,39 @@
 ### 検証状態
 
 ```
-uv run pytest                  411 passed
+uv run pytest                  596 passed
 uv run pytest -m needs_root      1 passed   ← detached mount の実証
 uv run ruff check .            All checks passed
-uv run ruff format --check .   88 files already formatted
+uv run ruff format --check .   113 files already formatted
 ```
+
+**結合のテストは実 ffmpeg を使う**（`shutil.which("ffmpeg")` が無いときだけ skip）。
+開発コンテナには `~/.local/bin/ffmpeg` が入っている。
 
 `ruff format` の対象が 88 件なのは、`docs/` を `extend-exclude` で外していても
 **ルート直下の `CLAUDE.md` は対象に入る**ため（Markdown 内のコードブロックが
 整形される）。
 
 `docker restart` や電源断に相当する試験は、§9.3 の手順 11 段すべてで子プロセスを
-`os._exit` で落として import と merge の両方を回収できることまで確認済み。
+`os._exit` で落として **import / merge / merge_prepared の 3 経路**を回収できる
+ことまで確認済み。回収後は結合グループの状態（`detected` か `merged`）も
+assert している。
 
 ### 残っていること
 
-1. **Phase 2 の実装（`docs/phase2-plan.md` の Task 1〜14）。** 計画は書き終わり、
-   codex のレビューを 2 巡通してある。コードはまだ 1 行も書いていない。
-2. **実 USB での手動確認（`phase1-manual-checklist.md` の 11 項目）。**
+1. **Phase 3（Immich 同期）の計画。** まだ計画も書いていない。範囲は
+   `design.md` §20 の表と §10 (a)(c)、`upload_record` / `selection_rule`。
+2. **実 USB での手動確認（`phase1-manual-checklist.md` の 12 項目）。**
    開発コンテナ（入れ子の非特権 LXC）ではマウントが AppArmor に阻まれるので、
    TrueNAS ホストで実行する必要がある。
 
    特に **11 番（mtime の解釈の実測）は実装の前提の確認**。前提が崩れていれば
    `timestamps.py` の `_wall_clock` と `publisher._collision_stamp` を直す。
-   Phase 2 の派生物の mtime も同じ前提に乗っているので、**実測は早い方がよい**。
-
-この 2 つは依存していない。**Phase 2 の実装は開発コンテナで進められる**
-（結合のテストは実 ffmpeg を使うが、マウントは要らない）。
+   Phase 2 の派生物の mtime（`merger._recording_end_ns`）も同じ前提に乗っている。
+   **12 番（`attached_pic`）は Phase 2 で足した項目**（`streams._is_thumbnail`）。
+3. **実データでの TS フォールバックの確認。** テストは lavfi のクリップで両経路を
+   通しているが、実 DJI では Phase 0 の時点で concat 経路が通っており、TS 経路は
+   まだ実データで走っていない。
 
 ---
 
@@ -61,7 +66,7 @@ uv run ruff format --check .   88 files already formatted
 | --- | --- | --- |
 | `docs/design.md` | **設計仕様書。正本。** | ✅ |
 | `docs/phase1-plan.md` | Phase 1 の実装計画。**実行済み**。実装との差分は都度書き戻してある | ✅ |
-| `docs/phase2-plan.md` | Phase 2（結合）の実装計画。**未実行**。codex のレビュー 2 巡（blocker 6 / major 7 / minor 1）を反映済み | ✅ |
+| `docs/phase2-plan.md` | Phase 2（結合）の実装計画。**実行済み**。codex のレビュー 2 巡を反映し、実装で外れた判断と検出できなかった変異を書き戻してある | ✅ |
 | `docs/phase1-backup.md` | バックアップとリストア、再構築できる範囲（§18-4） | ✅ |
 | `docs/phase1-manual-checklist.md` | 実 USB での確認手順 | ✅ |
 | `docs/phase0-findings.md` | Phase 0 の実測結果と設計への反映 | ✅ |
@@ -121,11 +126,11 @@ Phase 0 の価値はここにある。**いずれも「実際に動かして」�
 | **孤立ファイルは報告するだけ。削除しない** | 自動削除はデータを失う経路になる |
 | **停止は走っているジョブの完了を待つ** | `to_thread` のハンドラは task の cancel では止まらない。待たずに接続と dirfd を閉じると、コピー中のスレッドから見て資源が突然消える。timeout を付けて worker を cancel しても同じ |
 
-### Phase 2 の計画で確定した契約（蒸し返さないこと）
+### Phase 2 で確定した契約（蒸し返さないこと）
 
-**まだ実装していないが、判断は済んでいる。** 根拠は `phase2-plan.md` の
-各タスクとレビュー記録。**6 件は codex のレビューで blocker として指摘された
-もの**で、理屈で戻すと同じ穴に落ちる。
+**実装・検証とも済んでいる。** 根拠は `design.md` §21 の「Phase 2 の実装で
+確定した事項」と `phase2-plan.md` の各タスク。**6 件は codex のレビューで
+blocker として指摘されたもの**で、理屈で戻すと同じ穴に落ちる。
 
 | 判断 | 理由 |
 | --- | --- |
@@ -142,7 +147,9 @@ Phase 0 の価値はここにある。**いずれも「実際に動かして」�
 | **派生物の mtime は「壁時計を UTC として解釈した epoch」** | 取り込みの mtime と同じ表現にする。オフセット付きの瞬間を使うと `library/` と `derived/` で衝突接尾辞の壁時計がずれる |
 | **期待サイズは `bit_rate` が取れた保持ストリームだけで組み立てる** | `tmcd` は `bit_rate` を持たない。それを理由に全体を `inconclusive` にすると、**既定のプロファイルでサイズ検査が常に無効**になる（Phase 0 で直した検査が死ぬ）。ばらつきも合計ではなく対応するストリームごとに見る |
 | **検証器の版は `verification_json.pipeline_version`。`input_digest` には入れない** | `input_digest` は §8 で入力の同一性の判定と定義されている。混ぜると、閾値を 1 つ変えただけで既存の結合物がそろって選択肢から消え、再結合するまで戻らない。**codex の指摘を退けた 1 件**（先方も受け入れた） |
-| **検出は「アクティブな member」を境界として扱う** | 列から取り除くだけだと、その前後がつながって別の録画を 1 つのグループにする |
+| **検出は「アクティブな member」を境界として扱う** | 列から取り除くだけだと、その前後がつながって別の録画を 1 つのグループにする。写真も候補の列に入れない（duration を持たないので境界として働き、前後の分割録画が検出されなくなる） |
+| **TS 片のストリームの並びは種別順に揃える**（実装で判明） | `concat:` は mpegts の生バイトを継ぐので、パートごとに並びが違うと後続を読めない（`No start code is found`）。map の index はパート自身のままで、並べる順だけ揃える |
+| **サイズ検査の許容誤差 2% は実機の大きさが前提**（実装で判明） | コンテナのオーバーヘッドは 16 GiB では 0.002% だが、数百 KB の合成クリップでは 7〜8% になる。lavfi のクリップで組んだ e2e は必ずサイズ検査に落ちるので、採用（`adopt`）まで通す形にしてある |
 | **`record_verification` と `mark_merged` は成立条件を DB 側で確かめる** | 呼び出し順のバグ 1 つで「merged なのに出力が無い」行ができ、選択肢の側が隠すので静かに残る |
 
 ---
@@ -219,37 +226,40 @@ Phase 0 の価値はここにある。**いずれも「実際に動かして」�
 
 ### 手順
 
-1. **`docs/phase2-plan.md` を Task 1 から実行する。** 依存の順序は計画の
-   「実装順序と依存」にある（1〜5 が純粋ロジック、6〜8 が副作用と DB、
-   9〜12 がジョブと回収、13〜14 が API と統合）
+1. **Phase 3（Immich 同期）の計画を書く。** `docs/phase2-plan.md` と同じ粒度
+   （タスクごとに「失敗するテスト → 最小実装 → 変異試験 → コミット」）で書き、
+   **着手の前に codex のレビューを 2 巡通す**。Phase 2 では 1 巡目の blocker を
+   直した後の 2 巡目で、さらに blocker が 2 件出た
 2. **`phase1-manual-checklist.md` を TrueNAS ホストで実行する。** 特に 11 番
    （mtime の解釈）は実装の前提の確認なので、結果を `phase0-findings.md` に残す。
-   Phase 2 の Task 3 で **12 番（`attached_pic` の確認）** を足す
+   12 番（`attached_pic`）は Phase 2 で足した項目
 
 この 2 つは並行してよい。1 は開発コンテナで進められる。
 
-### Phase 2 の範囲（`design.md` §20）
+### Phase 3 の範囲（`design.md` §20）
 
-> グループ検出、結合、検証、§10 の選択肢規則。公開は Phase 1 の
-> `ArtifactPublisher` をそのまま使う。
+> 状態機械、転送先プロファイルの CRUD と接続検証、`origin` 判別、タグ、
+> タイムゾーン補正、複数宛先への同時アップロード。
 >
-> 完了条件: 分割動画が結合され、検証結果と選択肢が API で取れる。
+> 完了条件: 実 Immich にアップロードでき、途中で落としても再開し、既存アセットを
+> 勝手に変更しない。2 つの宛先へ同じメディアを送って独立に追跡できる。
 
-範囲の線引きは `phase2-plan.md` の冒頭にある。**§10 は (b)（既定で選択肢に
-出す条件）まで**で、(a) 安全条件と (c) `selection_rule` ごとの条件は
-`upload_record` と一緒に Phase 3。継ぎ目は**秒数を `verification_json` に残す
-ところまで**で、サムネイルの画像生成は Phase 4。
+Phase 2 側で既に用意してあるもの:
 
-Phase 1 側で既に用意してあるもの:
+- `GET /uploads/selectable`（§10 **(b)** の選択肢）と `SelectionService`。
+  **(a) 安全条件と (c) `selection_rule` ごとの条件は Phase 3 で足す**（claim の
+  ときに評価するもので、`upload_record` と一緒に入れる）
+- `media_file` に `role`（`original` / `derived`）と `sha1`、`captured_at`
+- 結合グループの `verification_json` と `adopted_at`（不合格の採用）
+- `ArtifactPublisher` の 11 手順と `_with_lease_pulse`（長い処理の間のリース維持）
+- `JobRunner` のキャンセル決着の作法（**例外で上げず、正常 return する**）
 
-- `merge_group` / `merge_member` のスキーマ（supersede の不可逆性、active の
-  両方向 trigger まで含む）。**Phase 2 でマイグレーションは足さない**
-- `job.type` の `detect_groups` と `merge`（`0001` の CHECK に入っている）
-- `ArtifactPublisher` の `kind="merge"` 経路（crash 試験も通っている）
-- `MediaProbe`（`duration_seconds` は §9.7 の境界判定が使う。失敗を 0 秒に
-  丸めていない）
-- プロファイルの `merge` 節（`tolerance_seconds` / `min_part_size_gib` /
-  `sequence_pattern` / `output_name` / `keep_streams`）
+Phase 0 で実測済みの前提（`phase0-findings.md`）:
+
+- 接続先 URL と表示用 URL を分ける（公開 URL 経由では 622 MiB で 502）
+- `remote_user_id` は同一性ではなく向き先変化の guard
+- `origin` は `status: created` を commit できた場合だけ `created_by_us`
+- `isTrashed` を無視しない / checksum は base64
 
 ### 作業の作法
 
@@ -262,13 +272,18 @@ Phase 1 側で既に用意してあるもの:
    - 結果が同じになる筋書きしか試していない（差が出るのは「読んだバイト数」
      「試した名前の数」のような量だけ）
    - 順序規則を、たまたま同じ順になるデータで試している
-3. **検出できない変異は、検出できないことを計画に書く。** Phase 1 では
-   `claim_next` の CAS 条件（`BEGIN IMMEDIATE` が claimer を直列化するので到達
-   しない）のように、構造的にテスト不能な保険が複数あった。**Phase 2 の計画
-   には、書いた時点で 12 件を記録済み**（`os.fsync` を消す変異、SIGKILL 段、
-   `start_new_session`、`sort_keys` 等）。実装中に増えたら足す
-4. 計画から外れる判断をしたら、その場で計画側にも書き戻す
-5. 詰まったら codex に相談する
+3. **検出できない変異は、検出できないことを計画に書く。** 構造的にテスト不能な
+   保険は実在する（`claim_next` の CAS 条件、`_materialise_link` の `os.fsync`、
+   `sort_keys`、スキーマの trigger が保証する冗長条件など）。ただし
+   **「検出できない」と書いてある変異の多くは、テストを 1 つ足せば検出できた**
+   —— Phase 2 では計画が検出不能としていた 5 件のうち 4 件を、実装時に固定できた。
+   まず落とせないか試し、それから記録する
+4. **変異は「成立する形」で当てる。** 例外で全件落ちる書き換え（dict を
+   `sorted` に渡す等）は、狙いの判断を検証したことにならない。
+   **`start_new_session=True` を外す変異は当ててはいけない**（子がテストランナーと
+   同じプロセスグループに入り、キャンセル試験の `killpg` が pytest ごと撃つ）
+5. 計画から外れる判断をしたら、その場で計画側にも書き戻す
+6. 詰まったら codex に相談する
 
 ### レビューの依頼先
 
@@ -308,9 +323,11 @@ uv run ruff format --check .
 | --- | --- |
 | 実 USB での確認 | `phase1-manual-checklist.md` に手順を用意済み。未実施 |
 | mtime の解釈 | `timestamps.py` は「カードの時刻欄に UTC オフセットが無い」前提。チェックリスト 11 番で実測する。**派生物の mtime も同じ前提に乗る** |
-| **取り込み側のリースの穴** | `publish` は 16 GiB のコピーの後に `os.fsync` と ffprobe（timeout がリースと同値）を通るが、その間 heartbeat が無い。実 USB の確認が 100 バイトのファイルでしか通っていないので表に出ていない。**Phase 2 の Task 7（`_with_lease_pulse`）が共通の `_publish` を直すので、両方が同時に塞がる** |
+| ~~取り込み側のリースの穴~~ | **塞いだ**（Phase 2 の Task 7）。`_with_lease_pulse` が共通の `_publish` に入ったので、16 GiB のコピー後の `os.fsync` と ffprobe も守られる。回帰テストは `test_publisher.py::test_a_slow_fsync_does_not_lose_the_lease` |
+| `_publish` の外の `fsync_dir` | ジョブ用ディレクトリを作った直後の `fsync_dir` は `_with_lease_pulse` の外にある。ディレクトリの fsync はメタデータだけなので実運用では一瞬で終わるが、極端に遅い環境では守られていない |
 | `disposition.attached_pic` | 結合の「最初の映像ストリームのみ」の判定が、埋め込みサムネイルをこれで見分ける。実機の DJI ファイルで立っているかは未確認（`keep_streams.video` が `primary` の間は影響しない）。チェックリスト 12 番で見る |
-| TS フォールバックの実運用 | Phase 0 の実測では DJI は concat 経路で通っており、TS 経路は**まだ実データで走っていない**。テストは lavfi のクリップで両経路を通す |
+| TS フォールバックの実運用 | Phase 0 の実測では DJI は concat 経路で通っており、TS 経路は**まだ実データで走っていない**。テストは lavfi のクリップで両経路を通す（`tmcd` の脱落まで再現している） |
+| サイズ検査の許容誤差と合成クリップ | 2% は 16 GiB 級の実ファイルが前提（オーバーヘッド 0.002%）。数百 KB の合成クリップでは 7〜8% ずれるので、e2e は「不合格でも公開され、採用すれば選択肢に出る」経路で通している |
 | 5 パート連続録画（70 GiB 級）のアップロード | 28.36 GiB は完走した。同じ経路で扱える見込みだが未実測。タイムアウトは比例して伸びる |
 | Canon EOS 70D のプロファイル | Phase 5。カードリーダー経由の UMS のみ対応と決定済み（PTP はスコープ外） |
 | 認証を既定 off のままにするか | ユーザの判断で off。`BIND_HOST` の既定を loopback にし、認証無効で非 loopback にバインドしていたら警告する緩和のみ |
@@ -348,3 +365,16 @@ uv run ruff format --check .
 - **計画にコードを全部書くと、レビューで実際の穴が出る。** 「ここで heartbeat を
   打つ」と散文で書いていたら、`fsync` と ffprobe が守られていないことは
   見つからなかった。手順の順序と例外の流れまで書いてあったから指摘できた
+- **計画の「検出できない変異」を鵜呑みにしない。** Phase 2 では計画が検出不能と
+  していた 5 件のうち 4 件を、テストを 1 つ足すだけで固定できた（`LeaseLost` の
+  待ち、`fsync` の囲み、`truncated`、片側のフレーム判定）。「観測には競合の
+  再現が要る」と書いてあっても、たいていは決定的に組める
+- **計画が「既存のテストが落ちる」と書いていても、そのテストの実在を確かめる。**
+  Phase 2 では `test_a_short_write_is_aborted` を前提にした変異があったが、
+  その名前のテストは Phase 1 に存在しなかった
+- **合成データは実データの比率を持たない。** lavfi の小さいクリップは MP4 の
+  オーバーヘッドが 7〜8% を占め、実機（0.002%）を前提にした 2% のサイズ検査に
+  必ず落ちる。閾値の妥当性を合成データで測らない
+- **実装で初めて分かることが残る。** Phase 2 では、計画に無かった処理が 1 つ要った
+  （TS 片の並びを揃える `_ts_layout`）。`concat:` が生バイトを継ぐことは、
+  実際に 2 本つないでみるまで表に出なかった
