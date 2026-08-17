@@ -516,7 +516,7 @@ Expected: PASS（7 件）
 
 | 変異 | 落ちるべきテスト |
 | --- | --- |
-| `members` をリストから `sorted(...)` にする | `test_the_order_of_the_members_changes_the_digest` |
+| `members` をリストから `sorted(...)` にする | `test_the_order_of_the_members_changes_the_digest`。**`sorted` を掛ける位置に注意**。内包の外（dict の列）に掛けると dict が比較不能で全件 TypeError になり、順序を検証したことにならない。`sorted(members)` としてタプルの段で並べ替える |
 | payload から `"merge"` を落とす | `test_a_changed_merge_setting_changes_the_digest` |
 | payload から `"profile_revision_id"` を落とす | `test_a_changed_profile_revision_changes_the_digest` |
 | `sha1` を payload から落とす | `test_a_changed_content_hash_changes_the_digest` |
