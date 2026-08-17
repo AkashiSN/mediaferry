@@ -171,6 +171,31 @@ def test_every_connect_is_a_separate_connection(tmp_path):
     second.close()
 
 
+def test_a_connection_can_be_created_in_one_thread_and_used_in_another(tmp_path):
+    """asyncio.to_thread はどの worker で走るかを保証しない.
+
+    既定の check_same_thread=True だと、poller の claim_next もハンドラも
+    最初の 1 回で ProgrammingError になる。
+    """
+    import threading
+
+    conn = Database(tmp_path / "db.sqlite3").connect()
+    apply_migrations(conn)
+    errors = []
+
+    def use():
+        try:
+            conn.execute("SELECT count(*) FROM schema_migration").fetchone()
+        except Exception as exc:  # noqa: BLE001
+            errors.append(exc)
+
+    thread = threading.Thread(target=use)
+    thread.start()
+    thread.join(timeout=5)
+    assert errors == []
+    conn.close()
+
+
 def test_database_file_is_not_world_readable(tmp_path):
     """API キーの暗号文と履歴が入るので、DB は 0600・親は 0700 にする."""
     path = tmp_path / "var" / "mediaferry.sqlite3"
@@ -424,7 +449,14 @@ class Database:
 
     def connect(self) -> sqlite3.Connection:
         self.path.parent.mkdir(parents=True, exist_ok=True, mode=DIR_MODE)
-        conn = sqlite3.connect(self.path, isolation_level=None)
+        # `check_same_thread=False` が要るのは、接続を作るスレッドと使う
+        # スレッドが違うため。`asyncio.to_thread` はどの worker で走るかを
+        # 保証しないし、FastAPI の同期ルータも lifespan とは別スレッドで動く。
+        #
+        # **これは「1 本を同時に共有してよい」という意味ではない。** 危険なのは
+        # フラグではなく共有そのもの（トランザクションは接続に属する）。所有者を
+        # スコープごとに 1 つに保ち、同時に 2 か所から使わないことで守る。
+        conn = sqlite3.connect(self.path, isolation_level=None, check_same_thread=False)
         conn.row_factory = sqlite3.Row
         conn.execute("PRAGMA journal_mode = WAL")
         conn.execute("PRAGMA synchronous = FULL")
@@ -1014,6 +1046,9 @@ CREATE UNIQUE INDEX volume_instance_identity
     ON volume_instance (fs_uuid, fs_type, size_bytes) WHERE fs_uuid <> '';
 
 -- 同じ identity のカードが同時に 2 枚挿さりうるので、接続ごとに行を持つ。
+-- 行は「接続」1 つに対応する。列挙のたびに増やさない。増やすと、キューに
+-- 積んだときの presence と実行時の presence が別物になって必ず stale になり、
+-- 抜けたポートの古い行が live のまま残って同定の確度を永久に下げる。
 CREATE TABLE volume_presence (
     id                 TEXT PRIMARY KEY,
     volume_instance_id TEXT NOT NULL REFERENCES volume_instance(id) ON DELETE CASCADE,
@@ -1024,7 +1059,8 @@ CREATE TABLE volume_presence (
     minor              INTEGER NOT NULL,
     sysfs_path         TEXT NOT NULL,
     attached_at        TEXT NOT NULL,
-    detached_at        TEXT
+    detached_at        TEXT,
+    UNIQUE (volume_instance_id, broker_epoch, generation, major, minor)
 );
 
 CREATE INDEX volume_presence_live
@@ -1271,12 +1307,36 @@ def test_a_superseded_group_cannot_gain_active_members(db):
     first = a_merge_group(db, profile, digest="d1")
     second = a_merge_group(db, profile, digest="d2")
     db.execute("UPDATE merge_group SET superseded_by_id = ? WHERE id = ?", (second, first))
-    with pytest.raises(sqlite3.IntegrityError, match="superseded"):
+    with pytest.raises(sqlite3.IntegrityError, match="supersede"):
         db.execute("INSERT INTO merge_member VALUES (?, ?, 0, 1)", (first, a_media_file(db, profile)))
     # 非 active としてなら履歴に残せる
     db.execute("INSERT INTO merge_member VALUES (?, ?, 0, 0)", (first, a_media_file(db, profile)))
-    with pytest.raises(sqlite3.IntegrityError, match="superseded"):
+    with pytest.raises(sqlite3.IntegrityError, match="supersede"):
         db.execute("UPDATE merge_member SET active = 1 WHERE merge_group_id = ?", (first,))
+
+
+def test_a_member_cannot_be_moved_into_a_superseded_group(db):
+    """active な member の親を付け替えると trigger を迂回できてしまう."""
+    profile = a_profile(db)
+    media_id = a_media_file(db, profile)
+    active_group = a_merge_group(db, profile, digest="d1")
+    doomed = a_merge_group(db, profile, digest="d2")
+    successor = a_merge_group(db, profile, digest="d3")
+    db.execute("UPDATE merge_group SET superseded_by_id = ? WHERE id = ?", (successor, doomed))
+    db.execute("INSERT INTO merge_member VALUES (?, ?, 0, 1)", (active_group, media_id))
+    with pytest.raises(sqlite3.IntegrityError, match="supersede"):
+        db.execute(
+            "UPDATE merge_member SET merge_group_id = ? WHERE merge_group_id = ?",
+            (doomed, active_group),
+        )
+
+
+def test_an_active_group_cannot_hold_an_inactive_member(db):
+    """active は親の状態の写しなので、片方だけずらせない."""
+    profile = a_profile(db)
+    group = a_merge_group(db, profile, digest="d1")
+    with pytest.raises(sqlite3.IntegrityError, match="supersede"):
+        db.execute("INSERT INTO merge_member VALUES (?, ?, 0, 0)", (group, a_media_file(db, profile)))
 
 
 def test_supersede_cannot_be_undone(db):
@@ -1408,20 +1468,25 @@ END;
 
 -- active の denormalize は片方向の trigger だけだと、既に superseded の
 -- グループへ後から active な member を足して壊せる。
-CREATE TRIGGER merge_member_insert_respects_supersede
+-- active は親の superseded 状態の写しなので、両方向で一致を強制する。
+-- 片方向だけだと、active な member の merge_group_id を superseded な
+-- グループへ付け替えて迂回できる。
+CREATE TRIGGER merge_member_insert_matches_parent
 BEFORE INSERT ON merge_member
-WHEN NEW.active = 1
- AND (SELECT superseded_by_id FROM merge_group WHERE id = NEW.merge_group_id) IS NOT NULL
+WHEN NEW.active <> (
+    SELECT superseded_by_id IS NULL FROM merge_group WHERE id = NEW.merge_group_id
+)
 BEGIN
-    SELECT RAISE(ABORT, 'a superseded group cannot gain active members');
+    SELECT RAISE(ABORT, 'member active flag must match the group supersede state');
 END;
 
-CREATE TRIGGER merge_member_activate_respects_supersede
-BEFORE UPDATE OF active ON merge_member
-WHEN NEW.active = 1
- AND (SELECT superseded_by_id FROM merge_group WHERE id = NEW.merge_group_id) IS NOT NULL
+CREATE TRIGGER merge_member_update_matches_parent
+BEFORE UPDATE OF merge_group_id, active ON merge_member
+WHEN NEW.active <> (
+    SELECT superseded_by_id IS NULL FROM merge_group WHERE id = NEW.merge_group_id
+)
 BEGIN
-    SELECT RAISE(ABORT, 'a superseded group cannot gain active members');
+    SELECT RAISE(ABORT, 'member active flag must match the group supersede state');
 END;
 
 -- 取り込みと結合が同じ公開プロトコルを通る。片方だけ回収不能にしない。
@@ -1640,6 +1705,20 @@ def test_a_record_cannot_name_an_epoch_that_has_no_revision(db):
     dest = a_destination(db)
     with pytest.raises(sqlite3.IntegrityError, match="epoch"):
         an_upload(db, dest, a_media_file(db, profile), target_epoch=7)
+
+
+def test_the_identity_of_a_record_cannot_be_rewritten(db):
+    """書き換えられると、INSERT 時の epoch guard も複合 FK も迂回できる."""
+    profile = a_profile(db)
+    dest = a_destination(db)
+    record_id = an_upload(db, dest, a_media_file(db, profile))
+    with pytest.raises(sqlite3.IntegrityError, match="immutable"):
+        db.execute("UPDATE upload_record SET target_epoch = 9 WHERE id = ?", (record_id,))
+    with pytest.raises(sqlite3.IntegrityError, match="immutable"):
+        db.execute(
+            "UPDATE upload_record SET media_file_id = ? WHERE id = ?",
+            (a_media_file(db, profile), record_id),
+        )
 
 
 def test_an_active_record_must_name_its_owner_and_revision(db):
@@ -1875,6 +1954,17 @@ WHEN NOT EXISTS (
 )
 BEGIN
     SELECT RAISE(ABORT, 'no revision exists for this destination and epoch');
+END;
+
+-- 同一性の 3 欄は不変。書き換えられると、INSERT 時の guard も複合 FK も
+-- 迂回して「存在しない epoch の pending 行」を作れる。
+CREATE TRIGGER upload_record_identity_is_immutable
+BEFORE UPDATE OF destination_id, target_epoch, media_file_id ON upload_record
+WHEN NEW.destination_id IS NOT OLD.destination_id
+  OR NEW.target_epoch IS NOT OLD.target_epoch
+  OR NEW.media_file_id IS NOT OLD.media_file_id
+BEGIN
+    SELECT RAISE(ABORT, 'the identity of an upload record is immutable');
 END;
 
 CREATE INDEX upload_record_by_media ON upload_record (media_file_id);
@@ -3665,8 +3755,14 @@ Expected: FAIL（`ModuleNotFoundError`）
 GPS も書かないため、Immich が撮影地の TZ を判定できず、UTC の壁時計をそのまま
 localDateTime として採用してしまう問題への対処である。
 
-mtime の壁時計は UTC 表現から取る。exFAT はローカル時刻を保持し、コンテナの
-TZ は UTC なので、epoch を UTC で描画したものがカード上の壁時計になる。
+mtime の壁時計は UTC 表現から取る。**これは「カードの時刻欄に UTC オフセットが
+書かれていない」ことを前提にしている。** Linux の exfat ドライバは、
+`OffsetFromUtc` の valid bit が立っていればそのオフセットで UTC へ変換し、
+立っていないときだけマウントの `time_offset`（既定 0）を使う
+（`fs/exfat/misc.c` の `exfat_get_entry_time`）。DJI はファイル名に壁時計を
+埋めるので、両者が一致するかを実機で確かめられる。手順は
+`phase1-manual-checklist.md` にあり、**一致しない機種が出たらここを
+プロファイルの timezone で描画する形へ変える**。
 """
 
 from __future__ import annotations
@@ -4635,11 +4731,30 @@ class JobStore:
         updated = self._conn.execute(
             "UPDATE job SET status = ?, error = ?, finished_at = ?,"
             " lease_token = NULL, lease_expires_at = NULL"
-            " WHERE id = ? AND lease_token = ?",
+            " WHERE id = ? AND lease_token = ? AND status IN ('running', 'cancelling')",
             (status, error, iso(utcnow()), job_id, token),
         )
         if updated.rowcount != 1:
             raise LeaseLost(f"ジョブ {job_id} のリースを失っている")
+
+    def finish_claimed(self, job_id: str, token: str) -> str:
+        """正常終了の決着を 1 文で付ける.
+
+        「status を読む → finish する」を分けると、その間に入った cancel が
+        succeeded で上書きされる。cancel API は成功を返したのにジョブは
+        succeeded、という食い違いになる。
+        """
+        row = self._conn.execute(
+            "UPDATE job SET"
+            " status = CASE WHEN status = 'cancelling' THEN 'cancelled' ELSE 'succeeded' END,"
+            " finished_at = ?, lease_token = NULL, lease_expires_at = NULL"
+            " WHERE id = ? AND lease_token = ? AND status IN ('running', 'cancelling')"
+            " RETURNING status",
+            (iso(utcnow()), job_id, token),
+        ).fetchone()
+        if row is None:
+            raise LeaseLost(f"ジョブ {job_id} のリースを失っている")
+        return row["status"]
 
     def request_cancel(self, job_id: str) -> bool:
         """queued は即 cancelled、running だけ cancelling にする.
@@ -4761,17 +4876,26 @@ class JobRunner:
         self._poll_interval = poll_interval
         self._handlers: dict[str, Handler] = {}
         self._stopping = asyncio.Event()
+        self._poll_store: JobStore | None = None
+        self._current: JobContext | None = None
 
     def register(self, job_type: str, handler: Handler) -> None:
         self._handlers[job_type] = handler
 
     async def stop(self) -> None:
-        """降りるよう伝える. 実際に終わるのは run_forever() の完了時."""
+        """降りるよう伝える. 実際に終わるのは `run_forever()` の完了時.
+
+        走っているジョブにはキャンセルを要求する。要求しないと、ハンドラは
+        `ctx.cancelled()` が偽のまま最後まで走り、停止が「待つだけ」になる。
+        """
         self._stopping.set()
+        current, store = self._current, self._poll_store
+        if current is not None and store is not None:
+            await asyncio.to_thread(store.request_cancel, current.job_id)
 
     async def run_forever(self) -> None:
         poller = self._database.connect()
-        poll_store = JobStore(poller)
+        self._poll_store = poll_store = JobStore(poller)
         try:
             while not self._stopping.is_set():
                 ctx = await asyncio.to_thread(poll_store.claim_next)
@@ -4785,6 +4909,7 @@ class JobRunner:
                     continue
                 await self._run_one(ctx, poll_store)
         finally:
+            self._poll_store = None
             poller.close()
 
     async def _run_one(self, ctx: JobContext, poll_store: JobStore) -> None:
@@ -4800,6 +4925,7 @@ class JobRunner:
         store = JobStore(conn)
         # ハンドラの中の JobStore と ArtifactPublisher を同じ接続に揃える。
         ctx = replace(ctx, _store=store)
+        self._current = ctx
         try:
             await asyncio.to_thread(handler, ctx, conn)
         except Exception as exc:  # noqa: BLE001 - どのジョブが落ちてもワーカーは生かす
@@ -4807,14 +4933,13 @@ class JobRunner:
             store.finish(ctx.job_id, ctx.lease_token, "failed", str(exc))
             return
         finally:
-            if not conn.in_transaction:
-                conn.close()
-            else:  # pragma: no cover - 取りこぼしの検出用
+            self._current = None
+            if conn.in_transaction:  # pragma: no cover - 取りこぼしの検出用
                 logger.error("ジョブ %s がトランザクションを開いたまま終わった", ctx.job_id)
                 conn.execute("ROLLBACK")
-                conn.close()
-        status = "cancelled" if poll_store.get(ctx.job_id)["status"] == "cancelling" else "succeeded"
-        poll_store.finish(ctx.job_id, ctx.lease_token, status)
+            conn.close()
+        # 状態の読み出しと決着を分けると、その間の cancel が上書きされる。
+        poll_store.finish_claimed(ctx.job_id, ctx.lease_token)
 ```
 
 - [ ] **Step 4: テストが通ることを確認する**
@@ -5864,7 +5989,12 @@ class ArtifactPublisher:
         self._checkpoint(STEP_WRITING_ROW)
 
         # 2. 書き込み。SHA-1 はストリームで取る。
-        staging_abs.parent.mkdir(parents=True, exist_ok=True)
+        #    ジョブ用ディレクトリを新しく作ったときは、その名前を持つ親
+        #    （staging/）も fsync する。中のファイルだけ永続化しても、
+        #    <job-id> のエントリが失われれば丸ごと消える。
+        if not staging_abs.parent.exists():
+            staging_abs.parent.mkdir(parents=True, exist_ok=True)
+            fsync_dir(staging_abs.parent.parent)
         with staging_abs.open("wb") as fileobj:
             writer = HashingWriter(fileobj)
             write(writer)
@@ -6092,10 +6222,9 @@ class ArtifactPublisher:
 def _collision_stamp(mtime_ns: int) -> str:
     """衝突時の別名に使う、カード上の壁時計.
 
-    exFAT はローカル時刻を保持し、カーネルはそれをオフセット 0 として epoch に
-    するので、epoch を UTC で描画したものがカード上の壁時計になる。
-    プロファイルの `timezone` を付けても表示される桁は変わらない
-    （オフセットの付与は瞬間を移動しない）。
+    `timestamps.py` と同じ前提に立つ（カードの時刻欄に UTC オフセットが
+    書かれていない）。その前提の下では、プロファイルの `timezone` を付けても
+    表示される桁は変わらない（オフセットの付与は瞬間を移動しない）。
     """
     return datetime.fromtimestamp(mtime_ns / 1e9, tz=UTC).strftime("%Y%m%d%H%M%S")
 
@@ -6555,18 +6684,30 @@ def test_an_interrupted_publish_leaves_the_entry_for_reconciliation(importing, d
     ).fetchone()[0] == 0
 
 
-def test_the_copy_heartbeats_so_a_long_file_does_not_lose_its_lease(importing, db, monkeypatch):
-    """16GiB のコピーは既定のリース (60 秒) より長い."""
+def test_the_copy_heartbeats_on_elapsed_time_not_bytes(importing, db, monkeypatch):
+    """低速なカードだと、閾値バイトに達する前にリースが切れる."""
     from mediaferry.jobs import importer as importer_module
 
     importer, ctx, fd, volume_id, profile = importing
     monkeypatch.setattr(importer_module, "COPY_CHUNK", 8)
-    monkeypatch.setattr(importer_module, "HEARTBEAT_BYTES", 8)
+    monkeypatch.setattr(importer_module, "HEARTBEAT_INTERVAL", 0)
     beats = []
     monkeypatch.setattr(ctx, "heartbeat", lambda: beats.append(1))
     importer.run(ctx, fd, volume_id, profile)
     # 100 バイトを 8 バイトずつなので、ファイル単位の 1 回より多く打つ
     assert len(beats) > 2
+
+
+def test_the_copy_stops_at_a_chunk_boundary_when_cancelled(importing, db, monkeypatch):
+    """chunk 境界がキャンセルポイント（§9.9）. 見ないと 16GiB 待たされる."""
+    from mediaferry.jobs import importer as importer_module
+
+    importer, ctx, fd, volume_id, profile = importing
+    monkeypatch.setattr(importer_module, "COPY_CHUNK", 8)
+    JobStore(db).request_cancel(ctx.job_id)
+    outcome = importer.run(ctx, fd, volume_id, profile)
+    assert outcome.published == 0
+    assert db.execute("SELECT count(*) FROM media_file").fetchone()[0] == 0
 ```
 
 - [ ] **Step 2: 失敗を確認する**
@@ -6591,6 +6732,7 @@ from __future__ import annotations
 import errno
 import os
 import sqlite3
+import time
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 
@@ -6605,15 +6747,15 @@ from ..adapters.publisher import (
 from ..clock import now_iso
 from ..core.naming import library_rel_path
 from ..core.timestamps import resolve_captured_at
-from ..db.jobs import JobContext
+from ..db.jobs import LEASE_SECONDS, JobContext
 from ..db.profiles import ProfileRef
 
 COPY_CHUNK = 4 * 1024 * 1024
 # 空き容量の見積りに乗せる余裕。DB とサムネイルの分。
 FREE_SPACE_MARGIN = 512 * 1024 * 1024
-# リースは 60 秒で切れる。16GiB のコピーはそれより長くかかるので、
-# コピーの途中でも延長する。
-HEARTBEAT_BYTES = 256 * 1024 * 1024
+# リース (60 秒) の 1/3 ごとに延ばす。16GiB のコピーはリースより長く、
+# 転送速度は環境で桁が変わるので、バイト数ではなく時間で決める。
+HEARTBEAT_INTERVAL = LEASE_SECONDS / 3
 
 # カードが抜けたときに出る errno。残りを試しても同じように失敗する。
 _DEVICE_GONE = frozenset({errno.EIO, errno.ENODEV, errno.ENXIO, errno.ESTALE, errno.EBADF})
@@ -6621,6 +6763,10 @@ _DEVICE_GONE = frozenset({errno.EIO, errno.ENODEV, errno.ENXIO, errno.ESTALE, er
 
 class NotEnoughSpace(RuntimeError):
     pass
+
+
+class CopyCancelled(RuntimeError):
+    """コピーの途中でキャンセル要求を観測した."""
 
 
 class ImportFailed(RuntimeError):
@@ -6683,9 +6829,9 @@ class Importer:
             ctx.heartbeat()
             try:
                 self._publish_one(ctx, dirfd, row, profile)
-            except PublishAborted:
-                # リースを失った（キャンセル・失効）。durable なものは残って
-                # いないので差し戻す。キャンセルなら降りる。失効なら失敗。
+            except (PublishAborted, CopyCancelled):
+                # staged より前なので durable なものは残っていない。差し戻す。
+                # キャンセルなら降りる。失効なら失敗として上へ投げる。
                 self._conn.execute(
                     "UPDATE source_entry SET state = 'seen' WHERE id = ?", (row["id"],)
                 )
@@ -6755,16 +6901,20 @@ class Importer:
 
         def write(writer: HashingWriter) -> None:
             fd = open_beneath(dirfd, row["rel_path"])
-            since_heartbeat = 0
+            last_beat = time.monotonic()
             with os.fdopen(fd, "rb") as source:
                 while chunk := source.read(COPY_CHUNK):
                     writer.write(chunk)
-                    since_heartbeat += len(chunk)
-                    if since_heartbeat >= HEARTBEAT_BYTES:
-                        # 16GiB のコピーはリースより長い。延ばさないと、
-                        # 公開の直前でリース切れになって全件が中止される。
+                    # chunk 境界がキャンセルポイント（§9.9）。ここで見ないと、
+                    # 16GiB のコピーが終わるまで停止要求に応じられない。
+                    if ctx.cancelled():
+                        raise CopyCancelled(row["rel_path"])
+                    if time.monotonic() - last_beat >= HEARTBEAT_INTERVAL:
+                        # **バイト数ではなく経過時間で打つ。** 低速なカードや
+                        # read が詰まった場合、閾値バイトに達する前にリースが
+                        # 切れて全件が中止される。
                         ctx.heartbeat()
-                        since_heartbeat = 0
+                        last_beat = time.monotonic()
 
         self._publisher.publish(ctx, request, write)
 
@@ -7491,6 +7641,12 @@ git commit -m "test(mediaferry): kill the process at every publish step"
 - Modify: `mountd/src/mountd/devices.py`（sysfs から `product` を読む）
 - Modify: `protocol/tests/test_messages.py`
 - Modify: `mountd/tests/test_devices.py`
+- **Modify: 既存の `UsbInfo(...)` 呼び出しをすべて更新する。** 現在は
+  `vendor_id` / `product_id` / `serial` の 3 引数で作られている:
+  `app/tests/test_broker_client.py`、`protocol/tests/test_messages.py`、
+  `mountd/tests/test_server.py`、`mountd/tests/test_mounts.py`。
+  既定値は付けない（付けると「product を送っていない mountd」が黙って
+  通ってしまい、Phase 0 で分かった機体同定の穴が残る）
 
 **Interfaces:**
 - Consumes: なし
@@ -7873,12 +8029,69 @@ def test_the_broker_is_not_called_concurrently(db, broker):
     assert errors == []
 
 
-def test_the_same_card_keeps_its_identity_across_refreshes(db, broker):
+def test_the_same_card_keeps_its_identity_and_presence_across_refreshes(db, broker):
+    """列挙のたびに presence を増やすと、キュー投入時と実行時で別物になる."""
     svc = service(db, broker)
     first = svc.refresh()[0]
     second = svc.refresh()[0]
     assert first.volume_instance_id == second.volume_instance_id
-    assert db.execute("SELECT count(*) FROM volume_presence").fetchone()[0] == 2
+    assert first.selection == second.selection
+    assert db.execute("SELECT count(*) FROM volume_presence").fetchone()[0] == 1
+
+
+def test_a_selection_survives_intervening_refreshes(db, broker):
+    """GET /devices → scan → import の間に何度 refresh が挟まっても開ける."""
+    svc = service(db, broker)
+    selection = svc.selection_for(svc.refresh()[0].volume_instance_id)
+    svc.refresh()
+    svc.refresh()
+    handle = svc.open(selection)
+    assert "DCIM" in __import__("os").listdir(handle.dirfd)
+    svc.release(selection)
+
+
+def test_a_vanished_presence_is_detached(db, broker, monkeypatch):
+    """抜いたポートの行が live のままだと、同一 identity の同時接続を誤検出する."""
+    svc = service(db, broker)
+    svc.refresh()
+    monkeypatch.setattr(broker, "list_volumes", list)
+    svc.refresh()
+    assert db.execute(
+        "SELECT count(*) FROM volume_presence WHERE detached_at IS NULL"
+    ).fetchone()[0] == 0
+
+
+def test_reinserting_into_another_port_does_not_pin_confidence_low(db, broker, monkeypatch):
+    """抜いて別ポートへ挿し直したカードが、以後ずっと low のままにならない."""
+    svc = service(db, broker)
+    svc.refresh()
+    svc.refresh()
+    original = broker.list_volumes
+
+    def moved():
+        return [
+            type(v)(**{**v.__dict__, "major": 8, "minor": 176, "volume_key": "8:176",
+                       "generation": v.generation + 1})
+            for v in original()
+        ]
+
+    monkeypatch.setattr(broker, "list_volumes", moved)
+    assert svc.refresh()[0].identity_confidence == "high"
+
+
+def test_an_unused_handle_is_retired_when_the_selection_changes(db, broker, monkeypatch):
+    svc = service(db, broker)
+    selection = svc.refresh()[0].selection
+    svc.open(selection)
+    svc.release(selection)
+    original = broker.list_volumes
+    monkeypatch.setattr(
+        broker,
+        "list_volumes",
+        lambda: [type(v)(**{**v.__dict__, "generation": v.generation + 1}) for v in original()],
+    )
+    svc.refresh()
+    assert svc.opened() == []
 
 
 def test_trust_is_recorded_and_reported(db, broker):
@@ -7918,6 +8131,7 @@ size_bytes) で引くが、これは識別子ではなく推測である。
 from __future__ import annotations
 
 import sqlite3
+from collections.abc import Sequence
 
 from ..clock import now_iso
 from ..ids import new_id
@@ -7971,7 +8185,27 @@ def upsert_volume(conn: sqlite3.Connection, volume, device_id: str | None) -> st
     return volume_id
 
 
-def record_presence(conn: sqlite3.Connection, volume_instance_id: str, volume) -> str:  # noqa: ANN001
+def sync_presence(conn: sqlite3.Connection, volume_instance_id: str, volume) -> str:  # noqa: ANN001
+    """観測した接続を 1 行に対応させる. 列挙のたびに増やさない.
+
+    増やすと、キューに積んだときの `presence_id` と実行時のそれが別物になり、
+    同じカードが挿さったままでも `StaleSelection` になる。
+    """
+    key = (
+        volume_instance_id, volume.broker_epoch, volume.generation, volume.major, volume.minor
+    )
+    row = conn.execute(
+        "SELECT id FROM volume_presence WHERE volume_instance_id = ? AND broker_epoch = ?"
+        " AND generation = ? AND major = ? AND minor = ?",
+        key,
+    ).fetchone()
+    if row is not None:
+        conn.execute(
+            "UPDATE volume_presence SET detached_at = NULL, device_node = ?, sysfs_path = ?"
+            " WHERE id = ?",
+            (volume.device_node, volume.sysfs_path, row["id"]),
+        )
+        return row["id"]
     presence_id = new_id()
     conn.execute(
         "INSERT INTO volume_presence (id, volume_instance_id, broker_epoch, generation,"
@@ -7981,6 +8215,22 @@ def record_presence(conn: sqlite3.Connection, volume_instance_id: str, volume) -
          volume.device_node, volume.major, volume.minor, volume.sysfs_path, now_iso()),
     )
     return presence_id
+
+
+def detach_absent(conn: sqlite3.Connection, seen_presence_ids: Sequence[str]) -> int:
+    """今回の観測に無い live な接続に detached_at を立てる.
+
+    立てないと、抜いたポートの行が永久に live のままになり、
+    「同一 identity の同時接続」を誤検出して確度が上がらなくなる。
+    """
+    placeholders = ",".join("?" * len(seen_presence_ids))
+    condition = f" AND id NOT IN ({placeholders})" if seen_presence_ids else ""
+    cursor = conn.execute(
+        f"UPDATE volume_presence SET detached_at = ?"  # noqa: S608
+        f" WHERE detached_at IS NULL{condition}",
+        (now_iso(), *seen_presence_ids),
+    )
+    return cursor.rowcount
 ```
 
 `app/src/mediaferry/jobs/volumes.py`:
@@ -8008,7 +8258,7 @@ from ..clock import now_iso
 from ..core.manifest import content_manifest_digest
 from ..core.profiles.matching import VolumeFacts, resolve_profile
 from ..db.profiles import ProfileRegistry
-from ..db.sources import record_presence, upsert_device, upsert_volume
+from ..db.sources import detach_absent, sync_presence, upsert_device, upsert_volume
 
 # manifest に含める名前の上限。数万件のカードで全件読まない。
 MANIFEST_LIMIT = 500
@@ -8075,15 +8325,37 @@ class VolumeService:
         self._lock = threading.RLock()
 
     def refresh(self) -> list[VolumeView]:
+        """今この場にあるものを 1 つのスナップショットとして DB に反映する.
+
+        観測した接続を upsert し、**消えた接続に detached_at を立てる**。
+        列挙のたびに行を増やすと、キュー投入時の presence と実行時のそれが
+        別物になり、同じカードが挿さったままでも stale と判定される。
+        """
         with self._lock:
             views = []
+            seen: list[str] = []
             definitions = [ref.definition for ref in self._registry.active()]
             for volume in self._client.list_volumes():
                 device_id = upsert_device(self._conn, volume.usb)
                 volume_id = upsert_volume(self._conn, volume, device_id)
-                presence_id = record_presence(self._conn, volume_id, volume)
+                presence_id = sync_presence(self._conn, volume_id, volume)
+                seen.append(presence_id)
                 views.append(self._probe(volume, volume_id, presence_id, definitions))
+            detach_absent(self._conn, seen)
+            self._retire_stale_handles({view.selection for view in views if view.selection})
             return views
+
+    def _retire_stale_handles(self, live: set[VolumeSelection]) -> None:
+        """使われていない handle のうち、選択が変わったものを閉じる.
+
+        抜き差し後に古い detached mount の dirfd を新しいジョブが掴まない
+        ようにする。参照中のものは触らない（ジョブが読んでいる最中）。
+        """
+        for volume_instance_id, held in list(self._open.items()):
+            if held.refs == 0 and held.selection not in live:
+                del self._open[volume_instance_id]
+                with contextlib.suppress(Exception):
+                    self._client.close_volume(held.handle)
 
     def _probe(self, volume, volume_id, presence_id, definitions) -> VolumeView:  # noqa: ANN001
         remembered = self._conn.execute(
@@ -8196,10 +8468,20 @@ class VolumeService:
 
     # ------------------------------------------------------------------
     def selection_for(self, volume_instance_id: str) -> VolumeSelection:
-        for view in self.refresh():
-            if view.volume_instance_id == volume_instance_id and view.selection is not None:
-                return view.selection
-        raise StaleSelection(f"ボリューム {volume_instance_id} は今この場に無い")
+        matches = [
+            view.selection
+            for view in self.refresh()
+            if view.volume_instance_id == volume_instance_id and view.selection is not None
+        ]
+        if not matches:
+            raise StaleSelection(f"ボリューム {volume_instance_id} は今この場に無い")
+        if len(matches) > 1:
+            # 同じ identity のカードが 2 枚同時に挿さっている。どちらを指した
+            # のか決められないので、勝手に選ばない（§8 の presence 分離の趣旨）。
+            raise StaleSelection(
+                "同じ識別子のボリュームが複数接続されている。どれを操作するか決められない"
+            )
+        return matches[0]
 
     def open(self, selection: VolumeSelection) -> VolumeHandle:
         """選択した瞬間の接続と同じものだけを開く.
@@ -8408,6 +8690,11 @@ git commit -m "feat(mediaferry): register volumes and resolve their profiles"
 `asyncio.to_thread` で走っているハンドラは `task.cancel()` では止まらない。
 待たずに `close_all()` や `conn.close()` を呼ぶと、コピーの途中の
 バックグラウンドスレッドから見て dirfd と DB が突然消える。
+
+**待ち時間に timeout を付けて worker を cancel してもいけない。** ハンドラの
+スレッドは止まらないのに coroutine 側の `finally` だけが走り、同じことが起きる。
+`runner.stop()` が走っているジョブにキャンセルを要求し、ハンドラは
+`ctx.cancelled()` を見て降りる。猶予を超えた場合はコンテナの SIGKILL に委ねる。
 
 - [ ] **Step 1: 失敗するテストを書く**
 
@@ -8651,9 +8938,6 @@ from .routes_system import router as system_router
 logger = logging.getLogger(__name__)
 
 
-SHUTDOWN_GRACE_SECONDS = 30
-
-
 @dataclass
 class AppState:
     database: Database
@@ -8714,16 +8998,17 @@ def create_app(
         try:
             yield
         finally:
-            # 走っているジョブに降りるよう伝え、実際に終わるのを待ってから
-            # 資源を閉じる。to_thread のハンドラは cancel では止まらない。
+            # 走っているジョブにキャンセルを要求し、**実際に終わるまで待つ**。
+            #
+            # ここで timeout を付けて worker を cancel してはいけない。
+            # `to_thread` のハンドラはそれでは止まらないのに、coroutine 側の
+            # finally だけが走って、まだ読み書きしている接続を閉じてしまう。
+            # 猶予を超えた場合はコンテナの SIGKILL に委ねる（プロセスごと
+            # 終わるので、中途半端に資源を剥がすより安全）。
             await runner.stop()
-            try:
-                await asyncio.wait_for(worker, timeout=SHUTDOWN_GRACE_SECONDS)
-            except TimeoutError:
-                logger.warning("ジョブが猶予内に終わらなかった。プロセス終了に任せる")
-            else:
-                volumes.close_all()
-                volumes_conn.close()
+            await worker
+            volumes.close_all()
+            volumes_conn.close()
 
     app = FastAPI(title="mediaferry", lifespan=lifespan)
     app.include_router(system_router, prefix="/api")
@@ -9224,6 +9509,19 @@ git commit -m "feat(mediaferry): expose scan and import over a loopback api"
 9. 同名で内容の違うファイルを `library/` に置いてから取り込み、既存が
    上書きされず別名が付く
 10. `POST /api/volumes/{id}/close` の後にカードを安全に抜ける
+11. **mtime の解釈を実測する。** DJI のファイル名は壁時計そのものなので、
+    同じファイルについて次の 2 つが一致するかを見る。
+
+    ```bash
+    ls /path/to/DCIM/DJI_001
+    TZ=UTC stat -c '%y %n' /path/to/DCIM/DJI_001/DJI_20260817143000_0001_D.MP4
+    ```
+
+    一致すれば、カードの時刻欄に UTC オフセットが書かれていない（または 0）
+    ことの確認になり、`timestamps.py` と `_collision_stamp` の前提が成り立つ。
+    **一致しなければ**、その機種は `OffsetFromUtc` を書いているので、
+    mtime の壁時計をプロファイルの timezone で描画する形へ変える。
+    結果は `phase0-findings.md` に 1 件として残す
 
 - [ ] **Step 3: README と設計仕様書を更新する**
 
@@ -9327,10 +9625,27 @@ Task 7〜12・15・16・22 は互いに独立で、Task 1 の後ならいつで�
 | `missing_at` が一度立つと復元しても消えなかった | Task 20 で `_sync_missing` にして復帰も扱う |
 | 衝突時の同内容判定が SHA-1 だけだった | Task 17 で大きさと SHA-1 の両方を比較 |
 
+### 2 巡目（blocker 3 / major 7 / minor 1）で反映した指摘
+
+1 巡目の修正で新しく入れた接続・presence・停止の実装に、実行時の破綻があった。
+
+| 指摘 | 反映先 |
+| --- | --- |
+| **接続を分けたのに `check_same_thread` を戻さなかった。** `to_thread` はどの worker で走るか保証しないので、最初の `claim_next` で `ProgrammingError` になる | Task 1 で `check_same_thread=False` に戻し、**危険なのはフラグではなく共有そのもの**だとコメントに残した。別スレッドで作って使うテストを追加 |
+| **`record_presence` が列挙のたびに行を増やしていた。** `selection_for` が内部で refresh するので、GET /devices → scan → import の間に presence_id が変わり、**同じカードが挿さったままでも必ず `StaleSelection`** になる | Task 3 に `UNIQUE(volume_instance_id, broker_epoch, generation, major, minor)`。Task 23 を `sync_presence` + `detach_absent` のスナップショット反映にし、参照 0 で選択の変わった handle を retire。refresh を挟んでも scan → import できるテストを追加 |
+| **停止の timeout が worker を cancel し、使用中の接続を閉じていた。** `to_thread` のハンドラは止まらないのに coroutine 側の `finally` だけが走る。しかも `stop()` は走っているジョブに cancel を要求していなかった | Task 14 の `stop()` が現在のジョブへ cancel を要求。Task 24 は timeout を付けずに完了を待つ（猶予超過は SIGKILL に委ねる）。Task 19 はコピーの chunk 境界で cancel を見る |
+| ハンドラ完了と cancel の間に TOCTOU。`get()` で読んでから `finish()` するので、間に入った cancel が succeeded で上書きされる | Task 14 に `finish_claimed`（`running→succeeded` / `cancelling→cancelled` を 1 文の CAS で決める） |
+| `volume_presence` に `detached_at` を立てる経路が無く、抜いたポートの行が永久に live。同一 identity の同時接続を誤検出して確度が上がらない | Task 23 の `detach_absent`。別ポートへ挿し直しても `high` に戻るテストを追加 |
+| `staging/<job-id>` を作ったとき、その名前を持つ `staging/` 側を fsync していない | Task 17 で、ジョブ用ディレクトリを新規作成したときだけ親も fsync |
+| epoch の guard が INSERT だけで、UPDATE で迂回できた | Task 5 に同一性 3 欄の不変トリガ |
+| `merge_member.active` の guard が INSERT と `UPDATE OF active` だけで、親の付け替えで迂回できた | Task 4 で `active` を親の状態の写しとして両方向に強制 |
+| heartbeat をバイト数で決めると、低速なカードでは最初の 1 回の前にリースが切れる | Task 19 で経過時間（リースの 1/3）に変更 |
+| `UsbInfo.product` を必須にすると既存の fixture が `TypeError` で壊れる | Task 22 の Files に既存 4 ファイルを明記（既定値は付けない） |
+
 ### 退けた指摘
 
 | 指摘 | 判断 |
 | --- | --- |
-| 衝突名の壁時計が「profile timezone ではなく UTC」なので Asia/Tokyo のカードで 9 時間ずれる | **ずれない。** exFAT はローカル時刻を保持し、カーネルはオフセット 0 で epoch にするので、epoch を UTC で描画したものがカード上の壁時計になる。プロファイルの `timezone` を付けても表示される桁は変わらない（オフセットの付与は瞬間を移動しない）。§6 の `force_offset` も同じ前提に立っている。ただし「staged の metadata に永続化して、再開時に再計算しない」という提案自体は正しいので、そちらは採用した |
+| 衝突名の壁時計が「profile timezone ではなく UTC」なので Asia/Tokyo のカードで 9 時間ずれる | **条件付きで退けた。** オフセットの付与は瞬間を移動しないので、桁は変わらない。ただし再指摘のとおり、この主張が成り立つのは**カードの時刻欄に UTC オフセットが書かれていない場合に限る**。Linux の exfat ドライバは `OffsetFromUtc` の valid bit が立っていればそれで UTC へ変換する（`fs/exfat/misc.c`）。DJI のファイル名は壁時計そのものなので実機で確かめられる。実測を `phase1-manual-checklist.md` の 11 番に入れ、一致しない機種が出たら profile timezone で描画する形へ変えると明記した。「staged の metadata に永続化して再開時に再計算しない」という提案は採用済み |
 
 
