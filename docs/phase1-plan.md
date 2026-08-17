@@ -3091,6 +3091,10 @@ def test_a_filename_source_needs_a_pattern_and_a_format():
     ts = a_definition()["timestamp"] | {"pattern": None}
     with pytest.raises(ProfileInvalid, match="pattern"):
         parse_definition(a_definition(timestamp=ts))
+    # format が無いと、取り出した ts をどう読むかが決まらない
+    ts = a_definition()["timestamp"] | {"format": None}
+    with pytest.raises(ProfileInvalid, match="format"):
+        parse_definition(a_definition(timestamp=ts))
 
 
 def test_the_pattern_must_capture_ts():
@@ -3110,6 +3114,23 @@ def test_json_round_trip_is_stable():
     once = definition_to_json(defn)
     assert parse_definition(json.loads(once)) == defn
     assert definition_to_json(parse_definition(json.loads(once))) == once
+
+
+def test_the_json_keys_are_sorted_at_every_level():
+    """リビジョンの差分検出に使うので、順序は内容だけで決まる必要がある.
+
+    dataclass のフィールドを並べ替えただけで JSON が変わると、中身が同じ
+    プロファイルが変更扱いになって無意味なリビジョンが増える。
+    """
+    loaded = json.loads(definition_to_json(parse_definition(a_definition())))
+
+    def assert_sorted(node):
+        if isinstance(node, dict):
+            assert list(node) == sorted(node)
+            for value in node.values():
+                assert_sorted(value)
+
+    assert_sorted(loaded)
 
 
 def test_the_builtin_dji_profile_is_valid_and_has_no_local_timezone():
@@ -3236,8 +3257,11 @@ class ProfileDefinition:
 
 
 def parse_definition(data: Mapping[str, Any]) -> ProfileDefinition:
-    _reject_unknown(data, {"slug", "name", "hints", "require", "scan", "timestamp",
-                           "merge", "immich"}, "profile")
+    _reject_unknown(
+        data,
+        {"slug", "name", "hints", "require", "scan", "timestamp", "merge", "immich"},
+        "profile",
+    )
     slug = _string(data, "slug")
     if not _SLUG_RE.match(slug):
         raise ProfileInvalid(f"slug は英小文字・数字・ハイフンのみ: {slug}")
@@ -3353,7 +3377,9 @@ def _parse_scan(data: Mapping[str, Any]) -> ScanRule:
 
 def _parse_timestamp(data: Mapping[str, Any]) -> TimestampRule:
     _reject_unknown(
-        data, {"source", "pattern", "format", "fallback", "timezone_policy", "timezone"}, "timestamp"
+        data,
+        {"source", "pattern", "format", "fallback", "timezone_policy", "timezone"},
+        "timestamp",
     )
     source = _string(data, "source")
     if source not in _TIMESTAMP_SOURCES:
@@ -3402,8 +3428,14 @@ def _parse_keep_streams(data: Mapping[str, Any]) -> KeepStreams:
 def _parse_merge(data: Mapping[str, Any]) -> MergeRule:
     _reject_unknown(
         data,
-        {"enabled", "tolerance_seconds", "min_part_size_gib", "sequence_pattern",
-         "output_name", "keep_streams"},
+        {
+            "enabled",
+            "tolerance_seconds",
+            "min_part_size_gib",
+            "sequence_pattern",
+            "output_name",
+            "keep_streams",
+        },
         "merge",
     )
     output_name = _string(data, "output_name")
@@ -3478,6 +3510,7 @@ immich:
 YAML をホイールに含めるため `app/pyproject.toml` の `force-include` に追記する:
 
 ```toml
+# .sql と .yaml はソースディストリビューションから漏れやすい。明示的に含める。
 [tool.hatch.build.targets.wheel.force-include]
 "src/mediaferry/db/migrations" = "mediaferry/db/migrations"
 "src/mediaferry/core/profiles/builtin" = "mediaferry/core/profiles/builtin"

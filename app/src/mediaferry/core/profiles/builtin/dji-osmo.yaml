@@ -1,0 +1,43 @@
+# DJI Osmo Pocket 系。SD カードと内蔵ストレージの両方が同じ形をしている。
+slug: dji-osmo
+name: DJI Osmo Pocket
+hints:
+  # 候補の順位付けにのみ使う。単独では確定しない。
+  usb_ids: ["2ca3:*"]
+  volume_labels: ["SD_Card", "Pocket4"]
+require:
+  roots: ["DCIM", "PANORAMA"]
+  filename_pattern: '^DJI_\d{14}_\d{4}_D\.(MP4|JPG)$'
+  min_matching_files: 1
+scan:
+  roots: ["DCIM", "PANORAMA"]
+  # .LRF はここに無いので取り込まれない。
+  extensions: ["MP4", "JPG"]
+timestamp:
+  source: filename
+  pattern: '^DJI_(?P<ts>\d{14})_'
+  format: "%Y%m%d%H%M%S"
+  # PANO_0001.JPG のように pattern に当たらないファイルがある。
+  fallback: mtime
+  # DJI は creation_time を UTC で書きつつオフセットも GPS も書かないので、
+  # Immich が撮影地の TZ を判定できない。壁時計にオフセットを付けて書き戻す。
+  timezone_policy: force_offset
+  # 地域固定の値は持たない。MEDIAFERRY_DEFAULT_TIMEZONE か画面で与える。
+  timezone: null
+merge:
+  enabled: true
+  tolerance_seconds: 5
+  # ~16GiB での自動分割を「分割」と「連続した別録画」の区別に使う。
+  min_part_size_gib: 15
+  sequence_pattern: '_(?P<seq>\d{4})_D$'
+  output_name: "DJI_{ts}_{first_seq}-{last_seq}_MERGED.MP4"
+  keep_streams:
+    video: primary
+    audio: all
+    timecode: true
+    # djmd / dbgi は Immich が使わない。落として転送量を減らす。
+    data: false
+immich:
+  tags: ["DJI Osmo Pocket 4"]
+  tag_pre_existing: true
+  fix_datetime_after_upload: true
