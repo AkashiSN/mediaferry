@@ -35,8 +35,9 @@ import os
 import resource
 import sys
 import time
+from collections.abc import Iterator
 from pathlib import Path
-from typing import Any
+from typing import IO, Any
 
 import httpx
 
@@ -49,7 +50,8 @@ DEFAULT_MIN_SIZE_GIB = 31.0
 
 
 def sha1_of(path: Path) -> bytes:
-    h = hashlib.sha1()
+    # S324: Immich のプロトコルが SHA-1 を要求する。暗号用途ではない。
+    h = hashlib.sha1()  # noqa: S324
     with path.open("rb") as f:
         while chunk := f.read(CHUNK):
             h.update(chunk)
@@ -76,7 +78,7 @@ class CountingReader:
     数えて、ファイルサイズと一致することを必須条件にする。
     """
 
-    def __init__(self, fh) -> None:
+    def __init__(self, fh: IO[bytes]) -> None:
         self._fh = fh
         self.bytes_read = 0
 
@@ -85,7 +87,7 @@ class CountingReader:
         self.bytes_read += len(chunk)
         return chunk
 
-    def __iter__(self):
+    def __iter__(self) -> Iterator[bytes]:
         while chunk := self.read(CHUNK):
             yield chunk
 
@@ -235,8 +237,7 @@ def main() -> int:
         print(f"\nPOST /api/assets -> {r.status_code} ({elapsed:.1f}s)")
         print(f"送信バイト数: {reader.bytes_read} / {size}")
         print(f"スループット: {human(size / max(elapsed, 1e-9))}/s")
-        print(f"RSS: baseline={human(baseline_rss)} peak={human(peak_rss)} "
-              f"増分={human(delta_rss)}")
+        print(f"RSS: baseline={human(baseline_rss)} peak={human(peak_rss)} 増分={human(delta_rss)}")
         print(f"応答: {r.text[:1000]}")
 
         cap = min(MEMORY_CAP_BYTES, size // 10)
@@ -251,33 +252,46 @@ def main() -> int:
             g = client.get(f"/api/assets/{asset_id}")
             asset = g.json() if g.status_code == 200 else {}
             got_size = remote_size_of(asset)
-            print(f"GET /api/assets/{{id}} -> {g.status_code} "
-                  f"type={asset.get('type')} remote_size={got_size}")
-            checks.append(("アップロード後に資産を取得できた", g.status_code == 200,
-                           f"status={g.status_code}"))
-            checks.append((
-                "サーバ側のサイズが入力と一致する",
-                got_size == size,
-                f"remote={got_size} local={size}"
-                + ("" if got_size is not None else " (サイズ欄が無い。対象版のフィールド名を要確認)"),
-            ))
+            print(
+                f"GET /api/assets/{{id}} -> {g.status_code} "
+                f"type={asset.get('type')} remote_size={got_size}"
+            )
+            checks.append(
+                (
+                    "アップロード後に資産を取得できた",
+                    g.status_code == 200,
+                    f"status={g.status_code}",
+                )
+            )
+            checks.append(
+                (
+                    "サーバ側のサイズが入力と一致する",
+                    got_size == size,
+                    f"remote={got_size} local={size}"
+                    + (
+                        ""
+                        if got_size is not None
+                        else " (サイズ欄が無い。対象版のフィールド名を要確認)"
+                    ),
+                )
+            )
         else:
             checks.append(("アップロード後に資産を取得できた", False, "asset id 不明"))
             checks.append(("サーバ側のサイズが入力と一致する", False, "asset id 不明"))
 
         if args.cleanup and asset_id:
-            d = client.request(
-                "DELETE", "/api/assets", json={"ids": [asset_id], "force": True}
-            )
+            d = client.request("DELETE", "/api/assets", json={"ids": [asset_id], "force": True})
             print(f"DELETE /api/assets -> {d.status_code}")
             post = bulk_outcome(client, f"post-delete-{digest.hex()[:8]}", bulk_sum)
             print(f"bulk-upload-check (削除後) -> {post}")
             checks.append(("後片付けが成功した", d.status_code < 300, f"status={d.status_code}"))
-            checks.append((
-                "削除後は再び accept になる",
-                post["outcome"] == "accept",
-                str(post["outcome"]),
-            ))
+            checks.append(
+                (
+                    "削除後は再び accept になる",
+                    post["outcome"] == "accept",
+                    str(post["outcome"]),
+                )
+            )
         elif asset_id:
             print(f"注意: 資産 {asset_id} が残っています。--cleanup で削除できます")
 

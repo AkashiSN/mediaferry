@@ -218,8 +218,10 @@ def probe_identity(
         results,
         "識別子が再起動をまたいで安定している",
         bool(stable),
-        f"一致={stable} 変化={ {k: (previous.get(k), v) for k, v in found.items() if k not in stable} }",
+        f"一致={stable} "
+        f"変化={ {k: (previous.get(k), v) for k, v in found.items() if k not in stable} }",
     )
+
 
 def probe_upload_cycle(
     client: httpx.Client, results: dict[str, bool], cleanup: bool, sample: Path | None
@@ -233,7 +235,8 @@ def probe_upload_cycle(
         blob = make_unique_png()
         filename, content_type = f"mediaferry-probe-{run_id}.png", "image/png"
 
-    digest = hashlib.sha1(blob).digest()
+    # S324: Immich のプロトコルが SHA-1 を要求する。暗号用途ではない。
+    digest = hashlib.sha1(blob).digest()  # noqa: S324
     hex_sum = digest.hex()
     b64_sum = base64.b64encode(digest).decode()
     device_asset_id = f"mediaferry:probe:{run_id}"
@@ -242,8 +245,10 @@ def probe_upload_cycle(
     print(f"sha1 base64= {b64_sum}")
 
     # アップロード前は存在しないはず。unknown を PASS にしない。
-    before = {enc: bulk_check(client, f"pre-{run_id}", val)
-              for enc, val in (("hex", hex_sum), ("base64", b64_sum))}
+    before = {
+        enc: bulk_check(client, f"pre-{run_id}", val)
+        for enc, val in (("hex", hex_sum), ("base64", b64_sum))
+    }
     show("bulk-upload-check (アップロード前)", before)
     bulk_encodings = [enc for enc, v in before.items() if v["outcome"] == "accept"]
     check(
@@ -302,13 +307,13 @@ def probe_upload_cycle(
 
     # アップロード後は reject として、その資産 ID が返るはず。
     # これが返らないと「サーバ成功・ローカル未記録」から再開できない。
-    after = {enc: bulk_check(client, f"post-{run_id}", val)
-             for enc, val in (("hex", hex_sum), ("base64", b64_sum))}
+    after = {
+        enc: bulk_check(client, f"post-{run_id}", val)
+        for enc, val in (("hex", hex_sum), ("base64", b64_sum))
+    }
     show("bulk-upload-check (アップロード後)", after)
     matched = [
-        enc
-        for enc, v in after.items()
-        if v["outcome"] == "reject" and v.get("assetId") == asset_id
+        enc for enc, v in after.items() if v["outcome"] == "reject" and v.get("assetId") == asset_id
     ]
     check(
         results,
