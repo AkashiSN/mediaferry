@@ -18,6 +18,9 @@
 - Python は `>=3.12`。ruff の `line-length = 100`、`target-version = "py312"`、
   lint は `select = ["E", "F", "I", "UP", "B", "SIM", "ANN", "S"]`（`ANN401` のみ ignore）。
   `**/tests/*` は `S101` と `ANN` が免除される。
+  **`docs/` は ruff の対象外**（`extend-exclude = ["docs"]`）。ruff は Markdown の
+  コードブロックも整形するので、除外しないと仕様書と実装計画そのものが書き換わる。
+  この計画に載っている Python はすべて ruff を通した形で書いてある。
 - すべてのモジュールは `from __future__ import annotations` で始める（既存コードの作法）。
 - **コメントと docstring は日本語。**「いま書かれているコードを現在形で説明する」だけを書く。
   過去の経緯（「以前は〜だった」「〜へ移行した」）はコードに書かず、`docs/` に残す
@@ -111,6 +114,8 @@ Phase 1 で作る／触るファイルと、それぞれの責務。
 - Create: `app/src/mediaferry/db/migrate.py`
 - Create: `app/src/mediaferry/db/migrations/__init__.py`
 - Create: `app/tests/conftest.py`
+- Modify: `app/pyproject.toml`（SQL をホイールに含める）
+- Modify: `pyproject.toml`（ruff から `docs/` を除外する）
 - Test: `app/tests/test_db_migrate.py`
 
 **Interfaces:**
@@ -278,9 +283,7 @@ def test_a_failing_migration_leaves_no_partial_schema(tmp_path, monkeypatch):
     with pytest.raises(sqlite3.OperationalError):
         apply_migrations(conn)
     assert conn.in_transaction is False
-    assert conn.execute(
-        "SELECT count(*) FROM sqlite_master WHERE name = 'ok'"
-    ).fetchone()[0] == 0
+    assert conn.execute("SELECT count(*) FROM sqlite_master WHERE name = 'ok'").fetchone()[0] == 0
     conn.close()
 
 
@@ -304,10 +307,9 @@ def test_editing_an_applied_migration_is_refused(tmp_path, monkeypatch):
 
 def test_immediate_rolls_back_on_error(db):
     db.execute("CREATE TABLE t (x INTEGER)")
-    with pytest.raises(ValueError):
-        with immediate(db):
-            db.execute("INSERT INTO t VALUES (1)")
-            raise ValueError("boom")
+    with pytest.raises(ValueError), immediate(db):
+        db.execute("INSERT INTO t VALUES (1)")
+        raise ValueError("boom")
     assert db.execute("SELECT count(*) FROM t").fetchone()[0] == 0
 
 
@@ -318,9 +320,8 @@ def test_immediate_takes_the_write_lock_immediately(tmp_path):
     apply_migrations(a)
     b = database.connect()
     b.execute("PRAGMA busy_timeout = 0")
-    with immediate(a):
-        with pytest.raises(sqlite3.OperationalError):
-            b.execute("BEGIN IMMEDIATE")
+    with immediate(a), pytest.raises(sqlite3.OperationalError):
+        b.execute("BEGIN IMMEDIATE")
     a.close()
     b.close()
 ```
@@ -474,8 +475,8 @@ class Database:
         """
         if stat.S_IMODE(self.path.parent.stat().st_mode) != DIR_MODE:
             self.path.parent.chmod(DIR_MODE)
-        for target in (self.path, *(self.path.with_name(self.path.name + s)
-                                    for s in SIDECAR_SUFFIXES)):
+        sidecars = (self.path.with_name(self.path.name + s) for s in SIDECAR_SUFFIXES)
+        for target in (self.path, *sidecars):
             if target.exists() and stat.S_IMODE(target.stat().st_mode) != DB_MODE:
                 target.chmod(DB_MODE)
 
@@ -561,24 +562,23 @@ def apply_migrations(conn: sqlite3.Connection) -> list[int]:
 
         if _TRANSACTION_RE.search(body):
             raise MigrationError(
-                f"{path.name} が BEGIN / COMMIT を含んでいる。"
-                "トランザクションは runner が所有する"
+                f"{path.name} が BEGIN / COMMIT を含んでいる。トランザクションは runner が所有する"
             )
         _apply_one(conn, version, path.name, body, checksum)
         done.append(version)
     return done
 
 
-def _apply_one(
-    conn: sqlite3.Connection, version: int, name: str, body: str, checksum: str
-) -> None:
+def _apply_one(conn: sqlite3.Connection, version: int, name: str, body: str, checksum: str) -> None:
     """DDL と版の記録を 1 つのトランザクションで適用する.
 
-    version は int、checksum は hex、name はファイル名なので、いずれも
-    リテラルに埋めても SQL の構造を壊す文字を含まない。
+    `executescript` はプレースホルダを受け取らないので、版の記録もリテラルで
+    組み立てる。version は int、checksum は hex、name はファイル名なので、
+    いずれも SQL の構造を壊す文字を含まない。
     """
     record = (
-        "INSERT INTO schema_migration (version, name, checksum, applied_at)"
+        # executescript にプレースホルダは渡せないのでリテラルで組み立てる。
+        "INSERT INTO schema_migration (version, name, checksum, applied_at)"  # noqa: S608
         f" VALUES ({version}, '{name}', '{checksum}', datetime('now'));"
     )
     try:
