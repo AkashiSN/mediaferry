@@ -137,26 +137,64 @@ Phase 1 の Scanner は、それに加えて単一のパス構成要素だけを
 
 ## ② Immich API（仕様書 §18-3）
 
-`immich_probe.py --write --cleanup` の終了ステータス: `(要実施)` ← **一次判定**
+`immich_probe.py --write --cleanup` の終了ステータス: **0（PASS）** ← 一次判定
+全 10 命題が PASS。`RESULT: PASS — 仕様書 §18-3 は解消`
 
 | 項目 | 結果 |
 | --- | --- |
-| 対象 Immich バージョン | `(要実施)` |
-| サーバインスタンス同定に使う値 | `(要実施)`（endpoint + field。version / licensed は不可） |
-| 識別子が再起動をまたいで安定しているか | `(要実施)` |
-| 認証ユーザ ID の取得元 | `(要実施)` |
-| **`x-immich-checksum` の encoding** | `(要実施)`（Task 10 に渡す） |
-| **`bulk-upload-check` の checksum encoding** | `(要実施)`（ヘッダと異なりうる） |
-| `bulk-upload-check` の action 語彙 | `(要実施)` |
-| `bulk-upload-check` が既存資産 ID を返すか | `(要実施)` |
-| `deviceAssetId` の読み戻し | `(要実施)` |
-| 後片付けの成否 | `(要実施)` |
+| 対象 Immich バージョン | **v3.1.0**（sourceCommit 8aa95c6） |
+| サーバインスタンス同定に使う値 | **無い。** `/api/server/about` が返すのは version / build / sourceCommit で、いずれもリリースに紐づき同版の全サーバで一致する。`/api/server/config` にも `instanceId` は無い |
+| 転送先の同定に使う値 | **`/api/users/me#id`（認証ユーザ UUID）** |
+| 識別子が再起動をまたいで安定しているか | **可**。Immich 再起動の前後で一致 |
+| **`x-immich-checksum` の encoding** | **base64**（201 created） |
+| **`bulk-upload-check` の checksum encoding** | **hex / base64 のどちらも受理**。実装は base64 に統一する |
+| `bulk-upload-check` の action 語彙 | `accept` / `reject`。reject 時は `reason: "duplicate"`, `assetId`, `isTrashed` を伴う |
+| `bulk-upload-check` が既存資産 ID を返すか | **可**。`assetId` が返る |
+| `POST /api/assets` の応答 | `{"id": ..., "status": "created"}` |
+| `deviceAssetId` の読み戻し | **不可**。資産応答に欄が無い |
+| 後片付けの成否 | 可（DELETE → 204） |
 
-判定:
+`GET /api/assets/{id}` が返すフィールド:
 
-- `upload_destination` の同一性を何で構成するか（取れない場合の代替と移行 UX）
-- `bulk-upload-check` が資産 ID を返さない場合、§9.10 の再開設計をどう変えるか
-- `deviceAssetId` を読めない場合、既存資産の日時補正を全て手動承認にするか
+```
+checksum, createdAt, duplicateId, duration, exifInfo, fileCreatedAt,
+fileModifiedAt, hasMetadata, height, id, isArchived, isEdited, isFavorite,
+isOffline, isTrashed, libraryId, livePhotoVideoId, localDateTime,
+originalFileName, originalMimeType, originalPath, owner, ownerId, people,
+resized, stack, tags, thumbhash, type, updatedAt, visibility, width
+```
+
+クライアントが送った値で残るのは `originalFileName` だけだった。
+
+### 判定と設計への反映
+
+**A. 転送先の同定は `remote_user_id` 単独で行う**
+
+サーバインスタンス ID が無いため。`/api/users/me` の `id` は Immich の DB が
+生成する UUID で、インストールごとに異なり再起動をまたいでも変わらないことを
+実測した。`base_url` は同定に使わない（リバースプロキシやドメイン変更で変わる）。
+
+残る穴は「DB を複製した 2 台のサーバで同じユーザ UUID」だが、その場合ライブラリの
+中身も同一なので実害は小さい。同じ `remote_user_id` を以前と異なる `base_url` で
+観測したら警告を出し、同一の転送先か新しい転送先かをユーザに確認させる。
+
+**B. 自作資産の判別は `deviceAssetId` ではなく状態機械で行う**
+
+`deviceAssetId` が読み戻せないので、次の 2 つを使う。
+
+1. `POST /api/assets` の応答 `status`（`created` なら自分が作ったと確定）
+2. 初回 `checking` の結果（`upload_record.first_check_result`）。`accept` だった
+   後に `duplicate` になったなら自分のアップロードによるもの
+
+最も危険な「ユーザが手動で時刻を直した古い資産を上書きする」ケースは、初回
+`checking` が `reject` になるので `pre_existing` に分類され、自動補正の対象から
+外れる。守りたいケースは守れる。
+
+**C. checksum の encoding は base64 に統一する**
+
+`bulk-upload-check` は両方受理するが、`x-immich-checksum` は base64 で成功した。
+片方に揃えないと取り違えが起きる。Task 10 には
+`--header-checksum-encoding base64 --bulk-checksum-encoding base64` を渡す。
 
 ## ③ 巨大ファイルのアップロード（仕様書 §18-2）
 

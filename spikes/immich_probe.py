@@ -126,23 +126,33 @@ def bulk_check(client: httpx.Client, asset_id: str, checksum: str) -> dict[str, 
     return {"outcome": outcome, "assetId": item.get("assetId"), "raw": item}
 
 
-# サーバ「インスタンス」の同定候補にする (endpoint, field) の allowlist。
+# 転送先の同定候補にする (endpoint, field) の allowlist。
 #
 # 名前だけで拾うと、version 系エンドポイントの汎用的な `id`（ビルド ID や
 # 起動 ID かもしれない）まで合格してしまう。エンドポイントごとに明示する。
-# バージョンやライセンス状態は同じ版の全サーバで一致するので入れない。
-IDENTITY_CANDIDATES = (
+# バージョン・ライセンス状態・ビルド番号は同じ版の全サーバで一致するので入れない。
+#
+# サーバインスタンス ID があればそれを優先する。Immich v3.1.0 は公開していない
+# ことを実測で確認したので、無い場合は認証ユーザの UUID を使う。ユーザ UUID は
+# Immich の DB が生成するためインストールごとに異なり、再起動・更新をまたいでも
+# 変わらない。
+INSTANCE_ID_CANDIDATES = (
     ("/api/server/about", "instanceId"),
     ("/api/server/about", "serverId"),
     ("/api/server/config", "instanceId"),
-    ("/api/server/storage", "instanceId"),
 )
+
+USER_ID_CANDIDATE = ("/api/users/me", "id")
 
 IDENTITY_ENDPOINTS = ("/api/server/about", "/api/server/config", "/api/server/version")
 
 
-def collect_identity(client: httpx.Client) -> dict[str, str]:
-    """allowlist した (endpoint, field) の値を集める."""
+def collect_identity(client: httpx.Client) -> tuple[dict[str, str], dict[str, str]]:
+    """allowlist した (endpoint, field) の値を集める.
+
+    戻り値は (サーバインスタンス由来, ユーザ由来) の 2 つ。前者が空なら
+    後者を転送先の同定に使う。
+    """
     bodies: dict[str, Any] = {}
     for path in IDENTITY_ENDPOINTS:
         r = client.get(path)
@@ -150,12 +160,22 @@ def collect_identity(client: httpx.Client) -> dict[str, str]:
         if r.status_code == 200:
             bodies[path] = r.json()
             show(f"server info: {path}", bodies[path])
-    found: dict[str, str] = {}
-    for path, field in IDENTITY_CANDIDATES:
+
+    instance: dict[str, str] = {}
+    for path, field in INSTANCE_ID_CANDIDATES:
         value = bodies.get(path, {}).get(field)
         if isinstance(value, str) and value:
-            found[f"{path}#{field}"] = value
-    return found
+            instance[f"{path}#{field}"] = value
+
+    user: dict[str, str] = {}
+    path, field = USER_ID_CANDIDATE
+    r = client.get(path)
+    print(f"GET {path} -> {r.status_code}")
+    if r.status_code == 200:
+        value = r.json().get(field)
+        if isinstance(value, str) and value:
+            user[f"{path}#{field}"] = value
+    return instance, user
 
 
 def probe_identity(
@@ -172,27 +192,33 @@ def probe_identity(
     そのため 2 回目の実行と付き合わせる。
     """
     print("\n--- 1. 転送先の同定 ---")
-    found = collect_identity(client)
+    instance, user = collect_identity(client)
+    found = {**instance, **user}
     print(f"\n候補: {json.dumps(found, ensure_ascii=False, indent=2)}")
 
-    r = client.get("/api/users/me")
-    print(f"GET /api/users/me -> {r.status_code}")
-    user_id = r.json().get("id") if r.status_code == 200 else None
-    check(results, "認証ユーザ ID が取れる", bool(user_id), f"user_id={user_id!r}")
+    check(results, "認証ユーザ ID が取れる", bool(user), f"user={list(user.values())}")
 
     if identity_out is not None:
         identity_out.write_text(json.dumps(found, ensure_ascii=False, indent=2))
         print(f"候補を {identity_out} に保存しました")
 
-    if not found:
+    if instance:
+        tier = f"サーバインスタンス ID ({', '.join(instance)})"
+    elif user:
+        tier = f"認証ユーザ UUID ({', '.join(user)}) — サーバインスタンス ID は非公開"
+    else:
+        tier = None
+    print(f"\n>>> Task 11 に記録する: 転送先の同定に使う値 = {tier}")
+
+    if tier is None:
         check(
             results,
-            "サーバインスタンス固有の識別子がある",
+            "転送先を同定できる安定した値がある",
             False,
-            f"{[f'{p}#{f}' for p, f in IDENTITY_CANDIDATES]} のいずれも取れない",
+            "サーバインスタンス ID もユーザ UUID も取れない",
         )
         return
-    check(results, "サーバインスタンス固有の識別子がある", True, ", ".join(found))
+    check(results, "転送先を同定できる安定した値がある", True, tier)
 
     if baseline is None:
         if accept_unverified:
@@ -267,6 +293,7 @@ def probe_upload_cycle(
     # x-immich-checksum の encoding を探る。base64 を先に試す。
     asset_id = None
     used_header_encoding = None
+    upload_status = None
     for enc, value in (("base64", b64_sum), ("hex", hex_sum)):
         r = client.post(
             "/api/assets",
@@ -286,6 +313,7 @@ def probe_upload_cycle(
             show("upload response", created)
             asset_id = created.get("id")
             used_header_encoding = enc
+            upload_status = created.get("status")
             check(
                 results,
                 "アップロードが created として成立した",
@@ -327,12 +355,38 @@ def probe_upload_cycle(
 
     r = client.get(f"/api/assets/{asset_id}")
     print(f"GET /api/assets/{{id}} -> {r.status_code}")
-    got = r.json().get("deviceAssetId") if r.status_code == 200 else None
+    asset = r.json() if r.status_code == 200 else {}
+    # deviceAssetId が別名で残っていないかを確かめるため、資産応答の
+    # フィールド一覧を必ず出す。クライアント由来の識別子が 1 つでも残って
+    # いれば、状態機械からの推論より直接的な判別材料になる。
+    print(f"資産応答のフィールド: {sorted(asset)}")
+    client_side = {
+        k: v for k, v in asset.items()
+        if isinstance(v, str) and run_id in v
+    }
+    print(f"クライアント由来の値が残っているフィールド: {client_side or 'なし'}")
+    got = asset.get("deviceAssetId")
+    readback_works = got == device_asset_id
+    print(f"deviceAssetId の読み戻し: got={got!r} sent={device_asset_id!r}")
+
+    # 必要なのは「自分が作った資産かどうかを判別できること」であって、
+    # deviceAssetId はその手段のひとつにすぎない。アップロード応答が
+    # created と duplicate を区別できるなら、そちらで判別できる。
+    if readback_works:
+        mechanism = "deviceAssetId の読み戻し"
+    elif upload_status:
+        mechanism = (
+            f"アップロード応答の status ({upload_status!r})"
+            " + 初回 checking の結果の記録"
+        )
+    else:
+        mechanism = None
+    print(f"\n>>> Task 11 に記録する: 自作資産の判別手段 = {mechanism}")
     check(
         results,
-        "deviceAssetId を読み戻せる",
-        got == device_asset_id,
-        f"got={got!r} sent={device_asset_id!r}",
+        "自分が作った資産を判別する手段がある",
+        mechanism is not None,
+        mechanism or "deviceAssetId も応答 status も使えない",
     )
 
     if not cleanup:
