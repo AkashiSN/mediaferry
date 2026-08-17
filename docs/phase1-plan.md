@@ -898,8 +898,10 @@ def test_profile_slug_is_unique(db):
 def test_profile_revision_is_immutable(db):
     _, revision_id = a_profile(db)
     with pytest.raises(sqlite3.IntegrityError, match="immutable"):
-        db.execute("UPDATE profile_revision SET definition_json = '{\"x\":1}' WHERE id = ?",
-                   (revision_id,))
+        db.execute(
+            "UPDATE profile_revision SET definition_json = '{\"x\":1}' WHERE id = ?",
+            (revision_id,),
+        )
     with pytest.raises(sqlite3.IntegrityError, match="immutable"):
         db.execute("DELETE FROM profile_revision WHERE id = ?", (revision_id,))
 
@@ -908,8 +910,10 @@ def test_current_revision_must_belong_to_the_same_profile(db):
     first, _ = a_profile(db, slug="a")
     _, other_revision = a_profile(db, slug="b")
     with pytest.raises(sqlite3.IntegrityError):
-        db.execute("UPDATE device_profile SET current_revision_id = ? WHERE id = ?",
-                   (other_revision, first))
+        db.execute(
+            "UPDATE device_profile SET current_revision_id = ? WHERE id = ?",
+            (other_revision, first),
+        )
 
 
 def test_source_device_identity_is_the_whole_tuple(db):
