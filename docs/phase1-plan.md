@@ -4141,11 +4141,20 @@ def test_unsafe_source_paths_are_refused(path):
         safe_source_rel_path(path)
 
 
+@pytest.mark.parametrize("path", ["/etc/passwd", ""])
+def test_absolute_and_empty_paths_say_which_rule_they_broke(path):
+    """構成要素の検査でも弾けるが、そのメッセージでは原因が分からない.
+
+    API とログに出るのはこの文言なので、先頭で相対パスかどうかを見て分ける。
+    """
+    with pytest.raises(UnsafePath, match="相対パス"):
+        safe_source_rel_path(path)
+
+
 def test_the_first_candidate_is_the_plain_path():
     stamp = "20260817143005"
-    assert next(
-        candidate_paths("library/x/DCIM/A.MP4", stamp, "abcdef1234")
-    ) == "library/x/DCIM/A.MP4"
+    first = next(candidate_paths("library/x/DCIM/A.MP4", stamp, "abcdef1234"))
+    assert first == "library/x/DCIM/A.MP4"
 
 
 def test_the_series_is_deterministic():
@@ -4161,9 +4170,8 @@ def test_the_series_is_deterministic():
 
 
 def test_the_series_keeps_the_extension_and_the_directory():
-    second = list(islice(candidate_paths("derived/x/DCIM/B.tar.gz", "20260102030405", "0" * 40), 2))[
-        1
-    ]
+    series = candidate_paths("derived/x/DCIM/B.tar.gz", "20260102030405", "0" * 40)
+    second = list(islice(series, 2))[1]
     assert second == "derived/x/DCIM/B.tar_20260102030405.gz"
 
 
@@ -4255,7 +4263,14 @@ def candidate_paths(rel_path: str, stamp: str, sha1_hex: str) -> Iterator[str]:
 Run: `uv run pytest app/tests/test_naming.py -v`
 Expected: すべて PASS
 
-- [ ] **Step 5: コミット**
+- [ ] **Step 5: 変異試験**
+
+`safe_source_rel_path` の構成要素の検査を削って
+`test_unsafe_source_paths_are_refused` が落ちること、先頭の「相対パスか」の
+検査を削って `test_absolute_and_empty_paths_say_which_rule_they_broke` が
+落ちることを確認してから戻す。
+
+- [ ] **Step 6: コミット**
 
 ```bash
 git add app/src/mediaferry/core/naming.py app/tests/test_naming.py
