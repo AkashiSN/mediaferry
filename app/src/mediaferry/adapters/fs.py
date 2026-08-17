@@ -53,6 +53,16 @@ def open_beneath(dirfd: int, rel_path: str) -> int:
             os.close(fd)
 
 
+def exists_beneath(dirfd: int, rel_path: str) -> bool:
+    """dirfd の下にそのパスがあるか. 開けるかどうかで判定する."""
+    try:
+        fd = open_beneath(dirfd, rel_path)
+    except (OSError, EscapeAttempt):
+        return False
+    os.close(fd)
+    return True
+
+
 def iter_media_files(
     dirfd: int, roots: Iterable[str], extensions: Iterable[str]
 ) -> Iterator[FoundFile]:

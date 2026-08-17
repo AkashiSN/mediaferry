@@ -9,6 +9,7 @@ from __future__ import annotations
 import contextlib
 import os
 import socket
+import threading
 from dataclasses import dataclass
 from pathlib import Path
 from types import TracebackType
@@ -84,12 +85,16 @@ class BrokerClient:
         self._sock = socket.socket(socket.AF_UNIX, socket.SOCK_SEQPACKET)
         self._sock.connect(str(socket_path))
         self._handles: dict[str, VolumeHandle] = {}
+        # 要求と応答は 1 本のソケットで対応付ける。API のスレッドと
+        # ワーカーのスレッドが同時に使うと、応答を取り違える。
+        self._lock = threading.Lock()
 
     @classmethod
     def from_socket(cls, sock: socket.socket) -> BrokerClient:
         client = cls.__new__(cls)
         client._sock = sock
         client._handles = {}
+        client._lock = threading.Lock()
         return client
 
     def __enter__(self) -> Self:
@@ -117,8 +122,9 @@ class BrokerClient:
 
     # ------------------------------------------------------------------
     def _call(self, payload: dict, expect_fd: bool = False) -> tuple[dict, list[int]]:
-        send_message(self._sock, payload)
-        reply, fds = recv_message(self._sock, max_fds=1 if expect_fd else 0)
+        with self._lock:
+            send_message(self._sock, payload)
+            reply, fds = recv_message(self._sock, max_fds=1 if expect_fd else 0)
         if not reply.get("ok"):
             for fd in fds:
                 os.close(fd)

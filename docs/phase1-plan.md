@@ -8581,9 +8581,16 @@ def mount_manager(fake_card):
 
 
 @pytest.fixture
-def broker(mount_manager, tmp_path):
-    volume = VolumeInfo(
-        volume_key="8:160",
+def volumes():
+    """broker が列挙するボリューム.
+
+    テストはこのリストを書き換えて抜き差しを表す。**クライアント側だけを
+    差し替えてはいけない**。サーバは自分の lister で volume_key を引くので、
+    知らないキーを開こうとして `unknown_volume` になる（実機では起きない状態）。
+    """
+    return [
+        VolumeInfo(
+            volume_key="8:160",
         device_node="/dev/sdk",
         major=8,
         minor=160,
@@ -8598,13 +8605,18 @@ def broker(mount_manager, tmp_path):
             product="OsmoPocket4-ABC123",
             serial="123456789ABCDEF",
         ),
-        broker_epoch="",
-        generation=1,
-    )
+            broker_epoch="",
+            generation=1,
+        )
+    ]
+
+
+@pytest.fixture
+def broker(mount_manager, tmp_path, volumes):
     server = BrokerServer(
         socket_path=tmp_path / "broker.sock",
         mount_manager=mount_manager,
-        lister=lambda: [volume],
+        lister=lambda: list(volumes),
         allowed_uids=None,
     )
     client_sock, server_sock = socket.socketpair(socket.AF_UNIX, socket.SOCK_SEQPACKET)
@@ -8669,6 +8681,42 @@ def test_a_returning_card_with_a_matching_manifest_becomes_high(db, broker):
     assert svc.refresh()[0].identity_confidence == "high"
 
 
+def test_without_a_remembered_manifest_survival_alone_is_not_enough(db, broker):
+    """記憶が無いカードは、既知ファイルが残っていても high にしない（§12.1）.
+
+    残存率の判定に落ちると、manifest を一度も記録していない相手に対して
+    「前回と連続的だ」と主張することになる。
+    """
+    svc = service(db, broker)
+    view = svc.refresh()[0]
+    db.execute(
+        "INSERT INTO source_entry (id, volume_instance_id, rel_path, size_bytes, mtime_ns,"
+        " quick_fingerprint, fingerprint_version, state, observed_at)"
+        " VALUES ('e1', ?, 'DCIM/DJI_001/DJI_20260817143000_0001_D.MP4', 100, 1, 'abc', 1,"
+        " 'published', '2026-01-01T00:00:00+00:00')",
+        (view.volume_instance_id,),
+    )
+    db.execute("UPDATE volume_instance SET content_manifest_digest = NULL")
+    assert svc.refresh()[0].identity_confidence == "low"
+
+
+def test_devices_that_differ_only_by_product_are_not_merged(db, broker, volumes):
+    """Osmo の serial は機種の既定値なので、product を落とすと 2 台が 1 台になる."""
+    first = volumes[0]
+    volumes.append(
+        replace(
+            first,
+            volume_key="8:176",
+            major=8,
+            minor=176,
+            fs_uuid="AAAA-BBBB",
+            usb=replace(first.usb, product="OsmoPocket4-XYZ789"),
+        )
+    )
+    service(db, broker).refresh()
+    assert db.execute("SELECT count(*) FROM source_device").fetchone()[0] == 2
+
+
 def test_a_reformatted_card_drops_back_to_low(db, broker, fake_card):
     """UUID を保持したまま中身が入れ替わったカードを high のままにしない."""
     svc = service(db, broker)
@@ -8680,16 +8728,9 @@ def test_a_reformatted_card_drops_back_to_low(db, broker, fake_card):
     assert svc.refresh()[0].identity_confidence == "low"
 
 
-def test_a_card_without_a_uuid_is_always_low(db, broker, monkeypatch):
+def test_a_card_without_a_uuid_is_always_low(db, broker, volumes):
+    volumes[0] = replace(volumes[0], fs_uuid="")
     svc = service(db, broker)
-    original = broker.list_volumes
-
-    def anonymous():
-        return [
-            type(v)(**{**v.__dict__, "fs_uuid": ""}) for v in original()
-        ]
-
-    monkeypatch.setattr(broker, "list_volumes", anonymous)
     svc.refresh()
     assert svc.refresh()[0].identity_confidence == "low"
 
@@ -8720,8 +8761,10 @@ def test_open_and_release_manage_the_dirfd(db, broker):
     assert "DCIM" in os.listdir(handle.dirfd)
     svc.release(view.selection)
     assert svc.opened() == []
-    with pytest.raises(OSError):
-        os.listdir(handle.dirfd)
+    # os.listdir(-1) はカレントディレクトリを黙って返すので、閉じたことは
+    # 契約（closed と dirfd の無効化）で確かめる。
+    assert handle.closed is True
+    assert handle.dirfd == -1
 
 
 def test_opening_the_same_volume_twice_is_refused(db, broker):
@@ -8807,32 +8850,28 @@ def test_a_selection_survives_intervening_refreshes(db, broker):
     svc.release(selection)
 
 
-def test_a_vanished_presence_is_detached(db, broker, monkeypatch):
+def test_a_vanished_presence_is_detached(db, broker, volumes):
     """抜いたポートの行が live のままだと、同一 identity の同時接続を誤検出する."""
     svc = service(db, broker)
     svc.refresh()
-    monkeypatch.setattr(broker, "list_volumes", list)
+    volumes.clear()
     svc.refresh()
-    assert db.execute(
-        "SELECT count(*) FROM volume_presence WHERE detached_at IS NULL"
-    ).fetchone()[0] == 0
+    rows = db.execute("SELECT count(*) AS n FROM volume_presence WHERE detached_at IS NULL")
+    assert rows.fetchone()["n"] == 0
 
 
-def test_reinserting_into_another_port_does_not_pin_confidence_low(db, broker, monkeypatch):
+def test_reinserting_into_another_port_does_not_pin_confidence_low(db, broker, volumes):
     """抜いて別ポートへ挿し直したカードが、以後ずっと low のままにならない."""
     svc = service(db, broker)
     svc.refresh()
     svc.refresh()
-    original = broker.list_volumes
-
-    def moved():
-        return [
-            type(v)(**{**v.__dict__, "major": 8, "minor": 176, "volume_key": "8:176",
-                       "generation": v.generation + 1})
-            for v in original()
-        ]
-
-    monkeypatch.setattr(broker, "list_volumes", moved)
+    volumes[0] = replace(
+        volumes[0],
+        major=8,
+        minor=176,
+        volume_key="8:176",
+        generation=volumes[0].generation + 1,
+    )
     assert svc.refresh()[0].identity_confidence == "high"
 
 
@@ -8846,9 +8885,7 @@ def test_no_handle_survives_a_finished_job(db, broker):
     assert svc.opened() == []
 
 
-def test_two_cards_with_the_same_identity_are_both_low_on_the_first_sighting(
-    db, broker, monkeypatch
-):
+def test_two_cards_with_the_same_identity_are_both_low_on_the_first_sighting(db, broker, volumes):
     """判定を live 集合の確定より前に行うと、先に見た方だけが high になる.
 
     先に 1 本だけで high を作っておき、**2 本目が現れた最初の refresh** を見る。
@@ -8859,16 +8896,7 @@ def test_two_cards_with_the_same_identity_are_both_low_on_the_first_sighting(
     svc.refresh()
     assert svc.refresh()[0].identity_confidence == "high"
 
-    original = broker.list_volumes
-
-    def twins():
-        first = original()[0]
-        second = type(first)(
-            **{**first.__dict__, "major": 8, "minor": 176, "volume_key": "8:176"}
-        )
-        return [first, second]
-
-    monkeypatch.setattr(broker, "list_volumes", twins)
+    volumes.append(replace(volumes[0], major=8, minor=176, volume_key="8:176"))
     views = svc.refresh()
     assert len(views) == 2
     assert [view.identity_confidence for view in views] == ["low", "low"]
@@ -8902,14 +8930,16 @@ def test_a_swapped_card_is_judged_on_its_own_contents(
 
     # ジョブが終われば handle はその場で閉じる。取っておくと、次のジョブが
     # 差し替え後もこの fd（＝旧カード）を読むことになる。
-    with pytest.raises(OSError):
-        os.listdir(handle.dirfd)
+    assert handle.closed is True
 
     # 新しく open するものだけが差し替わる（世代も epoch も据え置き）。
     mount_manager.target = a_swapped_card(tmp_path)
 
+    # ビルトインは dji-osmo だけなので hints は一致し続ける。旧 dirfd を
+    # 流用していれば DJI のファイルが見えて確定 (provisional False) になる。
+    # 新カードを見ていれば DCIM はあるが要件を満たさず provisional になる。
     view = svc.refresh()[0]
-    assert view.profile_slug != "dji-osmo"
+    assert view.provisional is True
     assert view.identity_confidence == "low"
 
     # 判定だけでなく、次に開く dirfd も新しいカードでなければならない。
@@ -8924,13 +8954,10 @@ def test_a_swapped_card_is_judged_on_its_own_contents(
         svc.release(view.selection)
 
 
-def test_a_card_without_a_uuid_keeps_its_selection_across_refreshes(db, broker, monkeypatch):
+def test_a_card_without_a_uuid_keeps_its_selection_across_refreshes(db, broker, volumes):
     """毎 refresh で新しい volume_instance を作ると、直前に選んだ selection が
     次の refresh で detached になる."""
-    original = broker.list_volumes
-    monkeypatch.setattr(
-        broker, "list_volumes", lambda: [type(v)(**{**v.__dict__, "fs_uuid": ""}) for v in original()]
-    )
+    volumes[0] = replace(volumes[0], fs_uuid="")
     svc = service(db, broker)
     first = svc.refresh()[0]
     second = svc.refresh()[0]
@@ -9048,8 +9075,16 @@ def resolve_volume_instance(conn: sqlite3.Connection, volume, device_id: str | N
         "INSERT INTO volume_instance (id, fs_uuid, fs_type, fs_label, size_bytes,"
         " identity_confidence, last_source_device_id, first_seen_at, last_seen_at)"
         " VALUES (?, ?, ?, ?, ?, 'low', ?, ?, ?)",
-        (volume_id, volume.fs_uuid or "", volume.fs_type or "", volume.fs_label or "",
-         volume.size_bytes, device_id, now_iso(), now_iso()),
+        (
+            volume_id,
+            volume.fs_uuid or "",
+            volume.fs_type or "",
+            volume.fs_label or "",
+            volume.size_bytes,
+            device_id,
+            now_iso(),
+            now_iso(),
+        ),
     )
     return volume_id
 
@@ -9060,9 +9095,7 @@ def sync_presence(conn: sqlite3.Connection, volume_instance_id: str, volume) -> 
     増やすと、キューに積んだときの `presence_id` と実行時のそれが別物になり、
     同じカードが挿さったままでも `StaleSelection` になる。
     """
-    key = (
-        volume_instance_id, volume.broker_epoch, volume.generation, volume.major, volume.minor
-    )
+    key = (volume_instance_id, volume.broker_epoch, volume.generation, volume.major, volume.minor)
     row = conn.execute(
         "SELECT id FROM volume_presence WHERE volume_instance_id = ? AND broker_epoch = ?"
         " AND generation = ? AND major = ? AND minor = ?",
@@ -9080,8 +9113,17 @@ def sync_presence(conn: sqlite3.Connection, volume_instance_id: str, volume) -> 
         "INSERT INTO volume_presence (id, volume_instance_id, broker_epoch, generation,"
         " device_node, major, minor, sysfs_path, attached_at)"
         " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-        (presence_id, volume_instance_id, volume.broker_epoch, volume.generation,
-         volume.device_node, volume.major, volume.minor, volume.sysfs_path, now_iso()),
+        (
+            presence_id,
+            volume_instance_id,
+            volume.broker_epoch,
+            volume.generation,
+            volume.device_node,
+            volume.major,
+            volume.minor,
+            volume.sysfs_path,
+            now_iso(),
+        ),
     )
     return presence_id
 
@@ -9095,7 +9137,7 @@ def detach_absent(conn: sqlite3.Connection, seen_presence_ids: Sequence[str]) ->
     placeholders = ",".join("?" * len(seen_presence_ids))
     condition = f" AND id NOT IN ({placeholders})" if seen_presence_ids else ""
     cursor = conn.execute(
-        f"UPDATE volume_presence SET detached_at = ?"  # noqa: S608
+        "UPDATE volume_presence SET detached_at = ?"  # noqa: S608
         f" WHERE detached_at IS NULL{condition}",
         (now_iso(), *seen_presence_ids),
     )
@@ -9559,10 +9601,21 @@ class BrokerClient:
 Run: `uv run pytest app/tests/test_volume_service.py -v`
 Expected: すべて PASS
 
-- [ ] **Step 5: コミット**
+- [ ] **Step 5: 変異試験**
+
+`_identity_confidence` の 4 つの分岐と、`_match_selection` の observation 比較、
+`open` の二重チェック、`release` の close をそれぞれ削り、対応するテストが
+落ちることを確認してから戻す。`upsert_device` の同定から `product` を落とす
+変異も忘れない（Task 22 の存在理由）。
+
+**「初回は必ず low」の分岐は、`_known_files_survive` が偶然 False を返すため
+素朴な筋書きでは検出できない。** manifest を消したうえで published な
+source_entry を残す筋書きを作る。
+
+- [ ] **Step 6: コミット**
 
 ```bash
-git add app/src/mediaferry/db/sources.py app/src/mediaferry/jobs/volumes.py app/tests/test_volume_service.py app/tests/conftest.py
+git add app/src/mediaferry/db/sources.py app/src/mediaferry/core/manifest.py app/src/mediaferry/jobs/volumes.py app/src/mediaferry/adapters/fs.py app/src/mediaferry/adapters/broker_client.py app/tests/test_volume_service.py app/tests/conftest.py
 git commit -m "feat(mediaferry): register volumes and resolve their profiles"
 ```
 
