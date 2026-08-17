@@ -3200,8 +3200,8 @@ class MergeRepository:
         marks = ", ".join("?" * len(CLAIMABLE))
         with immediate(self._conn):
             updated = self._conn.execute(
-                "UPDATE merge_group SET status = 'merging', error = NULL, updated_at = ?"
-                f" WHERE id = ? AND input_digest = ? AND superseded_by_id IS NULL"  # noqa: S608
+                "UPDATE merge_group SET status = 'merging', error = NULL, updated_at = ?"  # noqa: S608
+                " WHERE id = ? AND input_digest = ? AND superseded_by_id IS NULL"
                 f" AND status IN ({marks})",
                 (now_iso(), group_id, expected_digest, *CLAIMABLE),
             )
@@ -3314,8 +3314,8 @@ class MergeRepository:
         marks = ", ".join("?" * len(allowed))
         with immediate(self._conn):
             updated = self._conn.execute(
-                "UPDATE merge_group SET status = ?, error = ?, updated_at = ?"
-                f" WHERE id = ? AND superseded_by_id IS NULL AND status IN ({marks})",  # noqa: S608
+                "UPDATE merge_group SET status = ?, error = ?, updated_at = ?"  # noqa: S608
+                f" WHERE id = ? AND superseded_by_id IS NULL AND status IN ({marks})",
                 (target, error, now_iso(), group_id, *allowed),
             )
             if updated.rowcount != 1:
@@ -3331,7 +3331,7 @@ Expected: PASS（15 件）
 
 | 変異 | 落ちるべきテスト |
 | --- | --- |
-| `save_detected` の digest 重複チェックを消す | `test_the_same_digest_is_not_stored_twice`（部分ユニーク索引が `IntegrityError` を投げるので、テストは通らないが**例外の種類が変わる**。`None` を返す契約を守るため、チェックは残す） |
+| `save_detected` の digest 重複チェックを消す | `test_the_same_digest_is_not_stored_twice` では**落ちない**。同じ構成を 2 回渡しているので、`taken` のチェックが先に `None` を返す。**構成ファイルが違うのに digest が同じケース**（`test_a_digest_already_taken_by_another_group_is_refused`）を足すと、部分ユニーク索引の `IntegrityError` が漏れて落ちる |
 | `taken` のチェックを消す | `test_a_member_of_an_active_group_is_not_taken_again`（同上。`merge_member_one_active_group` が `IntegrityError` を投げる） |
 | `claim_for_merge` から `input_digest = ?` を落とす | `test_a_changed_digest_cannot_be_claimed` |
 | `CLAIMABLE` に `"merging"` を足す | `test_claiming_twice_is_refused` |
@@ -3340,8 +3340,11 @@ Expected: PASS（15 件）
 | `record_verification` で `status = 'merged'` も同時に立てる | `test_the_verification_is_recorded_before_the_group_is_merged` |
 | `record_verification` の `status = 'merging'` の条件を消す | `test_recording_a_verification_needs_a_merging_group` |
 | `mark_merged` の `output_media_file_id IS NOT NULL` を消す | `test_marking_merged_needs_an_output_and_a_verification` |
-| `mark_merged` の `verification_json IS NOT NULL` を消す | 同上（後半） |
-| `adopt` の `output_media_file_id IS NULL` の判定を消す | `test_adopting_requires_a_merged_group_with_an_output` |
+| `mark_merged` の `verification_json IS NOT NULL` を消す | 同上（後半）では**落ちない**。出力がまだ無いので `output_media_file_id` の条件が先に効く。**出力だけがある状態**のテスト（`test_marking_merged_needs_a_verification_even_with_an_output`）を足した |
+| `adopt` の `output_media_file_id IS NULL` の判定を消す | `test_adopting_requires_a_merged_group_with_an_output` では**落ちない**（`status != merged` で先に落ちる）。`status = 'merged'` かつ出力が無い行を DB へ直接作るテスト（`test_adopting_a_merged_group_without_an_output_is_refused`）を足した |
+| `release` の遷移元に `detected` / `merged` を足す | `test_releasing_only_moves_a_merging_group`（**追加**）。公開済みのグループを detected へ戻すと出力が宙に浮く |
+| `members` の `ORDER BY position` を逆にする | `test_a_detected_group_keeps_its_members_in_order` |
+| `list_groups` の `status` の絞り込みを外す | `test_groups_can_be_listed_by_status` |
 | `adopt` の `adopted_at is not None` の早期 return を消す | `test_adopting_is_idempotent` |
 
 **検出できない変異:** `save_detected` と `claim_for_merge` の `BEGIN IMMEDIATE` を
