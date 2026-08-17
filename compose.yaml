@@ -40,9 +40,9 @@ services:
       MEDIAFERRY_BROKER_SOCKET: /run/mediaferry/broker.sock
       MEDIAFERRY_DATA_ROOT: /data
       MEDIAFERRY_BIND_HOST: 127.0.0.1
-      MEDIAFERRY_IMMICH_URL: <immich-url>
-      MEDIAFERRY_IMMICH_API_KEY: <immich-api-key>
       MEDIAFERRY_DEFAULT_TIMEZONE: <iana-tz>
+      # 転送先 (Immich の URL と API キー) は環境変数では設定しない。
+      # Web 画面で「転送先プロファイル」として登録する。仕様書 §12.3。
     # Phase 4 で認証と CSRF が入るまで ports を書かない。
     #
     # コンテナ内で 127.0.0.1 にだけ bind した状態で ports を書いても、Docker の
