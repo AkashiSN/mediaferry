@@ -4571,21 +4571,45 @@ async def test_each_job_gets_its_own_connection(db, database):
 
 
 @pytest.mark.anyio
-async def test_a_job_claimed_while_stopping_is_cancelled(db, database):
+async def test_a_job_claimed_while_stopping_is_cancelled(db, database, monkeypatch):
     """claim を待っている間に停止要求が来ると、_current がまだ None なので
     stop() は cancel を打てない. 掴んだ後に確認しないと、停止が長いジョブの
-    完走待ちになる."""
+    完走待ちになる.
+
+    停止済みの状態で run_forever を呼んでも loop に入らないので、本当に
+    「claim 済み・戻る直前」で止めて競合を作る。
+    """
+    import threading
+
     store = JobStore(db)
+    job_id = store.enqueue("import", {})
     observed = []
 
-    def handler(ctx, conn):
-        observed.append(ctx.cancelled())
-
     runner = JobRunner(database, poll_interval=0.01)
-    runner.register("import", handler)
-    job_id = store.enqueue("import", {})
-    await runner.stop()
-    await runner.run_forever()
+    runner.register("import", lambda ctx, conn: observed.append(ctx.cancelled()))
+
+    claimed = threading.Event()
+    release = threading.Event()
+    original = JobStore.claim_next
+
+    def claim_then_wait(self):
+        ctx = original(self)
+        if ctx is not None:
+            claimed.set()
+            release.wait(timeout=5)
+        return ctx
+
+    monkeypatch.setattr(JobStore, "claim_next", claim_then_wait)
+
+    async with anyio.create_task_group() as tg:
+        tg.start_soon(runner.run_forever)
+        with anyio.fail_after(5):
+            await anyio.to_thread.run_sync(lambda: claimed.wait(5))
+        await runner.stop()  # _current はまだ None
+        release.set()
+        with anyio.fail_after(5):
+            while store.get(job_id)["status"] in {"queued", "running", "cancelling"}:
+                await anyio.sleep(0.01)
 
     assert observed == [True]
     assert store.get(job_id)["status"] == "cancelled"
@@ -7872,7 +7896,17 @@ def fake_card(tmp_path):
 
 
 @pytest.fixture
-def broker(fake_card, tmp_path):
+def mount_manager(fake_card):
+    """`target` を差し替えると、以後の open だけが新しい中身を見る.
+
+    既に渡した dirfd は古いディレクトリを指したままになるので、
+    「カードが差し替わったのに古い fd を使い回す」経路を再現できる。
+    """
+    return FakeMountManager(fake_card)
+
+
+@pytest.fixture
+def broker(mount_manager, tmp_path):
     volume = VolumeInfo(
         volume_key="8:160",
         device_node="/dev/sdk",
@@ -7894,7 +7928,7 @@ def broker(fake_card, tmp_path):
     )
     server = BrokerServer(
         socket_path=tmp_path / "broker.sock",
-        mount_manager=FakeMountManager(fake_card),
+        mount_manager=mount_manager,
         lister=lambda: [volume],
         allowed_uids=None,
     )
@@ -8001,12 +8035,15 @@ def test_the_volume_is_closed_after_probing(db, broker):
 
 
 def test_open_and_release_manage_the_dirfd(db, broker):
+    """release は参照を返すだけ. 次のジョブが同じ handle を使えるよう残す."""
     svc = service(db, broker)
     view = svc.refresh()[0]
     handle = svc.open(view.selection)
     assert svc.opened() == [view.volume_instance_id]
     assert "DCIM" in __import__("os").listdir(handle.dirfd)
     svc.release(view.selection)
+    assert svc.opened() == [view.volume_instance_id]
+    svc.close(view.volume_instance_id)
     assert svc.opened() == []
 
 
@@ -8014,18 +8051,20 @@ def test_a_selection_from_an_older_generation_is_refused(db, broker):
     """抜き差しで /dev/sdX が再利用され、別のカードが同じノードに来る."""
     svc = service(db, broker)
     view = svc.refresh()[0]
-    stale = replace(view.selection, generation=view.selection.generation - 1)
+    observation = replace(
+        view.selection.observation, generation=view.selection.observation.generation - 1
+    )
     with pytest.raises(StaleSelection):
-        svc.open(stale)
+        svc.open(replace(view.selection, observation=observation))
 
 
 def test_a_selection_from_a_previous_mountd_run_is_refused(db, broker):
     """generation は mountd の再起動で 0 に戻る. epoch が無いと偶然一致する."""
     svc = service(db, broker)
     view = svc.refresh()[0]
-    stale = replace(view.selection, broker_epoch="a-previous-run")
+    observation = replace(view.selection.observation, broker_epoch="a-previous-run")
     with pytest.raises(StaleSelection):
-        svc.open(stale)
+        svc.open(replace(view.selection, observation=observation))
 
 
 def test_closing_a_volume_a_job_is_using_is_refused(db, broker):
@@ -8125,43 +8164,62 @@ def test_an_unused_handle_is_retired_when_the_observation_changes(db, broker, mo
     assert svc.opened() == []
 
 
-def test_two_cards_with_the_same_identity_are_both_low_from_the_first_refresh(db, broker, monkeypatch):
-    """判定を live 集合の確定より前に行うと、先に見た方だけが high になる."""
+def test_two_cards_with_the_same_identity_are_both_low_on_the_first_sighting(
+    db, broker, monkeypatch
+):
+    """判定を live 集合の確定より前に行うと、先に見た方だけが high になる.
+
+    先に 1 本だけで high を作っておき、**2 本目が現れた最初の refresh** を見る。
+    最初から 2 本を返すと、初回は remembered digest が無くて両方 low になり、
+    反映しながら判定する実装でも通ってしまう。
+    """
     svc = service(db, broker)
+    svc.refresh()
+    assert svc.refresh()[0].identity_confidence == "high"
+
     original = broker.list_volumes
 
     def twins():
         first = original()[0]
-        second = type(first)(**{**first.__dict__, "major": 8, "minor": 176,
-                                "volume_key": "8:176"})
+        second = type(first)(
+            **{**first.__dict__, "major": 8, "minor": 176, "volume_key": "8:176"}
+        )
         return [first, second]
 
     monkeypatch.setattr(broker, "list_volumes", twins)
-    svc.refresh()
     views = svc.refresh()
     assert len(views) == 2
     assert [view.identity_confidence for view in views] == ["low", "low"]
 
 
-def test_a_new_generation_is_judged_on_its_own_contents(db, broker, fake_card, monkeypatch):
-    """開いてある dirfd を使い回すと、別のカードの中身で判定した結果を
-    新しいカードのものとして記録する."""
+def a_swapped_card(tmp_path):
+    """同じ UUID・容量だが中身の違うカード（複製・再フォーマット相当）."""
+    other = tmp_path / "swapped"
+    (other / "DCIM" / "100CANON").mkdir(parents=True)
+    (other / "DCIM" / "100CANON" / "IMG_0001.JPG").write_bytes(b"other camera")
+    return other
+
+
+def test_a_swapped_card_is_judged_on_its_own_contents(
+    db, broker, mount_manager, tmp_path
+):
+    """observation が完全一致でも、開いてある dirfd を使い回してはいけない.
+
+    mountd の generation は「観測した集合の指紋が変わったとき」だけ進む
+    (mountd/server.py::_observe)。Phase 1 は polling なので、同じ UUID・型・
+    容量のカードが同じ major:minor で観測の合間に差し替わると、generation も
+    epoch も据え置きのままになる。既存 fd は open_tree で切り離した旧カードを
+    指したままなので、流用すると旧カードの中身で新カードを判定する。
+    """
     svc = service(db, broker)
     selection = svc.refresh()[0].selection
-    svc.open(selection)
+    handle = svc.open(selection)
     svc.release(selection)
 
-    # 中身を入れ替え、世代を進める（＝別のカードに差し替わった）
-    for path in (fake_card / "DCIM" / "DJI_001").iterdir():
-        path.unlink()
-    (fake_card / "DCIM" / "DJI_001").rmdir()
-    (fake_card / "DCIM" / "SWAPPED").mkdir()
-    (fake_card / "DCIM" / "SWAPPED" / "IMG_0001.JPG").write_bytes(b"other camera")
-    original = broker.list_volumes
-    monkeypatch.setattr(
-        broker,
-        "list_volumes",
-        lambda: [type(v)(**{**v.__dict__, "generation": v.generation + 1}) for v in original()],
+    # 新しく open するものだけが差し替わる。既存 fd は旧カードを見続ける。
+    mount_manager.target = a_swapped_card(tmp_path)
+    assert "DJI_001" in __import__("os").listdir(
+        __import__("os").open("DCIM", 0, dir_fd=handle.dirfd)
     )
 
     view = svc.refresh()[0]
@@ -8519,10 +8577,12 @@ class VolumeService:
     def _retire_stale_handles(self, live: set[VolumeObservation]) -> None:
         """使われていない handle のうち、観測が変わったものを閉じる.
 
-        判定より前に行う。旧 detached mount の dirfd を使って新しいボリュームの
-        プロファイルや manifest を計算すると、**別のカードの中身で判定した
-        結果を新しいカードのものとして記録する**。参照中のものは触らない
-        （ジョブが読んでいる最中）。
+        ジョブ用の handle は「選択した時点のカードを読み続ける」ためのもので、
+        観測が変わっても参照中なら触らない。参照が無くなったものだけ、次の
+        ジョブが古い detached mount を掴まないように閉じる。
+
+        **判定はこのキャッシュを使わない**（`_probe` を参照）。ここで残る
+        handle は、その selection が指した当時のカードを読む用途に限る。
         """
         for volume_instance_id, held in list(self._open.items()):
             if held.refs == 0 and held.observation not in live:
@@ -8542,21 +8602,31 @@ class VolumeService:
             usb_product_id=volume.usb.product_id if volume.usb else "",
             fs_label=volume.fs_label or "",
         )
-        # 開いてある handle は、観測が**完全に一致するときだけ**使う。
-        # 世代が変わっているのに使い回すと、別のカードの中身で判定する。
+        # **判定は必ず開き直す。開いてある handle を流用しない。**
+        #
+        # mountd の `generation` は uevent の数ではなく、観測した集合の
+        # `(volume_key, fs_uuid, fs_type, size_bytes)` が前回と変わったときだけ
+        # 進む（`mountd/server.py::_observe`）。Phase 1 は uevent を購読せず
+        # polling なので、同じ UUID・型・容量のカードが同じ major:minor で
+        # 観測の合間に差し替わると、**generation も epoch も据え置きのまま**に
+        # なる。既存の dirfd は `open_tree` で切り離した旧カードを指したままな
+        # ので、流用すると旧カードの中身で新カードを判定することになる。
+        # 複製カードだけでなく、UUID を保持した再フォーマットも同じ。
+        #
+        # 代償は「GET /devices のたびに mount / umount が走る」こと。Phase 1 は
+        # 手動操作しか無いので許容する。避けたければ mountd 側に uevent を
+        # 取りこぼさない incarnation を持たせて handle と一覧の両方へ刻印する
+        # 必要があり、それは Phase 1 の範囲を超える。
         observation = VolumeObservation.of(volume)
-        held = self._open.get(volume_id)
-        reuse = held is not None and held.observation == observation
-        handle = held.handle if reuse else self._client.open_volume(volume)
+        handle = self._client.open_volume(volume)
         try:
             tree = DirfdTree(handle.dirfd)
             outcome = resolve_profile(definitions, facts, tree, remembered["slug"])
             digest = self._manifest_of(handle.dirfd, tree, outcome, definitions)
             confidence = self._identity_confidence(volume, volume_id, remembered, digest, handle)
         finally:
-            if not reuse:
-                with contextlib.suppress(Exception):
-                    self._client.close_volume(handle)
+            with contextlib.suppress(Exception):
+                self._client.close_volume(handle)
 
         profile_id = revision_id = None
         if outcome.slug is not None:
@@ -9822,6 +9892,20 @@ Task 7〜12・15・16・22 は互いに独立で、Task 1 の後ならいつで�
 | **`_probe()` が世代を確認せずに開いてある dirfd を再利用していた。** 差し替えられたカードを、旧カードの中身で判定した結果として記録する。retire も判定の後だった | `VolumeObservation`（epoch / generation / volume_key / major:minor / fs_uuid）を導入し、**完全一致のときだけ**再利用する。retire は判定の前。新旧で中身を変え、新世代が新しい中身で判定されることを固定するテストを追加 |
 | `fs_uuid` が空だと `upsert_volume` が毎回新しい `volume_instance` を作り、同じ broker snapshot を列挙し直しただけで selection が無効になる | `resolve_volume_instance` に改名し、UUID が無いときは同じ観測の live presence から引く。世代が変われば継承しない規則を明記。UUID 無しの fixture で selection が生き続けるテストを追加 |
 | `stop()` と `claim_next()` の間の race。claim 待ちの間に停止要求が来ると `_current` がまだ None なので cancel されず、掴んだ長いジョブの完走待ちになる | Task 14 で claim 直後に `_stopping` を再確認し、立っていれば `request_cancel` してから実行する |
+
+### 4 巡目（blocker 4 / major 2）で反映した指摘
+
+3 巡目で入れた「観測が完全一致すれば dirfd を再利用してよい」という前提が、
+実装済みの mountd の契約と食い違っていた。テスト側の欠陥も 4 件。
+
+| 指摘 | 反映先 |
+| --- | --- |
+| **完全一致でも cached dirfd が現在のカードを指すとは限らない。** `mountd/server.py::_observe` の `generation` は uevent の数ではなく、観測した集合の `(volume_key, fs_uuid, fs_type, size_bytes)` が変わったときだけ進む。Phase 1 は polling なので、同じ UUID・型・容量のカードが同じ major:minor で観測の合間に差し替わると **generation も epoch も据え置き**になる | Task 23 の `_probe` を**毎回 fresh open / close** に変更。ジョブ用 handle のキャッシュは「選択した時点のカードを読み続ける」用途として残す。代償（列挙のたびに mount / umount）と、避けるなら mountd 側に incarnation が要ることを明記 |
+| `VolumeSelection` の構造変更後も 2 つのテストが旧フィールドを `replace` していて `TypeError` になる | `replace(selection, observation=replace(selection.observation, ...))` へ修正 |
+| stop / claim の競合テストが、停止済みの状態で `run_forever` を呼ぶため loop に入らず、job を claim しない | `claim_next` を barrier で「claim 済み・戻る直前」に止め、そこで `stop()` する本物の競合に |
+| `release()` は `_open` から消さないので、`opened() == []` を期待するテストは落ちる | 期待を `[volume_instance_id]` にし、`close()` まで通す形に |
+| stale dirfd の回帰テストが、旧 fd と新 open が同じディレクトリを指すため修正を検出しない | `FakeMountManager.target` を差し替える fixture にし、既存 fd は旧カードを見続ける構成に。「generation 据え置きのまま差し替え」もこれで固定 |
+| 同一 identity 2 本のテストが、最初から 2 本返して 2 回目を見るため旧実装でも通る | 1 本で high を作ってから 2 本目が現れた**最初の refresh** を見る形に |
 
 ### 退けた指摘
 
