@@ -2255,6 +2255,28 @@ git commit -m "feat(mediaferry): join parts with ffmpeg and fall back through ts
 `PublishCancelled` を送出する（staged より前なので durable なものは残らない。
 `PublishAborted` の派生にして、既存の呼び出し側の扱いを変えない）。
 
+**chunk の合間だけでは足りない。** 読み終えた後にも、リースより長くなりうる
+同期処理が 2 つ残っている。
+
+| 処理 | どれくらいかかりうるか |
+| --- | --- |
+| `os.fsync`（手順 3） | 30 GiB を書いた直後の NAS では数十秒。**中断できない** |
+| `MediaProbe.describe`（手順 5） | timeout がちょうど 60 秒で、リースと同値 |
+
+どちらもハッシュ走査の後・手順 7 の前にあるので、走査中に打った heartbeat が
+成功していても、この 2 つで失効しうる。**`_with_lease_pulse` で囲む** ——
+処理を別スレッドで走らせ、待つ側（＝ジョブのスレッド）が `HEARTBEAT_INTERVAL`
+ごとに `ctx.heartbeat()` を打つ。DB へ触るのは待つ側だけなので、**接続は
+スコープごとに 1 本のまま**（トランザクションは接続に属する）。
+
+**これは取り込み側にも同じ形で存在する穴で、共通の `_publish` を直すことで
+両方に効く。** Phase 1 の実装では、16 GiB のコピーの後の `os.fsync` と ffprobe が
+同じ位置にある。実 USB での確認（`phase1-manual-checklist.md`）は 100 バイトの
+ファイルでしか通っていないので、まだ表に出ていない。
+
+`os.fsync` そのものは中断できないので、**fsync 中のキャンセル要求には応答
+できない**（終わってから次の確認点で降りる）。これは仕様として受け入れる。
+
 - [ ] **Step 1: 失敗するテストを書く**
 
 `app/tests/test_publisher.py` に追記（既存の `setup` / `a_request` を使う）:
@@ -2384,6 +2406,47 @@ def test_the_hash_scan_pulses_the_lease(setup, data_root, db, monkeypatch):
     assert beats
 
 
+def test_a_slow_probe_does_not_lose_the_lease(db, data_root, monkeypatch):
+    """ffprobe の timeout はリースと同値. 囲まないと手順 7 で失効する."""
+    ProfileRegistry(db).sync_builtins()
+    profile = ProfileRegistry(db).current("dji-osmo")
+    store = JobStore(db, lease_seconds=1)
+    store.enqueue("merge", {})
+    ctx = store.claim_next()
+    group_id = a_merge_group(db, (profile.profile_id, profile.revision_id), "digest-1")
+
+    class SlowProbe(StubProbe):
+        def describe(self, path, extension):
+            time.sleep(1.5)  # リース (1 秒) より長い
+            return super().describe(path, extension)
+
+    monkeypatch.setattr("mediaferry.adapters.publisher.HEARTBEAT_INTERVAL", 0.2)
+    publisher = ArtifactPublisher(db, data_root, SlowProbe())
+    work = data_root / "work" / ctx.job_id
+    work.mkdir(parents=True)
+    prepared = work / "MERGED.MP4"
+    prepared.write_bytes(b"merged-bytes")
+
+    published = publisher.publish_prepared(
+        ctx,
+        a_request(profile, None, kind="merge", role="derived",
+                  desired_rel_path="derived/dji-osmo/DCIM/MERGED.MP4", merge_group_id=group_id),
+        prepared,
+    )
+    assert (data_root / published.rel_path).exists()
+
+
+def test_the_lease_pulse_propagates_the_failure(setup):
+    """囲んだ処理の例外は、そのまま呼び出し側へ渡す."""
+    _, ctx, _, _ = setup
+
+    def boom():
+        raise RuntimeError("fsync に失敗した")
+
+    with pytest.raises(RuntimeError, match="fsync"):
+        _with_lease_pulse(ctx, boom)
+
+
 def test_a_cancelled_hash_scan_leaves_nothing_durable(setup, data_root, db):
     publisher, ctx, profile, _ = setup
     group_id = a_merge_group(db, (profile.profile_id, profile.revision_id), "digest-1")
@@ -2406,7 +2469,7 @@ def test_a_cancelled_hash_scan_leaves_nothing_durable(setup, data_root, db):
     assert not (data_root / "derived/dji-osmo/DCIM/MERGED.MP4").exists()
 ```
 
-`PublishCancelled` を import に足す。
+import に `time` と `PublishCancelled` / `_with_lease_pulse` を足す。
 
 ファイル先頭の import に次を足す:
 
@@ -2506,12 +2569,22 @@ Expected: FAIL（`AttributeError: 'ArtifactPublisher' object has no attribute 'p
 
 以降（手順 5 の `metadata` から）は現行のまま。`writer.size` を `size` に、
 `writer.sha1` を `sha1` に置き換える（手順 7 の UPDATE の引数 2 か所）。
+**手順 5 の ffprobe だけは `_with_lease_pulse` で囲む**（timeout がリースと
+同値なので、囲まないと手順 7 で失効しうる）:
+
+```python
+        # 5. メタデータは公開前に確定させる。実体はあるがメタデータが欠けたまま
+        #    永久にスキップされる状態を作らない。
+        probe = _with_lease_pulse(
+            ctx, lambda: self._probe.describe(staging_abs, request.extension)
+        )
+```
 
 実体を置く 2 つのメソッドを足す:
 
 ```python
     def _materialise_write(
-        self, staging_abs: Path, write: Callable[[HashingWriter], None], mtime_ns: int
+        self, staging_abs: Path, write: Callable[[HashingWriter], None], mtime_ns: int, ctx: JobContext
     ) -> tuple[int, str]:
         """書きながら SHA-1 を取る. 読み直しを 1 回省く."""
         with staging_abs.open("wb") as fileobj:
@@ -2524,7 +2597,8 @@ Expected: FAIL（`AttributeError: 'ArtifactPublisher' object has no attribute 'p
             os.utime(fileobj.fileno(), ns=(mtime_ns, mtime_ns))
             # 3. 中身とディレクトリエントリの両方を永続化する。親を fsync
             #    しないと、電源断で「DB は staged、ファイルは無い」になる。
-            os.fsync(fileobj.fileno())
+            #    **16 GiB を書いた直後の fsync はリースより長くなりうる。**
+            _with_lease_pulse(ctx, lambda: os.fsync(fileobj.fileno()))
         fsync_dir(staging_abs.parent)
         self._checkpoint(STEP_FSYNCED)
         return writer.size, writer.sha1
@@ -2555,13 +2629,24 @@ Expected: FAIL（`AttributeError: 'ArtifactPublisher' object has no attribute 'p
                     last_beat = time.monotonic()
             self._checkpoint(STEP_WRITTEN)
             os.utime(staging_abs, ns=(mtime_ns, mtime_ns))
-            os.fsync(fileobj.fileno())
+            # 30 GiB を link した直後の fsync はリースより長くなりうる。
+            _with_lease_pulse(ctx, lambda: os.fsync(fileobj.fileno()))
         fsync_dir(staging_abs.parent)
         self._checkpoint(STEP_FSYNCED)
         return size, digest.hexdigest()
 ```
 
-`publish_prepared` は `ctx` を渡す形にする:
+`publish` と `publish_prepared` はどちらも `ctx` を渡す形にする:
+
+```python
+        return self._publish(
+            ctx,
+            request,
+            lambda staging_abs: self._materialise_write(
+                staging_abs, write, request.mtime_ns, ctx
+            ),
+        )
+```
 
 ```python
         return self._publish(
@@ -2576,13 +2661,17 @@ Expected: FAIL（`AttributeError: 'ArtifactPublisher' object has no attribute 'p
 ファイル冒頭に足すもの:
 
 ```python
+import threading
 import time
+from typing import TypeVar
 
 from ..db.jobs import LEASE_SECONDS, JobContext, LeaseLost
 
 # リース (60 秒) の 1/3 ごとに延ばす。30 GiB の走査はリースより長く、
 # 読み出し速度は環境で桁が変わるので、バイト数ではなく時間で決める。
 HEARTBEAT_INTERVAL = LEASE_SECONDS / 3
+
+T = TypeVar("T")
 
 
 class PublishCancelled(PublishAborted):
@@ -2592,6 +2681,49 @@ class PublishCancelled(PublishAborted):
     「durable なものは残っていない」として扱える。結合の呼び出し元は、
     これを見てグループを detected へ戻す。
     """
+```
+
+そして、staged より前の**中断できない長い処理**を囲むヘルパ:
+
+```python
+def _with_lease_pulse(ctx: JobContext, work: Callable[[], T]) -> T:
+    """リースを延ばしながら、中断できない同期処理を待つ.
+
+    `os.fsync` と ffprobe は、どちらも 1 回でリース (60 秒) を超えうるのに
+    途中で止められない。処理は別スレッドで走らせ、**待つ側（ジョブの
+    スレッド）が heartbeat を打つ**。DB へ触るのは待つ側だけなので、接続は
+    スコープごとに 1 本のままで済む（トランザクションは接続に属する）。
+
+    リースを失ったら、処理の完了を待ってから送出する。走っているスレッドを
+    残したまま抜けると、後から staging へ書き込むことになる。
+    """
+    outcome: list[T] = []
+    failure: list[BaseException] = []
+
+    def run() -> None:
+        try:
+            outcome.append(work())
+        except BaseException as exc:  # noqa: BLE001 - 呼び出し側へそのまま渡す
+            failure.append(exc)
+
+    thread = threading.Thread(target=run, daemon=True)
+    thread.start()
+    lost: LeaseLost | None = None
+    while True:
+        thread.join(timeout=HEARTBEAT_INTERVAL)
+        if not thread.is_alive():
+            break
+        if lost is None:
+            try:
+                ctx.heartbeat()
+            except LeaseLost as exc:
+                # 打てなくなっても待ち続ける。処理の完了を待ってから送出する。
+                lost = exc
+    if lost is not None:
+        raise lost
+    if failure:
+        raise failure[0]
+    return outcome[0]
 ```
 
 - [ ] **Step 4: 通ることを確認する**
@@ -2694,6 +2826,10 @@ Expected: PASS（11 段 × 3 種 + 既存の個別ケース）
 | pulse をバイト数（chunk 数）で打つ形にする | **落ちない**。テストの入力が小さいため。**時間で打つ根拠は「読み出し速度が環境で桁違い」なので、`HEARTBEAT_INTERVAL` を 0 にした形でしか観測できない。** 検出できない変異として記録する |
 | `ctx.cancelled()` の確認を消す | `test_a_cancelled_hash_scan_leaves_nothing_durable` |
 | `PublishCancelled` を `PublishAborted` に戻す | 同上（`pytest.raises(PublishCancelled)` が落ちる） |
+| 手順 5 の `_with_lease_pulse` を外す | `test_a_slow_probe_does_not_lose_the_lease` |
+| `_with_lease_pulse` の `failure` の送出を消す | `test_the_lease_pulse_propagates_the_failure` |
+| `_with_lease_pulse` で `LeaseLost` を即座に送出する（thread を待たない） | **落ちない**。リースを失いながら処理が続く筋書きをテストで作っていない。**待ってから送出する根拠は「走っているスレッドが後から staging へ書く」ことなので、観測には競合の再現が要る。** 検出できない変異として記録する |
+| `os.fsync` を囲まない | **落ちない**。テストで使うファイルは小さく、fsync が一瞬で終わる。ffprobe 側の囲みで同じ仕組みを検証している（検出できない変異として記録する） |
 | `os.link` を `shutil.copy` にする | **落ちない**（結果は同じになる）。書き直しを避けることが目的なので、検出できない変異として記録する。ただし `test_the_published_file_survives_the_work_directory_being_cleaned` は copy でも通るので、**inode の共有を直接見るテストを足す**（下記） |
 | `size` の検証（手順 4）を消す | 既存の `test_a_short_write_is_aborted`（`publish` 側）が落ちる |
 | `_materialise_link` の `os.fsync` を消す | **落ちない**。電源断を再現できないため。検出できない変異として記録する（`os._exit` の crash 試験はページキャッシュを失わない） |
@@ -4688,6 +4824,7 @@ git commit -m "feat(mediaferry): expose which media are offered for upload"
 - Modify: `app/src/mediaferry/api/jobs_wiring.py`
 - Modify: `app/src/mediaferry/api/app.py`
 - Test: `app/tests/test_api_merges.py`
+- Test: `app/tests/test_merge_job_wiring.py`（`JobRunner` を通したキャンセルの決着）
 
 **Interfaces:**
 - Produces（§11 のうち Phase 2 の分）:
@@ -4703,6 +4840,14 @@ git commit -m "feat(mediaferry): expose which media are offered for upload"
 | GET | `/uploads/selectable?include=&limit=` | §10 (b) の選択肢 |
 
 - `JobWorld.run_detect_groups(ctx, conn) -> None` / `JobWorld.run_merge(ctx, conn) -> None`
+
+**キャンセルは例外で上へ抜かさない。** `JobRunner._run_one` は例外をすべて
+`finish(..., "failed", ...)` へ送るので、`MergeCancelled` / `PublishCancelled` を
+そのまま送出すると、**利用者が押したキャンセルがジョブの失敗として記録される**
+（`job.status = cancelling` でも `finish` は `failed` への更新を通す）。
+`run_merge` が受け止めて正常 return し、`finish_claimed` の
+`cancelling -> cancelled` に決着させる。取り込みも同じ形で降りている
+（`Importer.run` はキャンセルを観測するとループを抜けて返す）。
 
 **リクエストの受け方:** 既存のルータはどれも pydantic モデルを使っていない
 （`routes_devices.py`）。Phase 2 も**クエリパラメータで受ける**。入力スキーマは
@@ -4828,6 +4973,103 @@ def test_the_preview_does_not_store_anything(client, api_db):
     assert body["candidates"] == []
     assert api_db.execute("SELECT count(*) FROM merge_group").fetchone()[0] == 0
 ```
+
+`JobRunner` を実際に通して、キャンセルの決着を見るテストを別ファイルに置く
+（`app/tests/test_merge_job_wiring.py`）。ffmpeg は使わず、`MergeRunner` だけを
+差し替えて `MergeCancelled` を出させる。**ジョブは `cancelled`、グループは
+`detected` に落ち着く**ことを、実物の `Merger` と `JobRunner` を通して確かめる。
+
+```python
+import anyio
+import pytest
+
+from mediaferry.adapters.ffmpeg import MergeCancelled
+from mediaferry.api.jobs_wiring import JobWorld
+from mediaferry.core.merge.grouping import GIB, GroupCandidate, MergePart
+from mediaferry.db.jobs import JobStore
+from mediaferry.db.merges import MergeRepository
+from mediaferry.db.profiles import ProfileRegistry
+from mediaferry.jobs.runner import JobRunner
+
+from .test_merger import BASE
+from .test_schema_artifacts import a_media_file
+
+
+class CancellingRunner:
+    """結合の入口で止まり、テストの合図でキャンセルを観測した形にする.
+
+    合図で待たせないと、ハンドラが `request_cancel` より先に終わって
+    `finish_claimed` が `succeeded` を書き、テストが競合で揺れる。
+    """
+
+    started = threading.Event()
+    proceed = threading.Event()
+
+    def merge(self, *args, **kwargs):
+        CancellingRunner.started.set()
+        CancellingRunner.proceed.wait(timeout=10)
+        raise MergeCancelled("キャンセル要求を観測した")
+
+
+@pytest.mark.anyio
+async def test_a_cancelled_merge_job_ends_as_cancelled(db, database, data_root, monkeypatch):
+    ProfileRegistry(db).sync_builtins()
+    profile = ProfileRegistry(db).current("dji-osmo")
+    directory = data_root / "library" / "dji-osmo" / "DCIM" / "DJI_001"
+    directory.mkdir(parents=True)
+
+    members = []
+    for index in (1, 2):
+        name = f"DJI_20260817143000_{index:04d}_D.MP4"
+        (directory / name).write_bytes(b"x" * 16)
+        rel = f"library/dji-osmo/DCIM/DJI_001/{name}"
+        media_id = a_media_file(
+            db, (profile.profile_id, profile.revision_id), rel_path=rel,
+            sha1=f"{index:040d}", size_bytes=16, duration_seconds=2.0,
+            captured_at=BASE.isoformat(),
+        )
+        members.append(
+            MergePart(media_id, rel, f"{index:040d}", BASE, 2.0, 16 * GIB, "ok")
+        )
+
+    repo = MergeRepository(db)
+    group_id = repo.save_detected(
+        profile, GroupCandidate(members=tuple(members), gaps=(0.0,)), "digest-1"
+    )
+    monkeypatch.setattr("mediaferry.api.jobs_wiring.MergeRunner", CancellingRunner)
+
+    store = JobStore(db)
+    job_id = store.enqueue(
+        "merge",
+        {
+            "merge_group_id": group_id,
+            "input_digest": "digest-1",
+            "profile_id": profile.profile_id,
+            "profile_revision_id": profile.revision_id,
+        },
+    )
+    world = JobWorld(database, {"MEDIAFERRY_DATA_ROOT": str(data_root)}, volumes=None)
+    runner = JobRunner(database, poll_interval=0.01)
+    runner.register("merge", world.run_merge)
+
+    async with anyio.create_task_group() as tg:
+        tg.start_soon(runner.run_forever)
+        with anyio.fail_after(10):
+            # ハンドラが結合に入るまで待つ。ここで止まっている。
+            while not CancellingRunner.started.is_set():
+                await anyio.sleep(0.01)
+            store.request_cancel(job_id)
+            CancellingRunner.proceed.set()
+            while store.get(job_id)["status"] in {"running", "cancelling"}:
+                await anyio.sleep(0.01)
+        await runner.stop()
+
+    assert store.get(job_id)["status"] == "cancelled"
+    assert repo.get(group_id)["status"] == "detected"
+```
+
+`threading` を import し、`CancellingRunner` の 2 つの `Event` はテストごとに
+作り直す（クラス変数のまま複数のテストを足すと状態が漏れる）。
 
 `client` フィクスチャは `test_api.py` と同じものなので、**`conftest.py` へ移して
 共有する**（同じ組み立てを 2 か所に書かない）。移したら `test_api.py` 側の定義は
@@ -5093,15 +5335,27 @@ def _group(repo: MergeRepository, row) -> dict[str, Any]:  # noqa: ANN001
             MediaProbe(),
             settings.data_root,
         )
-        result = merger.run(
-            ctx, ctx.params["merge_group_id"], ctx.params["input_digest"], profile
-        )
+        try:
+            result = merger.run(
+                ctx, ctx.params["merge_group_id"], ctx.params["input_digest"], profile
+            )
+        except (MergeCancelled, PublishCancelled) as exc:
+            # **協調キャンセルは「完了」として返す。** 送出すると JobRunner の
+            # 例外経路が job を failed にし、利用者が押したキャンセルが失敗として
+            # 記録される。正常 return すれば `finish_claimed` が
+            # `cancelling -> cancelled` を決着させる（取り込みも同じ形で降りる）。
+            ctx.emit("info", f"結合を中止した: {exc}")
+            return
         ctx.emit(
             "info",
             f"結合完了: {result.rel_path}（経路 {result.route} /"
             f" 検証 {'合格' if result.passed else '不合格'}）",
         )
 ```
+
+`jobs_wiring.py` の import には `MergeCancelled`（`adapters.ffmpeg`）、
+`PublishCancelled`（`adapters.publisher`）、`MergeRunner`、`Merger`、
+`MergeRepository`、`GroupDetector` を足す。
 
 `_fixed_profile` と共通の解決を切り出す:
 
@@ -5149,7 +5403,7 @@ from .routes_merges import router as merges_router
 
 - [ ] **Step 4: 通ることを確認する**
 
-Run: `uv run pytest app/tests/test_api_merges.py app/tests/test_api.py -q`
+Run: `uv run pytest app/tests/test_api_merges.py app/tests/test_merge_job_wiring.py app/tests/test_api.py -q`
 Expected: PASS
 
 - [ ] **Step 5: 変異試験**
@@ -5165,6 +5419,8 @@ Expected: PASS
 | `_targets` の `merge.enabled` の絞り込みを消す | `test_profiles_that_do_not_merge_are_not_detected` |
 | `preview` が `save_detected` を呼ぶ | `test_the_preview_does_not_store_anything` |
 | `truncated` を常に `False` にする | **落ちない**。上限に届くデータを API のテストで作っていない。`SelectionService` 側の `test_the_list_is_capped` が上限そのものを見ている（検出できない変異として記録する） |
+| `run_merge` の `except (MergeCancelled, PublishCancelled)` を消して送出する | `test_a_cancelled_merge_job_ends_as_cancelled`（ジョブが `failed` になる） |
+| `run_merge` がキャンセルを握りつぶして `succeeded` で返す（`return` を消して続行） | 同上（`MergeResult` が無いので `AttributeError` になり、やはり `failed`） |
 
 リビジョンとプロファイル絞り込みのテストを足す:
 
@@ -5229,7 +5485,8 @@ def test_profiles_that_do_not_merge_are_not_detected(client, api_db):
 ```bash
 uv run ruff check . && uv run ruff format .
 git add app/src/mediaferry/api/routes_merges.py app/src/mediaferry/api/jobs_wiring.py \
-        app/src/mediaferry/api/app.py app/tests/test_api_merges.py
+        app/src/mediaferry/api/app.py app/tests/test_api_merges.py \
+        app/tests/test_merge_job_wiring.py
 git commit -m "feat(mediaferry): expose merge groups and upload candidates over the api"
 ```
 
@@ -5494,6 +5751,8 @@ uv run ruff format --check .
 | --- | --- |
 | **結合物の公開は `ArtifactPublisher.publish_prepared`（`os.link`）** | `write` コールバックで staging へ書き直すと 30 GiB をもう一度書く。`work/` と `staging/` は同一ファイルシステム（§7）なので link で移せる。11 手順と回収の性質は `publish` と同じ |
 | **`publish_prepared` の SHA-1 走査中も heartbeat とキャンセル確認を続ける** | 30 GiB の走査はリース（60 秒）より長い。打たないと、読み切った後の手順 7 で失効し、正しく生成・検証済みの結合物が捨てられる |
+| **staged より前の「中断できない長い処理」は `_with_lease_pulse` で囲む** | `os.fsync`（30 GiB の直後は数十秒）と ffprobe（timeout がリースと同値）は途中で止められず、chunk の合間の heartbeat では守れない。処理を別スレッドへ出し、待つ側が打つ（DB へ触るのは待つ側だけなので接続は 1 本のまま）。**取り込み側にも同じ穴があり、共通の `_publish` を直すことで両方に効く** |
+| **キャンセルは例外で `JobRunner` まで上げない** | `_run_one` は例外をすべて `failed` にするので、利用者が押したキャンセルがジョブの失敗として記録される。`run_merge` が受け止めて正常 return し、`finish_claimed` の `cancelling -> cancelled` に決着させる（取り込みも同じ形で降りている） |
 | **検証結果は公開の前に commit する** | 公開の途中で落ちても検証をやり直さない。`merging` のまま残ったグループは起動時に決着させる |
 | **`merging` のまま残ったグループは、出力の有無で merged / detected へ倒す** | 倒さないと再試行もできない。`_recover_staging` の後に走らせる（そこで公開が完遂して `output_media_file_id` が入る）。**回収できない `artifact_staging` を抱えたグループは動かさない**（再試行させると、古い staged 行と新しい公開が同じグループを指す） |
 | **公開後にできる操作は採用だけ。破棄と再結合は Phase 4** | どちらも公開済みの `media_file` を取り残す。旧グループを `superseded_by_id` で向け直す仕組みが要り、それは手動編集と共通なので画面と一緒に入れる |
@@ -5588,7 +5847,21 @@ git commit -m "docs(mediaferry): record what phase 2 settled"
 | 11 [major] | `selectable` が無制限 + derived ごとの N+1。`bool(value)` が `"false"` を合格にする | Task 12（batch query、`DEFAULT_LIMIT` と `truncated`、`is True`） |
 | 12 [minor] | `merge.enabled` の変異を検出できないテスト | Task 13（archive ではなく `enabled: false` の第 2 プロファイルで確かめる） |
 
-**退けた指摘: `MERGE_PIPELINE_VERSION` を `input_digest` に入れる（#8 の一部）。**
+### 2 巡目（2026-08-18、codex。blocker 2）
+
+1 巡目の反映を確認させたところ、接続部に 2 件残っていた。**どちらも反映した。**
+
+| # | 指摘 | 反映先 |
+| --- | --- | --- |
+| 1 [blocker] | キャンセル例外を再送出すると `JobRunner._run_one` が `failed` にするので、利用者が押したキャンセルが失敗として記録される | Task 13（`run_merge` が受け止めて正常 return。`JobRunner` を通して job=cancelled / group=detected を見る統合テストを足した） |
+| 2 [blocker] | pulse を入れたのは SHA-1 の read loop だけで、その後の `os.fsync` と ffprobe（timeout がリースと同値）で再び失効しうる | Task 7（`_with_lease_pulse`。処理を別スレッドへ出し、待つ側が打つ。**取り込み側の同じ穴も共通の `_publish` で塞がる**） |
+
+`MERGE_PIPELINE_VERSION` の反論は受け入れられた。「将来、既知の不具合がある
+検証版を無効化する必要が出たら、digest を変えるのではなく eligibility 側の
+『再検証が必要』ポリシーとして扱う」という補足も、Phase 4 以降の判断材料として
+ここに残す。
+
+**退けた指摘: `MERGE_PIPELINE_VERSION` を `input_digest` に入れる（1 巡目 #8 の一部）。**
 `input_digest` は §8 で「構成ファイルの ordered な id と sha1、結合設定、
 プロファイルリビジョン」と定義され、その役割は §10 のとおり**入力の同一性**の
 判定である。検証の閾値はプロファイルの `merge` 節にも無く、入力ではない。
