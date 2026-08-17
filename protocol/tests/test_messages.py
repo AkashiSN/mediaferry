@@ -23,7 +23,7 @@ def sample_volume() -> VolumeInfo:
         fs_uuid="26B1-2FD6",
         fs_label="SD_Card",
         size_bytes=512_110_190_592,
-        usb=UsbInfo(vendor_id="2ca3", product_id="0020", serial="ANGZP3K002QM4K"),
+        usb=UsbInfo(vendor_id="2ca3", product_id="0020", serial="TESTSERIAL0001"),
         broker_epoch="c0ffee",
         generation=7,
     )

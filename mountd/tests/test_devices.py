@@ -56,7 +56,7 @@ def make_sysfs(root: Path) -> None:
     usb_dev = root / "devices/pci0000:00/usb2/2-4"
     (usb_dev / "idVendor").write_text("2ca3\n")
     (usb_dev / "idProduct").write_text("0020\n")
-    (usb_dev / "serial").write_text("ANGZP3K002QM4K\n")
+    (usb_dev / "serial").write_text("TESTSERIAL0001\n")
     (usb_dev / "subsystem").symlink_to(bus_usb)
 
     # /sys/class/block のシンボリックリンク
@@ -112,7 +112,7 @@ def test_usb_identity_is_resolved_from_ancestors(tmp_path):
     vols = {v.device_node: v for v in enumerate_volumes(sysfs_root=tmp_path, probe=fake_probe)}
     usb = vols["/dev/sdk"].usb
     assert usb is not None
-    assert (usb.vendor_id, usb.product_id, usb.serial) == ("2ca3", "0020", "ANGZP3K002QM4K")
+    assert (usb.vendor_id, usb.product_id, usb.serial) == ("2ca3", "0020", "TESTSERIAL0001")
 
 
 def test_generation_and_epoch_are_stamped(tmp_path):

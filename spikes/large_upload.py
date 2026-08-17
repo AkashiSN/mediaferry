@@ -285,11 +285,15 @@ def main() -> int:
             post = bulk_outcome(client, f"post-delete-{digest.hex()[:8]}", bulk_sum)
             print(f"bulk-upload-check (削除後) -> {post}")
             checks.append(("後片付けが成功した", d.status_code < 300, f"status={d.status_code}"))
+            # Immich はゴミ箱を持つ (trashDays)。force: true でも直後に完全削除
+            # されるとは限らず、bulk-upload-check は isTrashed: true の duplicate を
+            # 返す。ゴミ箱に入っていれば後片付けは成立している。
+            trashed = bool((post.get("raw") or {}).get("isTrashed"))
             checks.append(
                 (
-                    "削除後は再び accept になる",
-                    post["outcome"] == "accept",
-                    str(post["outcome"]),
+                    "削除後に資産が消えたかゴミ箱に入った",
+                    post["outcome"] == "accept" or trashed,
+                    f"{post['outcome']} isTrashed={trashed}",
                 )
             )
         elif asset_id:

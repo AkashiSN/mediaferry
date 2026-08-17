@@ -360,10 +360,7 @@ def probe_upload_cycle(
     # フィールド一覧を必ず出す。クライアント由来の識別子が 1 つでも残って
     # いれば、状態機械からの推論より直接的な判別材料になる。
     print(f"資産応答のフィールド: {sorted(asset)}")
-    client_side = {
-        k: v for k, v in asset.items()
-        if isinstance(v, str) and run_id in v
-    }
+    client_side = {k: v for k, v in asset.items() if isinstance(v, str) and run_id in v}
     print(f"クライアント由来の値が残っているフィールド: {client_side or 'なし'}")
     got = asset.get("deviceAssetId")
     readback_works = got == device_asset_id
@@ -375,10 +372,7 @@ def probe_upload_cycle(
     if readback_works:
         mechanism = "deviceAssetId の読み戻し"
     elif upload_status:
-        mechanism = (
-            f"アップロード応答の status ({upload_status!r})"
-            " + 初回 checking の結果の記録"
-        )
+        mechanism = f"アップロード応答の status ({upload_status!r}) + 初回 checking の結果の記録"
     else:
         mechanism = None
     print(f"\n>>> Task 11 に記録する: 自作資産の判別手段 = {mechanism}")
