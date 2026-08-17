@@ -1,0 +1,58 @@
+# TrueNAS の Apps → Custom App に貼り付けて使う。
+# <...> はデプロイ時に置き換える。環境固有の値はリポジトリに含めない。
+#
+# app は mountd のソケットに接続するため、両者の GID を揃える必要がある。
+# MOUNTD_ALLOWED_UIDS に app の UID を指定すると、他プロセスからの接続を拒む。
+name: mediaferry
+
+services:
+  mountd:
+    image: ghcr.io/<owner>/mediaferry-mountd:<tag>
+    restart: unless-stopped
+    privileged: true
+    volumes:
+      - /dev:/dev                        # ホットプラグの伝播に必須
+      - /lib/modules:/lib/modules:ro     # exfat モジュールの遅延ロード
+      - <host-sock-path>:/run/mediaferry # ソケット専用。mountd のみ RW
+    environment:
+      MOUNTD_SOCKET: /run/mediaferry/broker.sock
+      MOUNTD_MOUNT_ROOT: /run/mountd/mnt
+      # app の UID のみ接続を許す (SO_PEERCRED)
+      MOUNTD_ALLOWED_UIDS: "<app-uid>"
+      # ソケットを app と共有するグループに付け替える。0660 にするだけでは
+      # 所有者が root:root のままで、非 root の app は接続できない。
+      MOUNTD_SOCKET_GID: "<app-gid>"
+
+  app:
+    image: ghcr.io/<owner>/mediaferry:<tag>
+    restart: unless-stopped
+    depends_on:
+      - mountd
+    user: "<app-uid>:<app-gid>"
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    read_only: true
+    volumes:
+      - <host-sock-path>:/run/mediaferry:ro   # 接続のみ。unlink・差し替えは不可
+      - <host-dataset-path>:/data
+      - app-tmp:/tmp
+    environment:
+      MEDIAFERRY_BROKER_SOCKET: /run/mediaferry/broker.sock
+      MEDIAFERRY_DATA_ROOT: /data
+      MEDIAFERRY_BIND_HOST: 127.0.0.1
+      MEDIAFERRY_IMMICH_URL: <immich-url>
+      MEDIAFERRY_IMMICH_API_KEY: <immich-api-key>
+      MEDIAFERRY_DEFAULT_TIMEZONE: <iana-tz>
+    # Phase 4 で認証と CSRF が入るまで ports を書かない。
+    #
+    # コンテナ内で 127.0.0.1 にだけ bind した状態で ports を書いても、Docker の
+    # ポート転送はコンテナの eth0 宛に繋ぐため到達できない。逆に到達させるには
+    # 0.0.0.0 に bind することになり、それは「公開しない」方針と矛盾する。
+    # この段階では `docker compose exec app ...` か内部ネットワークから使う。
+    #
+    # Phase 4 以降、LAN へ出すときは次の 2 つを同時に変える:
+    #   MEDIAFERRY_BIND_HOST: 0.0.0.0
+    #   ports: ["<host-ip>:<host-port>:8080"]
+
+volumes:
+  app-tmp:
