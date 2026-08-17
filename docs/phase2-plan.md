@@ -1014,10 +1014,12 @@ Expected: PASS（7 件）
 
 | 変異 | 落ちるべきテスト |
 | --- | --- |
-| `first.captured_at` を `last.captured_at` にする | `test_the_output_name_follows_the_profile_template`（ts が `145500` になる） |
+| `first.captured_at` を `last.captured_at` にする | `test_the_output_name_follows_the_profile_template`。ただし **`MEMBERS` の 2 件が同じ `captured_at` だと素通りする**（`a_part` の既定値のまま）。2 件目に `14:55` を持たせて先頭と末尾の差が出るようにした |
 | `_sequence(rule, last.rel_path)` を `first` にする | 同上（`0001-0001` になる） |
 | `key not in values` の判定を消す | `test_an_unknown_placeholder_is_refused` |
-| `prefix not in path.parents` を消す | `test_a_path_outside_the_library_is_refused` |
+| `prefix not in path.parents` を消す | `test_a_path_outside_the_library_is_refused`。ただし **`x.MP4` のままだと素通りする** —— `_sequence` が先に落ちて置き場所の判定を一度も通らない。連番が読める名前（`.../DJI_20260817143000_0001_D.MP4`）に直した |
+| `safe_source_rel_path` の検査を外す | `test_a_rendered_separator_is_refused` は**落ちない**（`../0001.MP4` は後段の `"/" in checked` が拾う）。バックスラッシュを含む名前のテスト（`test_a_rendered_backslash_is_refused`）を足して、`UnsafePath` ではなく `MergeOutputUndefined` で返すことを固定した |
+| 連番が読めないときに落とさない | `test_an_unreadable_sequence_is_refused` |
 | `"/" in checked` の判定を消す | `test_a_rendered_separator_is_refused` は `..` を `safe_source_rel_path` が先に弾くので落ちない。**`output_name="{first_seq}/x.MP4"` のケースを足す** |
 | `.strftime(TS_FORMAT)` を UTC へ正規化してから行う | `test_the_timestamp_is_the_local_wall_clock_of_the_first_part` |
 
