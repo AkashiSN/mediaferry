@@ -6,7 +6,10 @@ import sqlite3
 from collections.abc import Iterator
 from typing import TYPE_CHECKING
 
-from fastapi import Depends, Request
+from fastapi import Depends, HTTPException, Request
+
+from ..core.crypto import SecretBox
+from ..settings import SettingsService
 
 if TYPE_CHECKING:
     from .app import AppState
@@ -27,3 +30,21 @@ def conn(app_state: AppState = Depends(state)) -> Iterator[sqlite3.Connection]: 
         yield connection
     finally:
         connection.close()
+
+
+def secret_box(
+    app_state: AppState = Depends(state),  # noqa: B008
+    connection: sqlite3.Connection = Depends(conn),  # noqa: B008
+) -> SecretBox:
+    """マスター鍵から `SecretBox` を作る. 未設定なら 400 で断る（§12.3）.
+
+    引数名を `conn` にしないのは、このモジュールの `conn` を隠してしまい
+    自己参照になるため。
+    """
+    settings = SettingsService(connection, app_state.env).snapshot()
+    if settings.secret_key is None:
+        raise HTTPException(
+            status_code=400,
+            detail="MEDIAFERRY_SECRET_KEY が未設定。転送先の API キーを保存できない",
+        )
+    return SecretBox(settings.secret_key)

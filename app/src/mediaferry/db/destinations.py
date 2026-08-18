@@ -53,6 +53,15 @@ class EpochDecisionRequired(RuntimeError):
 
 
 @dataclass(frozen=True)
+class RevisionOutcome:
+    """編集の結果. **破棄した件数まで返す**（API が利用者へ見せる）."""
+
+    revision_id: str
+    target_epoch: int
+    invalidated_records: int
+
+
+@dataclass(frozen=True)
 class RemoteIdentity:
     """接続の検証で観測した値. 同一性ではない."""
 
@@ -105,8 +114,13 @@ class DestinationRepository:
         secret: str,
         identity: RemoteIdentity,
         same_library: bool | None = None,
-    ) -> str:
-        """編集を新しいリビジョンとして反映する. 戻り値は revision_id."""
+    ) -> RevisionOutcome:
+        """編集を新しいリビジョンとして反映する.
+
+        **旧 epoch の破棄まで同じトランザクションで行い、件数を返す**（§8）。
+        別の呼び出しに分けると、間で落ちたときに理由の無い pending が残り、
+        API も「何件止めたか」を返せない。
+        """
         endpoints = _endpoints(base_url, public_url)
         _require_identity(identity)
         with immediate(self._conn):
@@ -124,11 +138,14 @@ class DestinationRepository:
                 credential_id=credential_id,
                 identity=identity,
             )
+            invalidated = 0
             if epoch != current["target_epoch"]:
                 # **同じトランザクションで**旧 epoch の未 claim 項目を破棄する（§8）。
                 # 分けると、間で落ちたときに理由の無い pending が永久に残る。
-                self._invalidate_old_epoch_locked(destination_id, epoch)
-        return revision_id
+                invalidated = self._invalidate_old_epoch_locked(destination_id, epoch)
+        return RevisionOutcome(
+            revision_id=revision_id, target_epoch=epoch, invalidated_records=invalidated
+        )
 
     def current(self, destination_id: str) -> sqlite3.Row:
         row = self._conn.execute(
@@ -288,15 +305,16 @@ class DestinationRepository:
         )
         return revision_id
 
-    def _invalidate_old_epoch_locked(self, destination_id: str, current_epoch: int) -> None:
+    def _invalidate_old_epoch_locked(self, destination_id: str, current_epoch: int) -> int:
         """旧 epoch の未完了レコードを破棄する. **`complete` は履歴として残す**（§8）."""
-        self._conn.execute(
+        updated = self._conn.execute(
             "UPDATE upload_record SET invalidated_at = ?,"
             " invalidated_reason = '宛先の向き先が変わった', updated_at = ?"
             " WHERE destination_id = ? AND target_epoch < ? AND invalidated_at IS NULL"
             "   AND state <> 'complete'",
             (now_iso(), now_iso(), destination_id, current_epoch),
         )
+        return updated.rowcount
 
 
 def _require_identity(identity: RemoteIdentity) -> None:

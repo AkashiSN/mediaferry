@@ -955,6 +955,15 @@ class EpochDecisionRequired(RuntimeError):
 
 
 @dataclass(frozen=True)
+class RevisionOutcome:
+    """編集の結果. **破棄した件数まで返す**（API が利用者へ見せる）."""
+
+    revision_id: str
+    target_epoch: int
+    invalidated_records: int
+
+
+@dataclass(frozen=True)
 class RemoteIdentity:
     """接続の検証で観測した値. 同一性ではない."""
 
@@ -1007,8 +1016,13 @@ class DestinationRepository:
         secret: str,
         identity: RemoteIdentity,
         same_library: bool | None = None,
-    ) -> str:
-        """編集を新しいリビジョンとして反映する. 戻り値は revision_id."""
+    ) -> RevisionOutcome:
+        """編集を新しいリビジョンとして反映する.
+
+        **旧 epoch の破棄まで同じトランザクションで行い、件数を返す**（§8）。
+        別の呼び出しに分けると、間で落ちたときに理由の無い pending が残り、
+        API も「何件止めたか」を返せない。
+        """
         endpoints = _endpoints(base_url, public_url)
         _require_identity(identity)
         with immediate(self._conn):
@@ -1026,11 +1040,14 @@ class DestinationRepository:
                 credential_id=credential_id,
                 identity=identity,
             )
+            invalidated = 0
             if epoch != current["target_epoch"]:
                 # **同じトランザクションで**旧 epoch の未 claim 項目を破棄する（§8）。
                 # 分けると、間で落ちたときに理由の無い pending が永久に残る。
-                self._invalidate_old_epoch_locked(destination_id, epoch)
-        return revision_id
+                invalidated = self._invalidate_old_epoch_locked(destination_id, epoch)
+        return RevisionOutcome(
+            revision_id=revision_id, target_epoch=epoch, invalidated_records=invalidated
+        )
 
     def current(self, destination_id: str) -> sqlite3.Row:
         row = self._conn.execute(
@@ -1165,15 +1182,16 @@ class DestinationRepository:
         return revision_id
 
 
-    def _invalidate_old_epoch_locked(self, destination_id: str, current_epoch: int) -> None:
+    def _invalidate_old_epoch_locked(self, destination_id: str, current_epoch: int) -> int:
         """旧 epoch の未完了レコードを破棄する. **`complete` は履歴として残す**（§8）."""
-        self._conn.execute(
+        updated = self._conn.execute(
             "UPDATE upload_record SET invalidated_at = ?,"
             " invalidated_reason = '宛先の向き先が変わった', updated_at = ?"
             " WHERE destination_id = ? AND target_epoch < ? AND invalidated_at IS NULL"
             "   AND state <> 'complete'",
             (now_iso(), now_iso(), destination_id, current_epoch),
         )
+        return updated.rowcount
 
 
 def _require_identity(identity: RemoteIdentity) -> None:
@@ -6730,7 +6748,8 @@ def test_a_wrong_key_is_refused_and_stores_nothing(secret_env, immich, client, a
 
 
 def test_an_unusable_url_is_a_400(secret_env, immich, client):
-    assert client.post("/api/destinations", json=a_body(immich, base_url="javascript:x")).status_code == 400
+    response = client.post("/api/destinations", json=a_body(immich, base_url="javascript:x"))
+    assert response.status_code == 400
 
 
 def test_a_second_destination_on_the_same_account_is_warned(secret_env, immich, client):
@@ -7135,7 +7154,7 @@ from typing import Any
 from fastapi import APIRouter, Body, Depends, HTTPException
 
 from ..adapters.immich import ImmichClient, ImmichError
-from ..core.destinations.urls import EndpointRejected
+from ..core.destinations.urls import EndpointRejected, normalize_endpoint
 from ..db.credentials import CredentialStore
 from ..db.destinations import (
     DestinationNotFound,
@@ -7164,14 +7183,14 @@ def create_destination(
 ) -> dict[str, Any]:
     repo = _repo(conn, box)
     base_url, public_url, api_key = _fields(body)
+    # **URL の検証を接続より先に行う。** 逆にすると `javascript:` のような値でも
+    # まず接続を試すことになり、400 ではなく 502 を返してしまう。
+    _checked(base_url, public_url)
     identity = _verify(base_url, api_key)
-    try:
-        destination_id = repo.create(
-            name=body["name"], base_url=base_url, public_url=public_url,
-            secret=api_key, identity=identity,
-        )
-    except EndpointRejected as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    destination_id = repo.create(
+        name=body["name"], base_url=base_url, public_url=public_url,
+        secret=api_key, identity=identity,
+    )
     return {
         "id": destination_id,
         "remote_user_id": identity.remote_user_id,
@@ -7203,9 +7222,10 @@ def edit_destination(
     if api_key is None:
         # 鍵を変えない編集でも、保存には可逆な値が要る。
         api_key = repo.secret_of(current["id"])
+    _checked(base_url, public_url)
     identity = _verify(base_url, api_key)
     try:
-        repo.add_revision(
+        outcome = repo.add_revision(
             destination_id, base_url=base_url, public_url=public_url, secret=api_key,
             identity=identity, same_library=body.get("same_library"),
         )
@@ -7214,19 +7234,13 @@ def edit_destination(
             status_code=409,
             detail=f"{exc}。same_library を true か false で指定する",
         ) from exc
-    except EndpointRejected as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-    current = repo.current(destination_id)
-    # epoch の破棄は `add_revision` が同じトランザクションで済ませている（Task 3）。
-    invalidated = _uploads_of(conn, box).invalidate_old_epoch(
-        destination_id, current["target_epoch"], "宛先の向き先が変わった"
-    )
     # 参照が絶えた旧鍵を消す。ローテートしても漏洩面が減らないままにしない（§12.3）。
     repo.purge_superseded_credentials(destination_id)
     return {
         "id": destination_id,
-        "target_epoch": current["target_epoch"],
-        "invalidated_records": invalidated,
+        "target_epoch": outcome.target_epoch,
+        # 破棄は `add_revision` が同じトランザクションで済ませている（§8）。
+        "invalidated_records": outcome.invalidated_records,
         "warnings": repo.same_account_warnings(identity, destination_id),
     }
 
@@ -7296,13 +7310,21 @@ def _fields(body: dict[str, Any]) -> tuple[str, str | None, str]:
         raise HTTPException(status_code=400, detail=f"{exc} が要る") from exc
 
 
+def _checked(base_url: str, public_url: str | None) -> None:
+    """保存する前に URL を検証する. **接続より先に呼ぶ。**"""
+    try:
+        normalize_endpoint(base_url)
+        if public_url is not None:
+            normalize_endpoint(public_url)
+    except EndpointRejected as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
 def _verify(base_url: str, api_key: str) -> RemoteIdentity:
     """接続を検証し、向き先を観測する. 失敗した設定は保存しない."""
     try:
         with ImmichClient(base_url, api_key) as client:
             body = client.users_me()
-    except EndpointRejected as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
     except ImmichError as exc:
         # 502。こちらの要求は正しく、相手に届かないか拒まれている。
         raise HTTPException(status_code=502, detail=f"転送先に接続できない: {exc}") from exc
@@ -7654,7 +7676,9 @@ Expected: PASS
 | `EpochDecisionRequired` を 500 のまま通す | `test_a_changed_host_needs_an_answer` |
 | `same_library` を無視する | `test_the_answer_can_be_given` |
 | `verify` の `matches` を常に真にする | `test_verifying_reports_where_it_points` |
-| `invalidate_old_epoch` の呼び出しを消す | `test_advancing_the_epoch_invalidates_the_queued_records` |
+| `invalidate_old_epoch` の件数を報告しない | `test_advancing_the_epoch_invalidates_the_queued_records`。**破棄は `add_revision` が同じトランザクションで行う**ので、API は `RevisionOutcome.invalidated_records` を返す（実装時に変更） |
+| PATCH が未知の欄を受理する | `test_an_unknown_field_in_a_patch_is_refused`（**追加**。黙って捨てると利用者は反映されたと思う） |
+| URL の検証を接続の後に移す | `test_an_unusable_url_is_a_400`。**接続を先に試すと 502 になり 400 を返せない**（実装時に判明） |
 | `purge_superseded_credentials` の呼び出しを消す | **落ちない**（API のテストは鍵の破棄を見ていない）。`test_destination_repository.py::test_a_superseded_key_is_purged_when_nothing_is_in_flight` がメソッド自体を固定している。呼び出し側の変異は検出できないものとして記録する |
 | `archive` を無視する | `test_archiving_takes_it_out_of_the_list` |
 | `secret_box` の未設定チェックを消す | `test_a_destination_needs_a_master_key` |
@@ -7666,6 +7690,9 @@ Expected: PASS
 | `approve` を同期の PUT に戻す | `test_approving_enqueues_a_job_that_owns_the_side_effect` |
 | `approve` の状態判定を消す | `test_approving_something_that_is_not_waiting_is_a_409` |
 | `requeue` の `remote_asset_id IS NULL` 条件を消す | `test_a_healthy_complete_record_cannot_be_requeued` |
+| `requeue` の `state = 'complete'` 条件を消す | **落ちない**。`remote_asset_id IS NULL` かつ `remote_checked_at IS NOT NULL` は、再確認を通った `complete` にしか成立しない（`pending` の記録は `remote_checked_at` を持たない）。冗長な guard として記録する |
+| `approve` の重複 enqueue を許す | `test_a_second_approval_is_not_queued` |
+| 一覧の `destination_id` / `state` の絞り込みを無視する | `test_the_list_can_be_narrowed_by_destination_and_state` |
 | `requeue` を消す（`retry` で兼ねる） | `test_a_vanished_asset_can_be_sent_again` |
 | `reject` がリモートへ PUT する | `test_rejecting_completes_without_touching_the_remote` |
 | params に API キーを入れる | `test_starting_an_upload_enqueues_a_job_for_that_destination` |

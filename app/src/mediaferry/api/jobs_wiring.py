@@ -14,15 +14,24 @@ from typing import Any
 
 from ..adapters.ffmpeg import MergeCancelled, MergeRunner
 from ..adapters.ffprobe import MediaProbe
+from ..adapters.immich import ImmichClient
 from ..adapters.publisher import ArtifactPublisher, PublishCancelled
+from ..core.crypto import SecretBox
 from ..db.connection import Database
+from ..db.credentials import CredentialStore
+from ..db.destinations import DestinationRepository
 from ..db.jobs import JobContext, JobStore
 from ..db.merges import MergeRepository
 from ..db.profiles import ProfileRef, ProfileRegistry
+from ..db.uploads import UploadRepository
+from ..jobs.approvals import ApprovalService
 from ..jobs.detect_groups import GroupDetector
 from ..jobs.importer import Importer
 from ..jobs.merger import Merger
+from ..jobs.preflight import PreflightCache
+from ..jobs.recheck import Rechecker
 from ..jobs.scan import Scanner
+from ..jobs.uploader import Uploader
 from ..jobs.volumes import VolumeSelection, VolumeService
 from ..settings import SettingsService
 
@@ -102,6 +111,58 @@ class JobWorld:
             "info",
             f"結合完了: {result.rel_path}（経路 {result.route} /"
             f" 検証 {'合格' if result.passed else '不合格'}）",
+        )
+
+    def run_upload(self, ctx: JobContext, conn: sqlite3.Connection) -> None:
+        settings = SettingsService(conn, self._env).snapshot()
+        if settings.secret_key is None:
+            raise RuntimeError("MEDIAFERRY_SECRET_KEY が未設定なので転送先を開けない")
+        destinations = DestinationRepository(
+            conn, CredentialStore(conn, SecretBox(settings.secret_key))
+        )
+        uploads = UploadRepository(conn, ProfileRegistry(conn), destinations)
+
+        def open_client(revision: sqlite3.Row) -> ImmichClient:
+            return ImmichClient(
+                revision["base_url"],
+                destinations.secret_of(revision["id"]),
+                settings.upload_timeout_seconds,
+            )
+
+        preflight = PreflightCache(destinations, open_client)
+        destination_id = ctx.params["destination_id"]
+        if ctx.params.get("mode") == "approve":
+            # 承認は 1 件だけを扱う。外部副作用の所有権はジョブのリースが持つ。
+            ApprovalService(
+                conn, uploads, destinations, ProfileRegistry(conn), open_client, preflight
+            ).approve(ctx, ctx.params["upload_record_id"])
+            ctx.emit("info", "日時の補正を承認して書き戻した")
+            return
+        if ctx.params.get("mode") == "recheck":
+            outcome = Rechecker(uploads, destinations, open_client, preflight).run(
+                ctx, destination_id
+            )
+            ctx.emit(
+                "info",
+                f"再確認: {outcome.checked} 件 / ゴミ箱 {outcome.trashed} 件"
+                f" / 消滅 {outcome.vanished} 件 / 復元 {outcome.restored} 件",
+            )
+            return
+        uploader = Uploader(
+            conn,
+            uploads,
+            destinations,
+            ProfileRegistry(conn),
+            settings.data_root,
+            open_client,
+            preflight,
+            settings.upload_max_attempts,
+        )
+        outcome = uploader.run(ctx, destination_id)
+        ctx.emit(
+            "info",
+            f"アップロード完了: 送信 {outcome.sent} 件 / 承認待ち {outcome.awaiting} 件"
+            f" / 見送り {outcome.skipped} 件 / 失敗 {outcome.failed} 件",
         )
 
 

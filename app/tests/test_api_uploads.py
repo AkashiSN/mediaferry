@@ -1,0 +1,229 @@
+import hashlib
+
+import pytest
+
+from mediaferry.db.connection import Database
+from mediaferry.db.profiles import ProfileRegistry
+
+from .fake_immich import API_KEY
+from .test_api_destinations import a_body, secret_env  # noqa: F401
+from .test_schema_artifacts import a_media_file
+
+PAYLOAD = b"video-bytes"
+
+
+@pytest.fixture
+def api_db(client, data_root):
+    conn = Database(data_root / "var" / "mediaferry.sqlite3").connect()
+    yield conn
+    conn.close()
+
+
+@pytest.fixture
+def world(secret_env, immich, client, api_db, data_root):  # noqa: F811
+    destination_id = client.post("/api/destinations", json=a_body(immich)).json()["id"]
+    profile = ProfileRegistry(api_db).current("dji-osmo")
+    directory = data_root / "library" / "dji-osmo" / "DCIM"
+    directory.mkdir(parents=True, exist_ok=True)
+    (directory / "A.MP4").write_bytes(PAYLOAD)
+    media_id = a_media_file(
+        api_db,
+        (profile.profile_id, profile.revision_id),
+        rel_path="library/dji-osmo/DCIM/A.MP4",
+        sha1=hashlib.sha1(PAYLOAD, usedforsecurity=False).hexdigest(),
+    )
+    return immich, destination_id, media_id, api_db
+
+
+def test_uploads_are_created_per_pair(world, client):
+    _, destination_id, media_id, api_db = world
+
+    body = client.post(
+        "/api/uploads", json={"media_ids": [media_id], "destination_ids": [destination_id]}
+    ).json()
+
+    assert [pair["result"] for pair in body["pairs"]] == ["created"]
+    assert api_db.execute("SELECT count(*) FROM upload_record").fetchone()[0] == 1
+
+
+def test_an_unknown_media_id_rejects_the_request(world, client):
+    _, destination_id, _, api_db = world
+    response = client.post(
+        "/api/uploads", json={"media_ids": ["nope"], "destination_ids": [destination_id]}
+    )
+    assert response.status_code == 400
+    assert api_db.execute("SELECT count(*) FROM upload_record").fetchone()[0] == 0
+
+
+def test_the_records_can_be_listed_and_filtered(world, client):
+    _, destination_id, media_id, _ = world
+    client.post("/api/uploads", json={"media_ids": [media_id], "destination_ids": [destination_id]})
+    body = client.get(f"/api/uploads?destination_id={destination_id}&state=pending").json()
+    assert [row["state"] for row in body["records"]] == ["pending"]
+    assert body["records"][0]["media_file_id"] == media_id
+
+
+def test_a_failed_record_can_be_retried(world, client):
+    """**既定でない根拠**を持つレコードで確かめる.
+
+    `default` のままだと、`selection_rule` を書き換える変異が「同じ値で上書き」に
+    なり、不変 trigger も発火しないので見分けられない。
+    """
+    from .test_selection import a_group, a_pair
+
+    _, destination_id, _, api_db = world
+    profile = ProfileRegistry(api_db).current("dji-osmo")
+    members = a_pair(api_db, profile)
+    a_group(api_db, profile, members, status="failed", verification=None)
+    client.post(
+        "/api/uploads", json={"media_ids": [members[0][0]], "destination_ids": [destination_id]}
+    )
+    record_id = api_db.execute("SELECT id FROM upload_record").fetchone()[0]
+    api_db.execute("UPDATE upload_record SET state = 'failed'")
+
+    assert client.post(f"/api/uploads/{record_id}/retry").status_code == 200
+
+    row = api_db.execute("SELECT state, selection_rule FROM upload_record").fetchone()
+    assert row["state"] == "pending"
+    # 再試行は「なぜ最初に送信を許可したか」を変えない（§8）。
+    assert row["selection_rule"] == "failed_group_member"
+
+
+def test_retrying_something_that_is_not_failed_is_a_409(world, client):
+    _, destination_id, media_id, api_db = world
+    client.post("/api/uploads", json={"media_ids": [media_id], "destination_ids": [destination_id]})
+    record_id = api_db.execute("SELECT id FROM upload_record").fetchone()[0]
+    assert client.post(f"/api/uploads/{record_id}/retry").status_code == 409
+
+
+def _an_awaiting_record(client, api_db, destination_id, media_id):
+    client.post("/api/uploads", json={"media_ids": [media_id], "destination_ids": [destination_id]})
+    record_id = api_db.execute("SELECT id FROM upload_record").fetchone()[0]
+    revision_id = api_db.execute("SELECT current_revision_id FROM upload_destination").fetchone()[0]
+    api_db.execute(
+        "UPDATE upload_record SET state = 'awaiting_datetime_approval',"
+        " remote_asset_id = 'asset-1', destination_revision_id = ?",
+        (revision_id,),
+    )
+    return record_id
+
+
+def test_rejecting_completes_without_touching_the_remote(world, client):
+    server, destination_id, media_id, api_db = world
+    record_id = _an_awaiting_record(client, api_db, destination_id, media_id)
+
+    assert client.post(f"/api/uploads/{record_id}/reject").status_code == 200
+
+    assert api_db.execute("SELECT state FROM upload_record").fetchone()[0] == "complete"
+    assert server.datetimes == {}
+
+
+def test_approving_enqueues_a_job_that_owns_the_side_effect(world, client):
+    """承認は同期で PUT せず、claim を取れるジョブとして走らせる（Task 11）."""
+    import json
+
+    server, destination_id, media_id, api_db = world
+    record_id = _an_awaiting_record(client, api_db, destination_id, media_id)
+
+    job_id = client.post(f"/api/uploads/{record_id}/approve").json()["job_id"]
+
+    params = json.loads(
+        api_db.execute("SELECT params_json FROM job WHERE id = ?", (job_id,)).fetchone()[0]
+    )
+    assert params["mode"] == "approve"
+    assert params["upload_record_id"] == record_id
+    # ジョブが走るまでリモートは変わらない。
+    assert server.datetimes == {}
+
+
+def test_approving_something_that_is_not_waiting_is_a_409(world, client):
+    _, destination_id, media_id, api_db = world
+    client.post("/api/uploads", json={"media_ids": [media_id], "destination_ids": [destination_id]})
+    record_id = api_db.execute("SELECT id FROM upload_record").fetchone()[0]
+    assert client.post(f"/api/uploads/{record_id}/approve").status_code == 409
+
+
+def test_a_vanished_asset_can_be_sent_again(world, client):
+    """再確認で「リモートに存在しない」と分かったものだけ送り直せる（§9.10）."""
+    _, destination_id, media_id, api_db = world
+    client.post("/api/uploads", json={"media_ids": [media_id], "destination_ids": [destination_id]})
+    record_id = api_db.execute("SELECT id FROM upload_record").fetchone()[0]
+    revision_id = api_db.execute("SELECT current_revision_id FROM upload_destination").fetchone()[0]
+    api_db.execute(
+        "UPDATE upload_record SET state = 'complete', remote_asset_id = NULL,"
+        " remote_checked_at = '2026-08-17T00:00:00+00:00', destination_revision_id = ?",
+        (revision_id,),
+    )
+
+    assert client.post(f"/api/uploads/{record_id}/requeue").status_code == 200
+
+    assert api_db.execute("SELECT state FROM upload_record").fetchone()[0] == "pending"
+
+
+def test_a_healthy_complete_record_cannot_be_requeued(world, client):
+    """送信済みのものを、確認もせずに送り直させない."""
+    _, destination_id, media_id, api_db = world
+    client.post("/api/uploads", json={"media_ids": [media_id], "destination_ids": [destination_id]})
+    record_id = api_db.execute("SELECT id FROM upload_record").fetchone()[0]
+    revision_id = api_db.execute("SELECT current_revision_id FROM upload_destination").fetchone()[0]
+    api_db.execute(
+        "UPDATE upload_record SET state = 'complete', remote_asset_id = 'asset-1',"
+        " remote_checked_at = '2026-08-17T00:00:00+00:00', destination_revision_id = ?",
+        (revision_id,),
+    )
+    assert client.post(f"/api/uploads/{record_id}/requeue").status_code == 409
+
+
+def test_starting_an_upload_enqueues_a_job_for_that_destination(world, client, api_db):
+    _, destination_id, media_id, _ = world
+    client.post("/api/uploads", json={"media_ids": [media_id], "destination_ids": [destination_id]})
+
+    job_id = client.post(f"/api/destinations/{destination_id}/upload").json()["job_id"]
+
+    import json
+
+    params = json.loads(
+        api_db.execute("SELECT params_json FROM job WHERE id = ?", (job_id,)).fetchone()[0]
+    )
+    assert params["destination_id"] == destination_id
+    assert params["mode"] == "send"
+    # **秘密を params に入れない。**
+    assert API_KEY not in json.dumps(params)
+
+
+def test_a_recheck_is_the_same_job_type_with_another_mode(world, client, api_db):
+    _, destination_id, _, _ = world
+    job_id = client.post(f"/api/destinations/{destination_id}/recheck").json()["job_id"]
+    import json
+
+    row = api_db.execute("SELECT type, params_json FROM job WHERE id = ?", (job_id,)).fetchone()
+    assert row["type"] == "upload"
+    assert json.loads(row["params_json"])["mode"] == "recheck"
+
+
+def test_a_second_approval_is_not_queued(world, client):
+    """同じレコードの承認ジョブを二重に積まない.
+
+    積めると、1 本目が終わった後の残りが軒並み失敗として画面に並ぶ。
+    """
+    _, destination_id, media_id, api_db = world
+    record_id = _an_awaiting_record(client, api_db, destination_id, media_id)
+
+    assert client.post(f"/api/uploads/{record_id}/approve").status_code == 200
+    assert client.post(f"/api/uploads/{record_id}/approve").status_code == 409
+
+    assert api_db.execute("SELECT count(*) FROM job WHERE type = 'upload'").fetchone()[0] == 1
+
+
+def test_the_list_can_be_narrowed_by_destination_and_state(world, client, immich):  # noqa: F811
+    """絞り込みが効かないと、別の宛先の記録まで混ざって見える."""
+    _, home, media_id, api_db = world
+    family = client.post("/api/destinations", json=a_body(immich, name="family")).json()["id"]
+    client.post("/api/uploads", json={"media_ids": [media_id], "destination_ids": [home, family]})
+    api_db.execute("UPDATE upload_record SET state = 'failed' WHERE destination_id = ?", (family,))
+
+    body = client.get(f"/api/uploads?destination_id={home}").json()
+    assert [row["destination_id"] for row in body["records"]] == [home]
+
+    body = client.get("/api/uploads?state=failed").json()
+    assert [row["destination_id"] for row in body["records"]] == [family]

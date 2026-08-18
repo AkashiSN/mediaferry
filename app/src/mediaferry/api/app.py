@@ -15,6 +15,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import sqlite3
 from collections.abc import AsyncIterator, Callable, Mapping
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
@@ -32,12 +33,14 @@ from ..db.profiles import ProfileRegistry
 from ..jobs.reconcile import Reconciler, ReconcileReport
 from ..jobs.runner import JobRunner
 from ..jobs.volumes import VolumeService
-from ..settings import SettingsService, bootstrap_data_root, startup_warnings
+from ..settings import Settings, SettingsService, bootstrap_data_root, startup_warnings
 from .jobs_wiring import JobWorld
+from .routes_destinations import router as destinations_router
 from .routes_devices import router as devices_router
 from .routes_media import router as media_router
 from .routes_merges import router as merges_router
 from .routes_system import router as system_router
+from .routes_uploads import router as uploads_router
 
 logger = logging.getLogger(__name__)
 
@@ -75,6 +78,8 @@ def create_app(
                 settings.data_root / "derived",
             )
             ProfileRegistry(startup).sync_builtins()
+            # **転送先が 1 件でもあってマスター鍵が無ければ起動しない**（§12.3）。
+            _assert_master_key(startup, settings)
             report = Reconciler(
                 startup,
                 settings.data_root,
@@ -94,6 +99,7 @@ def create_app(
         runner.register("import", world.run_import)
         runner.register("detect_groups", world.run_detect_groups)
         runner.register("merge", world.run_merge)
+        runner.register("upload", world.run_upload)
 
         state = AppState(
             database=database, env=env, volumes=volumes, runner=runner, last_reconcile=report
@@ -121,4 +127,19 @@ def create_app(
     app.include_router(devices_router, prefix="/api")
     app.include_router(media_router, prefix="/api")
     app.include_router(merges_router, prefix="/api")
+    app.include_router(destinations_router, prefix="/api")
+    app.include_router(uploads_router, prefix="/api")
     return app
+
+
+def _assert_master_key(conn: sqlite3.Connection, settings: Settings) -> None:
+    """鍵が無いまま起動すると、資格情報を復号できないジョブが走る."""
+    if settings.secret_key is not None:
+        return
+    count = conn.execute(
+        "SELECT count(*) FROM upload_destination WHERE archived_at IS NULL"
+    ).fetchone()[0]
+    if count:
+        raise RuntimeError(
+            f"転送先が {count} 件あるが MEDIAFERRY_SECRET_KEY が未設定。鍵を与えるまで起動しない"
+        )
