@@ -16,7 +16,6 @@ import hashlib
 import json
 import os
 import sqlite3
-import threading
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -25,10 +24,12 @@ from pathlib import Path
 from typing import BinaryIO
 
 from ..clock import now_iso
+from ..core import lease_pulse
+from ..core.lease_pulse import with_lease_pulse as _with_lease_pulse
 from ..core.naming import candidate_paths, staging_rel_path
 from ..core.timestamps import CapturedAt
 from ..db.connection import immediate
-from ..db.jobs import LEASE_SECONDS, JobContext, LeaseLost
+from ..db.jobs import JobContext, LeaseLost
 from ..ids import new_id
 from .ffprobe import MediaProbe
 from .fs import fsync_dir
@@ -46,10 +47,6 @@ STEP_STAGING_UNLINKED = 10
 STEP_COMMITTED = 11
 
 COPY_CHUNK = 4 * 1024 * 1024
-
-# リース (60 秒) の 1/3 ごとに延ばす。30 GiB の走査はリースより長く、
-# 読み出し速度は環境で桁が変わるので、バイト数ではなく時間で決める。
-HEARTBEAT_INTERVAL = LEASE_SECONDS / 3
 
 
 class PublishAborted(RuntimeError):
@@ -320,7 +317,7 @@ class ArtifactPublisher:
                 size += len(chunk)
                 if ctx.cancelled():
                     raise PublishCancelled("SHA-1 の走査中にキャンセル要求を観測した")
-                if time.monotonic() - last_beat >= HEARTBEAT_INTERVAL:
+                if time.monotonic() - last_beat >= lease_pulse.HEARTBEAT_INTERVAL:
                     # **バイト数ではなく経過時間で打つ。** 低速な読み出しでは、
                     # 閾値バイトに達する前にリースが切れる。
                     ctx.heartbeat()
@@ -488,46 +485,6 @@ class ArtifactPublisher:
         return self._conn.execute(
             "SELECT * FROM artifact_staging WHERE id = ?", (staging_id,)
         ).fetchone()
-
-
-def _with_lease_pulse[T](ctx: JobContext, work: Callable[[], T]) -> T:
-    """リースを延ばしながら、中断できない同期処理を待つ.
-
-    `os.fsync` と ffprobe は、どちらも 1 回でリース (60 秒) を超えうるのに
-    途中で止められない。処理は別スレッドで走らせ、**待つ側（ジョブの
-    スレッド）が heartbeat を打つ**。DB へ触るのは待つ側だけなので、接続は
-    スコープごとに 1 本のままで済む（トランザクションは接続に属する）。
-
-    リースを失ったら、処理の完了を待ってから送出する。走っているスレッドを
-    残したまま抜けると、後から staging へ書き込むことになる。
-    """
-    outcome: list[T] = []
-    failure: list[BaseException] = []
-
-    def run() -> None:
-        try:
-            outcome.append(work())
-        except BaseException as exc:  # noqa: BLE001 - 呼び出し側へそのまま渡す
-            failure.append(exc)
-
-    thread = threading.Thread(target=run, daemon=True)
-    thread.start()
-    lost: LeaseLost | None = None
-    while True:
-        thread.join(timeout=HEARTBEAT_INTERVAL)
-        if not thread.is_alive():
-            break
-        if lost is None:
-            try:
-                ctx.heartbeat()
-            except LeaseLost as exc:
-                # 打てなくなっても待ち続ける。処理の完了を待ってから送出する。
-                lost = exc
-    if lost is not None:
-        raise lost
-    if failure:
-        raise failure[0]
-    return outcome[0]
 
 
 def _collision_stamp(mtime_ns: int) -> str:

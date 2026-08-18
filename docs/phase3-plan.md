@@ -4040,6 +4040,8 @@ Expected: PASS（17 件）
 | `prepare_side_effect` の `invalidated_at IS NULL` を消す | `test_an_invalidated_record_cannot_perform_a_side_effect` |
 | `_cas` の `strict` を常に偽にする | `test_an_expired_claim_cannot_commit_a_side_effect` |
 | `advance` / `finish` の `expect_state` を無視する | `test_a_state_that_moved_under_us_stops_the_commit` |
+| `advance_owned` を `advance` に戻す | `test_a_cancel_while_the_upload_is_in_flight_stops_the_commit`。**`remote_asset_id` が書かれていないことまで見る**（最終状態は次の guard が落ちるので同じになり、それだけでは見分けられない） |
+| `except ImmichError` の `last_error` を空にする | `test_a_rejected_request_fails_the_record_without_retrying`（**追加**）。4xx は再試行に回さず、理由を残して失敗させる経路 |
 | `claim_next` が現行リビジョンを引かずに引数の revision を使う | `test_a_record_from_another_epoch_is_not_claimed`（宛先を向け替えた後に旧 epoch を拾う） |
 | `target_epoch` の条件を消す | `test_a_record_from_another_epoch_is_not_claimed` |
 | `invalidated_at IS NULL` を消す | `test_an_invalidated_record_is_not_claimed`。ただし **SELECT 側と UPDATE 側の片方だけを消しても落ちない**（互いに隠れる）。**両方を同時に消すと落ちる**ことを実装時に確認した。二重の guard として意図的に両方へ書く |
@@ -4104,6 +4106,11 @@ git commit -m "feat(mediaferry): claim upload records with a conditional update"
 `_with_lease_pulse` を共有モジュールへ移して使う。**送信を別スレッドへ出し、待つ側が
 `ctx.heartbeat()` と `uploads.extend_claim()` を打つ。** DB へ触るのは待つ側だけなので、
 接続はスコープごとに 1 本のまま。
+
+**キャンセルは失敗として記録しない**（§9.9）。所有権の確認（`assert_lease`）は
+`cancelling` を通さないので、送信中のキャンセルは `LeaseLost` になって上がってくる。
+`run` のループがこれを受け止め、**`ctx.cancelled()` が真なら正常に降りる**
+（Phase 2 の結合ジョブと同じ形。上げると `JobRunner` が `failed` にする）。
 
 **キャンセルは送信の前後で扱いを変える。** 送信前なら `pending` へ戻す（何も起きて
 いない）。送信中に観測したら `needs_recheck` へ落とす（**サーバ側の成否が不明**）。
@@ -4361,11 +4368,16 @@ def with_lease_pulse[T](
 from ..core.lease_pulse import HEARTBEAT_INTERVAL, with_lease_pulse as _with_lease_pulse
 ```
 
-**`HEARTBEAT_INTERVAL` を publisher から再エクスポートする理由:** 既存のテストが
+**差し替え先を 1 つに揃える。** 既存のテストは
 `monkeypatch.setattr("mediaferry.adapters.publisher.HEARTBEAT_INTERVAL", 0)` で
-差し替えている。`with_lease_pulse` は `core.lease_pulse.HEARTBEAT_INTERVAL` を読むので、
-**publisher 側だけを差し替えても効かない。** テストの差し替え先を
-`mediaferry.core.lease_pulse.HEARTBEAT_INTERVAL` へ直す（`test_publisher.py` の 3 か所）。
+差し替えているが、`with_lease_pulse` は `core.lease_pulse` 側の名前を読むので、
+publisher 側だけを差し替えても効かない。**逆に、publisher が定数を `from ... import`
+すると、今度は `core` 側を差し替えても publisher の走査ループに効かない**
+（実装時に判明。片方だけ直すとテストが 1 件残って落ちる）。
+
+publisher は **`from ..core import lease_pulse` として `lease_pulse.HEARTBEAT_INTERVAL`
+を参照**し、テストの差し替え先を `mediaferry.core.lease_pulse.HEARTBEAT_INTERVAL` の
+1 か所に統一する（`test_publisher.py` の 4 か所）。
 
 Run: `uv run pytest app/tests/test_publisher.py app/tests/test_crash_consistency.py -q`
 Expected: PASS（移設の前後で挙動は変わらない）
@@ -4398,7 +4410,7 @@ CAPTURED = "2026-08-17T14:30:00+09:00"
 
 
 @pytest.fixture
-def world(db, data_root):
+def world(db, data_root, immich):
     import hashlib
 
     server = immich  # conftest のフィクスチャ（ループバックで listen している）
@@ -4493,13 +4505,45 @@ def test_a_trashed_asset_is_recorded_as_trashed(world, db):
     assert record_of(db)["remote_is_trashed"] == 1
 
 
-def test_a_pre_existing_asset_is_not_tagged_by_default(world, db):
+def _an_existing_asset(server):
     import base64
     import hashlib
 
-    server, uploader, ctx, _, _, destination_id, _ = world
     checksum = base64.b64encode(hashlib.sha1(PAYLOAD, usedforsecurity=False).digest()).decode()
     server.assets[checksum] = "asset-existing"
+
+
+def _tag_policy(monkeypatch, tag_pre_existing):
+    """プロファイルの `tag_pre_existing` だけを差し替える."""
+    from dataclasses import replace
+
+    real = ProfileRegistry.by_id
+
+    def by_id(self, profile_id):
+        ref = real(self, profile_id)
+        immich = replace(ref.definition.immich, tag_pre_existing=tag_pre_existing)
+        return replace(ref, definition=replace(ref.definition, immich=immich))
+
+    monkeypatch.setattr(ProfileRegistry, "by_id", by_id)
+
+
+def test_a_pre_existing_asset_is_tagged_when_the_profile_says_so(world, db, monkeypatch):
+    """既定の DJI プロファイルは `tag_pre_existing: true`（design §6）."""
+    server, uploader, ctx, _, _, destination_id, _ = world
+    _an_existing_asset(server)
+    _tag_policy(monkeypatch, True)
+
+    uploader.run(ctx, destination_id)
+
+    assert server.tagged
+
+
+def test_a_pre_existing_asset_is_not_tagged_when_the_profile_forbids_it(world, db, monkeypatch):
+    """自分が作ったと証明できない資産に、ユーザが「既存には付けない」と決めた
+    タグを付けない（§9.10）."""
+    server, uploader, ctx, _, _, destination_id, _ = world
+    _an_existing_asset(server)
+    _tag_policy(monkeypatch, False)
 
     uploader.run(ctx, destination_id)
 
@@ -4783,7 +4827,17 @@ class Uploader:
             record = self._uploads.claim_next(destination_id, ctx.job_id, ctx.lease_token)
             if record is None:
                 break
-            state = self._guarded(ctx, record)
+            try:
+                state = self._guarded(ctx, record)
+            except LeaseLost:
+                if ctx.cancelled():
+                    # **利用者が押したキャンセルを失敗として記録しない**（§9.9）。
+                    # 所有権の確認（`assert_lease`）は `cancelling` を通さないので、
+                    # 送信の途中でキャンセルすると必ずここへ来る。レコードは
+                    # `_guarded` の finally が `needs_recheck` へ落としている。
+                    ctx.emit("info", "キャンセルを観測したので送信を中止した")
+                    break
+                raise
             sent += state == "complete"
             failed += state == "failed"
             awaiting += state == "awaiting_datetime_approval"
@@ -5046,11 +5100,12 @@ Expected: PASS（13 + 12 件）
 | `check_eligibility` の呼び出しを消す | `test_a_record_that_lost_its_grounds_is_refused_not_sent` |
 | `outcome.action == "reject"` の分岐を消して常に送る | `test_an_asset_that_already_exists_is_not_uploaded_again` |
 | `is_trashed` を記録しない | `test_a_trashed_asset_is_recorded_as_trashed` |
-| `origin_after_upload` を常に `created_by_us` にする | `test_an_asset_that_already_exists_is_not_uploaded_again`（承認待ちにならない） |
+| `origin_after_upload` を常に `created_by_us` にする | `test_a_duplicate_after_an_accept_is_unknown_not_ours`（**追加**）。既存の重複テストは `reject` 分岐を通るので、`origin_after_upload` を一度も呼ばない。初回 `accept` の後に `duplicate` が返る割り込みを再現する |
 | `tags_to_apply` を無視して常に付ける | `test_a_pre_existing_asset_is_not_tagged_by_default` |
 | `plan.automatic` を無視して常に書き戻す | `test_an_asset_that_already_exists_is_not_uploaded_again`（`datetimes` が空でなくなる） |
 | `with_lease_pulse` を素の呼び出しにする | `test_the_lease_is_extended_while_the_file_is_sent` |
-| `also`（claim の延長）を渡さない | **落ちない**。テストの claim は既定 60 秒で切れない。**`lease_seconds` を 1 にして claim を取り、送信を 1.5 秒にするテストを足す**（下記） |
+| `also`（claim の延長）を渡さない | **落ちない**。`_guard` の `prepare_side_effect` が送信の直前に claim を 60 秒へ延ばすので、**60 秒を超える送信でしか差が出ない**（実装時に確認。1 秒の claim + 1.5 秒の送信でも落ちない）。差が出るのはまさに 28 GiB の実ファイル（Phase 0 の実測で 84.5 秒）で、単体テストでは作れない。検出できない変異として記録する |
+| `_one` 冒頭の `preflight.assert_target` を消す | **落ちない**。`_guard` が副作用ごとに同じ確認をするので、最初の 1 回は冗長（失敗したときの戻り先も同じ `pending`）。将来 guard を書き忘れた段が入ったときの保険として残す |
 | 送信前の `ctx.cancelled()` を消す | `test_a_cancel_before_sending_leaves_it_pending` |
 | `BaseException` の捕捉を消す（`needs_recheck` にしない） | `test_a_cancel_during_the_send_asks_for_a_recheck` |
 | `needs_recheck` を `failed` にする | 同上 |

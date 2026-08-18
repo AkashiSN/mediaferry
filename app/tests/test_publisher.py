@@ -510,7 +510,7 @@ def test_the_hash_scan_pulses_the_lease(setup, data_root, db, monkeypatch):
     group_id = a_merge_group(db, (profile.profile_id, profile.revision_id), "digest-1")
     # 2 chunk 以上にして、走査の途中で打つ機会を作る。
     prepared = a_prepared(data_root, ctx, b"x" * (4 * 1024 * 1024 + 1))
-    monkeypatch.setattr("mediaferry.adapters.publisher.HEARTBEAT_INTERVAL", 0)
+    monkeypatch.setattr("mediaferry.core.lease_pulse.HEARTBEAT_INTERVAL", 0)
     beats = []
     monkeypatch.setattr(ctx, "heartbeat", lambda: beats.append(1))
 
@@ -532,7 +532,7 @@ def test_a_slow_probe_does_not_lose_the_lease(db, data_root, monkeypatch):
             time.sleep(1.5)  # リース (1 秒) より長い
             return super().describe(path, extension)
 
-    monkeypatch.setattr("mediaferry.adapters.publisher.HEARTBEAT_INTERVAL", 0.2)
+    monkeypatch.setattr("mediaferry.core.lease_pulse.HEARTBEAT_INTERVAL", 0.2)
     publisher = ArtifactPublisher(db, data_root, SlowProbe())
 
     published = publisher.publish_prepared(
@@ -580,7 +580,7 @@ def test_the_lease_pulse_waits_for_the_work_before_raising(setup, monkeypatch):
     def lost():
         raise LeaseLost("リースを失った")
 
-    monkeypatch.setattr("mediaferry.adapters.publisher.HEARTBEAT_INTERVAL", 0.05)
+    monkeypatch.setattr("mediaferry.core.lease_pulse.HEARTBEAT_INTERVAL", 0.05)
     monkeypatch.setattr(ctx, "heartbeat", lost)
     with pytest.raises(LeaseLost):
         _with_lease_pulse(ctx, slow)
@@ -608,7 +608,7 @@ def test_a_slow_fsync_does_not_lose_the_lease(db, data_root, monkeypatch):
 
     from mediaferry.adapters import publisher as publisher_module
 
-    monkeypatch.setattr("mediaferry.adapters.publisher.HEARTBEAT_INTERVAL", 0.2)
+    monkeypatch.setattr("mediaferry.core.lease_pulse.HEARTBEAT_INTERVAL", 0.2)
     monkeypatch.setattr(publisher_module.os, "fsync", slow_fsync)
     publisher = ArtifactPublisher(db, data_root, StubProbe())
 
