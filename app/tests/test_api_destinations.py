@@ -89,7 +89,9 @@ def test_a_changed_host_needs_an_answer(secret_env, immich, second_immich, clien
         json={"base_url": second_immich.url, "api_key": API_KEY},
     )
     assert response.status_code == 409
-    assert "same_library" in response.json()["detail"]
+    error = response.json()["error"]
+    assert error["code"] == "same_library_undecided"
+    assert "same_library" in error["detail"]
 
 
 def test_renaming_does_not_create_a_revision(secret_env, immich, client, api_db):
@@ -184,4 +186,7 @@ def test_an_unknown_field_in_a_patch_is_refused(secret_env, immich, client):
     destination_id = client.post("/api/destinations", json=a_body(immich)).json()["id"]
     response = client.patch(f"/api/destinations/{destination_id}", json={"basurl": "typo"})
     assert response.status_code == 400
-    assert "basurl" in response.json()["detail"].lower().replace("'", "")
+    error = response.json()["error"]
+    assert error["code"] == "unknown_field"
+    # **どの欄が知らない欄かを meta で返す**（画面がそのまま示せる）。
+    assert error["meta"]["fields"] == ["basurl"]

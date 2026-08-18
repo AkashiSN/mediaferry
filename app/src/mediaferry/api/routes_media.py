@@ -4,10 +4,11 @@ from __future__ import annotations
 
 from typing import Any
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends
 
 from .deps import conn as get_conn
 from .deps import state as get_state
+from .errors import ApiError, ErrorCode
 
 router = APIRouter()
 
@@ -24,7 +25,7 @@ def list_media(limit: int = 200, offset: int = 0, conn=Depends(get_conn)) -> dic
 def get_media(media_id: str, conn=Depends(get_conn)) -> dict[str, Any]:  # noqa: ANN001, B008
     row = conn.execute("SELECT * FROM media_file WHERE id = ?", (media_id,)).fetchone()
     if row is None:
-        raise HTTPException(status_code=404, detail="そのメディアは無い")
+        raise ApiError(404, ErrorCode.NOT_FOUND, "そのメディアは無い")
     return _media(row)
 
 

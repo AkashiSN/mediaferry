@@ -9,7 +9,7 @@ import json
 from dataclasses import replace
 from typing import Any
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, Query
 
 from ..core.merge.output import MergeOutputUndefined, merged_rel_path
 from ..db.jobs import JobStore
@@ -18,6 +18,7 @@ from ..db.profiles import ProfileRegistry, UnknownProfile
 from ..db.selection import DEFAULT_LIMIT, SelectionService
 from ..jobs.detect_groups import GroupDetector
 from .deps import conn as get_conn
+from .errors import ApiError, ErrorCode
 
 router = APIRouter()
 
@@ -131,11 +132,11 @@ def patch_group(group_id: str, action: str, conn=Depends(get_conn)) -> dict[str,
     repo = MergeRepository(conn)
     _found(repo, group_id)
     if action != ADOPT:
-        raise HTTPException(status_code=400, detail=f"知らない操作: {action}")
+        raise ApiError(400, ErrorCode.UNKNOWN_ACTION, "知らない操作", {"action": action})
     try:
         repo.adopt(group_id)
     except GroupNotClaimable as exc:
-        raise HTTPException(status_code=409, detail=str(exc)) from exc
+        raise ApiError(409, ErrorCode.CONFLICT, str(exc)) from exc
     return {"status": "ok"}
 
 
@@ -174,15 +175,15 @@ def _profile(registry: ProfileRegistry, profile_slug: str):  # noqa: ANN202
     try:
         return registry.current(profile_slug)
     except UnknownProfile as exc:
-        raise HTTPException(
-            status_code=404, detail=f"そのプロファイルは無い: {profile_slug}"
+        raise ApiError(
+            404, ErrorCode.NOT_FOUND, "そのプロファイルは無い", {"profile": profile_slug}
         ) from exc
 
 
 def _found(repo: MergeRepository, group_id: str):  # noqa: ANN202
     row = repo.get(group_id)
     if row is None:
-        raise HTTPException(status_code=404, detail="そのグループは無い")
+        raise ApiError(404, ErrorCode.NOT_FOUND, "そのグループは無い")
     return row
 
 

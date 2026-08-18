@@ -34,6 +34,7 @@ from ..jobs.reconcile import Reconciler, ReconcileReport
 from ..jobs.runner import JobRunner
 from ..jobs.volumes import VolumeService
 from ..settings import Settings, SettingsService, bootstrap_data_root, startup_warnings
+from .errors import install_error_handlers
 from .jobs_wiring import JobWorld
 from .routes_destinations import router as destinations_router
 from .routes_devices import router as devices_router
@@ -123,6 +124,8 @@ def create_app(
             volumes_conn.close()
 
     app = FastAPI(title="mediaferry", lifespan=lifespan)
+    # **すべての失敗を同じ封筒に入れる**（画面は `code` を見て日本語を決める。§13）。
+    install_error_handlers(app)
     app.include_router(system_router, prefix="/api")
     app.include_router(devices_router, prefix="/api")
     app.include_router(media_router, prefix="/api")

@@ -6,10 +6,11 @@ import sqlite3
 from collections.abc import Iterator
 from typing import TYPE_CHECKING
 
-from fastapi import Depends, HTTPException, Request
+from fastapi import Depends, Request
 
 from ..core.crypto import SecretBox
 from ..settings import SettingsService
+from .errors import ApiError, ErrorCode
 
 if TYPE_CHECKING:
     from .app import AppState
@@ -43,8 +44,9 @@ def secret_box(
     """
     settings = SettingsService(connection, app_state.env).snapshot()
     if settings.secret_key is None:
-        raise HTTPException(
-            status_code=400,
-            detail="MEDIAFERRY_SECRET_KEY が未設定。転送先の API キーを保存できない",
+        raise ApiError(
+            400,
+            ErrorCode.SECRET_KEY_MISSING,
+            "MEDIAFERRY_SECRET_KEY が未設定。転送先の API キーを保存できない",
         )
     return SecretBox(settings.secret_key)

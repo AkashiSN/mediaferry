@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from fastapi import APIRouter, Body, Depends, HTTPException
+from fastapi import APIRouter, Body, Depends
 
 from ..adapters.immich import ImmichClient
 from ..clock import now_iso
@@ -18,6 +18,7 @@ from ..jobs.approvals import ApprovalNotPossible, ApprovalService
 from ..jobs.preflight import PreflightCache
 from .deps import conn as get_conn
 from .deps import secret_box as get_box
+from .errors import ApiError, ErrorCode
 
 router = APIRouter()
 
@@ -35,7 +36,7 @@ def create_uploads(
         )
     except UploadRequestInvalid as exc:
         # 何も作らずに全体を拒否する。
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
+        raise ApiError(400, ErrorCode.BAD_REQUEST, str(exc)) from exc
     return {
         "pairs": [
             {
@@ -71,7 +72,7 @@ def retry_upload(
     """`failed` → `pending` の明示操作. **`selection_rule` は変えない**（§8）."""
     uploads = _uploads(conn, box)
     if uploads.get(record_id) is None:
-        raise HTTPException(status_code=404, detail="そのレコードは無い")
+        raise ApiError(404, ErrorCode.NOT_FOUND, "そのレコードは無い")
     with immediate(conn):
         updated = conn.execute(
             "UPDATE upload_record SET state = 'pending', claim_job_id = NULL,"
@@ -80,7 +81,7 @@ def retry_upload(
             (now_iso(), record_id),
         )
     if updated.rowcount != 1:
-        raise HTTPException(status_code=409, detail="失敗した状態ではないので再試行できない")
+        raise ApiError(409, ErrorCode.NOT_RETRYABLE, "失敗した状態ではないので再試行できない")
     return {"status": "ok"}
 
 
@@ -99,10 +100,10 @@ def requeue_upload(
     uploads = _uploads(conn, box)
     row = uploads.get(record_id)
     if row is None:
-        raise HTTPException(status_code=404, detail="そのレコードは無い")
+        raise ApiError(404, ErrorCode.NOT_FOUND, "そのレコードは無い")
     reason = uploads.check_eligibility(row)
     if reason is not None:
-        raise HTTPException(status_code=409, detail=f"送り直せない: {reason}")
+        raise ApiError(409, ErrorCode.NOT_REQUEUEABLE, f"送り直せない: {reason}")
     with immediate(conn):
         updated = conn.execute(
             "UPDATE upload_record SET state = 'pending', remote_is_trashed = NULL,"
@@ -112,8 +113,10 @@ def requeue_upload(
             (now_iso(), record_id),
         )
     if updated.rowcount != 1:
-        raise HTTPException(
-            status_code=409, detail="リモートに存在しないと確認できたレコードだけ送り直せる"
+        raise ApiError(
+            409,
+            ErrorCode.NOT_REQUEUEABLE,
+            "リモートに存在しないと確認できたレコードだけ送り直せる",
         )
     return {"status": "ok"}
 
@@ -128,11 +131,13 @@ def approve_upload(
     uploads = _uploads(conn, box)
     row = uploads.get(record_id)
     if row is None:
-        raise HTTPException(status_code=404, detail="そのレコードは無い")
+        raise ApiError(404, ErrorCode.NOT_FOUND, "そのレコードは無い")
     if row["state"] != "awaiting_datetime_approval":
-        raise HTTPException(status_code=409, detail=f"承認待ちではない（{row['state']}）")
+        raise ApiError(
+            409, ErrorCode.NOT_AWAITING_APPROVAL, "承認待ちではない", {"state": row["state"]}
+        )
     if row["invalidated_at"] is not None:
-        raise HTTPException(status_code=409, detail="無効化されている")
+        raise ApiError(409, ErrorCode.ALREADY_INVALIDATED, "無効化されている")
     with immediate(conn):
         # **同じレコードの承認ジョブを二重に積まない。** 積めてしまうと、
         # 1 本目が終わった後の残りが軒並み失敗として画面に並ぶ。
@@ -143,7 +148,7 @@ def approve_upload(
             (f'%"upload_record_id": "{record_id}"%',),
         ).fetchone()
         if active is not None:
-            raise HTTPException(status_code=409, detail="この承認は既に実行待ち")
+            raise ApiError(409, ErrorCode.APPROVAL_ALREADY_QUEUED, "この承認は既に実行待ち")
         job_id = JobStore(conn).enqueue(
             "upload",
             {
@@ -179,7 +184,7 @@ def reject_upload(
     try:
         service.reject(record_id)
     except ApprovalNotPossible as exc:
-        raise HTTPException(status_code=409, detail=str(exc)) from exc
+        raise ApiError(409, ErrorCode.CONFLICT, str(exc)) from exc
     return {"status": "ok"}
 
 

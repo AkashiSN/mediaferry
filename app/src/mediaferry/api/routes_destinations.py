@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from fastapi import APIRouter, Body, Depends, HTTPException
+from fastapi import APIRouter, Body, Depends
 
 from ..adapters.immich import ImmichClient, ImmichError
 from ..core.destinations.urls import EndpointRejected, normalize_endpoint
@@ -22,6 +22,7 @@ from ..db.destinations import (
 from ..db.jobs import JobStore
 from .deps import conn as get_conn
 from .deps import secret_box as get_box
+from .errors import ApiError, ErrorCode
 
 router = APIRouter()
 
@@ -69,7 +70,9 @@ def edit_destination(
     current = _found(repo, destination_id)
     unknown = set(body) - {"name", "enabled", "base_url", "public_url", "api_key", "same_library"}
     if unknown:
-        raise HTTPException(status_code=400, detail=f"知らない欄: {sorted(unknown)}")
+        raise ApiError(
+            400, ErrorCode.UNKNOWN_FIELD, "知らない欄がある", {"fields": sorted(unknown)}
+        )
     if set(body) <= {"name", "enabled"}:
         # 接続に関わらない編集は、検証もリビジョンも要らない。
         repo.rename_or_toggle(destination_id, name=body.get("name"), enabled=body.get("enabled"))
@@ -92,9 +95,10 @@ def edit_destination(
             same_library=body.get("same_library"),
         )
     except EpochDecisionRequired as exc:
-        raise HTTPException(
-            status_code=409,
-            detail=f"{exc}。same_library を true か false で指定する",
+        raise ApiError(
+            409,
+            ErrorCode.SAME_LIBRARY_UNDECIDED,
+            f"{exc}。same_library を true か false で指定する",
         ) from exc
     # 参照が絶えた旧鍵を消す。ローテートしても漏洩面が減らないままにしない（§12.3）。
     repo.purge_superseded_credentials(destination_id)
@@ -169,7 +173,9 @@ def _fields(body: dict[str, Any]) -> tuple[str, str | None, str]:
     try:
         return body["base_url"], body.get("public_url"), body["api_key"]
     except KeyError as exc:
-        raise HTTPException(status_code=400, detail=f"{exc} が要る") from exc
+        raise ApiError(
+            400, ErrorCode.MISSING_FIELD, "必要な欄が無い", {"field": str(exc).strip("'")}
+        ) from exc
 
 
 def _checked(base_url: str, public_url: str | None) -> None:
@@ -179,7 +185,7 @@ def _checked(base_url: str, public_url: str | None) -> None:
         if public_url is not None:
             normalize_endpoint(public_url)
     except EndpointRejected as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
+        raise ApiError(400, ErrorCode.INVALID_ENDPOINT, str(exc)) from exc
 
 
 def _verify(base_url: str, api_key: str) -> RemoteIdentity:
@@ -189,7 +195,9 @@ def _verify(base_url: str, api_key: str) -> RemoteIdentity:
             body = client.users_me()
     except ImmichError as exc:
         # 502。こちらの要求は正しく、相手に届かないか拒まれている。
-        raise HTTPException(status_code=502, detail=f"転送先に接続できない: {exc}") from exc
+        raise ApiError(
+            502, ErrorCode.DESTINATION_UNREACHABLE, f"転送先に接続できない: {exc}"
+        ) from exc
     observed = body.get("id")
     # **観測値そのものは持ち回らない**（`core.destinations.identity`）。
     return RemoteIdentity.observed(observed if isinstance(observed, str) else None)
@@ -198,11 +206,11 @@ def _verify(base_url: str, api_key: str) -> RemoteIdentity:
 def _found(repo: DestinationRepository, destination_id: str):  # noqa: ANN202
     row = repo.get(destination_id)
     if row is None or row["archived_at"] is not None:
-        raise HTTPException(status_code=404, detail="その転送先は無い")
+        raise ApiError(404, ErrorCode.NOT_FOUND, "その転送先は無い")
     try:
         return repo.current(destination_id)
     except DestinationNotFound as exc:
-        raise HTTPException(status_code=409, detail=str(exc)) from exc
+        raise ApiError(409, ErrorCode.CONFLICT, str(exc)) from exc
 
 
 def _enqueue(conn, repo: DestinationRepository, destination_id: str, mode: str):  # noqa: ANN001, ANN202

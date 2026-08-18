@@ -4,12 +4,13 @@ from __future__ import annotations
 
 from typing import Any
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends
 
 from ..db.jobs import JobStore
 from ..jobs.volumes import StaleSelection, VolumeBusy
 from .deps import conn as get_conn
 from .deps import state as get_state
+from .errors import ApiError, ErrorCode
 
 router = APIRouter()
 
@@ -68,7 +69,7 @@ def _enqueue(state, conn, job_type: str, volume_instance_id: str) -> str:  # noq
     try:
         selection = state.volumes.selection_for(volume_instance_id)
     except StaleSelection as exc:
-        raise HTTPException(status_code=409, detail=str(exc)) from exc
+        raise ApiError(409, ErrorCode.CONFLICT, str(exc)) from exc
     return JobStore(conn).enqueue(job_type, selection.to_params())
 
 
@@ -77,7 +78,7 @@ def close(volume_instance_id: str, state=Depends(get_state)) -> dict[str, str]: 
     try:
         state.volumes.close(volume_instance_id)
     except VolumeBusy as exc:
-        raise HTTPException(status_code=409, detail=str(exc)) from exc
+        raise ApiError(409, ErrorCode.CONFLICT, str(exc)) from exc
     except LookupError as exc:
-        raise HTTPException(status_code=404, detail=str(exc)) from exc
+        raise ApiError(404, ErrorCode.NOT_FOUND, str(exc)) from exc
     return {"status": "ok"}

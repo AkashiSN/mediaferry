@@ -4,13 +4,14 @@ from __future__ import annotations
 
 from typing import Any
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends
 
 from ..db.jobs import JobStore
 from ..db.profiles import ProfileRegistry
 from ..settings import SettingInvalid, SettingLocked, SettingsService
 from .deps import conn as get_conn
 from .deps import state as get_state
+from .errors import ApiError, ErrorCode
 
 router = APIRouter()
 
@@ -47,9 +48,9 @@ def write_setting(
     try:
         tier = SettingsService(conn, state.env).set(body["key"], body["value"])
     except SettingLocked as exc:
-        raise HTTPException(status_code=409, detail=str(exc)) from exc
+        raise ApiError(409, ErrorCode.SETTING_LOCKED, str(exc)) from exc
     except (SettingInvalid, KeyError) as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
+        raise ApiError(400, ErrorCode.BAD_REQUEST, str(exc)) from exc
     # いつ効くかを返す。RESTART の値を変えて「反映されない」と見えるのを防ぐ。
     return {"status": "ok", "applies": tier.value}
 
@@ -73,7 +74,7 @@ def list_jobs(conn=Depends(get_conn)) -> dict[str, Any]:  # noqa: ANN001, B008
 def get_job(job_id: str, conn=Depends(get_conn)) -> dict[str, Any]:  # noqa: ANN001, B008
     row = JobStore(conn).get(job_id)
     if row is None:
-        raise HTTPException(status_code=404, detail="そのジョブは無い")
+        raise ApiError(404, ErrorCode.NOT_FOUND, "そのジョブは無い")
     return _job(row)
 
 
@@ -90,7 +91,7 @@ def job_events(job_id: str, after_seq: int = 0, conn=Depends(get_conn)) -> dict[
 @router.post("/jobs/{job_id}/cancel")
 def cancel_job(job_id: str, conn=Depends(get_conn)) -> dict[str, str]:  # noqa: ANN001, B008
     if not JobStore(conn).request_cancel(job_id):
-        raise HTTPException(status_code=409, detail="そのジョブはもう終わっている")
+        raise ApiError(409, ErrorCode.JOB_ALREADY_FINISHED, "そのジョブはもう終わっている")
     return {"status": "cancelling"}
 
 
