@@ -2172,7 +2172,6 @@ from mediaferry.jobs.preflight import PreflightCache, PreflightFailed
 
 from .fake_immich import API_KEY, FakeImmich
 
-BASE_URL = "http://immich.invalid:2283"
 
 
 @pytest.fixture
@@ -2180,7 +2179,7 @@ def world(db, immich):
     server = immich  # conftest のフィクスチャ（ループバックで listen している）
     repo = DestinationRepository(db, CredentialStore(db, SecretBox(os.urandom(32))))
     destination_id = repo.create(
-        name="home", base_url=BASE_URL, public_url=None, secret=API_KEY,
+        name="home", base_url=server.url, public_url=None, secret=API_KEY,
         identity=RemoteIdentity(remote_user_id=server.user_id, server_instance_id=None),
     )
     opened = []
@@ -2277,8 +2276,12 @@ Run: `uv run pytest app/tests/test_preflight.py -q`
 Expected: FAIL（`ModuleNotFoundError: No module named 'mediaferry.jobs.preflight'`）
 
 **注:** 最後のテストは `destination_revision` の削除 trigger に阻まれる。
-実装を書いた後で、**リビジョンが読めない場合に `PreflightFailed` を出す**形へ直し、
-テストも `pytest.raises(PreflightFailed)` に書き換える（Step 5 で扱う）。
+**実装時は Step 5 の形（現行リビジョンを持たない宛先と、id を返さない相手）で
+最初から書いた。**
+
+**保存する URL は fake の `server.url` を使う。** 計画では `BASE_URL` の定数を
+使っていたが、fake が実際に listen するようになった（Task 4）ので、届かない
+ホスト名を保存すると preflight が DNS で落ちる（実装時に判明）。
 
 - [ ] **Step 3: 最小実装**
 
@@ -2298,9 +2301,8 @@ Expected: FAIL（`ModuleNotFoundError: No module named 'mediaferry.jobs.prefligh
 from __future__ import annotations
 
 import sqlite3
-from collections.abc import Callable
-
 import time
+from collections.abc import Callable
 
 from ..adapters.immich import ImmichClient, ImmichError
 from ..db.destinations import DestinationNotFound, DestinationRepository
@@ -2371,13 +2373,21 @@ class PreflightCache:
 Run: `uv run pytest app/tests/test_preflight.py -q`
 Expected: PASS（6 件。最後のテストは Step 5 で書き換える）
 
-- [ ] **Step 5: 最後のテストを実装に合わせて直す**
+- [ ] **Step 5: 最後のテストを実装に合わせて直す**（実装時には Step 1 の時点で下記の形にした）
 
 `destination_revision` は削除できない（`0004` の trigger）。**リビジョンが読めない
 場面は「現行リビジョンが未設定の宛先」で作れる**ので、そちらで固定する。
 
 ```python
-def test_a_revision_without_a_recorded_identity_is_refused(world, db):
+def test_a_revision_without_a_recorded_identity_is_refused(world, db, monkeypatch):
+    """**相手も id を返さない場合が危ない。**
+
+    記録が無いだけなら「観測値と一致しない」で弾けるが、相手が id を返さない
+    実装だと `None == None` で一致してしまい、検証していないリビジョンが
+    「確認済み」として通る。
+    """
+    from mediaferry.adapters.immich import ImmichClient
+
     _, repo, destination_id, preflight, _ = world
     revision_id = repo.current(destination_id)["id"]
     # 検証していない（remote_user_id が無い）リビジョンは突き合わせようがない。
@@ -2387,6 +2397,8 @@ def test_a_revision_without_a_recorded_identity_is_refused(world, db):
         "UPDATE destination_revision SET remote_user_id = NULL WHERE id = ?", (revision_id,)
     )
     db.execute("PRAGMA foreign_keys = ON")
+    monkeypatch.setattr(ImmichClient, "users_me", lambda self: {})
+
     with pytest.raises(PreflightFailed):
         preflight.assert_target(revision_id)
 
@@ -2411,7 +2423,7 @@ def test_an_unknown_revision_is_refused(world):
 | 結果のキャッシュを消す（毎回叩く） | `test_the_check_is_shared_within_the_job` |
 | TTL を無限にする（`ttl_seconds` を無視する） | `test_the_check_is_repeated_after_the_ttl` |
 | 失敗をキャッシュしない（成功だけ覚える） | `test_a_failure_is_remembered_so_the_rest_do_not_try` |
-| `expected is None` の判定を消す | `test_a_revision_without_a_recorded_identity_is_refused` |
+| `expected is None` の判定を消す | `test_a_revision_without_a_recorded_identity_is_refused`。**相手も id を返さない状況で試す**（記録が無いだけなら「観測値と一致しない」で弾けてしまい、この分岐を通らない） |
 | `DestinationNotFound` を素通しにする | `test_an_unknown_revision_is_refused`（例外の種類が変わる） |
 
 - [ ] **Step 7: コミット**
