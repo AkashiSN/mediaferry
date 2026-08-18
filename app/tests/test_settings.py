@@ -135,5 +135,6 @@ def test_secrets_are_masked_when_described(db):
 
 def test_non_loopback_without_auth_warns(db):
     warnings = startup_warnings(service(db, BIND_HOST="0.0.0.0").snapshot())  # noqa: S104
-    assert any("認証" in w for w in warnings)
+    assert [w.code for w in warnings] == ["unauthenticated_exposure"]
+    assert any("認証" in w.message for w in warnings)
     assert startup_warnings(service(db).snapshot()) == []

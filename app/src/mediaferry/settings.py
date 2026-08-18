@@ -76,6 +76,19 @@ class Settings:
     auto_import: str
     default_timezone: str | None
     log_level: str
+    trusted_hosts: str = ""
+
+    def trusted_host_names(self) -> frozenset[str]:
+        """`Host` として名乗ってよい名前（IP と localhost は別に既定で通す）."""
+        return frozenset(name.strip() for name in self.trusted_hosts.split(",") if name.strip())
+
+
+@dataclass(frozen=True)
+class Warning:
+    """危険な組み合わせの報せ. **画面が `code` を見て文言を決める**（§13）."""
+
+    code: str
+    message: str
 
 
 def _port(raw: str) -> int:
@@ -131,6 +144,10 @@ SETTING_SPECS: dict[str, SettingSpec] = {
         # 平文を app_setting へ置く経路は作らない。
         SettingSpec("AUTH_PASSWORD", None, str, Tier.BOOTSTRAP, secret=True),
         SettingSpec("BIND_HOST", "127.0.0.1", str, Tier.RESTART),
+        # 名乗ってよいホスト名。**IP と localhost は既定で通す**（利用者が直に
+        # 打つのは正当な使い方）。ホスト名だけを明示の許可制にして、DNS
+        # rebinding の経路を閉じる（§14）。
+        SettingSpec("TRUSTED_HOSTS", "", str, Tier.RESTART),
         SettingSpec("HTTP_PORT", "8080", _port, Tier.RESTART),
         SettingSpec("UPLOAD_CONCURRENCY", "2", _positive_int, Tier.RUNTIME),
         SettingSpec("UPLOAD_TIMEOUT_SECONDS", "86400", _positive_int, Tier.RUNTIME),
@@ -225,20 +242,27 @@ class SettingsService:
             auto_import=parsed["AUTO_IMPORT"],
             default_timezone=parsed["DEFAULT_TIMEZONE"],
             log_level=parsed["LOG_LEVEL"],
+            trusted_hosts=parsed["TRUSTED_HOSTS"],
         )
 
 
-def startup_warnings(settings: Settings) -> list[str]:
+def startup_warnings(settings: Settings) -> list[Warning]:
     """危険な組み合わせを起動ログと UI バナーに出す.
 
     認証は必須にしない（LAN 内で無設定で使えることを優先する）が、意図せず
-    公開している状態には気づけるようにする。
+    公開している状態には気づけるようにする。**画面が文言を決められるよう
+    `code` を添える**（§13）。
     """
-    warnings: list[str] = []
+    warnings: list[Warning] = []
     if settings.auth_password is None and not _is_loopback(settings.bind_host):
         warnings.append(
-            f"認証が無効なまま {settings.bind_host} で待ち受けている。"
-            "LAN の他の端末から操作できる状態になっている。"
+            Warning(
+                code="unauthenticated_exposure",
+                message=(
+                    f"認証が無効なまま {settings.bind_host} で待ち受けている。"
+                    "LAN の他の端末から操作できる状態になっている。"
+                ),
+            )
         )
     return warnings
 

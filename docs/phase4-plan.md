@@ -167,7 +167,7 @@ OpenAPI の型を生成し、最小の UI consumer を 1 つ通す**形にする
 
 ---
 
-### Task 3: 入口の防御（`api/security.py`）と公開の警告
+### Task 3: 入口の防御（`api/security.py`）と公開の警告 —— **実装済み**
 
 **Files:** Create `api/security.py`, `api/routes_auth.py` / Modify `api/app.py`, `settings.py`,
 `api/routes_system.py` / Test `test_api_auth.py`, `test_api_csrf.py`, `test_settings.py`
@@ -179,6 +179,12 @@ OpenAPI の型を生成し、最小の UI consumer を 1 つ通す**形にする
 足すルータで書き忘れる**。ルータ単位の `dependencies=` で既定を掛ける。
 
 **決めること（順序が効く。計画レビューで 1 件 blocker が出た箇所）:**
+
+**実装で変えた判断（計画から外れたので書き戻す）:** `TRUSTED_HOSTS` の既定を
+「loopback と `BIND_HOST`」にすると、`BIND_HOST=0.0.0.0` で LAN の IP を直に打つ利用者が
+全員 421 になる。**IP アドレスそのものは既定で通し、ホスト名だけを明示の許可制**にした
+（rebinding は「攻撃者のホスト名が LAN の IP を指す」形なので、名前を許可制にすれば
+閉じる。IP を直に打つのは利用者の正当な操作）。
 
 1. **Origin だけを見ても DNS rebinding は防げない。** 攻撃者のドメインを LAN の IP へ
    rebind すると、ブラウザが送る `Origin` も `Host` も攻撃者のホスト名になり、

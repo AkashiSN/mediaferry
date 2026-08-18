@@ -168,7 +168,11 @@ def test_shutdown_waits_for_the_running_handler(data_root, broker, monkeypatch):
     monkeypatch.setattr(jobs_wiring.JobWorld, "run_scan", slow_scan)
 
     app = create_app(broker_factory=lambda: broker)
-    with TestClient(app) as client:
+    with TestClient(app, base_url="http://127.0.0.1:8080") as client:
+        # 状態を変える要求には二重送信 Cookie の対が要る（§14）。
+        token = "test-csrf-token"  # noqa: S105 - テスト用の見せかけの値
+        client.cookies.set("XSRF-TOKEN", token)
+        client.headers["X-CSRF-Token"] = token
         volume_id = client.get("/api/devices").json()["volumes"][0]["volume_instance_id"]
         job_id = client.post(f"/api/volumes/{volume_id}/scan").json()["job_id"]
         deadline = time.monotonic() + 10

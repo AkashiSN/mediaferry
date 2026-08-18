@@ -141,7 +141,12 @@ def client(data_root, broker, monkeypatch):
     monkeypatch.setenv("MEDIAFERRY_DATA_ROOT", str(data_root))
     monkeypatch.setenv("MEDIAFERRY_DEFAULT_TIMEZONE", "Asia/Tokyo")
     app = create_app(broker_factory=lambda: broker)
-    with TestClient(app) as client:
+    # **ブラウザと同じ形で叩く。** Host はループバック（rebinding 対策で名前は
+    # 許可制。§14）、状態を変える要求には二重送信 Cookie の対を付ける。
+    with TestClient(app, base_url="http://127.0.0.1:8080") as client:
+        token = "test-csrf-token"  # noqa: S105 - テスト用の見せかけの値
+        client.cookies.set("XSRF-TOKEN", token)
+        client.headers["X-CSRF-Token"] = token
         yield client
 
 

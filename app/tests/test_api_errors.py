@@ -49,7 +49,9 @@ def test_an_unhandled_exception_does_not_leak_its_message(client, monkeypatch):
 
     monkeypatch.setattr("mediaferry.db.jobs.JobStore.list_jobs", explode)
 
-    with TestClient(client.app, raise_server_exceptions=False) as raw:
+    with TestClient(
+        client.app, base_url="http://127.0.0.1:8080", raise_server_exceptions=False
+    ) as raw:
         response = raw.get("/api/jobs")
 
     assert response.status_code == 500

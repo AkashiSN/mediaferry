@@ -8,15 +8,17 @@ from fastapi import APIRouter, Depends
 
 from ..db.jobs import JobStore
 from ..db.profiles import ProfileRegistry
-from ..settings import SettingInvalid, SettingLocked, SettingsService
+from ..settings import SettingInvalid, SettingLocked, SettingsService, startup_warnings
 from .deps import conn as get_conn
 from .deps import state as get_state
 from .errors import ApiError, ErrorCode
 
 router = APIRouter()
+# **`/health` だけは認証を掛けない**（監視と compose の healthcheck が叩く）。
+public_router = APIRouter()
 
 
-@router.get("/health")
+@public_router.get("/health")
 def health(conn=Depends(get_conn)) -> dict[str, Any]:  # noqa: ANN001, B008
     version = conn.execute("SELECT MAX(version) AS v FROM schema_migration").fetchone()["v"]
     return {"status": "ok", "schema_version": version}
@@ -24,7 +26,12 @@ def health(conn=Depends(get_conn)) -> dict[str, Any]:  # noqa: ANN001, B008
 
 @router.get("/settings")
 def list_settings(state=Depends(get_state), conn=Depends(get_conn)) -> dict[str, Any]:  # noqa: ANN001, B008
+    settings = SettingsService(conn, state.env).snapshot()
     return {
+        "warnings": [
+            {"code": warning.code, "message": warning.message}
+            for warning in startup_warnings(settings)
+        ],
         "settings": [
             {
                 "key": s.key,
@@ -35,7 +42,7 @@ def list_settings(state=Depends(get_state), conn=Depends(get_conn)) -> dict[str,
                 "writable": s.writable,
             }
             for s in SettingsService(conn, state.env).describe_all()
-        ]
+        ],
     }
 
 

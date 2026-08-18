@@ -38,6 +38,12 @@ class ErrorCode(StrEnum):
     UNKNOWN_ACTION = "unknown_action"
     SECRET_KEY_MISSING = "secret_key_missing"  # noqa: S105 - 鍵ではなく code の名前
     VALIDATION_FAILED = "validation_failed"
+    # 401 / 403 / 421
+    NOT_AUTHENTICATED = "not_authenticated"
+    CROSS_SITE_REQUEST = "cross_site_request"
+    CSRF_FAILED = "csrf_failed"
+    UNTRUSTED_HOST = "untrusted_host"
+    TOO_MANY_ATTEMPTS = "too_many_attempts"
     # 404
     NOT_FOUND = "not_found"
     # 409
@@ -71,6 +77,11 @@ class ApiError(Exception):
         self.code = code
         self.detail = detail
         self.meta = meta or {}
+
+
+def error_response(status_code: int, code: str, detail: str, meta: dict[str, Any]) -> JSONResponse:
+    """封筒に入れた応答を作る（middleware など、例外を使えない場所から呼ぶ）."""
+    return _envelope(status_code, code, detail, meta)
 
 
 def _envelope(status_code: int, code: str, detail: str, meta: dict[str, Any]) -> JSONResponse:
