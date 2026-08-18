@@ -370,3 +370,70 @@ def test_invalidating_a_group_hits_only_unfinished_records(db, world):
     assert uploads.invalidate_for_group(group_id, "グループが変わった") == 1
 
     assert uploads.get(sent)["invalidated_at"] is None
+
+
+def test_advancing_the_epoch_invalidates_the_queued_records(db, world):
+    """**`add_revision` が同じトランザクションで破棄する**（§8）."""
+    _, destinations, destination_id, uploads = world
+    a_pending(db, world)
+
+    destinations.add_revision(
+        destination_id,
+        base_url="http://immich.invalid:2283",
+        public_url=None,
+        secret="key-2",
+        identity=RemoteIdentity(remote_user_id="user-b", server_instance_id=None),
+    )
+
+    row = db.execute("SELECT * FROM upload_record").fetchone()
+    assert row["invalidated_at"] is not None
+    assert row["invalidated_reason"]
+
+
+def test_the_startup_sweep_catches_what_the_edit_missed(db, world):
+    """編集の直後に落ちた場合に備えて、起動時にも同じ掃除をする（Task 12）."""
+    _, destinations, destination_id, uploads = world
+    a_pending(db, world)
+    destinations.add_revision(
+        destination_id,
+        base_url="http://immich.invalid:2283",
+        public_url=None,
+        secret="key-2",
+        identity=RemoteIdentity(remote_user_id="user-b", server_instance_id=None),
+    )
+    epoch = destinations.current(destination_id)["target_epoch"]
+    # 破棄が走る前に落ちた状態を作る。
+    db.execute("UPDATE upload_record SET invalidated_at = NULL, invalidated_reason = NULL")
+
+    assert uploads.invalidate_old_epoch(destination_id, epoch, "向き先が変わった") == 1
+
+    row = db.execute("SELECT * FROM upload_record").fetchone()
+    assert row["invalidated_reason"] == "向き先が変わった"
+
+
+def test_records_of_the_current_epoch_are_left_alone(db, world):
+    _, destinations, destination_id, uploads = world
+    a_pending(db, world)
+    epoch = destinations.current(destination_id)["target_epoch"]
+    assert uploads.invalidate_old_epoch(destination_id, epoch, "x") == 0
+
+
+def test_a_completed_record_from_an_old_epoch_stays_as_history(db, world):
+    """旧 epoch の記録は監査履歴として残す（§8）."""
+    _, destinations, destination_id, uploads = world
+    record = a_pending(db, world)
+    db.execute(
+        "UPDATE upload_record SET state = 'complete', destination_revision_id = ? WHERE id = ?",
+        (destinations.current(destination_id)["id"], record["id"]),
+    )
+    destinations.add_revision(
+        destination_id,
+        base_url="http://immich.invalid:2283",
+        public_url=None,
+        secret="key-2",
+        identity=RemoteIdentity(remote_user_id="user-b", server_instance_id=None),
+    )
+    epoch = destinations.current(destination_id)["target_epoch"]
+
+    assert uploads.invalidate_old_epoch(destination_id, epoch, "向き先が変わった") == 0
+    assert uploads.get(record["id"])["invalidated_at"] is None

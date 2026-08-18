@@ -19,7 +19,9 @@ from pathlib import Path
 
 from ..adapters.publisher import ArtifactPublisher, StagingLost
 from ..clock import now_iso
+from ..db.destinations import DestinationRepository
 from ..db.jobs import JobStore
+from ..db.uploads import UploadRepository
 
 logger = logging.getLogger(__name__)
 
@@ -46,6 +48,9 @@ class ReconcileReport:
     merges_released: int = 0
     # 回収できない staging を抱えていて、自動では動かせないグループ。
     merges_blocked: int = 0
+    uploads_released: int = 0
+    uploads_invalidated: int = 0
+    credentials_purged: int = 0
     orphans: list[OrphanFile] = field(default_factory=list)
     # 自動では続行できなかった staging（実体が無い、内容が一致しない）。
     # 行は残す。画面に出して判断を仰ぐ。
@@ -59,11 +64,20 @@ class Reconciler:
         data_root: Path,
         publisher: ArtifactPublisher,
         store: JobStore,
+        *,
+        uploads: UploadRepository | None = None,
+        destinations: DestinationRepository | None = None,
     ) -> None:
+        # **黙って skip しない。** 片方だけ渡す配線ミスをすると、claim の解放も
+        # 旧 epoch の sweep も旧鍵の破棄も、何も言わずに行われなくなる。
+        if (uploads is None) != (destinations is None):
+            raise ValueError("uploads と destinations は組で渡す")
         self._conn = conn
         self._data_root = data_root
         self._publisher = publisher
         self._store = store
+        self._uploads = uploads
+        self._destinations = destinations
 
     def run(self) -> ReconcileReport:
         report = ReconcileReport()
@@ -72,10 +86,34 @@ class Reconciler:
         self._store.sweep_interrupted()
         self._recover_staging(report)
         self._settle_merges(report)
+        self._settle_uploads(report)
         self._sync_missing(report)
         self._collect_orphans(report)
         self._clean_job_dirs(report)
         return report
+
+    def _settle_uploads(self, report: ReconcileReport) -> None:
+        """中断したアップロードの claim を外し、根拠が消えた行を無効化する.
+
+        `_settle_merges` の後に走らせる。そこでグループの状態が確定するので、
+        「今のグループの状態」で根拠を評価できる。
+
+        **旧 epoch の sweep と旧鍵の破棄もここで行う。** どちらも宛先の編集時に
+        1 度は走るが、**その直後に落ちた場合に取り残される**（理由の無い pending が
+        永久に残り、旧鍵は次の編集まで消えない）。起動時にもう一度均す。
+        """
+        if self._uploads is None or self._destinations is None:
+            return
+        report.uploads_released = self._uploads.release_interrupted()
+        report.uploads_invalidated = self._uploads.invalidate_stale()
+        for row in self._destinations.list_destinations(include_archived=True):
+            current = self._destinations.get_current_or_none(row["id"])
+            if current is None:
+                continue
+            report.uploads_invalidated += self._uploads.invalidate_old_epoch(
+                row["id"], current["target_epoch"], "宛先の向き先が変わった"
+            )
+            report.credentials_purged += self._destinations.purge_superseded_credentials(row["id"])
 
     def _settle_merges(self, report: ReconcileReport) -> None:
         """`merging` のまま残ったグループを決着させる.

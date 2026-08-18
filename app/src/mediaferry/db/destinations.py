@@ -20,6 +20,18 @@ from ..ids import new_id
 from .connection import immediate
 from .credentials import CredentialStore
 
+# そのリビジョンの鍵がまだ要る状態。**承認待ちを必ず含める。**
+# 含めないと、宛先を編集した直後に「承認に要る旧鍵」を消してしまい、
+# 承認画面は残るのに永久に承認できないレコードができる。
+_IN_FLIGHT = (
+    "checking",
+    "uploading",
+    "asset_known",
+    "tagging",
+    "fixing_datetime",
+    "awaiting_datetime_approval",
+)
+
 
 class DestinationNotFound(RuntimeError):
     pass
@@ -188,6 +200,34 @@ class DestinationRepository:
                 "UPDATE upload_destination SET archived_at = ?, enabled = 0 WHERE id = ?",
                 (now_iso(), destination_id),
             )
+
+    def purge_superseded_credentials(self, destination_id: str) -> int:
+        """現行でないリビジョンの資格情報を、使い終わっていれば消す（§12.3）.
+
+        `destination_revision` は不変なので、リビジョンから参照が外れることは
+        ない。**「進行中の `upload_record` がそのリビジョンを指していないこと」**を
+        使い終わりの条件にする。版管理したまま旧鍵を持ち続けると、ローテートしても
+        漏洩面が減らない。
+        """
+        marks = ", ".join("?" * len(_IN_FLIGHT))
+        rows = self._conn.execute(
+            "SELECT r.credential_id AS credential_id FROM destination_revision r"  # noqa: S608
+            " JOIN upload_destination d ON d.id = r.destination_id"
+            " WHERE r.destination_id = ? AND r.id <> d.current_revision_id"
+            "   AND NOT EXISTS (SELECT 1 FROM upload_record u"
+            f"                  WHERE u.destination_revision_id = r.id AND u.state IN ({marks}))",
+            (destination_id, *_IN_FLIGHT),
+        ).fetchall()
+        purged = 0
+        for row in rows:
+            purged += self._credentials.purge(row["credential_id"])
+        return purged
+
+    def get_current_or_none(self, destination_id: str) -> sqlite3.Row | None:
+        try:
+            return self.current(destination_id)
+        except DestinationNotFound:
+            return None
 
     def same_account_warnings(
         self, identity: RemoteIdentity, exclude_id: str | None = None

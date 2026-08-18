@@ -539,6 +539,54 @@ class UploadRepository:
                 (),
             )
 
+    def invalidate_stale(self) -> int:
+        """根拠が成立しなくなった未完了のレコードを無効化する（§10 の多重防御）."""
+        invalidated = 0
+        for row in self._conn.execute(
+            "SELECT * FROM upload_record WHERE invalidated_at IS NULL AND state <> 'complete'"
+        ).fetchall():
+            reason = self._stale_reason(row)
+            if reason is None:
+                continue
+            self._conn.execute(
+                "UPDATE upload_record SET invalidated_at = ?, invalidated_reason = ?,"
+                " updated_at = ? WHERE id = ?",
+                (now_iso(), reason, now_iso(), row["id"]),
+            )
+            invalidated += 1
+        return invalidated
+
+    def _stale_reason(self, row: sqlite3.Row) -> str | None:
+        """グループに紐づく根拠だけを見る. 宛先の有効・無効は claim 時に見る."""
+        if row["merge_group_id"] is None:
+            return None
+        media = self._conn.execute(
+            "SELECT * FROM media_file WHERE id = ?", (row["media_file_id"],)
+        ).fetchone()
+        if media is None:
+            return f"メディア {row['media_file_id']} が無い"
+        if media["role"] == "derived" and not group_is_current(
+            self._conn, self._registry, row["merge_group_id"], media["id"]
+        ):
+            return f"グループ {row['merge_group_id']} が現在の構成と一致しない"
+        return self._check_rule(row, media)
+
+    def invalidate_old_epoch(self, destination_id: str, current_epoch: int, reason: str) -> int:
+        """epoch を進めた宛先の、旧 epoch の未完了レコードを破棄する（§8）.
+
+        **`complete` は残す。** 旧 epoch の記録は監査履歴として意味がある。
+        claim は epoch で絞るので送られはしないが、理由が無いまま `pending` で
+        残ると、利用者から見て「いつまでも送られない項目」になる。
+        """
+        with immediate(self._conn):
+            updated = self._conn.execute(
+                "UPDATE upload_record SET invalidated_at = ?, invalidated_reason = ?,"
+                " updated_at = ? WHERE destination_id = ? AND target_epoch < ?"
+                "   AND invalidated_at IS NULL AND state <> 'complete'",
+                (now_iso(), reason, now_iso(), destination_id, current_epoch),
+            )
+            return updated.rowcount
+
     def records_for_recheck(self, destination_id: str, target_epoch: int) -> list[sqlite3.Row]:
         """再確認の対象. **現行 epoch の `complete` だけ**を、全件返す.
 

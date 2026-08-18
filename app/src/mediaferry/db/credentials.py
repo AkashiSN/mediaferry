@@ -100,6 +100,16 @@ class CredentialStore:
         except SecretCorrupt as exc:
             raise CredentialUnusable(f"資格情報 {credential_id} を復号できない") from exc
 
+    def purge(self, credential_id: str) -> int:
+        """1 件の暗号文を消す. 既に消えていれば 0 を返す."""
+        with immediate(self._conn):
+            purged = self._conn.execute(
+                "UPDATE destination_credential SET secret_encrypted = NULL, purged_at = ?"
+                " WHERE id = ? AND secret_encrypted IS NOT NULL",
+                (now_iso(), credential_id),
+            )
+            return purged.rowcount
+
     def purge_unreferenced(self, destination_id: str) -> int:
         """どのリビジョンからも参照されていない版の暗号文を消す.
 

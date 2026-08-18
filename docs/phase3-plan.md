@@ -6036,9 +6036,11 @@ def _an_upload_record(db, state, **over):
     uploads = UploadRepository(db, ProfileRegistry(db), destinations)
     media_id = a_media_file(db, (profile.profile_id, profile.revision_id))
     uploads.create_pairs([media_id], [destination_id])
+    # claim_job_id は job(id) への外部キー。中断したジョブの行を用意する。
+    job_id = JobStore(db).enqueue("upload", {"destination_id": destination_id})
     fields = {
         "state": state,
-        "claim_job_id": "job-old",
+        "claim_job_id": job_id,
         "claim_token": "tok-old",
         "claim_expires_at": "2999-01-01T00:00:00+00:00",
         "destination_revision_id": destinations.current(destination_id)["id"],
@@ -6350,7 +6352,24 @@ def _reconcile(db, data_root):
 テスト（`app/tests/test_upload_claim.py` に追記）:
 
 ```python
-def test_records_from_an_old_epoch_are_invalidated_with_a_reason(db, world):
+def test_advancing_the_epoch_invalidates_the_queued_records(db, world):
+    """**`add_revision` が同じトランザクションで破棄する**（§8）."""
+    _, destinations, destination_id, uploads = world
+    a_pending(db, world)
+
+    destinations.add_revision(
+        destination_id, base_url="http://immich.invalid:2283", public_url=None,
+        secret="key-2",
+        identity=RemoteIdentity(remote_user_id="user-b", server_instance_id=None),
+    )
+
+    row = db.execute("SELECT * FROM upload_record").fetchone()
+    assert row["invalidated_at"] is not None
+    assert row["invalidated_reason"]
+
+
+def test_the_startup_sweep_catches_what_the_edit_missed(db, world):
+    """編集の直後に落ちた場合に備えて、起動時にも同じ掃除をする（Task 12）."""
     _, destinations, destination_id, uploads = world
     a_pending(db, world)
     destinations.add_revision(
@@ -6359,11 +6378,12 @@ def test_records_from_an_old_epoch_are_invalidated_with_a_reason(db, world):
         identity=RemoteIdentity(remote_user_id="user-b", server_instance_id=None),
     )
     epoch = destinations.current(destination_id)["target_epoch"]
+    # 破棄が走る前に落ちた状態を作る。
+    db.execute("UPDATE upload_record SET invalidated_at = NULL, invalidated_reason = NULL")
 
     assert uploads.invalidate_old_epoch(destination_id, epoch, "向き先が変わった") == 1
 
     row = db.execute("SELECT * FROM upload_record").fetchone()
-    assert row["invalidated_at"] is not None
     assert row["invalidated_reason"] == "向き先が変わった"
 
 
@@ -6522,11 +6542,11 @@ def _a_media_file(db):
         """
         marks = ", ".join("?" * len(_IN_FLIGHT))
         rows = self._conn.execute(
-            "SELECT r.credential_id AS credential_id FROM destination_revision r"
+            "SELECT r.credential_id AS credential_id FROM destination_revision r"  # noqa: S608
             " JOIN upload_destination d ON d.id = r.destination_id"
             " WHERE r.destination_id = ? AND r.id <> d.current_revision_id"
             "   AND NOT EXISTS (SELECT 1 FROM upload_record u"
-            f"                  WHERE u.destination_revision_id = r.id AND u.state IN ({marks}))",  # noqa: S608
+            f"                  WHERE u.destination_revision_id = r.id AND u.state IN ({marks}))",
             (destination_id, *_IN_FLIGHT),
         ).fetchall()
         purged = 0
@@ -6600,9 +6620,10 @@ def test_the_reconciler_refuses_a_half_wired_pair(db, data_root):
 | claim の 3 欄を消さない | `test_an_interrupted_upload_is_released_for_a_recheck`（`0004` の CHECK でも落ちる） |
 | `invalidate_stale` の `group_is_current` を消す | `test_a_record_whose_grounds_are_gone_is_invalidated` |
 | `invalidate_stale` が健全な行も無効化する | `test_a_healthy_record_is_not_invalidated` |
+| `invalidate_stale` が `complete` も対象にする | `test_a_completed_record_keeps_its_history_even_if_the_group_changed`（**追加**。送信済みの履歴は監査に要る） |
 | `state <> 'complete'` を消す | `test_a_finished_upload_is_left_alone`（送信済みが無効化される） |
 | `_settle_uploads` の `invalidate_old_epoch` / `purge_superseded_credentials` を消す | `test_startup_purges_superseded_keys_and_sweeps_old_epochs` |
-| `_settle_uploads` を `_settle_merges` の前に置く | **落ちない**。テストのグループは reconciliation で状態が変わらない。**`merging` のまま残ったグループの derived を対象にするテストを Task 14 の統合で見る**（そこでは `_settle_merges` が `merged` へ倒してから評価する必要がある） |
+| `_settle_uploads` を `_settle_merges` の前に置く | Task 12 のテストだけでは**落ちない**（reconciliation でグループの状態が変わらないため）。**Task 14 の `test_a_group_settled_at_startup_changes_what_can_be_sent` が実効で固定する**（起動時に `merging` → `detected` へ倒れた結果、`failed_group_member` の根拠が消える） |
 
 - [ ] **Step 9: コミット**
 

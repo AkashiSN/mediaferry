@@ -224,8 +224,19 @@ def _a_profile(db):
 
 
 def _reconcile(db, data_root):
+    import os
+
+    from mediaferry.core.crypto import SecretBox
+    from mediaferry.db.credentials import CredentialStore
+    from mediaferry.db.destinations import DestinationRepository
+    from mediaferry.db.uploads import UploadRepository
+
     publisher = ArtifactPublisher(db, data_root, StubProbe())
-    return Reconciler(db, data_root, publisher, JobStore(db)).run()
+    destinations = DestinationRepository(db, CredentialStore(db, SecretBox(os.urandom(32))))
+    uploads = UploadRepository(db, ProfileRegistry(db), destinations)
+    return Reconciler(
+        db, data_root, publisher, JobStore(db), uploads=uploads, destinations=destinations
+    ).run()
 
 
 def test_a_merge_that_reached_the_publish_is_completed(db, data_root):
@@ -326,3 +337,229 @@ def test_a_merge_is_settled_after_its_staging_is_recovered(db, data_root):
     assert db.execute("SELECT status FROM merge_group WHERE id = ?", (group_id,)).fetchone()[0] == (
         "merged"
     )
+
+
+def _an_upload_record(db, state, **over):
+    import os
+
+    from mediaferry.core.crypto import SecretBox
+    from mediaferry.db.credentials import CredentialStore
+    from mediaferry.db.destinations import DestinationRepository, RemoteIdentity
+    from mediaferry.db.uploads import UploadRepository
+
+    ProfileRegistry(db).sync_builtins()
+    profile = ProfileRegistry(db).current("dji-osmo")
+    destinations = DestinationRepository(db, CredentialStore(db, SecretBox(os.urandom(32))))
+    destination_id = destinations.create(
+        name="home",
+        base_url="http://immich.invalid:2283",
+        public_url=None,
+        secret="k",
+        identity=RemoteIdentity(remote_user_id="user-a", server_instance_id=None),
+    )
+    uploads = UploadRepository(db, ProfileRegistry(db), destinations)
+    media_id = a_media_file(db, (profile.profile_id, profile.revision_id))
+    uploads.create_pairs([media_id], [destination_id])
+    # claim_job_id は job(id) への外部キー。中断したジョブの行を用意する。
+    job_id = JobStore(db).enqueue("upload", {"destination_id": destination_id})
+    fields = {
+        "state": state,
+        "claim_job_id": job_id,
+        "claim_token": "tok-old",
+        "claim_expires_at": "2999-01-01T00:00:00+00:00",
+        "destination_revision_id": destinations.current(destination_id)["id"],
+    }
+    fields.update(over)
+    assignment = ", ".join(f"{name} = ?" for name in fields)
+    db.execute(f"UPDATE upload_record SET {assignment}", tuple(fields.values()))  # noqa: S608
+    return db.execute("SELECT * FROM upload_record").fetchone()
+
+
+def test_an_interrupted_upload_is_released_for_a_recheck(db, data_root):
+    record = _an_upload_record(db, "uploading")
+
+    report = _reconcile(db, data_root)
+
+    row = db.execute("SELECT * FROM upload_record WHERE id = ?", (record["id"],)).fetchone()
+    assert report.uploads_released == 1
+    # サーバ側の成否が不明なので pending ではない。
+    assert row["state"] == "needs_recheck"
+    assert (row["claim_job_id"], row["claim_token"], row["claim_expires_at"]) == (None, None, None)
+
+
+def test_a_finished_upload_is_left_alone(db, data_root):
+    record = _an_upload_record(
+        db, "complete", claim_job_id=None, claim_token=None, claim_expires_at=None
+    )
+
+    report = _reconcile(db, data_root)
+
+    row = db.execute("SELECT * FROM upload_record WHERE id = ?", (record["id"],)).fetchone()
+    assert report.uploads_released == 0
+    assert row["state"] == "complete"
+
+
+def test_a_waiting_upload_keeps_waiting(db, data_root):
+    record = _an_upload_record(
+        db,
+        "awaiting_datetime_approval",
+        claim_job_id=None,
+        claim_token=None,
+        claim_expires_at=None,
+    )
+    _reconcile(db, data_root)
+    row = db.execute("SELECT * FROM upload_record WHERE id = ?", (record["id"],)).fetchone()
+    assert row["state"] == "awaiting_datetime_approval"
+
+
+def test_a_record_whose_grounds_are_gone_is_invalidated(db, data_root):
+    """derived の生成元が現行と一致しなくなったレコードを止める."""
+    import os
+
+    from mediaferry.core.crypto import SecretBox
+    from mediaferry.db.credentials import CredentialStore
+    from mediaferry.db.destinations import DestinationRepository, RemoteIdentity
+    from mediaferry.db.uploads import UploadRepository
+
+    from .test_selection import a_derived, a_group, a_pair
+
+    ProfileRegistry(db).sync_builtins()
+    profile = ProfileRegistry(db).current("dji-osmo")
+    destinations = DestinationRepository(db, CredentialStore(db, SecretBox(os.urandom(32))))
+    destination_id = destinations.create(
+        name="home",
+        base_url="http://immich.invalid:2283",
+        public_url=None,
+        secret="k",
+        identity=RemoteIdentity(remote_user_id="user-a", server_instance_id=None),
+    )
+    uploads = UploadRepository(db, ProfileRegistry(db), destinations)
+    members = a_pair(db, profile)
+    output_id = a_derived(db, profile)
+    group_id = a_group(db, profile, members, output_id=output_id)
+    uploads.create_pairs([output_id], [destination_id])
+    # 構成ファイルが差し替わって digest が合わなくなった。
+    db.execute("UPDATE media_file SET sha1 = 'edited' WHERE id = ?", (members[0][0],))
+
+    report = _reconcile(db, data_root)
+
+    row = db.execute("SELECT * FROM upload_record").fetchone()
+    assert report.uploads_invalidated == 1
+    assert row["invalidated_at"] is not None
+    assert group_id in row["invalidated_reason"] or "グループ" in row["invalidated_reason"]
+
+
+def test_a_healthy_record_is_not_invalidated(db, data_root):
+    _an_upload_record(db, "pending", claim_job_id=None, claim_token=None, claim_expires_at=None)
+
+    report = _reconcile(db, data_root)
+
+    assert report.uploads_invalidated == 0
+    assert db.execute("SELECT invalidated_at FROM upload_record").fetchone()[0] is None
+
+
+def test_startup_purges_superseded_keys_and_sweeps_old_epochs(db, data_root):
+    """編集の直後に落ちても、次の起動で均される."""
+    import os
+
+    from mediaferry.core.crypto import SecretBox
+    from mediaferry.db.credentials import CredentialStore
+    from mediaferry.db.destinations import DestinationRepository, RemoteIdentity
+    from mediaferry.db.uploads import UploadRepository
+
+    ProfileRegistry(db).sync_builtins()
+    profile = ProfileRegistry(db).current("dji-osmo")
+    destinations = DestinationRepository(db, CredentialStore(db, SecretBox(os.urandom(32))))
+    destination_id = destinations.create(
+        name="home",
+        base_url="http://immich.invalid:2283",
+        public_url=None,
+        secret="k1",
+        identity=RemoteIdentity(remote_user_id="user-a", server_instance_id=None),
+    )
+    uploads = UploadRepository(db, ProfileRegistry(db), destinations)
+    media_id = a_media_file(db, (profile.profile_id, profile.revision_id))
+    uploads.create_pairs([media_id], [destination_id])
+    old_credential = destinations.current(destination_id)["credential_id"]
+    # 編集はしたが、その後の後始末が走る前に落ちた状態を作る。
+    destinations.add_revision(
+        destination_id,
+        base_url="http://immich.invalid:2283",
+        public_url=None,
+        secret="k2",
+        identity=RemoteIdentity(remote_user_id="user-b", server_instance_id=None),
+    )
+    db.execute("UPDATE upload_record SET invalidated_at = NULL, invalidated_reason = NULL")
+
+    report = Reconciler(
+        db,
+        data_root,
+        ArtifactPublisher(db, data_root, StubProbe()),
+        JobStore(db),
+        uploads=uploads,
+        destinations=destinations,
+    ).run()
+
+    assert report.uploads_invalidated == 1
+    assert report.credentials_purged == 1
+    assert (
+        db.execute(
+            "SELECT secret_encrypted FROM destination_credential WHERE id = ?", (old_credential,)
+        ).fetchone()[0]
+        is None
+    )
+
+
+def test_the_reconciler_refuses_a_half_wired_pair(db, data_root):
+    """片方だけ渡すと、回収がすべて黙って skip される（気づけない）."""
+    import pytest
+
+    from mediaferry.db.uploads import UploadRepository
+
+    with pytest.raises(ValueError):
+        Reconciler(
+            db,
+            data_root,
+            ArtifactPublisher(db, data_root, StubProbe()),
+            JobStore(db),
+            uploads=UploadRepository(db, ProfileRegistry(db), None),
+        )
+
+
+def test_a_completed_record_keeps_its_history_even_if_the_group_changed(db, data_root):
+    """送信済みの履歴は無効化しない（監査に要る）."""
+    import os
+
+    from mediaferry.core.crypto import SecretBox
+    from mediaferry.db.credentials import CredentialStore
+    from mediaferry.db.destinations import DestinationRepository, RemoteIdentity
+    from mediaferry.db.uploads import UploadRepository
+
+    from .test_selection import a_derived, a_group, a_pair
+
+    ProfileRegistry(db).sync_builtins()
+    profile = ProfileRegistry(db).current("dji-osmo")
+    destinations = DestinationRepository(db, CredentialStore(db, SecretBox(os.urandom(32))))
+    destination_id = destinations.create(
+        name="home",
+        base_url="http://immich.invalid:2283",
+        public_url=None,
+        secret="k",
+        identity=RemoteIdentity(remote_user_id="user-a", server_instance_id=None),
+    )
+    uploads = UploadRepository(db, ProfileRegistry(db), destinations)
+    members = a_pair(db, profile)
+    output_id = a_derived(db, profile)
+    a_group(db, profile, members, output_id=output_id)
+    uploads.create_pairs([output_id], [destination_id])
+    db.execute(
+        "UPDATE upload_record SET state = 'complete', destination_revision_id = ?",
+        (destinations.current(destination_id)["id"],),
+    )
+    # 構成ファイルが差し替わって digest が合わなくなった。
+    db.execute("UPDATE media_file SET sha1 = 'edited' WHERE id = ?", (members[0][0],))
+
+    report = _reconcile(db, data_root)
+
+    assert report.uploads_invalidated == 0
+    assert db.execute("SELECT invalidated_at FROM upload_record").fetchone()[0] is None
