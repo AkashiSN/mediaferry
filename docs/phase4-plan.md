@@ -227,7 +227,7 @@ OpenAPI の型を生成し、最小の UI consumer を 1 つ通す**形にする
 
 ---
 
-### Task 4: E2E の土台（system harness）と OpenAPI の型生成
+### Task 4: E2E の土台（system harness）と OpenAPI の型生成 —— **実装済み**
 
 **Files:** Create `web/tests/harness.ts`, `app/tests/system/__init__.py`,
 `app/tests/system/server.py` / Modify `web/package.json`
@@ -245,7 +245,15 @@ fake broker + fake Immich 2 台**を立ち上げる仕掛けが無いと、E2E �
 - 型は `GET /openapi.json` から `openapi-typescript` で生成し、`web/src/api/types.ts` を
   **コミットする**（API を変えたら差分が出る）
 
-- [ ] Step 1: harness だけの smoke（起動 → `/health` → 停止）を書き、CI で回す
+`app/tests/system/harness.py` の `system_app()` が一式を立ち上げる（`-m needs_system`。
+既定の `pytest` では走らない）。smoke は 4 本: `/health` が返る / fake Immich が 2 台
+生きている / **本番と同じ経路で入口の防御が効く**（信頼しない `Host` は 421、CSRF の
+対が無い POST は 403）/ 認証を有効にしてログインできる。
+
+型は `npm --prefix web run typegen`（アプリ自身の `openapi()` から生成）。生成物は
+追跡する。**再生成し忘れは Python のテストが検出する**
+（`test_api_types_are_current.py`。npm が無くても回る）。
+
 - [ ] Step 2: backend の slice が増えるたびに型を再生成し、最小の UI consumer を 1 つ通す
 
 ---

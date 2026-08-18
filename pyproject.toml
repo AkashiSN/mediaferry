@@ -40,5 +40,6 @@ testpaths = ["protocol/tests", "mountd/tests", "app/tests"]
 addopts = "-m 'not needs_root and not needs_immich'"
 markers = [
     "needs_root: マウントを伴うためコンテナか root でのみ実行できる",
+    "needs_system: 実プロセスを起動する（E2E の土台）",
     "needs_immich: 実 Immich サーバが必要",
 ]
