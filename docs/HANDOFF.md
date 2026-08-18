@@ -10,14 +10,15 @@
 
 ## 1. 現在地
 
-**Phase 1 と Phase 2 は実装・検証とも完了。次は Phase 3（Immich 同期）の計画から。**
+**Phase 1 と Phase 2 は実装・検証とも完了。Phase 3 は計画を書き終えた段階で、
+レビューも実装も未着手。次は `docs/phase3-plan.md` を codex に 2 巡レビューさせる。**
 
 | Phase | 内容 | 状態 |
 | --- | --- | --- |
 | 0 | スパイク。未検証項目の実測とブローカーの最小実装 | **完了** |
 | 1 | 基盤 + 取り込み。`ArtifactPublisher` / `Reconciler` / DB スキーマ / scan / import / API | **完了**（実 USB の確認だけ残り） |
 | 2 | 結合。検出 / ffmpeg / 検証 / 公開 / 回収 / 選択肢 / API | **完了**（`phase2-plan.md` の 14 タスク。実装との差分は書き戻し済み） |
-| 3 | Immich 同期（転送先プロファイル、状態機械） | 未着手 |
+| 3 | Immich 同期（転送先プロファイル、状態機械） | **計画完了・未実装**（`phase3-plan.md`、14 タスク。**レビュー未実施**） |
 | 4 | Web UI | 未着手 |
 | 5 | 汎用化（Canon、プロファイル編集 UI、複数デバイス） | 未着手 |
 
@@ -67,6 +68,7 @@ assert している。
 | `docs/design.md` | **設計仕様書。正本。** | ✅ |
 | `docs/phase1-plan.md` | Phase 1 の実装計画。**実行済み**。実装との差分は都度書き戻してある | ✅ |
 | `docs/phase2-plan.md` | Phase 2（結合）の実装計画。**実行済み**。codex のレビュー 2 巡を反映し、実装で外れた判断と検出できなかった変異を書き戻してある | ✅ |
+| `docs/phase3-plan.md` | Phase 3（Immich 同期）の実装計画。**未レビュー・未実行**。14 タスク | ✅ |
 | `docs/phase1-backup.md` | バックアップとリストア、再構築できる範囲（§18-4） | ✅ |
 | `docs/phase1-manual-checklist.md` | 実 USB での確認手順 | ✅ |
 | `docs/phase0-findings.md` | Phase 0 の実測結果と設計への反映 | ✅ |
@@ -226,15 +228,29 @@ blocker として指摘されたもの**で、理屈で戻すと同じ穴に落�
 
 ### 手順
 
-1. **Phase 3（Immich 同期）の計画を書く。** `docs/phase2-plan.md` と同じ粒度
-   （タスクごとに「失敗するテスト → 最小実装 → 変異試験 → コミット」）で書き、
-   **着手の前に codex のレビューを 2 巡通す**。Phase 2 では 1 巡目の blocker を
-   直した後の 2 巡目で、さらに blocker が 2 件出た
+1. **`docs/phase3-plan.md` を codex にレビューさせる（2 巡）。** 計画は書き終えて
+   いるが、**まだ 1 度もレビューを通していない**。着手の前に 2 巡通す。Phase 2 では
+   1 巡目の blocker を直した後の 2 巡目で、さらに blocker が 2 件出た。見てほしい
+   点は計画の末尾「実装の前に決めておくこと」に列挙してある。
+   レビューを反映したら Task 1 から実行する
 2. **`phase1-manual-checklist.md` を TrueNAS ホストで実行する。** 特に 11 番
    （mtime の解釈）は実装の前提の確認なので、結果を `phase0-findings.md` に残す。
    12 番（`attached_pic`）は Phase 2 で足した項目
 
 この 2 つは並行してよい。1 は開発コンテナで進められる。
+
+### Phase 3 の計画で決めたこと（レビューで覆りうる）
+
+- **アップロードは逐次実行**にする。`UPLOAD_CONCURRENCY` は Phase 4 の
+  ワーカー多重化まで効かない（ジョブ内で並行させると、接続をスコープごとに
+  1 本に保てない）
+- **`upload` ジョブは宛先ごとに 1 本**。状態の再確認は同じジョブ種別の
+  `params.mode = "recheck"`（`job.type` の CHECK を書き換えるとテーブルの
+  作り直しになる）
+- **マイグレーションは足さない。** `0004_destinations_and_uploads.sql` に
+  必要なテーブル・複合外部キー・trigger がすべて入っている
+- Phase 2 で作った `_with_lease_pulse` を `core/lease_pulse.py` へ移し、
+  巨大ファイルの送信中のリース維持にも使う
 
 ### Phase 3 の範囲（`design.md` §20）
 
