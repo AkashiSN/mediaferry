@@ -346,6 +346,54 @@ PYTHONDONTWRITEBYTECODE=1 uv run python mutate.py \
 文書では出なかった層**（SQLite の並行性、相手が値を選べる応答、実装した順序）
 **が出る。** 直した箇所の周辺をもう一度見せると、また出る。
 
+### codex への経路（agmsg）
+
+codex とのやり取りは agmsg 経由。チーム `mediaferry`、こちらが `mediaferry-dev`
+（claude-code）、レビュー役が `mediaferry-reviewer`（codex）。スクリプトは
+`~/.agents/skills/agmsg/scripts/` にある。**依頼のたびに起動し、終わったら必ず
+片付ける。**
+
+```bash
+S=~/.agents/skills/agmsg/scripts
+
+# 1. 起動（この環境は tmux ではなく herdr のペインになる）
+$S/spawn.sh codex mediaferry-reviewer --project "$(pwd)"
+
+# 2. bridge の生存確認。spawn は codex の readiness を待たないので、送る前に見る
+$S/delivery.sh status codex "$(pwd)"        # → Codex bridge: ... alive (pid N)
+
+# 3. 依頼（コミット済みの hash とファイル名を渡す。上の「レビューの依頼」を参照）
+$S/send.sh mediaferry mediaferry-dev mediaferry-reviewer "<依頼>"
+
+# 4. 片付け。--force を最初から付ける
+$S/despawn.sh mediaferry mediaferry-dev mediaferry-reviewer --force   # → status=forced
+
+# 5. 確認
+$S/delivery.sh status codex "$(pwd)"        # → no identities registered for this project
+```
+
+**`--force` を最初から付けること。素の graceful を先に打ってはいけない。**
+graceful な despawn は actas ロックだけを土台にしている（前提チェック、teardown の
+実行主体であるメンバー側 `watch.sh`、完了判定のポーリング、3 つとも）。codex は
+`actas-claim` を一度も走らせないためロックが常に `free` で、graceful は
+`status=ok note=no-live-lock` を返して**何も片付けない**。しかもその離脱の直前に
+`rm -f "$SPAWN_REC"` が走り、`--force` が読むはずの placement レコード
+（`spawn.sh` が `herdr:<pane_id><TAB><project><TAB>codex` を書いている）を消す。
+結果、続けて `--force` を打っても `no placement record` で exit 1 になり、
+**二度と force できない。順序は一方通行。**
+
+`--force` はペインを閉じ、登録を落とし、placement レコードを消す。bridge は
+その登録消滅を検知して自分で終了するので、手動の kill は要らない。
+
+**起動しっぱなしにしない理由**: codex CLI が居なくなっても bridge プロセスだけが
+生き残ることがあり、その状態で `mediaferry-reviewer` 宛に送るとメッセージを黙って
+飲み込む。手で `herdr pane close <pane_id>` だけした場合がこれに当たる（登録が
+残るので bridge も残る。ペインを閉じても SessionEnd フックは走らない）。その
+ときは `delivery.sh status codex` が出す pid に `kill -TERM` が要る。
+
+（2026-08-18 に確認。graceful → `--force` の順で打って詰まり、`--force` を最初から
+打つ手順で spawn から片付けまで 1 サイクル通ることを実測した。）
+
 ---
 
 ## 6. 開発コマンド
