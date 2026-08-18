@@ -640,7 +640,7 @@ Expected: PASS（8 件）
 | `WrongKeyError` を握りつぶして行を上書きする | `test_a_wrong_master_key_is_reported_not_overwritten` |
 | `secret_encrypted IS NULL` の判定を消す | `test_a_purged_credential_cannot_be_revealed` |
 | `purge_unreferenced` の `NOT IN (...)` を消す | `test_purging_keeps_the_referenced_credential` |
-| 例外メッセージに `secret` を入れる | `test_the_secret_is_not_in_the_exception_text` |
+| 例外メッセージに `secret` を入れる | **意味のある変異を作れない**。このモジュールが平文を持つのは `reveal` の return の瞬間だけで、そこから例外を投げる経路が無い（`WrongKeyError` の分岐は平文を持っていない）。`test_the_secret_is_not_in_the_exception_text` は「鍵を取り違えたときのメッセージ」を固定する回帰テストとして残す。**秘密の露出は下流で見る** —— アダプタの例外（Task 4）、`last_error`（Task 9）、API 応答と `job.params_json`（Task 13） |
 | `encrypt` を素通し（平文を保存）にする | `test_the_ciphertext_is_not_the_secret` |
 
 - [ ] **Step 6: コミット**
