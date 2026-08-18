@@ -131,3 +131,15 @@ def test_the_secret_is_not_in_the_exception_text(db, box, destination):
     with pytest.raises(CredentialUnusable) as caught:
         other.reveal(credential_id)
     assert SECRET not in str(caught.value)
+
+
+def test_store_locked_refuses_to_run_without_a_transaction(db, box, destination):
+    """docstring だけの約束にしない.
+
+    単独で呼ばれると autocommit になり、宛先の作成・編集の途中で落ちたときに
+    孤立した credential を残せてしまう（§8「編集は原子的に反映する」）。
+    """
+    store = CredentialStore(db, box)
+    with pytest.raises(RuntimeError):
+        store.store_locked(destination, SECRET)
+    assert db.execute("SELECT count(*) FROM destination_credential").fetchone()[0] == 0

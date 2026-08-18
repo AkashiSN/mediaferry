@@ -1230,7 +1230,9 @@ Expected: PASS（13 件）
 | --- | --- |
 | `_next_epoch` の `remote_user_id != current` の判定を消す | `test_pointing_at_another_account_advances_the_epoch` |
 | `_require_identity` を消す | `test_a_missing_identity_is_refused_atomically` |
-| `create` / `add_revision` を複数トランザクションに戻す | `test_a_failure_midway_leaves_nothing_behind` |
+| `create` / `add_revision` の**書き込み**を複数トランザクションに戻す | `test_a_failure_midway_leaves_nothing_behind` |
+| `add_revision` の**読み出しと版番号の決定**だけをトランザクションの外へ出す | **落ちない**。単一スレッドでは、読んだ後に別の編集が割り込む筋書きを作れない。同時 PATCH の保険として記録する（実害は「両方が revision N を読み、片方が UNIQUE 違反で 500」） |
+| `store_locked` の `in_transaction` 検査を消す | `test_store_locked_refuses_to_run_without_a_transaction`（Task 2 のテストに追加） |
 | `add_revision` の `_invalidate_old_epoch_locked` を別トランザクションにする | **落ちない**（単一プロセスのテストでは間で落とせない）。原子性の保険として記録する。呼び出し自体を消す変異は Task 12 の `test_records_from_an_old_epoch_are_invalidated_with_a_reason` が捕まえる |
 | ホストが変わったときも据え置きにする（`EpochDecisionRequired` を投げない） | `test_a_changed_host_with_the_same_user_needs_an_answer` |
 | `same_library` の分岐を反転する | `test_the_answer_decides_whether_the_history_carries_over` |
