@@ -5755,7 +5755,8 @@ def test_a_rejection_that_won_the_race_stops_the_approval(world):
 
     service.reject(record_id)
 
-    with pytest.raises(Exception):  # ClaimLost か ApprovalNotPossible
+    # 却下が先に complete へ倒しているので、承認は「承認待ちではない」で断られる。
+    with pytest.raises(ApprovalNotPossible):
         service.approve(ctx, record_id)
     assert server.datetimes == {}
     assert record_of(db)["state"] == "complete"
@@ -5975,6 +5976,7 @@ Expected: PASS（7 件）
 | `claim_for_approval` を呼ばずに PUT する | `test_a_rejection_that_won_the_race_stops_the_approval` |
 | `_waiting` の `invalidated_at` の判定を消す | `test_an_invalidated_record_cannot_be_approved` |
 | 失敗時に `release_from_approval` を呼ばない | `test_a_failed_approval_goes_back_to_waiting`（`fixing_datetime` + claim のまま残る） |
+| commit を `finish_owned` から `finish` に戻す | `test_a_cancel_during_the_approval_stops_the_commit`（**追加**。PUT 中にキャンセルされても complete を書かない） |
 | `_settle` の `state = ?` 条件を消す | **落ちない**（単一スレッドのテストでは競合しない）。`BEGIN IMMEDIATE` の中の CAS は、承認ジョブと却下が同時に動く場合の保険。構造的にテスト不能な変異として記録する |
 
 - [ ] **Step 6: コミット**

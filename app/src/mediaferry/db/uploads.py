@@ -11,6 +11,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import sqlite3
 from collections.abc import Sequence
 from dataclasses import dataclass
@@ -508,6 +509,35 @@ class UploadRepository:
                 (now_iso(), reason, now_iso(), group_id),
             )
             return updated.rowcount
+
+    def claim_for_approval(
+        self, record_id: str, job_id: str, token: str, lease_seconds: int = 60
+    ) -> None:
+        """`awaiting_datetime_approval` → `fixing_datetime` を CAS で取る.
+
+        却下と競合したら 0 行になる（先に `complete` へ倒れている）。
+        """
+        with immediate(self._conn):
+            updated = self._conn.execute(
+                "UPDATE upload_record SET state = 'fixing_datetime', claim_job_id = ?,"
+                " claim_token = ?, claim_expires_at = ?, updated_at = ?"
+                " WHERE id = ? AND state = 'awaiting_datetime_approval'"
+                "   AND invalidated_at IS NULL AND claim_job_id IS NULL",
+                (job_id, token, _expiry(lease_seconds), now_iso(), record_id),
+            )
+            if updated.rowcount != 1:
+                raise ClaimLost(f"レコード {record_id} は承認できる状態ではない")
+
+    def release_from_approval(self, record_id: str, token: str) -> None:
+        """承認の途中で降りる. 承認待ちへ戻して人に見せる."""
+        with contextlib.suppress(ClaimLost):
+            self._cas(
+                record_id,
+                token,
+                "state = 'awaiting_datetime_approval', claim_job_id = NULL,"
+                " claim_token = NULL, claim_expires_at = NULL",
+                (),
+            )
 
     def records_for_recheck(self, destination_id: str, target_epoch: int) -> list[sqlite3.Row]:
         """再確認の対象. **現行 epoch の `complete` だけ**を、全件返す.
