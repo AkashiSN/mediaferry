@@ -58,6 +58,8 @@ class AppState:
     env: Mapping[str, str]
     volumes: VolumeService
     runner: JobRunner
+    # 起動時に解決した設定（`Tier.RESTART` までは起動中に変わらない）。
+    settings: Settings
     last_reconcile: ReconcileReport = field(default_factory=ReconcileReport)
     # 認証が有効なときだけ入る（`AUTH_PASSWORD` の Argon2 ハッシュ）。
     password_hash: str | None = None
@@ -124,6 +126,7 @@ def create_app(
             env=env,
             volumes=volumes,
             runner=runner,
+            settings=settings,
             last_reconcile=report,
             # 平文は持ち回らない。突き合わせに使うのはハッシュだけ（§14）。
             password_hash=(

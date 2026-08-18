@@ -326,6 +326,29 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/media/{media_id}/thumbnail": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get Thumbnail
+         * @description サムネイルを返す（`at` は秒。刻みに丸める）.
+         *
+         *     **同じ絵には同じ札を付ける。** 丸めた後の位置で `ETag` を作るので、
+         *     `at=13` と `at=17` は同じ応答になる。
+         */
+        get: operations["get_thumbnail_api_media__media_id__thumbnail_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/orphans": {
         parameters: {
             query?: never;
@@ -1241,6 +1264,39 @@ export interface operations {
                     "application/json": {
                         [key: string]: unknown;
                     };
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    get_thumbnail_api_media__media_id__thumbnail_get: {
+        parameters: {
+            query?: {
+                at?: number;
+            };
+            header?: never;
+            path: {
+                media_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
                 };
             };
             /** @description Validation Error */

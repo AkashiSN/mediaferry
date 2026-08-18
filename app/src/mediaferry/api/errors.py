@@ -38,6 +38,7 @@ class ErrorCode(StrEnum):
     UNKNOWN_ACTION = "unknown_action"
     SECRET_KEY_MISSING = "secret_key_missing"  # noqa: S105 - 鍵ではなく code の名前
     VALIDATION_FAILED = "validation_failed"
+    THUMBNAIL_FAILED = "thumbnail_failed"
     # 401 / 403 / 421
     NOT_AUTHENTICATED = "not_authenticated"
     CROSS_SITE_REQUEST = "cross_site_request"

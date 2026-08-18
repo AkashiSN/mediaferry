@@ -4,8 +4,10 @@ from __future__ import annotations
 
 from typing import Any
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Request, Response
+from fastapi.responses import FileResponse
 
+from ..adapters.thumbnails import ThumbnailCache, ThumbnailFailed, quantise
 from .deps import conn as get_conn
 from .deps import state as get_state
 from .errors import ApiError, ErrorCode
@@ -27,6 +29,41 @@ def get_media(media_id: str, conn=Depends(get_conn)) -> dict[str, Any]:  # noqa:
     if row is None:
         raise ApiError(404, ErrorCode.NOT_FOUND, "そのメディアは無い")
     return _media(row)
+
+
+@router.get("/media/{media_id}/thumbnail")
+def get_thumbnail(  # noqa: ANN201
+    media_id: str,
+    request: Request,
+    at: int = 0,
+    state=Depends(get_state),  # noqa: ANN001, B008
+    conn=Depends(get_conn),  # noqa: ANN001, B008
+):
+    """サムネイルを返す（`at` は秒。刻みに丸める）.
+
+    **同じ絵には同じ札を付ける。** 丸めた後の位置で `ETag` を作るので、
+    `at=13` と `at=17` は同じ応答になる。
+    """
+    row = conn.execute("SELECT * FROM media_file WHERE id = ?", (media_id,)).fetchone()
+    if row is None:
+        raise ApiError(404, ErrorCode.NOT_FOUND, "そのメディアは無い")
+    position = quantise(at, row["duration_seconds"])
+    etag = f'"{row["sha1"]}-{position}"'
+    if request.headers.get("if-none-match") == etag:
+        return Response(status_code=304, headers={"ETag": etag})
+    cache = ThumbnailCache(state.settings.data_root)
+    try:
+        path = cache.get_or_create(media_id, state.settings.data_root / row["rel_path"], position)
+    except ThumbnailFailed as exc:
+        # 元のファイルが消えている・壊れている。**理由の分かる形で返す。**
+        raise ApiError(
+            422, ErrorCode.THUMBNAIL_FAILED, "サムネイルを作れなかった", {"at": position}
+        ) from exc
+    return FileResponse(
+        path,
+        media_type="image/jpeg",
+        headers={"ETag": etag, "Cache-Control": "private, max-age=604800"},
+    )
 
 
 @router.get("/orphans")
