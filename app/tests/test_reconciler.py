@@ -355,7 +355,7 @@ def _an_upload_record(db, state, **over):
         base_url="http://immich.invalid:2283",
         public_url=None,
         secret="k",
-        identity=RemoteIdentity(remote_user_id="user-a", server_instance_id=None),
+        identity=RemoteIdentity.observed("user-a"),
     )
     uploads = UploadRepository(db, ProfileRegistry(db), destinations)
     media_id = a_media_file(db, (profile.profile_id, profile.revision_id))
@@ -431,7 +431,7 @@ def test_a_record_whose_grounds_are_gone_is_invalidated(db, data_root):
         base_url="http://immich.invalid:2283",
         public_url=None,
         secret="k",
-        identity=RemoteIdentity(remote_user_id="user-a", server_instance_id=None),
+        identity=RemoteIdentity.observed("user-a"),
     )
     uploads = UploadRepository(db, ProfileRegistry(db), destinations)
     members = a_pair(db, profile)
@@ -475,7 +475,7 @@ def test_startup_purges_superseded_keys_and_sweeps_old_epochs(db, data_root):
         base_url="http://immich.invalid:2283",
         public_url=None,
         secret="k1",
-        identity=RemoteIdentity(remote_user_id="user-a", server_instance_id=None),
+        identity=RemoteIdentity.observed("user-a"),
     )
     uploads = UploadRepository(db, ProfileRegistry(db), destinations)
     media_id = a_media_file(db, (profile.profile_id, profile.revision_id))
@@ -487,7 +487,7 @@ def test_startup_purges_superseded_keys_and_sweeps_old_epochs(db, data_root):
         base_url="http://immich.invalid:2283",
         public_url=None,
         secret="k2",
-        identity=RemoteIdentity(remote_user_id="user-b", server_instance_id=None),
+        identity=RemoteIdentity.observed("user-b"),
     )
     db.execute("UPDATE upload_record SET invalidated_at = NULL, invalidated_reason = NULL")
 
@@ -545,7 +545,7 @@ def test_a_completed_record_keeps_its_history_even_if_the_group_changed(db, data
         base_url="http://immich.invalid:2283",
         public_url=None,
         secret="k",
-        identity=RemoteIdentity(remote_user_id="user-a", server_instance_id=None),
+        identity=RemoteIdentity.observed("user-a"),
     )
     uploads = UploadRepository(db, ProfileRegistry(db), destinations)
     members = a_pair(db, profile)

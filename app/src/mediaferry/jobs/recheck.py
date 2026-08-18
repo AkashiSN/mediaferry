@@ -46,11 +46,13 @@ class Rechecker:
         self._preflight = preflight
 
     def run(self, ctx: JobContext, destination_id: str) -> RecheckOutcome:
+        # **キャンセルの確認はリモートへ触る前。** preflight も鍵を付けた要求
+        # なので、キャンセル済みのジョブから出してよいものではない（§14）。
+        if ctx.cancelled():
+            return RecheckOutcome(0, 0, 0, 0)
         revision = self._destinations.current(destination_id)
         # 向き先が変わっていたら、別ライブラリの照合結果で上書きしてしまう。
         self._preflight.assert_target(revision["id"])
-        if ctx.cancelled():
-            return RecheckOutcome(0, 0, 0, 0)
 
         # **現行 epoch だけを照合する。** 旧 epoch は別ライブラリへの履歴。
         # **黙って打ち切らない。** 上限で切ると「N 件確認した」の N が実際の
@@ -65,6 +67,11 @@ class Rechecker:
 
         with self._open_client(revision) as client:
             outcomes = client.bulk_upload_check([(row["id"], row["checksum"]) for row in records])
+
+        # **照合の最中にキャンセルされていたら、結果を書かずに降りる。** 書くと
+        # 「キャンセルした」と表示しながら、リモートの観測を反映したことになる。
+        if ctx.cancelled():
+            return RecheckOutcome(0, 0, 0, 0)
 
         trashed = vanished = restored = 0
         for row in records:

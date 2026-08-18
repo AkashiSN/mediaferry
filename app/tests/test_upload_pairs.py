@@ -4,6 +4,8 @@ import os
 import pytest
 
 from mediaferry.core.crypto import SecretBox
+from mediaferry.db import uploads as uploads_module
+from mediaferry.db.connection import Database
 from mediaferry.db.credentials import CredentialStore
 from mediaferry.db.destinations import DestinationRepository, RemoteIdentity
 from mediaferry.db.profiles import ProfileRegistry
@@ -12,7 +14,8 @@ from mediaferry.db.uploads import UploadRepository, UploadRequestInvalid
 from .test_schema_artifacts import a_media_file
 from .test_selection import a_derived, a_group, a_pair
 
-IDENTITY = RemoteIdentity(remote_user_id="user-a", server_instance_id=None)
+IDENTITY = RemoteIdentity.observed("user-a")
+KEY = os.urandom(32)
 
 
 @pytest.fixture
@@ -23,7 +26,7 @@ def profile(db):
 
 @pytest.fixture
 def destinations(db):
-    return DestinationRepository(db, CredentialStore(db, SecretBox(os.urandom(32))))
+    return DestinationRepository(db, CredentialStore(db, SecretBox(KEY)))
 
 
 @pytest.fixture
@@ -125,13 +128,54 @@ def test_the_pair_carries_the_current_epoch(db, profile, destinations, uploads):
         base_url="http://home.invalid:2283",
         public_url=None,
         secret="key-2",
-        identity=RemoteIdentity(remote_user_id="user-b", server_instance_id=None),
+        identity=RemoteIdentity.observed("user-b"),
     )
     assert destinations.current(destination_id)["target_epoch"] == 2
 
     uploads.create_pairs([media_id], [destination_id])
 
     assert db.execute("SELECT target_epoch FROM upload_record").fetchone()[0] == 2
+
+
+def test_a_revision_bumped_just_before_the_insert_does_not_leave_a_stale_pair(
+    db, data_root, profile, destinations, uploads, monkeypatch
+):
+    """**epoch の読み出しは pair の INSERT と同じトランザクションで行う**（§8）.
+
+    外で読むと、読んだ後・書く前に他の書き手が epoch を進めて旧 epoch の
+    無効化を済ませられる。すり抜けた行は `claim_next` が現行 epoch しか拾わない
+    ので送られず、次の起動の掃除まで理由の無い `pending` として残る。
+    """
+    media_id = a_media_file(db, (profile.profile_id, profile.revision_id))
+    destination_id = a_destination(destinations)
+
+    other = Database(data_root / "var" / "mediaferry.sqlite3").connect()
+    bumped = False
+
+    def bump_then(conn):
+        # 「別の書き手が、こちらがトランザクションを開く直前に commit した」形。
+        nonlocal bumped
+        if not bumped:
+            bumped = True
+            DestinationRepository(other, CredentialStore(other, SecretBox(KEY))).add_revision(
+                destination_id,
+                base_url="http://moved.invalid:2283",
+                public_url=None,
+                secret="key-2",
+                identity=RemoteIdentity.observed("user-b"),
+            )
+        return real_immediate(conn)
+
+    real_immediate = uploads_module.immediate
+    monkeypatch.setattr(uploads_module, "immediate", bump_then)
+    try:
+        uploads.create_pairs([media_id], [destination_id])
+    finally:
+        other.close()
+
+    epoch = destinations.current(destination_id)["target_epoch"]
+    assert epoch == 2
+    assert db.execute("SELECT target_epoch FROM upload_record").fetchone()[0] == epoch
 
 
 def test_a_missing_file_is_rejected_per_pair(db, profile, destinations, uploads):

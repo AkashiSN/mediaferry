@@ -15,6 +15,7 @@ from dataclasses import dataclass
 from urllib.parse import urlsplit
 
 from ..clock import now_iso
+from ..core.destinations.identity import fingerprint
 from ..core.destinations.urls import normalize_endpoint
 from ..ids import new_id
 from .connection import immediate
@@ -63,10 +64,22 @@ class RevisionOutcome:
 
 @dataclass(frozen=True)
 class RemoteIdentity:
-    """接続の検証で観測した値. 同一性ではない."""
+    """接続の検証で観測した向き先. 同一性ではない.
+
+    **`remote_user_id` は指紋であって観測値そのものではない**
+    （`core.destinations.identity`）。生の値を通す経路を残さないため、
+    観測から作るときは `observed()` を使う。
+    """
 
     remote_user_id: str | None
     server_instance_id: str | None
+
+    @classmethod
+    def observed(cls, user_id: str | None, server_instance_id: str | None = None) -> RemoteIdentity:
+        """観測した識別子を指紋にして包む."""
+        return cls(
+            remote_user_id=fingerprint(user_id), server_instance_id=fingerprint(server_instance_id)
+        )
 
 
 class DestinationRepository:

@@ -33,7 +33,7 @@ from ..core.lease_pulse import with_lease_pulse
 from ..core.uploads.decisions import datetime_plan, origin_after_upload, tags_to_apply
 from ..db.jobs import JobContext, LeaseLost
 from ..db.profiles import ProfileRegistry
-from ..db.uploads import ClaimLost, UploadRepository
+from ..db.uploads import ClaimLost, NoLongerEligible, UploadRepository
 from .preflight import PreflightCache
 
 logger = logging.getLogger(__name__)
@@ -134,6 +134,12 @@ class Uploader:
             state = self._one(ctx, record, progress)
             progress.settled = True
             return state
+        except NoLongerEligible as exc:
+            # 送る直前に根拠が崩れていた。**まだ 1 バイトも送っていない。**
+            self._uploads.refuse(record["id"], ctx.lease_token, str(exc))
+            ctx.emit("warning", f"送信を見送った: {exc}", {"upload_record_id": record["id"]})
+            progress.settled = True
+            return "refused"
         finally:
             if not progress.settled:
                 # **副作用の境界を越えたかで戻し先を変える。** 越える前の失敗
@@ -147,9 +153,6 @@ class Uploader:
 
     def _one(self, ctx: JobContext, record: sqlite3.Row, progress: _Progress) -> str:
         revision = self._destinations.revision(record["destination_revision_id"])
-        # **1 バイトも送る前に向き先を確かめる。** ここで落ちれば、まだ何も
-        # 起きていない（`progress.touched_remote` は偽のまま）。
-        self._preflight.assert_target(revision["id"])
         media = self._conn.execute(
             "SELECT * FROM media_file WHERE id = ?", (record["media_file_id"],)
         ).fetchone()
@@ -182,6 +185,7 @@ class Uploader:
         revision_id: str,
         state: str,
         progress: _Progress | None = None,
+        verify_eligibility: bool = False,
     ) -> None:
         """**ネットワークへ触る直前に必ず通す。**
 
@@ -190,8 +194,13 @@ class Uploader:
         70 GiB の送信が TTL を跨いだ後の tag / 日時 PUT が**別のライブラリへ
         飛ぶ**（asset ID が偶然存在すれば他人の資産を書き換える）。
         """
+        # **順序が意味を持つ。** 向き先の再確認も鍵を付けた要求なので、所有権を
+        # 確かめる前に出さない（§14）。claim の直後にキャンセルが commit された
+        # ときも、1 要求も出さずに降りる。
+        self._uploads.prepare_side_effect(
+            ctx, record["id"], state, verify_eligibility=verify_eligibility
+        )
         self._preflight.assert_target(revision_id)
-        self._uploads.prepare_side_effect(ctx, record["id"], state)
         if progress is not None:
             # ここを抜けた後は、リモートに触った可能性がある。
             progress.touched_remote = True
@@ -211,7 +220,14 @@ class Uploader:
         outcome = client.bulk_upload_check([(record["id"], media["sha1"])])[record["id"]]
         first_check = record["first_check_result"] or outcome.action
         if outcome.action == "reject":
-            origin = "pre_existing" if first_check == "reject" else "unknown"
+            # **一度確定した `created_by_us` は降格させない。** 後処理の一時障害で
+            # 再開したとき、自分が上げた資産は当然 `reject` で返ってくる。ここで
+            # 付け直すと自作の資産が `unknown` になり、タグと日時の扱いが
+            # 「他人が上げたもの」に変わる（§9.10）。
+            if record["origin"] == "created_by_us":
+                origin = "created_by_us"
+            else:
+                origin = "pre_existing" if first_check == "reject" else "unknown"
             self._uploads.advance_owned(
                 ctx,
                 record["id"],
@@ -233,7 +249,8 @@ class Uploader:
                 remote_checked_at=now_iso(),
             )
             # 送信の直前にもう一度。ここを通ってから初めて 1 バイトを送る。
-            self._guard(ctx, record, revision_id, "uploading", progress)
+            # **§10 の根拠もここで見直す**（`verify_eligibility`）。
+            self._guard(ctx, record, revision_id, "uploading", progress, verify_eligibility=True)
             uploaded = self._send(ctx, client, record, media)
             origin = origin_after_upload(first_check, uploaded.status)
             # 2〜3. asset_known。ここで初めて「サーバ側に存在する」が確定する。

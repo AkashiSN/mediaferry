@@ -11,7 +11,7 @@ from mediaferry.db.uploads import ClaimLost, UploadRepository
 from .test_schema_artifacts import a_media_file
 from .test_selection import a_derived, a_group, a_pair
 
-IDENTITY = RemoteIdentity(remote_user_id="user-a", server_instance_id=None)
+IDENTITY = RemoteIdentity.observed("user-a")
 
 
 def a_job_row(db, job_id):
@@ -114,7 +114,7 @@ def test_a_record_from_another_epoch_is_not_claimed(db, world):
         base_url="http://immich.invalid:2283",
         public_url=None,
         secret="key-2",
-        identity=RemoteIdentity(remote_user_id="user-b", server_instance_id=None),
+        identity=RemoteIdentity.observed("user-b"),
     )
     db.execute("UPDATE upload_record SET invalidated_at = NULL, invalidated_reason = NULL")
 
@@ -382,7 +382,7 @@ def test_advancing_the_epoch_invalidates_the_queued_records(db, world):
         base_url="http://immich.invalid:2283",
         public_url=None,
         secret="key-2",
-        identity=RemoteIdentity(remote_user_id="user-b", server_instance_id=None),
+        identity=RemoteIdentity.observed("user-b"),
     )
 
     row = db.execute("SELECT * FROM upload_record").fetchone()
@@ -399,7 +399,7 @@ def test_the_startup_sweep_catches_what_the_edit_missed(db, world):
         base_url="http://immich.invalid:2283",
         public_url=None,
         secret="key-2",
-        identity=RemoteIdentity(remote_user_id="user-b", server_instance_id=None),
+        identity=RemoteIdentity.observed("user-b"),
     )
     epoch = destinations.current(destination_id)["target_epoch"]
     # 破棄が走る前に落ちた状態を作る。
@@ -431,7 +431,7 @@ def test_a_completed_record_from_an_old_epoch_stays_as_history(db, world):
         base_url="http://immich.invalid:2283",
         public_url=None,
         secret="key-2",
-        identity=RemoteIdentity(remote_user_id="user-b", server_instance_id=None),
+        identity=RemoteIdentity.observed("user-b"),
     )
     epoch = destinations.current(destination_id)["target_epoch"]
 

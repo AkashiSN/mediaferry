@@ -33,7 +33,7 @@ def world(db, data_root, immich):
         base_url=server.url,
         public_url=None,
         secret=API_KEY,
-        identity=RemoteIdentity(remote_user_id=server.user_id, server_instance_id=None),
+        identity=RemoteIdentity.observed(server.user_id),
     )
     # 別名の宛先だが**同じ fake を見る**。宛先ごとに独立して記録が進むことと、
     # 同じリモートに 2 度目を送ると重複として扱われることを、1 つの世界で見る。
@@ -42,7 +42,7 @@ def world(db, data_root, immich):
         base_url=server.url,
         public_url=None,
         secret=API_KEY,
-        identity=RemoteIdentity(remote_user_id=server.user_id, server_instance_id=None),
+        identity=RemoteIdentity.observed(server.user_id),
     )
     uploads = UploadRepository(db, ProfileRegistry(db), destinations)
     directory = data_root / "library" / "dji-osmo" / "DCIM"

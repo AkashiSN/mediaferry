@@ -20,7 +20,7 @@ def world(db, immich):
         base_url=server.url,
         public_url=None,
         secret=API_KEY,
-        identity=RemoteIdentity(remote_user_id=server.user_id, server_instance_id=None),
+        identity=RemoteIdentity.observed(server.user_id),
     )
     opened = []
 

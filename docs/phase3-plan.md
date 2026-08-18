@@ -8302,8 +8302,23 @@ JSON の型検証漏れ。**いずれも `pytest` を 1 回回せば数秒で出
 ので、同じ類の欠陥はレビューを何巡回しても出続ける。**次はレビューではなく
 実装へ進み、`pytest` が落とす。**
 
-### 3 巡目（実装後に依頼する）
+### 3 巡目（実装差分、blocker 1 / major 4 / minor 1）
 
-Task 1 から実装し、**動くコードの差分**を見せてレビューする。文書のレビューでは
-拾えない層（実際の SQLite の挙動、httpx の実装差、CHECK 制約の実効）が、
-そこで初めて確かめられる。
+Task 1〜14 を実装したうえで `7f6794c..2d04165` を見せた。**文書のレビューでは
+出なかった層の指摘が出た**（実際の SQLite の並行性、相手が値を選べる応答、
+実装した順序）。**全 6 件とも実在を確認して直した。** 追加したテストはすべて、
+対応する変異を落とす。
+
+| # | 指摘 | 対応 |
+| --- | --- | --- |
+| 1 [blocker] | 侵害された転送先が `users/me` の `id` や `status` / `action` に API キーを echo すると、平文が DB の `remote_user_id`・API 応答・例外文（→ `job.error` とログ）に出る | `core/destinations/identity.py` の**指紋**（SHA-256）で保存する。用途は等値比較の guard だけなので意味は変わらない。あわせて、応答由来の値を例外文から落とした（`test_secret_leaks.py`） |
+| 2 [major] | `create_pairs` が epoch をトランザクションの外で読む。読んだ後・書く前に他の書き手が epoch を進めて無効化まで済ませると、旧 epoch の行がすり抜けて次の起動まで理由の無い `pending` で残る | `_load_destinations` を `immediate` の中へ移した（`test_a_revision_bumped_just_before_the_insert_does_not_leave_a_stale_pair`） |
+| 3 [major] | `check_eligibility` が claim のトランザクションの外 | **指摘の筋書き（claim 後に条件が成立へ戻る）は安全側**なので、そちらは変えていない。危険なのは「判定の後・送信の前に根拠が崩れる」窓なので、`prepare_side_effect(verify_eligibility=True)` で**最初の 1 バイトを送る直前に、リース・claim と同じトランザクションで §10 を見直す**ようにした。資産が既にリモートにある後（タグ・日時）は、見送っても取り消せないので立てない |
+| 4 [major] | アップロード成功後の後処理が 503 で落ちて再開すると、`bulk-upload-check` の `reject` で `origin` が `created_by_us` → `unknown` に降格する。自作の資産なのにタグが付かず、日時が承認待ちになる | 一度確定した `created_by_us` は上書きしない（`test_an_asset_we_uploaded_stays_ours_after_a_retry`） |
+| 5 [major] | preflight（鍵付きの `GET /api/users/me`）がリース確認より先。`Rechecker` はキャンセル確認より前に投げ、照合の後もリース確認なしに結果を書く | `_guard` の順序を prepare → preflight にし、`_one` の先頭の preflight を落とした。`Rechecker` はキャンセル確認を先頭へ移し、照合の後にもう一度見る。`ApprovalService` は claim + `prepare_side_effect` の後に preflight を回した |
+| 6 [minor] | 秘密のテストが正常系に偏り、順序違反を捕まえられない | fake に `echo_key_in_scalars` を足し、`server.requests == []` で「1 要求も出さない」を固定した |
+
+**変異試験（すべて検出）:** 指紋にせず観測値を保存する / リビジョンの解決を
+トランザクションの外へ戻す / 送信直前の見直しを消す・立てない / `created_by_us`
+を降格させる / guard の順序を戻す / キャンセル確認を preflight の後ろへ戻す /
+照合後のキャンセル確認を消す / 承認で preflight を claim より先に投げる。

@@ -57,6 +57,10 @@ TERMINAL_STATES = ("complete", "failed", "awaiting_datetime_approval")
 RELEASED_STATES = ("pending", "needs_recheck")
 
 
+class NoLongerEligible(RuntimeError):
+    """送る直前に §10 の根拠が崩れていた. 送らずに見送る."""
+
+
 class UploadRequestInvalid(ValueError):
     """要求そのものが成立しない. **何も作らずに全体を拒否する。**"""
 
@@ -95,10 +99,14 @@ class UploadRepository:
         self, media_ids: Sequence[str], destination_ids: Sequence[str]
     ) -> list[PairResult]:
         media = self._load_media(media_ids)
-        revisions = self._load_destinations(destination_ids)
 
         results: list[PairResult] = []
         with immediate(self._conn):
+            # **宛先の現行リビジョンは INSERT と同じトランザクションで解決する**（§8）。
+            # 外で読むと、読んだ後・書く前に他の書き手が epoch を進めて旧 epoch の
+            # 無効化まで済ませられる。すり抜けた行は `claim_next` が現行 epoch しか
+            # 拾わないので送られず、次の起動の掃除まで理由の無い `pending` で残る。
+            revisions = self._load_destinations(destination_ids)
             for media_id in media_ids:
                 choice = self._choose(media[media_id])
                 for destination_id in destination_ids:
@@ -375,7 +383,12 @@ class UploadRepository:
         return None
 
     def prepare_side_effect(
-        self, ctx: JobContext, record_id: str, expect_state: str, lease_seconds: int = 60
+        self,
+        ctx: JobContext,
+        record_id: str,
+        expect_state: str,
+        lease_seconds: int = 60,
+        verify_eligibility: bool = False,
     ) -> None:
         """外部への副作用の直前に呼ぶ（§8）.
 
@@ -383,9 +396,24 @@ class UploadRepository:
         その隙間にキャンセルが commit でき、「キャンセル済みと表示した後に
         送信・タグ付与・日時変更が行われる」経路が残る。`ctx.assert_lease()` は
         `cancelling` を通さない（`extend_lease` は通すので、これが必要）。
+
+        `verify_eligibility` を立てると、§10 の根拠も同じトランザクションで
+        見直す。**最初の 1 バイトを送る前に立てる。** claim の直後の判定は
+        その時点の状態でしかなく、そこから送信までの間に利用者が結合を
+        やり直せば、いま結合中のグループの構成ファイルを送ってしまう。
+        資産が既にリモートにある後（タグ・日時）は、見送っても取り消せないので
+        立てない。
         """
         with immediate(self._conn):
             ctx.assert_lease()
+            if verify_eligibility:
+                reason = self.check_eligibility(
+                    self._conn.execute(
+                        "SELECT * FROM upload_record WHERE id = ?", (record_id,)
+                    ).fetchone()
+                )
+                if reason is not None:
+                    raise NoLongerEligible(reason)
             updated = self._conn.execute(
                 "UPDATE upload_record SET claim_expires_at = ?, updated_at = ?"
                 " WHERE id = ? AND claim_token = ? AND state = ? AND invalidated_at IS NULL"

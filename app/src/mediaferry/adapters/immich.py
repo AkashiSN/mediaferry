@@ -157,7 +157,7 @@ class ImmichClient:
         body = _as_object(response, "POST /api/assets")
         status = body.get("status")
         if status not in UPLOAD_STATUSES:
-            raise ImmichProtocolError(f"POST /api/assets の status が未知: {status!r}")
+            raise ImmichProtocolError("POST /api/assets の status が未知")
         if not body.get("id"):
             raise ImmichProtocolError("POST /api/assets の応答に id が無い")
         return UploadOutcome(asset_id=body["id"], status=status)
@@ -284,10 +284,10 @@ def _parsed_check(body: Any, expected: Sequence[str]) -> dict[str, CheckOutcome]
         if not isinstance(key, str):
             raise ImmichProtocolError("bulk-upload-check の結果に文字列の id が無い")
         if key in outcomes:
-            raise ImmichProtocolError(f"bulk-upload-check の応答に重複した id: {key!r}")
+            raise ImmichProtocolError("bulk-upload-check の応答に同じ id が 2 度現れた")
         action = result.get("action")
         if action not in CHECK_ACTIONS:
-            raise ImmichProtocolError(f"bulk-upload-check の action が未知: {action!r}")
+            raise ImmichProtocolError("bulk-upload-check の action が未知")
         asset_id = result.get("assetId")
         if action == "reject" and not asset_id:
             raise ImmichProtocolError("reject なのに assetId が無い")

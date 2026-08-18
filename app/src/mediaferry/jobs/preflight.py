@@ -15,6 +15,7 @@ import time
 from collections.abc import Callable
 
 from ..adapters.immich import ImmichClient, ImmichError
+from ..core.destinations.identity import fingerprint
 from ..db.destinations import DestinationNotFound, DestinationRepository
 
 # 成功の判定が有効な時間。20 時間級のジョブでも、この間隔で取り直す。
@@ -68,7 +69,9 @@ class PreflightCache:
             )
         try:
             with self._open_client(revision) as client:
-                observed = client.users_me().get("id")
+                # 記録側と同じ指紋にしてから比べる（`core.destinations.identity`）。
+                raw = client.users_me().get("id")
+                observed = fingerprint(raw if isinstance(raw, str) else None)
         except ImmichError as exc:
             raise PreflightFailed(f"向き先を確認できない: {exc}") from exc
         if observed != expected:

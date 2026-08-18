@@ -13,7 +13,7 @@ from mediaferry.jobs.preflight import PreflightCache, PreflightFailed
 from mediaferry.jobs.uploader import Uploader
 
 from .fake_immich import API_KEY
-from .test_schema_artifacts import a_media_file
+from .test_schema_artifacts import a_media_file, a_merge_group
 
 PAYLOAD = b"video-bytes"
 CAPTURED = "2026-08-17T14:30:00+09:00"
@@ -32,7 +32,7 @@ def world(db, data_root, immich):
         base_url=server.url,
         public_url=None,
         secret=API_KEY,
-        identity=RemoteIdentity(remote_user_id=server.user_id, server_instance_id=None),
+        identity=RemoteIdentity.observed(server.user_id),
     )
     uploads = UploadRepository(db, ProfileRegistry(db), destinations)
 
@@ -227,6 +227,39 @@ def test_the_target_is_re_checked_before_the_tags_when_the_ttl_expired(world, db
     assert server.datetimes == {}
 
 
+def test_an_asset_we_uploaded_stays_ours_after_a_retry(world, db, monkeypatch):
+    """**アップロード成功後の後処理が失敗しても `created_by_us` を降格させない。**
+
+    再開時の `bulk-upload-check` は、自分が上げた資産なので当然 `reject` を返す。
+    そこで origin を付け直すと `unknown` になり、自作の資産なのにタグが付かず、
+    日時の補正まで承認待ちへ変わる。
+    """
+    from mediaferry.adapters.immich import ImmichUnavailable
+
+    server, uploader, ctx, _, _, destination_id, _ = world
+    monkeypatch.setattr("mediaferry.jobs.uploader.BACKOFF_BASE_SECONDS", 0.01)
+    calls = {"n": 0}
+    real_find = ImmichClient.find_tag
+
+    def once_unavailable(self, name):  # noqa: ANN001, ANN202
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise ImmichUnavailable("GET /api/tags が 503")
+        return real_find(self, name)
+
+    monkeypatch.setattr(ImmichClient, "find_tag", once_unavailable)
+
+    uploader.run(ctx, destination_id)
+
+    row = record_of(db)
+    assert row["state"] == "complete"
+    assert row["origin"] == "created_by_us"
+    # 送信は 1 回だけ。2 周目は重複として引き受けている。
+    assert len(server.uploads) == 1
+    assert server.tagged
+    assert server.datetimes[row["remote_asset_id"]] == CAPTURED
+
+
 def test_a_server_error_is_retried_and_then_failed(world, db, monkeypatch):
     server, uploader, ctx, _, _, destination_id, _ = world
     # **preflight の後で落とす。** `server.fail_next` にすると preflight が先に
@@ -280,6 +313,74 @@ def test_a_cancel_before_sending_leaves_it_pending(world, db):
     outcome = uploader.run(ctx, destination_id)
 
     assert outcome.sent == 0
+    assert record_of(db)["state"] == "pending"
+
+
+def test_a_record_that_loses_its_ground_before_the_send_is_not_sent(world, db, monkeypatch):
+    """**送る直前にも §10 の根拠を見る。**
+
+    claim の後の判定は「その時点の状態」でしかない。判定から最初の 1 バイトまでの
+    間に根拠が崩れることがある（利用者が結合をやり直した等）。ここを見ないと、
+    いま結合中のグループの構成ファイルを送ってしまう。
+    """
+    server, uploader, ctx, uploads, _, destination_id, media_id = world
+    # 「結合に失敗したグループの構成ファイル」として送る根拠を作り直す。
+    # `selection_rule` は不変なので、記録は作り直す（trigger が書き換えを拒む）。
+    db.execute("DELETE FROM upload_record")
+    media = db.execute("SELECT * FROM media_file WHERE id = ?", (media_id,)).fetchone()
+    group_id = a_merge_group(
+        db, (media["profile_id"], media["profile_revision_id"]), "digest-1", status="failed"
+    )
+    db.execute(
+        "INSERT INTO merge_member (merge_group_id, media_file_id, position, active)"
+        " VALUES (?, ?, 0, 1)",
+        (group_id, media_id),
+    )
+    uploads.create_pairs([media_id], [destination_id])
+    assert db.execute("SELECT selection_rule FROM upload_record").fetchone()[0] == (
+        "failed_group_member"
+    )
+
+    real_check = ImmichClient.bulk_upload_check
+
+    def flip_then_check(self, pairs):  # noqa: ANN001, ANN202
+        # 判定は通った後。ここで利用者が結合をやり直した。
+        db.execute("UPDATE merge_group SET status = 'merging' WHERE id = ?", (group_id,))
+        return real_check(self, pairs)
+
+    monkeypatch.setattr(ImmichClient, "bulk_upload_check", flip_then_check)
+
+    uploader.run(ctx, destination_id)
+
+    assert server.uploads == []
+    row = record_of(db)
+    assert row["state"] == "pending"
+    assert row["invalidated_at"] is not None
+
+
+def test_a_cancel_right_after_the_claim_sends_no_request(world, db, monkeypatch):
+    """**claim の直後にキャンセルされたら、1 要求も出さない。**
+
+    向き先の再確認（`GET /api/users/me`）も鍵を付けた要求なので、
+    所有権を確かめる前に出してはいけない（§14）。
+    """
+    from mediaferry.db.uploads import UploadRepository
+
+    server, uploader, ctx, _, _, destination_id, _ = world
+    real_claim = UploadRepository.claim_next
+
+    def cancel_after_claim(self, *args, **kwargs):  # noqa: ANN001, ANN202
+        row = real_claim(self, *args, **kwargs)
+        if row is not None:
+            db.execute("UPDATE job SET status = 'cancelling' WHERE id = ?", (ctx.job_id,))
+        return row
+
+    monkeypatch.setattr(UploadRepository, "claim_next", cancel_after_claim)
+
+    uploader.run(ctx, destination_id)
+
+    assert server.requests == []
+    # まだ何も起きていないので、次回は最初からやり直せる。
     assert record_of(db)["state"] == "pending"
 
 

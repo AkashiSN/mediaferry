@@ -3,6 +3,7 @@ import os
 import pytest
 
 from mediaferry.core.crypto import SecretBox
+from mediaferry.core.destinations.identity import fingerprint
 from mediaferry.core.destinations.urls import EndpointRejected
 from mediaferry.db.credentials import CredentialStore
 from mediaferry.db.destinations import (
@@ -11,8 +12,8 @@ from mediaferry.db.destinations import (
     RemoteIdentity,
 )
 
-USER_A = RemoteIdentity(remote_user_id="user-a", server_instance_id=None)
-USER_B = RemoteIdentity(remote_user_id="user-b", server_instance_id=None)
+USER_A = RemoteIdentity.observed("user-a")
+USER_B = RemoteIdentity.observed("user-b")
 
 
 @pytest.fixture
@@ -32,7 +33,8 @@ def test_creating_a_destination_stores_a_verified_revision(repo, db):
     assert row["revision"] == 1
     assert row["target_epoch"] == 1
     assert row["base_url"] == "http://immich.invalid:2283"
-    assert row["remote_user_id"] == "user-a"
+    # 保存されるのは観測値ではなく指紋（§12.3）。
+    assert row["remote_user_id"] == fingerprint("user-a")
     assert row["verified_at"] is not None
     assert repo.secret_of(row["id"]) == "key-1"
 
@@ -141,7 +143,7 @@ def test_a_missing_identity_is_refused_atomically(repo, db):
             base_url="http://immich.invalid:2283",
             public_url=None,
             secret="key-2",
-            identity=RemoteIdentity(remote_user_id=None, server_instance_id=None),
+            identity=RemoteIdentity.observed(None),
         )
     assert repo.current(destination_id)["id"] == before
     assert db.execute("SELECT count(*) FROM destination_revision").fetchone()[0] == 1
@@ -215,7 +217,7 @@ def test_the_same_account_is_warned_not_refused(repo):
         secret="key-1",
         identity=USER_A,
     )
-    assert repo.current(second)["remote_user_id"] == "user-a"
+    assert repo.current(second)["remote_user_id"] == fingerprint("user-a")
 
 
 def test_archiving_takes_it_out_of_the_list_but_keeps_the_history(repo, db):

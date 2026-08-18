@@ -3,6 +3,7 @@ import os
 
 import pytest
 
+from mediaferry.core.destinations.identity import fingerprint
 from mediaferry.db.connection import Database
 
 from .fake_immich import API_KEY, FakeImmich
@@ -31,7 +32,8 @@ def test_creating_a_destination_verifies_the_connection(secret_env, immich, clie
     response = client.post("/api/destinations", json=a_body(immich))
     assert response.status_code == 200
     body = response.json()
-    assert body["remote_user_id"] == immich.user_id
+    # 観測した id そのものではなく指紋を持つ（§12.3）。
+    assert body["remote_user_id"] == fingerprint(immich.user_id)
     assert body["warnings"] == []
 
 

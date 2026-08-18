@@ -58,13 +58,15 @@ class ApprovalService:
             "SELECT captured_at FROM media_file WHERE id = ?", (row["media_file_id"],)
         ).fetchone()
         revision = self._destinations.revision(row["destination_revision_id"])
-        # 別のライブラリの資産の日時を書き換えない。
-        self._preflight.assert_target(revision["id"])
         # awaiting → fixing_datetime を CAS で取る。ここで負けたら却下が先。
         self._uploads.claim_for_approval(record_id, ctx.job_id, ctx.lease_token)
         settled = False
         try:
             self._uploads.prepare_side_effect(ctx, record_id, "fixing_datetime")
+            # **所有権を確かめてから向き先を見る。** 再確認も鍵を付けた要求なので、
+            # キャンセル済みのジョブから出さない（§14）。別のライブラリの資産の
+            # 日時を書き換えないための確認であることは変わらない。
+            self._preflight.assert_target(revision["id"])
             with self._open_client(revision) as client:
                 # **PUT も pulse で囲む。** 遅い相手だと 60 秒を超え、claim が
                 # 切れて「リモートは変更済みなのに commit できない」状態になる。

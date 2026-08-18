@@ -30,7 +30,7 @@ def world(db, data_root, immich):
         base_url=server.url,
         public_url=None,
         secret=API_KEY,
-        identity=RemoteIdentity(remote_user_id=server.user_id, server_instance_id=None),
+        identity=RemoteIdentity.observed(server.user_id),
     )
     uploads = UploadRepository(db, ProfileRegistry(db), destinations)
     media_id = a_media_file(
@@ -165,6 +165,20 @@ def test_approving_without_an_asset_id_is_refused(world):
     db.execute("UPDATE upload_record SET remote_asset_id = NULL")
     with pytest.raises(ApprovalNotPossible):
         service.approve(ctx, record_of(db)["id"])
+
+
+def test_a_cancelled_approval_sends_no_request(world):
+    """キャンセル済みの承認は、向き先の再確認すら投げない（§14）."""
+    from mediaferry.db.jobs import LeaseLost
+
+    server, service, db, _, ctx = world
+    db.execute("UPDATE job SET status = 'cancelling' WHERE id = ?", (ctx.job_id,))
+
+    with pytest.raises(LeaseLost):
+        service.approve(ctx, record_of(db)["id"])
+
+    assert server.requests == []
+    assert record_of(db)["state"] == "awaiting_datetime_approval"
 
 
 def test_a_cancel_during_the_approval_stops_the_commit(world, monkeypatch):

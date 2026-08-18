@@ -190,7 +190,9 @@ def _verify(base_url: str, api_key: str) -> RemoteIdentity:
     except ImmichError as exc:
         # 502。こちらの要求は正しく、相手に届かないか拒まれている。
         raise HTTPException(status_code=502, detail=f"転送先に接続できない: {exc}") from exc
-    return RemoteIdentity(remote_user_id=body.get("id"), server_instance_id=None)
+    observed = body.get("id")
+    # **観測値そのものは持ち回らない**（`core.destinations.identity`）。
+    return RemoteIdentity.observed(observed if isinstance(observed, str) else None)
 
 
 def _found(repo: DestinationRepository, destination_id: str):  # noqa: ANN202

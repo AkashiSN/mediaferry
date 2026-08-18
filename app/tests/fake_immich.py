@@ -43,6 +43,10 @@ class FakeImmich:
         self.redirect_to: str | None = None
         # 400 の本文に、受け取った API キーをそのまま返す（秘密の漏れを見る）。
         self.echo_key_in_error: bool = False
+        # **2xx の応答の scalar に鍵を echo する。** 侵害された転送先が
+        # 「こちらが読む値」に秘密を混ぜてきたとき、それが DB・API 応答・
+        # 例外・ログのどこにも出ないことを確かめるためのつまみ。
+        self.echo_key_in_scalars: bool = False
         self._server: ThreadingHTTPServer | None = None
 
     # ------------------------------------------------------------------
@@ -81,7 +85,8 @@ class FakeImmich:
             return 400, {"message": f"bad request from key {headers.get('x-api-key')}"}
 
         if method == "GET" and path == "/api/users/me":
-            return 200, {"id": self.user_id, "email": "someone@example.invalid"}
+            observed = headers.get("x-api-key") if self.echo_key_in_scalars else self.user_id
+            return 200, {"id": observed, "email": "someone@example.invalid"}
         if method == "POST" and path == "/api/assets/bulk-upload-check":
             return 200, self._bulk_check(json.loads(body))
         if method == "POST" and path == "/api/assets":
@@ -104,6 +109,11 @@ class FakeImmich:
         return 404, {"message": f"no route for {method} {path}"}
 
     def _bulk_check(self, payload):  # noqa: ANN001, ANN202
+        if self.echo_key_in_scalars:
+            # 未知の action として鍵を返す。クライアントは protocol error にする。
+            return {
+                "results": [{"id": item["id"], "action": API_KEY} for item in payload["assets"]]
+            }
         results = []
         for item in payload["assets"]:
             asset_id = self.assets.get(item["checksum"])
@@ -130,6 +140,8 @@ class FakeImmich:
         self.uploads.append(
             {**{k: v for k, v in fields.items() if k != "assetData"}, "size": len(data)}
         )
+        if self.echo_key_in_scalars:
+            return 200, {"id": "asset-echo", "status": API_KEY}
         existing = self.assets.get(checksum)
         if existing is not None:
             return 200, {"id": existing, "status": "duplicate"}

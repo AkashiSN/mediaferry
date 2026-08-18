@@ -14,7 +14,7 @@ from mediaferry.db.uploads import UploadRepository
 from mediaferry.jobs.preflight import PreflightCache
 from mediaferry.jobs.recheck import Rechecker
 
-from .fake_immich import API_KEY
+from .fake_immich import API_KEY, FakeImmich
 from .test_schema_artifacts import a_media_file
 
 PAYLOAD = b"video-bytes"
@@ -37,7 +37,7 @@ def world(db, data_root, immich):
         base_url=server.url,
         public_url=None,
         secret=API_KEY,
-        identity=RemoteIdentity(remote_user_id=server.user_id, server_instance_id=None),
+        identity=RemoteIdentity.observed(server.user_id),
     )
     uploads = UploadRepository(db, ProfileRegistry(db), destinations)
     media_id = a_media_file(
@@ -136,7 +136,7 @@ def test_records_from_an_old_epoch_are_not_touched(world):
         base_url=server.url,
         public_url=None,
         secret=API_KEY,
-        identity=RemoteIdentity(remote_user_id="another-user", server_instance_id=None),
+        identity=RemoteIdentity.observed("another-user"),
     )
     assert destinations.current(destination_id)["target_epoch"] == 2
     server.user_id = "another-user"  # preflight を通す
@@ -206,12 +206,44 @@ def test_records_are_checked_in_one_batch(world):
 
 
 def test_a_cancelled_recheck_stops_early(world):
+    """**キャンセル済みなら 1 要求も出さない。**
+
+    件数だけを見ていると、`users/me` を投げてから止まる実装を見逃す。鍵付きの
+    要求はキャンセルの後に出してよいものではない（§14）。
+    """
     server, rechecker, ctx, destination_id, db = world
     db.execute("UPDATE job SET status = 'cancelling' WHERE id = ?", (ctx.job_id,))
 
     outcome = rechecker.run(ctx, destination_id)
 
     assert outcome.checked == 0
+    assert server.requests == []
+
+
+def test_a_recheck_cancelled_during_the_check_writes_nothing(world):
+    """照合の最中にキャンセルされたら、結果を書かずに降りる.
+
+    書くと「キャンセルした」と表示しながらリモートの観測を反映したことになる。
+    """
+    server, rechecker, ctx, destination_id, db = world
+    before = db.execute("SELECT remote_checked_at FROM upload_record").fetchall()
+
+    real = FakeImmich.route
+
+    def cancel_during_check(self, method, path, body, headers):  # noqa: ANN001, ANN202
+        if path == "/api/assets/bulk-upload-check":
+            db.execute("UPDATE job SET status = 'cancelling' WHERE id = ?", (ctx.job_id,))
+        return real(self, method, path, body, headers)
+
+    server.route = cancel_during_check.__get__(server, FakeImmich)
+
+    outcome = rechecker.run(ctx, destination_id)
+
+    assert outcome.checked == 0
+    after = db.execute("SELECT remote_checked_at FROM upload_record").fetchall()
+    assert [row["remote_checked_at"] for row in after] == [
+        row["remote_checked_at"] for row in before
+    ]
 
 
 def test_a_record_in_flight_is_not_stamped_by_a_recheck(world):
