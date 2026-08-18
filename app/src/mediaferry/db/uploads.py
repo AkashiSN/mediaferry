@@ -509,6 +509,35 @@ class UploadRepository:
             )
             return updated.rowcount
 
+    def records_for_recheck(self, destination_id: str, target_epoch: int) -> list[sqlite3.Row]:
+        """再確認の対象. **現行 epoch の `complete` だけ**を、全件返す.
+
+        旧 epoch は別ライブラリへ送った履歴なので、現行の資格情報で照合しない。
+        件数の上限は置かない（打ち切ると「N 件確認した」が嘘になる）。
+        """
+        return list(
+            self._conn.execute(
+                "SELECT * FROM upload_record WHERE destination_id = ? AND target_epoch = ?"
+                "   AND state = 'complete' AND invalidated_at IS NULL"
+                " ORDER BY created_at",
+                (destination_id, target_epoch),
+            )
+        )
+
+    def stamp_remote(
+        self, record_id: str, asset_id: str | None, is_trashed: int, checked_at: str
+    ) -> None:
+        """再確認の結果を書く. **`complete` の行だけ**を対象にする.
+
+        進行中の行は所有者がいるので、claim を持たないこの経路では触らない。
+        """
+        with immediate(self._conn):
+            self._conn.execute(
+                "UPDATE upload_record SET remote_asset_id = ?, remote_is_trashed = ?,"
+                " remote_checked_at = ?, updated_at = ? WHERE id = ? AND state = 'complete'",
+                (asset_id, is_trashed, checked_at, now_iso(), record_id),
+            )
+
     def release_interrupted(self) -> int:
         """進行中のまま残ったレコードを `needs_recheck` へ落とす.
 

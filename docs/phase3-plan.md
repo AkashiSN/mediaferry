@@ -5564,16 +5564,22 @@ Expected: PASS（8 件）
 | `ctx.cancelled()` の確認を消す | `test_a_cancelled_recheck_stops_early` |
 | `records_for_recheck` の `target_epoch = ?` を消す | `test_records_from_an_old_epoch_are_not_touched` |
 | `records_for_recheck` に上限（`LIMIT 10000`）を戻す | **落ちない**（テストは 4 件）。**黙って打ち切らない**ことが要点なので、上限を置かない実装を維持する。検出できない変異として記録する |
-| `stamp_remote` の `state = 'complete'` を消す | **落ちない**。テストは `complete` の行しか作らない。**進行中の行を用意して、再確認が触らないことを見るテストを足す**（下記） |
+| `stamp_remote` の `state = 'complete'` を消す | `test_stamping_refuses_a_record_that_is_not_complete`（**追加**。再確認の選択側の絞り込みに隠れるので、メソッドを直接呼んで固定する） |
 
 進行中の行を守るテストを足す:
 
 ```python
 def test_a_record_in_flight_is_not_stamped_by_a_recheck(world):
+    """進行中の行には所有者がいる. claim を持たない経路では触らない."""
+    from mediaferry.db.jobs import JobStore
+
     server, rechecker, ctx, destination_id, db = world
+    # claim_job_id は job(id) への外部キー。実在するジョブでないと入らない。
+    other_job = JobStore(db).enqueue("upload", {"destination_id": destination_id})
     db.execute(
-        "UPDATE upload_record SET state = 'uploading', claim_job_id = 'other',"
-        " claim_token = 'other-token', claim_expires_at = '2999-01-01T00:00:00+00:00'"
+        "UPDATE upload_record SET state = 'uploading', claim_job_id = ?,"
+        " claim_token = 'other-token', claim_expires_at = '2999-01-01T00:00:00+00:00'",
+        (other_job,),
     )
     rechecker.run(ctx, destination_id)
     assert record_of(db)["remote_checked_at"] is None
