@@ -3310,8 +3310,25 @@ from .test_selection import a_derived, a_group, a_pair
 IDENTITY = RemoteIdentity(remote_user_id="user-a", server_instance_id=None)
 
 
+def a_job_row(db, job_id):
+    """`upload_record.claim_job_id` は job(id) への外部キー.
+
+    このタスクのテストは job の中身を使わないので、行だけ用意する。
+    """
+    from mediaferry.clock import now_iso
+
+    db.execute(
+        "INSERT INTO job (id, type, status, params_json, created_at)"
+        " VALUES (?, 'upload', 'running', '{}', ?)",
+        (job_id, now_iso()),
+    )
+    return job_id
+
+
 @pytest.fixture
 def world(db):
+    for job_id in ("job-1", "job-2"):
+        a_job_row(db, job_id)
     ProfileRegistry(db).sync_builtins()
     profile = ProfileRegistry(db).current("dji-osmo")
     destinations = DestinationRepository(db, CredentialStore(db, SecretBox(os.urandom(32))))
@@ -3379,6 +3396,12 @@ def test_an_abandoned_claim_is_recovered_by_the_reconciler_not_by_a_takeover(db,
 
 
 def test_a_record_from_another_epoch_is_not_claimed(db, world):
+    """epoch が違う記録は、無効化されていなくても claim しない.
+
+    `add_revision` は旧 epoch の未完了レコードを無効化する（§8）ので、
+    **その無効化を外してから**確かめる。外さないと `invalidated_at` の条件で
+    弾かれて、epoch の条件を一度も通らない。
+    """
     _, destinations, destination_id, uploads = world
     a_pending(db, world)
     # 宛先を別アカウントへ向け替える（epoch が進む）。
@@ -3386,6 +3409,8 @@ def test_a_record_from_another_epoch_is_not_claimed(db, world):
         destination_id, base_url="http://immich.invalid:2283", public_url=None,
         secret="key-2", identity=RemoteIdentity(remote_user_id="user-b", server_instance_id=None),
     )
+    db.execute("UPDATE upload_record SET invalidated_at = NULL, invalidated_reason = NULL")
+
     assert uploads.claim_next(destination_id, "job-1", "tok-1") is None
 
 
@@ -3611,20 +3636,27 @@ def test_the_claim_can_be_extended(db, world):
 
 
 def test_invalidating_a_group_hits_only_unfinished_records(db, world):
+    """**同じグループの `complete` は残す。** 送信済みの履歴を無効化しない."""
     profile, destinations, destination_id, uploads = world
     members = a_pair(db, profile)
     output_id = a_derived(db, profile)
     group_id = a_group(db, profile, members, output_id=output_id)
     uploads.create_pairs([output_id], [destination_id])
-    done = a_pending(db, world, rel_path="library/dji-osmo/DCIM/DONE.MP4")
+    sent = db.execute("SELECT id FROM upload_record").fetchone()["id"]
     db.execute(
         "UPDATE upload_record SET state = 'complete', destination_revision_id = ? WHERE id = ?",
-        (destinations.current(destination_id)["id"], done["id"]),
+        (destinations.current(destination_id)["id"], sent),
     )
+    # 同じグループに、まだ送っていない pair をもう 1 つ作る（別の宛先へ）。
+    other = destinations.create(
+        name="family", base_url="http://family.invalid:2283", public_url=None,
+        secret="key-1", identity=IDENTITY,
+    )
+    uploads.create_pairs([output_id], [other])
 
     assert uploads.invalidate_for_group(group_id, "グループが変わった") == 1
 
-    assert uploads.get(done["id"])["invalidated_at"] is None
+    assert uploads.get(sent)["invalidated_at"] is None
 ```
 
 - [ ] **Step 2: 失敗を確認する**
@@ -4010,7 +4042,7 @@ Expected: PASS（17 件）
 | `advance` / `finish` の `expect_state` を無視する | `test_a_state_that_moved_under_us_stops_the_commit` |
 | `claim_next` が現行リビジョンを引かずに引数の revision を使う | `test_a_record_from_another_epoch_is_not_claimed`（宛先を向け替えた後に旧 epoch を拾う） |
 | `target_epoch` の条件を消す | `test_a_record_from_another_epoch_is_not_claimed` |
-| `invalidated_at IS NULL` を消す | `test_an_invalidated_record_is_not_claimed` |
+| `invalidated_at IS NULL` を消す | `test_an_invalidated_record_is_not_claimed`。ただし **SELECT 側と UPDATE 側の片方だけを消しても落ちない**（互いに隠れる）。**両方を同時に消すと落ちる**ことを実装時に確認した。二重の guard として意図的に両方へ書く |
 | `CLAIMABLE_STATES` から `needs_recheck` を外す | `test_needs_recheck_is_claimable` |
 | `destination_revision_id` を記録しない | `test_claiming_takes_ownership_and_records_the_revision`（CHECK 制約でも落ちる） |
 | `check_eligibility` の `missing_at` を消す | `test_a_missing_file_fails_the_eligibility_check` |
@@ -5904,7 +5936,9 @@ git commit -m "feat(mediaferry): let the user approve or refuse a datetime fix"
 **Interfaces:**
 - Produces:
   - `ReconcileReport.uploads_released: int` / `ReconcileReport.uploads_invalidated: int`
-  - `UploadRepository.release_interrupted() -> int`
+  - `UploadRepository.release_interrupted() -> int`（**Task 8 で先に実装した**。
+    「期限切れの横取りは起こらず、回収は起動時だけ」という Task 8 の契約テストが
+    これを必要とする）
   - `UploadRepository.invalidate_stale() -> int`
   - `UploadRepository.invalidate_old_epoch(destination_id: str, current_epoch: int, reason: str) -> int`
   - `DestinationRepository.purge_superseded_credentials(destination_id: str) -> int`
@@ -6039,7 +6073,7 @@ Expected: FAIL（`AttributeError: 'ReconcileReport' object has no attribute 'upl
 `UploadRepository` に足す:
 
 ```python
-    def release_interrupted(self) -> int:
+    def release_interrupted(self) -> int:  # **実装は Task 8 で先に入れた**
         """進行中のまま残ったレコードを `needs_recheck` へ落とす.
 
         **`pending` ではない。** `uploading` で落ちた場合、サーバ側で成功して
@@ -6493,7 +6527,7 @@ def test_the_reconciler_refuses_a_half_wired_pair(db, data_root):
 | 変異 | 落ちるべきテスト |
 | --- | --- |
 | 片方だけでも動くようにする（`ValueError` を消す） | `test_the_reconciler_refuses_a_half_wired_pair` |
-| `release_interrupted` を `pending` へ落とす | `test_an_interrupted_upload_is_released_for_a_recheck` |
+| `release_interrupted` を `pending` へ落とす | `test_an_interrupted_upload_is_released_for_a_recheck`（Task 12）。**Task 8 のテストだけでは落ちない**（`pending` でも claim できてしまうため）。実装は Task 8 で前倒ししたが、`needs_recheck` であることを固定するテストは Task 12 側にある |
 | `invalidate_old_epoch` の `target_epoch < ?` を消す | `test_records_of_the_current_epoch_are_left_alone` |
 | `invalidate_old_epoch` の `state <> 'complete'` を消す | `test_a_completed_record_from_an_old_epoch_stays_as_history` |
 | `purge_superseded_credentials` の `r.id <> d.current_revision_id` を消す | `test_the_current_key_is_never_purged` |

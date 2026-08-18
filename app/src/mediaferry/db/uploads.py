@@ -14,11 +14,13 @@ from __future__ import annotations
 import sqlite3
 from collections.abc import Sequence
 from dataclasses import dataclass
+from datetime import timedelta
 
-from ..clock import now_iso
+from ..clock import iso, now_iso, utcnow
 from ..ids import new_id
 from .connection import immediate
 from .destinations import DestinationRepository
+from .jobs import JobContext
 from .profiles import ProfileRegistry
 from .selection import group_is_current
 
@@ -35,6 +37,23 @@ RESULTS = frozenset(
 
 ACTIVE_STATES = ("checking", "uploading", "asset_known", "tagging", "fixing_datetime")
 CLAIMABLE_STATES = ("pending", "needs_recheck")
+
+
+class ClaimLost(RuntimeError):
+    """自分の claim_token では、その行を動かせない.
+
+    キャンセルされた古いジョブが、新しいジョブの状態を上書きするのを防ぐ。
+    """
+
+
+# 進行中に置ける状態と、claim を外す状態（`0004` の CHECK と一致させる）。
+TERMINAL_STATES = ("complete", "failed", "awaiting_datetime_approval")
+RELEASED_STATES = ("pending", "needs_recheck")
+
+
+# 進行中に置ける状態と、claim を外す状態（`0004` の CHECK と一致させる）。
+TERMINAL_STATES = ("complete", "failed", "awaiting_datetime_approval")
+RELEASED_STATES = ("pending", "needs_recheck")
 
 
 class UploadRequestInvalid(ValueError):
@@ -232,6 +251,357 @@ class UploadRepository:
         # pending / needs_recheck は既に claim できる状態。二重に作らない。
         return PairResult(media["id"], destination_id, "created", row["id"])
 
+    def claim_next(
+        self,
+        destination_id: str,
+        job_id: str,
+        token: str,
+        lease_seconds: int = 60,
+    ) -> sqlite3.Row | None:
+        """CAS で 1 件だけ所有権を取る. 取れなければ None.
+
+        **`SELECT ... FOR UPDATE` は無い。** 更新できた 1 ジョブだけが実行者になる。
+
+        **現行リビジョンは pair ごとに、同じトランザクションの中で解決する**（§8）。
+        ジョブの開始時に 1 回だけ読んで固定すると、途中で API キーを変えた場合に
+        未 claim の pair まで旧リビジョンで送る（旧 credential は purge されて
+        いるかもしれない）。epoch が進んでいれば、そもそも対象から外れる。
+        """
+        marks = ", ".join("?" * len(CLAIMABLE_STATES))
+        with immediate(self._conn):
+            revision = self._conn.execute(
+                "SELECT r.* FROM upload_destination d"
+                " JOIN destination_revision r ON r.id = d.current_revision_id"
+                " WHERE d.id = ? AND d.enabled = 1 AND d.archived_at IS NULL",
+                (destination_id,),
+            ).fetchone()
+            if revision is None:
+                return None
+            row = self._conn.execute(
+                "SELECT id FROM upload_record"  # noqa: S608
+                " WHERE destination_id = ? AND target_epoch = ? AND invalidated_at IS NULL"
+                f"   AND state IN ({marks})"
+                "   AND (claim_expires_at IS NULL OR claim_expires_at < ?)"
+                " ORDER BY created_at LIMIT 1",
+                (
+                    destination_id,
+                    revision["target_epoch"],
+                    *CLAIMABLE_STATES,
+                    now_iso(),
+                ),
+            ).fetchone()
+            if row is None:
+                return None
+            updated = self._conn.execute(
+                "UPDATE upload_record SET state = 'checking', claim_job_id = ?,"  # noqa: S608
+                " claim_token = ?, claim_expires_at = ?, destination_revision_id = ?,"
+                " updated_at = ?"
+                f" WHERE id = ? AND invalidated_at IS NULL AND state IN ({marks})",
+                (
+                    job_id,
+                    token,
+                    _expiry(lease_seconds),
+                    revision["id"],
+                    now_iso(),
+                    row["id"],
+                    *CLAIMABLE_STATES,
+                ),
+            )
+            if updated.rowcount != 1:
+                return None
+            return self._conn.execute(
+                "SELECT * FROM upload_record WHERE id = ?", (row["id"],)
+            ).fetchone()
+
+    def check_eligibility(self, row: sqlite3.Row) -> str | None:
+        """§10 (a) と、`selection_rule` に対応する (c) を**今の状態で**評価する.
+
+        claim 時に評価するのは「選べる場面」ではなく「その根拠が今も成立して
+        いるか」。混同すると、採用した瞬間に自分自身が条件を満たさなくなる。
+        """
+        media = self._conn.execute(
+            "SELECT * FROM media_file WHERE id = ?", (row["media_file_id"],)
+        ).fetchone()
+        if media is None or media["missing_at"] is not None:
+            return "ファイルが見つからない"
+        if row["invalidated_at"] is not None:
+            return f"無効化されている: {row['invalidated_reason']}"
+        destination = self._destinations.get(row["destination_id"])
+        if destination is None or destination["archived_at"] is not None:
+            return "宛先が保管済み"
+        if not destination["enabled"]:
+            return "宛先が無効になっている"
+        revision = self._destinations.revision(row["destination_revision_id"])
+        if revision["target_epoch"] != row["target_epoch"]:
+            return "宛先の向き先が変わっている"
+
+        if media["role"] == "derived" and not group_is_current(
+            self._conn, self._registry, row["merge_group_id"] or "", media["id"]
+        ):
+            return "生成元のグループが現在の構成と一致しない"
+        return self._check_rule(row, media)
+
+    def _check_rule(self, row: sqlite3.Row, media: sqlite3.Row) -> str | None:
+        rule = row["selection_rule"]
+        if rule == "failed_group_member":
+            member = self._conn.execute(
+                "SELECT g.status AS status FROM merge_member mm"
+                " JOIN merge_group g ON g.id = mm.merge_group_id"
+                " WHERE mm.media_file_id = ? AND mm.active = 1 AND g.id = ?",
+                (media["id"], row["merge_group_id"]),
+            ).fetchone()
+            if member is None or member["status"] not in ("failed", "skipped"):
+                return "結合できなかったグループの構成ファイル、という根拠が成立しない"
+            return None
+        if rule == "adopted_derived":
+            adopted = self._conn.execute(
+                "SELECT adopted_at FROM merge_group WHERE id = ?", (row["merge_group_id"],)
+            ).fetchone()
+            if adopted is None or adopted["adopted_at"] is None:
+                return "採用の記録が無い"
+            return None
+        # default は (b) を満たすこと。derived の条件は上で見たので、
+        # ここではアクティブなグループの member でないことを確かめる。
+        if media["role"] == "original":
+            member = self._conn.execute(
+                "SELECT g.status AS status FROM merge_member mm"
+                " JOIN merge_group g ON g.id = mm.merge_group_id"
+                " WHERE mm.media_file_id = ? AND mm.active = 1",
+                (media["id"],),
+            ).fetchone()
+            if member is not None and member["status"] not in ("failed", "skipped"):
+                return "アクティブな結合グループの構成ファイルになっている"
+        return None
+
+    def prepare_side_effect(
+        self, ctx: JobContext, record_id: str, expect_state: str, lease_seconds: int = 60
+    ) -> None:
+        """外部への副作用の直前に呼ぶ（§8）.
+
+        **リースと claim を 1 つの `BEGIN IMMEDIATE` の中で確かめる。** 分けると
+        その隙間にキャンセルが commit でき、「キャンセル済みと表示した後に
+        送信・タグ付与・日時変更が行われる」経路が残る。`ctx.assert_lease()` は
+        `cancelling` を通さない（`extend_lease` は通すので、これが必要）。
+        """
+        with immediate(self._conn):
+            ctx.assert_lease()
+            updated = self._conn.execute(
+                "UPDATE upload_record SET claim_expires_at = ?, updated_at = ?"
+                " WHERE id = ? AND claim_token = ? AND state = ? AND invalidated_at IS NULL"
+                "   AND claim_expires_at > ?",
+                (
+                    _expiry(lease_seconds),
+                    now_iso(),
+                    record_id,
+                    ctx.lease_token,
+                    expect_state,
+                    now_iso(),
+                ),
+            )
+            if updated.rowcount != 1:
+                raise ClaimLost(f"レコード {record_id} の所有権を失っている")
+
+    def extend_claim(self, record_id: str, token: str, lease_seconds: int = 60) -> None:
+        self._cas(record_id, token, "claim_expires_at = ?", (_expiry(lease_seconds),), strict=True)
+
+    def advance_owned(
+        self, ctx: JobContext, record_id: str, state: str, expect_state: str, **fields: object
+    ) -> None:
+        """外部副作用の結果を commit する. **リースも同じ取引の中で確かめる。**"""
+        with immediate(self._conn):
+            ctx.assert_lease()
+            self._locked_cas(
+                record_id, ctx.lease_token, "state = ?", (state,), expect_state, **fields
+            )
+
+    def finish_owned(
+        self, ctx: JobContext, record_id: str, state: str, expect_state: str, **fields: object
+    ) -> None:
+        """終端へ倒して claim を外す. **リースも同じ取引の中で確かめる。**"""
+        if state not in TERMINAL_STATES:
+            raise ValueError(f"終端ではない状態: {state}")
+        with immediate(self._conn):
+            ctx.assert_lease()
+            self._locked_cas(
+                record_id,
+                ctx.lease_token,
+                "state = ?, claim_job_id = NULL, claim_token = NULL, claim_expires_at = NULL",
+                (state,),
+                expect_state,
+                **fields,
+            )
+
+    def advance(
+        self, record_id: str, token: str, state: str, expect_state: str, **fields: object
+    ) -> None:
+        """進行中の状態へ進める. claim は保ったまま.
+
+        **`expect_state` を必ず渡す。** 外部副作用の結果を commit する時点でも、
+        自分が期待した状態のままであることを確かめる（§8）。
+        """
+        self._cas(
+            record_id,
+            token,
+            "state = ?",
+            (state,),
+            strict=True,
+            expect_state=expect_state,
+            **fields,
+        )
+
+    def finish(
+        self, record_id: str, token: str, state: str, expect_state: str, **fields: object
+    ) -> None:
+        """終端（complete / failed / awaiting）へ倒し、claim を外す.
+
+        **未来の期限を残したまま終端にしない。** 残ると、明示操作しても期限まで
+        claim できなくなる（§8）。
+        """
+        if state not in TERMINAL_STATES:
+            raise ValueError(f"終端ではない状態: {state}")
+        self._cas(
+            record_id,
+            token,
+            "state = ?, claim_job_id = NULL, claim_token = NULL, claim_expires_at = NULL",
+            (state,),
+            strict=True,
+            expect_state=expect_state,
+            **fields,
+        )
+
+    def release_to(self, record_id: str, token: str, state: str, **fields: object) -> None:
+        """再び claim できる状態へ戻し、claim を外す."""
+        if state not in RELEASED_STATES:
+            raise ValueError(f"claim できる状態ではない: {state}")
+        self._cas(
+            record_id,
+            token,
+            "state = ?, claim_job_id = NULL, claim_token = NULL, claim_expires_at = NULL",
+            (state,),
+            **fields,
+        )
+
+    def refuse(self, record_id: str, token: str, reason: str) -> None:
+        """claim してから条件を満たさないと分かった行を無効化する（§10 の多重防御）.
+
+        **`state` も `pending` へ戻す。** `0004` の CHECK が「進行中の状態なら
+        claim を持つ」と定めているので、`checking` のまま claim を外すと
+        `IntegrityError` になる。無効化された行は claim の条件
+        （`invalidated_at IS NULL`）で弾かれるので、`pending` に戻しても
+        拾われない。
+        """
+        self._cas(
+            record_id,
+            token,
+            "state = 'pending', invalidated_at = ?, invalidated_reason = ?,"
+            " claim_job_id = NULL, claim_token = NULL, claim_expires_at = NULL",
+            (now_iso(), reason),
+        )
+
+    def invalidate_for_group(self, group_id: str, reason: str) -> int:
+        """グループが変わったときに、未完了のレコードをまとめて無効化する."""
+        with immediate(self._conn):
+            updated = self._conn.execute(
+                "UPDATE upload_record SET invalidated_at = ?, invalidated_reason = ?,"
+                " updated_at = ? WHERE merge_group_id = ? AND invalidated_at IS NULL"
+                "   AND state <> 'complete'",
+                (now_iso(), reason, now_iso(), group_id),
+            )
+            return updated.rowcount
+
+    def release_interrupted(self) -> int:
+        """進行中のまま残ったレコードを `needs_recheck` へ落とす.
+
+        **`pending` ではない。** `uploading` で落ちた場合、サーバ側で成功して
+        いるかもしれない。次回 `checking` から照合し直せば二重にはならない。
+        起動時に呼ぶので、走っているジョブは既に倒れている。
+
+        **放置された claim を回収する唯一の経路**でもある（`claim_next` は
+        進行中の状態を拾わないので、期限切れの横取りは起こらない）。
+        """
+        marks = ", ".join("?" * len(ACTIVE_STATES))
+        with immediate(self._conn):
+            updated = self._conn.execute(
+                "UPDATE upload_record SET state = 'needs_recheck', claim_job_id = NULL,"  # noqa: S608
+                " claim_token = NULL, claim_expires_at = NULL, updated_at = ?"
+                f" WHERE state IN ({marks})",
+                (now_iso(), *ACTIVE_STATES),
+            )
+            return updated.rowcount
+
+    def get(self, record_id: str) -> sqlite3.Row | None:
+        return self._conn.execute(
+            "SELECT * FROM upload_record WHERE id = ?", (record_id,)
+        ).fetchone()
+
+    def list_records(
+        self, destination_id: str | None = None, state: str | None = None, limit: int = 200
+    ) -> list[sqlite3.Row]:
+        clauses, params = [], []
+        if destination_id is not None:
+            clauses.append("destination_id = ?")
+            params.append(destination_id)
+        if state is not None:
+            clauses.append("state = ?")
+            params.append(state)
+        where = f" WHERE {' AND '.join(clauses)}" if clauses else ""
+        return list(
+            self._conn.execute(
+                f"SELECT * FROM upload_record{where} ORDER BY updated_at DESC LIMIT ?",  # noqa: S608
+                (*params, limit),
+            )
+        )
+
+    def _cas(
+        self,
+        record_id: str,
+        token: str,
+        assignment: str,
+        params: tuple,
+        strict: bool = False,
+        expect_state: str | None = None,
+        **fields: object,
+    ) -> None:
+        """`claim_token` が自分のものである行だけを動かす.
+
+        `strict` を立てると、期限切れと無効化も条件に入れる。**外部副作用の
+        結果を書く経路では必ず立てる。** 逆に、降りるための解放
+        （`release_to` / `refuse`）では立てない —— 期限が切れていても、
+        自分が持っていた行は片付けられる必要がある。
+        """
+        with immediate(self._conn):
+            self._locked_cas(
+                record_id, token, assignment, params, expect_state, strict=strict, **fields
+            )
+
+    def _locked_cas(
+        self,
+        record_id: str,
+        token: str,
+        assignment: str,
+        params: tuple,
+        expect_state: str | None,
+        strict: bool = True,
+        **fields: object,
+    ) -> None:
+        """**呼び出し側が開いたトランザクションの中で使う。** 条件は `_cas` と同じ."""
+        extra = "".join(f", {name} = ?" for name in fields)
+        clauses = ["id = ?", "claim_token = ?"]
+        guard: list[object] = [record_id, token]
+        if strict:
+            clauses += ["claim_expires_at > ?", "invalidated_at IS NULL"]
+            guard.append(now_iso())
+        if expect_state is not None:
+            clauses.append("state = ?")
+            guard.append(expect_state)
+        updated = self._conn.execute(
+            f"UPDATE upload_record SET {assignment}{extra}, updated_at = ?"  # noqa: S608
+            f" WHERE {' AND '.join(clauses)}",
+            (*params, *fields.values(), now_iso(), *guard),
+        )
+        if updated.rowcount != 1:
+            raise ClaimLost(f"レコード {record_id} の claim を失っている")
+
 
 def _passed(verification_json: str | None) -> bool:
     """検証の合否. `passed` が真の bool のときだけ合格（§10）."""
@@ -243,3 +613,7 @@ def _passed(verification_json: str | None) -> bool:
         return json.loads(verification_json).get("passed") is True
     except (AttributeError, TypeError, ValueError):
         return False
+
+
+def _expiry(seconds: int) -> str:
+    return iso(utcnow() + timedelta(seconds=seconds))
