@@ -159,3 +159,16 @@ def immich():
     server.start()
     yield server
     server.stop()
+
+
+@pytest.fixture
+def secured_app(data_root, broker, monkeypatch):
+    """認証を有効にしたアプリと、その CSRF トークン."""
+    monkeypatch.setenv("MEDIAFERRY_DATA_ROOT", str(data_root))
+    monkeypatch.setenv("MEDIAFERRY_DEFAULT_TIMEZONE", "Asia/Tokyo")
+    monkeypatch.setenv("MEDIAFERRY_AUTH_PASSWORD", "correct horse")
+    app = create_app(broker_factory=lambda: broker)
+    with TestClient(app, base_url="http://127.0.0.1:8080") as client:
+        token = client.get("/api/auth/session").cookies["XSRF-TOKEN"]
+        client.headers["X-CSRF-Token"] = token
+        yield client, token

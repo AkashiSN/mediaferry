@@ -44,6 +44,7 @@ class ErrorCode(StrEnum):
     CSRF_FAILED = "csrf_failed"
     UNTRUSTED_HOST = "untrusted_host"
     TOO_MANY_ATTEMPTS = "too_many_attempts"
+    TOO_MANY_STREAMS = "too_many_streams"
     # 404
     NOT_FOUND = "not_found"
     # 409

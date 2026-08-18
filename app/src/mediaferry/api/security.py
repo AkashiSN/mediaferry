@@ -21,11 +21,10 @@ import ipaddress
 import secrets
 import sqlite3
 import time
-from collections.abc import Awaitable, Callable
 from urllib.parse import urlsplit
 
 from fastapi import Depends, Request, Response
-from starlette.middleware.base import BaseHTTPMiddleware
+from starlette.types import ASGIApp, Receive, Scope, Send
 
 from ..db.sessions import SessionStore
 from .deps import conn
@@ -68,22 +67,35 @@ def _same_origin(candidate: str, request: Request) -> bool:
     )
 
 
-class SecurityMiddleware(BaseHTTPMiddleware):
-    """`Host` を確かめ、状態を変える要求に Origin と CSRF を要求する."""
+class SecurityMiddleware:
+    """`Host` を確かめ、状態を変える要求に Origin と CSRF を要求する.
 
-    async def dispatch(
-        self, request: Request, call_next: Callable[[Request], Awaitable[Response]]
-    ) -> Response:
+    **素の ASGI ミドルウェアにする。** `BaseHTTPMiddleware` は応答を一旦受け止めて
+    から流すので、終わらない応答（SSE）が相手に届かなくなる。ここは要求を通すか
+    断るかだけなので、scope を見て早く決める。
+    """
+
+    def __init__(self, app: ASGIApp) -> None:
+        self.app = app
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+        request = Request(scope, receive=receive)
         # **信頼する名前は起動時に決まる**（`TRUSTED_HOSTS` は RESTART の階層）。
         trusted = request.app.state.mediaferry.trusted_hosts
         if not is_trusted_host(request.headers.get("host"), trusted):
             # 421。「この名前ではこのサーバを名乗らない」という意味で返す。
-            return error_response(421, ErrorCode.UNTRUSTED_HOST, "この名前では受け付けない", {})
+            refusal = error_response(421, ErrorCode.UNTRUSTED_HOST, "この名前では受け付けない", {})
+            await refusal(scope, receive, send)
+            return
         if request.method not in SAFE_METHODS:
-            refusal = self._refuse_cross_site(request)
-            if refusal is not None:
-                return refusal
-        return await call_next(request)
+            refused = self._refuse_cross_site(request)
+            if refused is not None:
+                await refused(scope, receive, send)
+                return
+        await self.app(scope, receive, send)
 
     def _refuse_cross_site(self, request: Request) -> Response | None:
         origin = request.headers.get("origin") or request.headers.get("referer")

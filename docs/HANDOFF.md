@@ -1,7 +1,7 @@
 # mediaferry 引き継ぎ資料
 
 最終更新: 2026-08-18
-ブランチ: `main`（単独リポジトリ、114 コミット。先頭は Phase 4 の着手分）
+ブランチ: `main`（単独リポジトリ、115 コミット。先頭は Phase 4 の着手分）
 
 このファイルは、別セッションが作業を引き継ぐための出発点。
 **まずここを読み、次に `design.md` §20 と該当フェーズの計画を読む。**
@@ -50,9 +50,9 @@
 uv run pytest                  861 passed, 4 deselected
 uv run pytest -m needs_root      1 passed   ← detached mount の実証
 uv run pytest -m needs_immich    3 passed   ← 実 Immich v3.1.0 で確認済み（2026-08-19）
-uv run pytest -m needs_system    4 passed   ← 実プロセスを起動する E2E の土台
+uv run pytest -m needs_system    6 passed   ← 実プロセスを起動する E2E の土台（SSE の線上の挙動を含む）
 uv run ruff check .            All checks passed
-uv run ruff format --check .   160 files already formatted
+uv run ruff format --check .   163 files already formatted
 ```
 
 **結合のテストは実 ffmpeg を使う**（`shutil.which("ffmpeg")` が無いときだけ skip）。
@@ -91,7 +91,7 @@ assert している。
 | `docs/phase1-plan.md` | Phase 1 の実装計画。**実行済み**。実装との差分は都度書き戻してある | ✅ |
 | `docs/phase2-plan.md` | Phase 2（結合）の実装計画。**実行済み**。codex のレビュー 2 巡を反映し、実装で外れた判断と検出できなかった変異を書き戻してある | ✅ |
 | `docs/phase3-plan.md` | Phase 3（Immich 同期）の実装計画。**実行済み**。codex のレビュー 7 巡を反映し、実装で外れた判断と検出できなかった変異を書き戻してある | ✅ |
-| `docs/phase4-plan.md` | Phase 4（Web UI）の実装計画。**Task 0〜4 が実装済み**（残り 14）。計画レビュー 1 巡（blocker 4 / major 8 / minor 2）を全件反映済み | ✅ |
+| `docs/phase4-plan.md` | Phase 4（Web UI）の実装計画。**Task 0〜5 が実装済み**（残り 13）。計画レビュー 1 巡（blocker 4 / major 8 / minor 2）を全件反映済み | ✅ |
 | `docs/phase1-backup.md` | バックアップとリストア、再構築できる範囲（§18-4） | ✅ |
 | `docs/phase1-manual-checklist.md` | 実 USB での確認手順 | ✅ |
 | `docs/phase0-findings.md` | Phase 0 の実測結果と設計への反映 | ✅ |

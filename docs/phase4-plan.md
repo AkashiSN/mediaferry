@@ -258,7 +258,7 @@ fake broker + fake Immich 2 台**を立ち上げる仕掛けが無いと、E2E �
 
 ---
 
-### Task 5: SSE（`GET /events`）
+### Task 5: SSE（`GET /events`）—— **実装済み**
 
 **Files:** Create `api/routes_events.py` / Test `test_api_events.py` / Modify `docs/design.md` §11
 
@@ -273,8 +273,24 @@ fake broker + fake Immich 2 台**を立ち上げる仕掛けが無いと、E2E �
 - 接続ごとに DB 接続を 1 本開く（§3）。0.5 秒間隔のポーリング。15 秒ごとに `: keep-alive`
 - 同時接続の上限（既定 8）。超えたら 503
 
-- [ ] Step 1〜4（テスト: 再開位置・取りこぼし無し・初回は履歴を流さない・消えた cursor・
-      未来の cursor・keep-alive・上限・**認証が有効なら未ログインで 401**）
+**実装で分かったこと（計画に無かった判断）:**
+
+- **`BaseHTTPMiddleware` は SSE を殺す。** 応答を一旦受け止めてから流すので、終わらない
+  応答が相手に届かない。Task 3 の `SecurityMiddleware` を**素の ASGI ミドルウェア**へ
+  書き直した
+- **`TestClient` では SSE を試験できない**（終わらない応答を最後まで受け取ろうとする）。
+  そこで**層を分けた**: 位置の決め方・枠組み・資源の返し方は生成器を直接呼ぶ単体試験
+  （既定の `pytest`）、実際に流れるか・`id:` が付くか・再接続で続くかは**実プロセス**
+  （`app/tests/system/test_events.py`、`-m needs_system`）
+- **`is_disconnected()` を待たない。** 受信側に何も来ない経路でそこから進まなくなる。
+  切断は取り消しで受け取り、`finally` で片付ける
+- **資源は `_Reservation` が 1 度だけ返す。** 返す場所が 2 つある（流し終えた／切られた
+  ときと、**一度も始まらないまま閉じられた**とき）。後者を落とすと、数えだけが残って
+  上限に当たったまま戻らなくなる
+
+変異 12 件を検出。1 件（cursor を進めない）は最初素通りし、原因はテストが 1 回の poll で
+届く範囲しか見ていなかったこと —— **次の poll で同じ行が来ないこと**まで見る形にして
+固定した。
 
 ---
 

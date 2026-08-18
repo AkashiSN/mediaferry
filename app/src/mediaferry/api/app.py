@@ -41,6 +41,7 @@ from .jobs_wiring import JobWorld
 from .routes_auth import router as auth_router
 from .routes_destinations import router as destinations_router
 from .routes_devices import router as devices_router
+from .routes_events import router as events_router
 from .routes_media import router as media_router
 from .routes_merges import router as merges_router
 from .routes_system import public_router as system_public_router
@@ -63,6 +64,8 @@ class AppState:
     # `Host` として名乗ってよい名前。IP と localhost は別に既定で通る。
     trusted_hosts: frozenset[str] = frozenset()
     login_attempts: LoginAttempts = field(default_factory=LoginAttempts)
+    # 開いている SSE の本数（1 本につき DB 接続を 1 本使う）。
+    event_streams: int = 0
 
 
 def create_app(
@@ -159,6 +162,7 @@ def create_app(
     # **残りは既定で認証を要求する。** ルータごとに書き忘れないよう、ここで一括で
     # 掛ける（認証が無効なら `require_session` は素通りする）。
     guarded = [
+        events_router,
         system_router,
         devices_router,
         media_router,
