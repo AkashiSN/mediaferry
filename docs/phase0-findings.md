@@ -168,6 +168,26 @@ resized, stack, tags, thumbhash, type, updatedAt, visibility, width
 
 クライアントが送った値で残るのは `originalFileName` だけだった。
 
+### Phase 3 の実機確認（2026-08-19 実施）
+
+Phase 0 のプローブに入っていなかった**タグと日時**を、実 Immich で確かめた。
+`uv run pytest -m needs_immich` の 3 件が PASS（0.6 秒）。相手は同じ **v3.1.0**
+（build 30460361152 / sourceRef v3.1.0）。
+
+| 項目 | 結果 |
+| --- | --- |
+| `POST /api/tags` | タグを作り `{"id": ..., "name": ...}` を返す |
+| `GET /api/tags` で作ったタグを引き当てられるか | **可**。`ensure_tag` を 2 度呼ぶと同じ id が返る（作成と再利用の両方を通した） |
+| `PUT /api/tags/{id}/assets` | 付与できる（2xx） |
+| `PUT /api/assets/{id}` に `dateTimeOriginal` | 書き戻せる（2xx） |
+| アップロード直後の `bulk-upload-check` | `reject` + **こちらが受け取った `assetId` と一致**、`isTrashed` は `false` |
+| 後片付け | `DELETE /api/assets`（`force: true`）と `DELETE /api/tags/{id}` の両方が 2xx |
+| **識別子の検査（§12.3）が実機の値を拒まないか** | **拒まない。** 資産 id もタグ id も UUID で、unreserved のみ・128 文字以内・dot-segment でないという条件を満たす |
+
+最後の行は、レビュー 5〜7 巡目で厳しくした `ImmichClient._identifier` の allowlist が
+**実物と両立する**ことの確認になっている（厳しくしすぎて正常な応答を弾く、が起きて
+いない）。**アップロード経路は adapter の実装のまま直しが要らなかった。**
+
 ### 判定と設計への反映
 
 **A. `remote_user_id` は向き先の変化を検知する guard として使う**

@@ -12,7 +12,7 @@
 
 **Phase 1〜3 は実装・検証とも完了。** Phase 3 は計画のレビューを 2 巡してから
 14 タスクを実行し、**実装差分のレビューを 5 巡（3〜7 巡目）回して全件反映済み**。
-**残るのは実 Immich に当てる `needs_immich` の 3 件。** 次のフェーズは 4（Web UI）。
+**実 Immich での確認も済んだ**（2026-08-19、v3.1.0）。次のフェーズは 4（Web UI）。
 
 **レビューの巡目と、そこで出たもの**（詳細は `phase3-plan.md` の「レビュー記録」）:
 
@@ -40,7 +40,7 @@
 | 0 | スパイク。未検証項目の実測とブローカーの最小実装 | **完了** |
 | 1 | 基盤 + 取り込み。`ArtifactPublisher` / `Reconciler` / DB スキーマ / scan / import / API | **完了**（実 USB の確認だけ残り） |
 | 2 | 結合。検出 / ffmpeg / 検証 / 公開 / 回収 / 選択肢 / API | **完了**（`phase2-plan.md` の 14 タスク。実装との差分は書き戻し済み） |
-| 3 | Immich 同期（転送先プロファイル、状態機械、タグ、日時補正、複数宛先） | **完了**（`phase3-plan.md` の 14 タスク。codex レビュー 7 巡を反映。実装との差分は書き戻し済み。**実 Immich での確認だけ残り**） |
+| 3 | Immich 同期（転送先プロファイル、状態機械、タグ、日時補正、複数宛先） | **完了**（`phase3-plan.md` の 14 タスク。codex レビュー 7 巡を反映。実装との差分は書き戻し済み。**実 Immich でも確認済み**） |
 | 4 | Web UI | 未着手 |
 | 5 | 汎用化（Canon、プロファイル編集 UI、複数デバイス） | 未着手 |
 
@@ -49,7 +49,7 @@
 ```
 uv run pytest                  861 passed, 4 deselected
 uv run pytest -m needs_root      1 passed   ← detached mount の実証
-uv run pytest -m needs_immich    3 件       ← 実 Immich が要る。既定では走らない
+uv run pytest -m needs_immich    3 passed   ← 実 Immich v3.1.0 で確認済み（2026-08-19）
 uv run ruff check .            All checks passed
 uv run ruff format --check .   147 files already formatted
 ```
@@ -68,11 +68,7 @@ assert している。
 
 ### 残っていること
 
-1. **実 Immich での確認（`-m needs_immich` の 3 件）。** `app/tests/test_immich_live.py`。
-   `MEDIAFERRY_TEST_IMMICH_URL` と `MEDIAFERRY_TEST_IMMICH_KEY` を渡して実行する。
-   **タグの取得・作成・付与と日時の更新は Phase 0 のプローブに入っていない**ので、
-   ここが初めての実測になる。形が違っていたら `adapters/immich.py` だけを直す。
-2. **実 USB での手動確認（`phase1-manual-checklist.md` の 12 項目）。**
+1. **実 USB での手動確認（`phase1-manual-checklist.md` の 12 項目）。**
    開発コンテナ（入れ子の非特権 LXC）ではマウントが AppArmor に阻まれるので、
    TrueNAS ホストで実行する必要がある。
 
@@ -80,7 +76,7 @@ assert している。
    `timestamps.py` の `_wall_clock` と `publisher._collision_stamp` を直す。
    Phase 2 の派生物の mtime（`merger._recording_end_ns`）も同じ前提に乗っている。
    **12 番（`attached_pic`）は Phase 2 で足した項目**（`streams._is_thumbnail`）。
-3. **実データでの TS フォールバックの確認。** テストは lavfi のクリップで両経路を
+2. **実データでの TS フォールバックの確認。** テストは lavfi のクリップで両経路を
    通しているが、実 DJI では Phase 0 の時点で concat 経路が通っており、TS 経路は
    まだ実データで走っていない。
 
@@ -276,16 +272,16 @@ blocker として指摘されたもの**で、理屈で戻すと同じ穴に落�
 
 ### 手順
 
-1. **実 Immich に `-m needs_immich` を当てる**（§1「残っていること」1）。
-   タグと日時更新のエンドポイントは Phase 0 で実測していない
-2. **6 巡目のレビューを依頼するかを決める。** 5 巡目でも blocker が 2 件出た
-   （**巡を重ねても止まっていない**）。指摘は毎巡「直した箇所の周辺」から出る。
-   5 巡目の修正で新しくなったのは、識別子の allowlist（`_UNRESERVED_RE` と
-   長さの上限、送る側の検査）・`0006` の移行・`0005` の形の見分け・後段 guard の
-   `verify_eligibility`・`duplicate` 後の見直し・batch ごとのリース確認・
-   `Stamp`（照合したときの姿）。回すならそこを見せる。
-   **打ち切るなら「実 Immich に当ててから」が自然**（形が違えば adapter を直す
-   ことになり、そこがまた新しい境界になる）
+1. ~~**実 Immich に `-m needs_immich` を当てる**~~ —— **済み**（2026-08-19、v3.1.0）。
+   タグの作成・再利用・付与と日時の書き戻しを実機で通した。**adapter に直しは
+   要らなかった**。厳しくした識別子の検査が実物の UUID を拒まないことも同時に
+   確かめている。結果は `phase0-findings.md` ② の「Phase 3 の実機確認」
+2. **8 巡目のレビューを依頼するかを決める。** 5・6・7 巡目とも blocker が 2 件ずつ
+   出ている（**巡を重ねても止まっていない**）。指摘は毎巡「直した箇所」から出る。
+   7 巡目の修正で新しくなったのは、`0007` の作り替え・版の checksum を凍結する
+   回帰テスト・`PreflightCache.assert_target` の `wait` seam（`Rechecker` /
+   `Uploader` / `ApprovalService` の 3 箇所）。回すならそこを見せる。
+   **依頼は毎回 `--fresh`**（理由は §5 の agmsg の節）
 3. **`phase1-manual-checklist.md` を TrueNAS ホストで実行する。** 特に 11 番
    （mtime の解釈）は実装の前提の確認なので、結果を `phase0-findings.md` に残す。
    12 番（`attached_pic`）は Phase 2 で足した項目
@@ -294,7 +290,13 @@ blocker として指摘されたもの**で、理屈で戻すと同じ穴に落�
    ものが 2 つある**: 結合グループの破棄と再結合（`superseded_by_id`）、
    `GET /uploads/pending-approval` の差分表示
 
-1・2 は独立して進められる。3 は TrueNAS ホストが要る。
+2 と 4 は独立して進められる。3 は TrueNAS ホストが要る。**実機で確かめ残しているのは、
+ホストが要るものと実 DJI のデータが要るものだけになった。**
+
+**`0007` は既存の DB に再検証を要求する。** 相手由来の観測を捨てるので、開いた直後は
+どの宛先も「向き先の記録が無い」で閉じる。**宛先を保存し直す（PUT）と新しいリビジョンに
+今の観測が入って直る。** 送信済みレコードの `remote_asset_id` も消えるが、宛先ごとの
+再確認（`mode: recheck`）がチェックサム照合で戻す。
 
 ### Phase 3 で実装しなかったもの（意図的な先送り）
 
