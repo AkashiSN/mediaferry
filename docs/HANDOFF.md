@@ -359,8 +359,15 @@ S=~/.agents/skills/agmsg/scripts
 # 1. 起動（この環境は tmux ではなく herdr のペインになる）
 $S/spawn.sh codex mediaferry-reviewer --project "$(pwd)"
 
-# 2. bridge の生存確認。spawn は codex の readiness を待たないので、送る前に見る
-$S/delivery.sh status codex "$(pwd)"        # → Codex bridge: ... alive (pid N)
+# 2. bridge が起きるまで待つ。spawn は codex の readiness を待たずに返るので、
+#    1 度見て not running でも失敗ではない。alive になるまで期限付きで回す
+BPID=""
+for _ in $(seq 30); do
+  BPID=$($S/delivery.sh status codex "$(pwd)" | sed -n 's/.*alive (pid \([0-9]*\)).*/\1/p')
+  [ -n "$BPID" ] && break
+  sleep 1
+done
+[ -n "$BPID" ] || echo "bridge が上がらない。送らずに調べること"
 
 # 3. 依頼（コミット済みの hash とファイル名を渡す。上の「レビューの依頼」を参照）
 $S/send.sh mediaferry mediaferry-dev mediaferry-reviewer "<依頼>"
@@ -368,8 +375,10 @@ $S/send.sh mediaferry mediaferry-dev mediaferry-reviewer "<依頼>"
 # 4. 片付け。--force を最初から付ける
 $S/despawn.sh mediaferry mediaferry-dev mediaferry-reviewer --force   # → status=forced
 
-# 5. 確認
-$S/delivery.sh status codex "$(pwd)"        # → no identities registered for this project
+# 5. 確認。status=forced は成功の証明にならないので、3 つを別々に見る
+herdr pane list | grep mediaferry-reviewer   # → 出なければペインは閉じた
+$S/identities.sh "$(pwd)" codex              # → 空なら登録は消えた
+ps -p "$BPID"                                # → 無ければ bridge は終了した
 ```
 
 **`--force` を最初から付けること。素の graceful を先に打ってはいけない。**
@@ -379,11 +388,29 @@ graceful な despawn は actas ロックだけを土台にしている（前提�
 `status=ok note=no-live-lock` を返して**何も片付けない**。しかもその離脱の直前に
 `rm -f "$SPAWN_REC"` が走り、`--force` が読むはずの placement レコード
 （`spawn.sh` が `herdr:<pane_id><TAB><project><TAB>codex` を書いている）を消す。
-結果、続けて `--force` を打っても `no placement record` で exit 1 になり、
-**二度と force できない。順序は一方通行。**
+結果、続けて `--force` を打っても `no placement record` で exit 1 になる。
+**その起動分は `despawn.sh --force` で後追いできない**（spawn し直せば placement は
+また作られるし、手での teardown は残っている）。順序は一方通行。
 
-`--force` はペインを閉じ、登録を落とし、placement レコードを消す。bridge は
-その登録消滅を検知して自分で終了するので、手動の kill は要らない。
+`--force` はペインを閉じ、登録を落とし、placement レコードを消す。**bridge を
+kill するコードは `despawn.sh` にも `reset.sh` にも無いが、それでも bridge は
+止まる。** 止めているのは `codex-bridge-launcher.sh` の子で、毎 tick
+`identities.sh` を見て自分の役割が 2 連続で空なら pidfile の bridge を kill して
+`exit 0` する（同ファイルの `deregistered_ticks`。2 連続を要求するのは、
+`identities.sh` が読み取り失敗でも空を返すため）。**手動の kill は要らない。**
+この節を読んで `despawn.sh` だけを見ると「force は bridge を止めない」と読めるので、
+根拠の在り処をここに書いておく。
+
+**`delivery.sh status codex` は片付けの確認に使えない。** 登録を列挙する実装なので、
+登録が消えた後は bridge が残っていても
+`no identities registered for this project` と出る。停止の確認は上の手順 5 のように
+pid を直接見る。同じ理由で `despawn.sh` の `status=forced` も証明にならない
+（ペイン close も `reset.sh` も失敗を握り潰したうえで常に `forced` を返す）。
+
+**プロジェクト共用の `codex app-server` は残る。** 次の spawn が使い回すので放置で
+よい。明示的に落とすなら `delivery.sh set off codex "$(pwd)"`（`stop_codex_bridge`
+が bridge と app-server の両方を落とす）だが、**delivery 設定まで `off` になる**ので
+使ったら `set monitor` で戻すこと。
 
 **起動しっぱなしにしない理由**: codex CLI が居なくなっても bridge プロセスだけが
 生き残ることがあり、その状態で `mediaferry-reviewer` 宛に送るとメッセージを黙って
