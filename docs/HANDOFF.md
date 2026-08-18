@@ -237,16 +237,26 @@ blocker として指摘されたもの**で、理屈で戻すと同じ穴に落�
 一意である必要があるのはチームの中だけ）。**Phase 3 の 2 巡目までは `chezmoi`
 チームの `codex` とやり取りしていた**ので、それ以前の履歴はそちらにある。
 
-**レビューのたびに codex を spawn する**（常駐させない）:
+**レビューのたびに codex を spawn する**（常駐させない）。**依頼の本文は
+`--boot-prompt` で渡す**:
 
 ```bash
 bash ~/.agents/skills/agmsg/scripts/spawn.sh codex lookout \
-  --project "$(pwd)" --team mediaferry
+  --project "$(pwd)" --team mediaferry --boot-prompt "<依頼>"
 bash ~/.agents/skills/agmsg/scripts/despawn.sh mediaferry deckhand lookout   # 終わったら
 ```
 
+**codex は Monitor を持たないので、idle になった後に届いたメッセージに気づかない。**
+spawn だけして後から `send.sh` を打つと、受信箱に未読のまま積まれてレビューが
+始まらない（実際に 1 度これで空振りした）。`--boot-prompt` は actas の指示に
+改行区切りで連結され、最初のターンで「名乗る + 依頼を実行する」が同時に走る。
+本文が長いときは、先に `send.sh` で送っておき、boot prompt では
+`inbox.sh mediaferry lookout` を読ませる形にすると短く済む。
+
 codex には readiness handshake が無いので `spawn.sh` は待たずに返る
-（`--no-wait` 相当）。tmux のペインとして開く。
+（`--no-wait` 相当）。ペインは herdr（tmux ではない）で開く。**despawn は
+`--force` が要る**（graceful は codex 側の watcher の応答を待つが、その watcher が
+居ない）。
 
 - **`delivery.sh status` の `watch processes: 0 alive` は「codex が死んでいる」
   ことを意味しない。** codex 側は自前の bridge と `watch-once.sh` で受け取る。
