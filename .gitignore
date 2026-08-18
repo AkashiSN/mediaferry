@@ -216,3 +216,11 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# Graphify
+# 生成物のうち、ローカル環境固有の値を持つものだけ外す
+graphify-out/cost.json
+# インタプリタとスキャンルートの絶対パスが入る
+graphify-out/.graphify_python
+graphify-out/.graphify_root
+# graphify-out/cache/ は速度のために追跡する（外すならこの行を有効化）
