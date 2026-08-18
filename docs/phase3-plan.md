@@ -1385,7 +1385,10 @@ class FakeImmich:
     def route(self, method: str, path: str, body: bytes, headers: dict[str, str]):  # noqa: ANN201
         self.requests.append((method, path))
         if self.redirect_to is not None:
-            return 301, {"location": self.redirect_to}
+            # **1 回だけ返す。** 毎回 301 にすると、追従した先で何が起きても
+            # 「redirect が多すぎる」に化けて、追従の可否を見分けられない。
+            target, self.redirect_to = self.redirect_to, None
+            return 301, {"location": target}
         if headers.get("x-api-key") != API_KEY:
             return 401, {"message": "Invalid API key"}
         if self.fail_next > 0:
@@ -1701,7 +1704,13 @@ def test_a_reject_without_an_asset_id_is_a_protocol_error(client, immich, monkey
     monkeypatch.setattr(
         immich,
         "_bulk_check",
-        lambda payload: {"results": [{"id": "k1", "action": "reject", "reason": "duplicate"}]},
+        lambda payload: {
+            "results": [
+                # isTrashed は入れておく（入れないと、そちらの検査が先に効いて
+                # assetId の検査を通らない）。
+                {"id": "k1", "action": "reject", "reason": "duplicate", "isTrashed": False}
+            ]
+        },
     )
     with pytest.raises(ImmichProtocolError):
         client.bulk_upload_check([("k1", "0" * 40)])
@@ -1710,6 +1719,13 @@ def test_a_reject_without_an_asset_id_is_a_protocol_error(client, immich, monkey
 def test_a_malformed_response_is_a_protocol_error(client, immich, monkeypatch):
     """scalar や配列を返す相手でも、プロトコル不一致として分類できる."""
     monkeypatch.setattr(immich, "_bulk_check", lambda payload: ["not", "an", "object"])
+    with pytest.raises(ImmichProtocolError):
+        client.bulk_upload_check([("k1", "0" * 40)])
+
+
+def test_a_scalar_result_item_is_a_protocol_error(client, immich, monkeypatch):
+    """要素ごとの型も見る（`.get()` を呼んで AttributeError にしない）."""
+    monkeypatch.setattr(immich, "_bulk_check", lambda payload: {"results": ["nope"]})
     with pytest.raises(ImmichProtocolError):
         client.bulk_upload_check([("k1", "0" * 40)])
 
@@ -2066,16 +2082,16 @@ Expected: PASS（21 件）
 | --- | --- |
 | `follow_redirects=True` にする | `test_a_redirect_to_another_host_never_gets_the_key` |
 | `_same_origin_target` の origin 比較を消す | 同上 |
-| `upload_asset` の `allow_redirect=False` を外す | `test_an_upload_is_never_redirected_even_within_the_same_origin` |
+| `upload_asset` の `allow_redirect=False` を外す | `test_an_upload_is_never_redirected_even_within_the_same_origin`。ただし **fake が 301 を 1 回だけ返すこと**が前提。毎回返す実装だと、追従した先で何が起きても「redirect が多すぎる」に化けて、追従の可否を見分けられない（実装時に判明） |
 | `to_base64_checksum` を hex のまま返す | `test_the_checksum_is_sent_as_base64_in_both_places`（fake が 400 を返す） |
 | `x-immich-checksum` ヘッダを付けない | 同上 |
 | `bulk_upload_check` の `checksum` を hex にする | `test_a_known_checksum_comes_back_with_its_asset_id`（照合できず accept になる） |
 | `is_trashed` を `result.get("isTrashed", False)` に戻す | `test_a_trashed_asset_is_reported_as_trashed` は落ちないが、**`isTrashed` を落とした応答を受理してしまう**。`_parsed_check` の bool 判定を消す変異として `test_a_reject_without_an_asset_id_is_a_protocol_error` と同じ形のテストで捕まえる |
 | `_parsed_check` の全単射チェックを消す | `test_a_missing_result_is_a_protocol_error` |
-| 応答の型検証（`isinstance`）を消す | `test_a_malformed_response_is_a_protocol_error` |
+| 応答の型検証（`isinstance`）を消す | top-level は `test_a_malformed_response_is_a_protocol_error`、**要素ごとは `test_a_scalar_result_item_is_a_protocol_error`**（top-level の検査が先に効くので、両方が要る） |
 | `ensure_tag` を分けずに 1 メソッドへ戻す | Task 9 の「タグごとに guard」が書けなくなる。`test_a_tag_is_created_once_and_reused` は通るので、**呼び出し側の変異**として Task 9 側で捕まえる |
 | `action` の検証を消す | `test_an_unknown_action_is_a_protocol_error` |
-| `reject` の `assetId` 検証を消す | `test_a_reject_without_an_asset_id_is_a_protocol_error` |
+| `reject` の `assetId` 検証を消す | `test_a_reject_without_an_asset_id_is_a_protocol_error`。**`isTrashed` を入れた応答で試す**（入れないと `isTrashed` の検査が先に効いて、この分岐を通らない） |
 | `upload_asset` の `status` 検証を消す | `test_an_unknown_upload_status_is_a_protocol_error` |
 | `_checked` に `response.text[:200]` を戻す | `test_the_error_text_never_carries_the_response_body` |
 | `BULK_CHECK_BATCH` の分割を消す（全件を 1 回で送る） | `test_a_large_check_is_split_into_batches` |

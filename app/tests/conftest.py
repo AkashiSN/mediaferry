@@ -143,3 +143,14 @@ def client(data_root, broker, monkeypatch):
     app = create_app(broker_factory=lambda: broker)
     with TestClient(app) as client:
         yield client
+
+
+@pytest.fixture
+def immich():
+    """ループバックで listen する fake Immich. テストごとに新しいポート."""
+    from .fake_immich import FakeImmich
+
+    server = FakeImmich()
+    server.start()
+    yield server
+    server.stop()
