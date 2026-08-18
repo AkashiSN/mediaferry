@@ -585,3 +585,80 @@ def test_a_rejected_request_fails_the_record_without_retrying(world, db, monkeyp
     assert row["state"] == "failed"
     assert row["last_error"]
     assert row["attempts"] == 1
+
+
+def _a_failed_group_ground(db, uploads, media_id, destination_id):
+    """`failed_group_member` の根拠を作り直す（結合が失敗したグループの構成ファイル）."""
+    db.execute("DELETE FROM upload_record")
+    media = db.execute("SELECT * FROM media_file WHERE id = ?", (media_id,)).fetchone()
+    group_id = a_merge_group(
+        db, (media["profile_id"], media["profile_revision_id"]), "digest-1", status="failed"
+    )
+    db.execute(
+        "INSERT INTO merge_member (merge_group_id, media_file_id, position, active)"
+        " VALUES (?, ?, 0, 1)",
+        (group_id, media_id),
+    )
+    uploads.create_pairs([media_id], [destination_id])
+    return group_id
+
+
+def test_a_ground_that_falls_away_during_the_target_check_stops_the_send(world, db, monkeypatch):
+    """**2 段 guard の後段でも §10 の根拠を見直す。**
+
+    向き先の再確認は相手待ちで、リース（60 秒）より長くなりうる。その間に
+    利用者が結合をやり直すと、後段が claim とリースしか見ていない場合、
+    **いま結合中のグループの構成ファイルを送る**。
+    """
+    server, uploader, ctx, uploads, _, destination_id, media_id = world
+    group_id = _a_failed_group_ground(db, uploads, media_id, destination_id)
+    uploader._preflight._ttl = 0  # noqa: SLF001 - guard のたびに相手へ聞きに行かせる
+    real_users_me = ImmichClient.users_me
+    calls = []
+
+    def flip_on_the_send_guard(self):  # noqa: ANN001, ANN202
+        body = real_users_me(self)
+        calls.append(1)
+        if len(calls) == 2:
+            # 送信直前の guard の最中に根拠が崩れた。
+            db.execute("UPDATE merge_group SET status = 'merging' WHERE id = ?", (group_id,))
+        return body
+
+    monkeypatch.setattr(ImmichClient, "users_me", flip_on_the_send_guard)
+
+    uploader.run(ctx, destination_id)
+
+    assert server.uploads == []
+    row = record_of(db)
+    assert row["invalidated_at"] is not None
+
+
+def test_an_asset_that_turns_out_to_exist_is_not_tagged_when_the_ground_is_gone(
+    world, db, monkeypatch
+):
+    """**送信が `duplicate` で返ったら、それは他人の資産かもしれない。**
+
+    `accept` で始まった送信でも、応答が `duplicate` なら自作の証明は無い
+    （`origin` は `unknown`）。こちらはまだ何も変えていないので、タグ付けが
+    最初の変更になる。その前に §10 の根拠を見直す。
+    """
+    server, uploader, ctx, uploads, _, destination_id, media_id = world
+    group_id = _a_failed_group_ground(db, uploads, media_id, destination_id)
+    _tag_policy(monkeypatch, True)
+    checksum = base64.b64encode(hashlib.sha1(PAYLOAD, usedforsecurity=False).digest()).decode()
+    real_upload = ImmichClient.upload_asset
+
+    def another_client_wins_the_race(self, *args, **kwargs):  # noqa: ANN001, ANN202
+        # 送信の最中に別のクライアントが同じ資産を作り、根拠も崩れた。
+        server.assets[checksum] = "asset-someone-else"
+        db.execute("UPDATE merge_group SET status = 'merging' WHERE id = ?", (group_id,))
+        return real_upload(self, *args, **kwargs)
+
+    monkeypatch.setattr(ImmichClient, "upload_asset", another_client_wins_the_race)
+
+    uploader.run(ctx, destination_id)
+
+    assert server.tagged == {}
+    assert server.datetimes == {}
+    row = record_of(db)
+    assert row["invalidated_at"] is not None

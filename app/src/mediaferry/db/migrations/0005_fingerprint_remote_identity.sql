@@ -8,16 +8,27 @@
 -- destination_revision は不変（UPDATE を trigger が拒む）。移行はスキーマを
 -- 変える窓なので、trigger を外して変換し、同じ本体で作り直す。
 -- mediaferry_fingerprint は migrate.py が接続へ登録する（SQLite に SHA-256 は無い）。
+--
+-- **生値と指紋が混ざった DB がある。** 指紋化を入れたアプリは新しいリビジョンを
+-- 指紋で保存する一方、この版が無ければ schema_migration は 4 のままなので、
+-- 「古い行は生値・新しい行は指紋」という DB が正規に作れる。指紋をもう一度
+-- ハッシュすると、観測値の一重指紋と永久に一致せず、その宛先が恒久的に拒否
+-- される。指紋の形（64 文字の小文字 16 進）の値は変換しない。
+--
+-- 生の観測値がたまたま同じ形だった場合は変換されずに残る。そのときは
+-- preflight が一致しないと言って**閉じる側**に倒れ、宛先を編集し直せば直る。
 
 DROP TRIGGER destination_revision_no_update;
 
 UPDATE destination_revision
    SET remote_user_id = mediaferry_fingerprint(remote_user_id)
- WHERE remote_user_id IS NOT NULL;
+ WHERE remote_user_id IS NOT NULL
+   AND NOT (length(remote_user_id) = 64 AND remote_user_id NOT GLOB '*[^0-9a-f]*');
 
 UPDATE destination_revision
    SET server_instance_id = mediaferry_fingerprint(server_instance_id)
- WHERE server_instance_id IS NOT NULL;
+ WHERE server_instance_id IS NOT NULL
+   AND NOT (length(server_instance_id) = 64 AND server_instance_id NOT GLOB '*[^0-9a-f]*');
 
 CREATE TRIGGER destination_revision_no_update BEFORE UPDATE ON destination_revision
 BEGIN

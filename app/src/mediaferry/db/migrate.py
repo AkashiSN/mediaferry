@@ -17,6 +17,7 @@ import re
 import sqlite3
 from pathlib import Path
 
+from ..clock import now_iso
 from ..core.destinations.identity import fingerprint
 
 MIGRATIONS_DIR = Path(__file__).parent / "migrations"
@@ -39,6 +40,9 @@ def apply_migrations(conn: sqlite3.Connection) -> list[int]:
     # **SQLite に SHA-256 が無い。** データを作り替える版のために、こちらから
     # 関数を渡す（`0005`）。接続に紐づくので、他の経路には漏れない。
     conn.create_function("mediaferry_fingerprint", 1, fingerprint, deterministic=True)
+    # 時刻の出所は `mediaferry.clock` だけ（`0006`）。datetime('now') は
+    # 表現が違ううえ、DB の時刻表現を SQL 側に持たせることになる。
+    conn.create_function("mediaferry_now", 0, now_iso)
     conn.execute(
         "CREATE TABLE IF NOT EXISTS schema_migration ("
         " version INTEGER PRIMARY KEY,"

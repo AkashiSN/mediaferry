@@ -212,24 +212,127 @@ def test_an_existing_raw_remote_id_is_converted_to_a_fingerprint(tmp_path):
     conn.close()
 
 
-def _a_destination_revision(conn, user_id):
+def _a_destination_revision(conn, user_id, suffix="1"):
     """転送先とリビジョンを 1 つ作る（repository を通さず、最小の行だけ）."""
     when = "2026-08-18T00:00:00+00:00"
+    destination, credential, revision = f"d-{suffix}", f"c-{suffix}", f"r-{suffix}"
     conn.execute(
         "INSERT INTO upload_destination (id, name, kind, enabled, created_at)"
-        " VALUES ('d-1', 'home', 'immich', 1, ?)",
-        (when,),
+        " VALUES (?, ?, 'immich', 1, ?)",
+        (destination, f"home-{suffix}", when),
     )
     conn.execute(
         "INSERT INTO destination_credential (id, destination_id, revision, secret_encrypted,"
-        " key_fingerprint, created_at) VALUES ('c-1', 'd-1', 1, X'00', 'fp', ?)",
-        (when,),
+        " key_fingerprint, created_at) VALUES (?, ?, 1, X'00', 'fp', ?)",
+        (credential, destination, when),
     )
     conn.execute(
         "INSERT INTO destination_revision (id, destination_id, revision, target_epoch,"
         " base_url, public_url, credential_id, remote_user_id, server_instance_id,"
         " verified_at, created_at)"
-        " VALUES ('r-1', 'd-1', 1, 1, 'http://immich.invalid:2283', NULL, 'c-1', ?, NULL, ?, ?)",
-        (user_id, when, when),
+        " VALUES (?, ?, 1, 1, 'http://immich.invalid:2283', NULL, ?, ?, NULL, ?, ?)",
+        (revision, destination, credential, user_id, when, when),
     )
-    conn.execute("UPDATE upload_destination SET current_revision_id = 'r-1' WHERE id = 'd-1'")
+    conn.execute(
+        "UPDATE upload_destination SET current_revision_id = ? WHERE id = ?",
+        (revision, destination),
+    )
+    return destination, revision
+
+
+def test_a_value_that_is_already_a_fingerprint_is_not_hashed_again(tmp_path):
+    """**生値と指紋が混ざった DB が正規に作れる**（§12.3）.
+
+    指紋化を入れた版のアプリは新しいリビジョンを指紋で保存するが、
+    `schema_migration` はまだ 4 のまま。その DB に版 5 を当てたとき、
+    指紋をもう一度ハッシュすると観測値の一重指紋と永久に一致せず、
+    その宛先が恒久的に拒否される。
+    """
+    from mediaferry.core.destinations.identity import fingerprint
+
+    conn = Database(tmp_path / "mixed.sqlite3").connect()
+    apply_migrations(conn)
+    _a_destination_revision(conn, "user-a", suffix="1")
+    _a_destination_revision(conn, fingerprint("user-b"), suffix="2")
+
+    # 版 5 が入る前の DB にする（適用の記録を外し、生値の行を作り直す）。
+    conn.execute("DELETE FROM schema_migration WHERE version = 5")
+    conn.execute("DROP TRIGGER destination_revision_no_update")
+    conn.execute("UPDATE destination_revision SET remote_user_id = 'user-a' WHERE id = 'r-1'")
+    conn.execute(
+        "UPDATE destination_revision SET remote_user_id = ? WHERE id = 'r-2'",
+        (fingerprint("user-b"),),
+    )
+    conn.execute(
+        "CREATE TRIGGER destination_revision_no_update BEFORE UPDATE ON destination_revision"
+        " BEGIN SELECT RAISE(ABORT, 'destination_revision is immutable'); END"
+    )
+
+    assert apply_migrations(conn) == [5]
+
+    stored = dict(conn.execute("SELECT id, remote_user_id FROM destination_revision"))
+    assert stored["r-1"] == fingerprint("user-a")
+    assert stored["r-2"] == fingerprint("user-b")  # 二重にしない
+    conn.close()
+
+
+def test_a_stored_identifier_that_could_not_be_an_identifier_is_removed(tmp_path):
+    """**検査の無かった版が保存した識別子を残さない**（§12.3 / §14）.
+
+    受け取る側の検査は新しく受け取る値にしか効かない。旧版が保存した
+    `remote_asset_id` は一覧の API 応答に出続け、承認や再開の URL にも入る。
+    """
+    from .test_schema_artifacts import a_media_file
+    from .test_schema_sources import a_profile
+    from .test_schema_uploads import a_destination, an_upload
+
+    encoded_key = "%74%65%73%74%2d%61%70%69%2d%6b%65%79"
+    conn = Database(tmp_path / "old.sqlite3").connect()
+    apply_migrations(conn)
+    profile = a_profile(conn)
+    destination = a_destination(conn)
+    _, revision_id, _ = destination
+    common = {"destination_revision_id": revision_id, "remote_checked_at": "2026-08-18T00:00:00Z"}
+    poisoned = an_upload(
+        conn,
+        destination,
+        a_media_file(conn, profile),
+        state="complete",
+        remote_asset_id=encoded_key,
+        **common,
+    )
+    awaiting = an_upload(
+        conn,
+        destination,
+        a_media_file(conn, profile),
+        state="awaiting_datetime_approval",
+        remote_asset_id=encoded_key,
+        **common,
+    )
+    healthy = an_upload(
+        conn,
+        destination,
+        a_media_file(conn, profile),
+        state="complete",
+        origin="created_by_us",
+        remote_asset_id="6f9619ff-8b86-d011-b42d-00c04fc964ff",
+        **common,
+    )
+
+    conn.execute("DELETE FROM schema_migration WHERE version = 6")
+    assert apply_migrations(conn) == [6]
+
+    rows = {row["id"]: row for row in conn.execute("SELECT * FROM upload_record")}
+    assert rows[poisoned]["remote_asset_id"] is None
+    assert "識別子" in rows[poisoned]["last_error"]
+    # **complete は止めない。** 「リモートに存在しない」と同じ形になり、
+    # 再確認と requeue で自力で直る。
+    assert rows[poisoned]["invalidated_at"] is None
+    # 承認は人の操作で、指す資産が無いと直しようがない。
+    assert rows[awaiting]["remote_asset_id"] is None
+    assert rows[awaiting]["invalidated_at"] is not None
+    assert "承認" in rows[awaiting]["invalidated_reason"]
+    # 正しい形の識別子は触らない。
+    assert rows[healthy]["remote_asset_id"] == "6f9619ff-8b86-d011-b42d-00c04fc964ff"
+    assert rows[healthy]["last_error"] is None
+    conn.close()

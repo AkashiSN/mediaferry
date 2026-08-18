@@ -198,11 +198,17 @@ class Uploader:
         # 要求なので、所有権を確かめる前に出さない（§14）。そして再確認は相手待ち
         # なので、リース（60 秒）より長くなりうる。前だけに置くと「直前に確かめた」
         # という保証が消え、確認している間に commit されたキャンセルを見落とす。
+        #
+        # **後段も同じ強さで確かめる。** §10 の根拠まで見直す呼び出しで後段だけ
+        # 弱くすると、相手を待っている間に結合をやり直されたとき、いま結合中の
+        # グループの構成ファイルを送る（保証が消えるのはキャンセルだけではない）。
         self._uploads.prepare_side_effect(
             ctx, record["id"], state, verify_eligibility=verify_eligibility
         )
         self._preflight.assert_target(revision_id)
-        self._uploads.prepare_side_effect(ctx, record["id"], state)
+        self._uploads.prepare_side_effect(
+            ctx, record["id"], state, verify_eligibility=verify_eligibility
+        )
         if progress is not None:
             # ここを抜けた後は、リモートに触った可能性がある。
             progress.touched_remote = True
@@ -260,6 +266,13 @@ class Uploader:
             self._guard(ctx, record, revision_id, "uploading", progress, verify_eligibility=True)
             uploaded = self._send(ctx, client, record, media)
             origin = origin_after_upload(first_check, uploaded.status)
+            if origin != "created_by_us":
+                # **`duplicate` で返った資産は他人のものかもしれない。**
+                # こちらはまだ何も変えていない（既にあったので作ってもいない）。
+                # タグ付けが最初の変更になるので、その前に §10 を見直す（§8）。
+                self._guard(
+                    ctx, record, revision_id, "uploading", progress, verify_eligibility=True
+                )
             # 2〜3. asset_known。ここで初めて「サーバ側に存在する」が確定する。
             # **commit も所有権付きで行う。** 送信中にキャンセルされていたら
             # ここで止まり、`_guarded` が needs_recheck へ落とす。

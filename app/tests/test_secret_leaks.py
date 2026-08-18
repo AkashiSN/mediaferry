@@ -18,7 +18,7 @@ import pytest
 from mediaferry.adapters.immich import ImmichClient, ImmichProtocolError
 from mediaferry.db.connection import Database
 
-from .fake_immich import API_KEY
+from .fake_immich import API_KEY, ENCODED_API_KEY
 
 
 @pytest.fixture
@@ -116,3 +116,50 @@ def test_an_identifier_that_would_change_the_path_is_refused(immich):
     immich.path_in_tag_id = True
     with ImmichClient(immich.url, API_KEY) as client, pytest.raises(ImmichProtocolError):
         client.find_tag("dji")
+
+
+def test_a_percent_encoded_key_is_refused(immich):
+    """**符号化した鍵を通さない。** 生の一致だけを見る検査は fail-open になる.
+
+    `%74%65%73%74...` は httpx がそのまま path に載せる。可逆な形の鍵が
+    `remote_asset_id`・一覧の API 応答・次の要求 URL に届き、経路の先で
+    復号されれば平文に戻る。
+    """
+    immich.encoded_key_as_ids = True
+    with ImmichClient(immich.url, API_KEY) as client:
+        with pytest.raises(ImmichProtocolError) as caught:
+            client.bulk_upload_check([("record-1", "0" * 40)])
+        assert ENCODED_API_KEY not in str(caught.value)
+
+        with pytest.raises(ImmichProtocolError):
+            client.find_tag("dji")
+
+
+def test_an_identifier_from_the_database_is_checked_before_it_reaches_the_url(immich):
+    """**保存済みの識別子も検める。** 検査の無い版が書いた行が残っている.
+
+    `remote_asset_id` とタグの id は DB から読んで次の要求の URL に入る。
+    受け取る側だけで弾くと、旧版が保存した汚染値がそのまま path に載る。
+    """
+    with ImmichClient(immich.url, API_KEY) as client:
+        with pytest.raises(ImmichProtocolError):
+            client.set_date_time_original(ENCODED_API_KEY, "2026-08-17T14:30:00+09:00")
+        with pytest.raises(ImmichProtocolError):
+            client.tag_assets("tag-1", [ENCODED_API_KEY])
+        with pytest.raises(ImmichProtocolError):
+            client.tag_assets("../../users/me", ["asset-1"])
+
+
+def test_an_asset_id_that_is_not_a_string_is_a_protocol_error(immich):
+    """数値の `assetId` を内部例外にしない（`TypeError` はジョブごと落ちる）."""
+    immich.numeric_asset_id = True
+    with ImmichClient(immich.url, API_KEY) as client, pytest.raises(ImmichProtocolError):
+        client.bulk_upload_check([("record-1", "0" * 40)])
+
+
+def test_an_identifier_longer_than_an_identifier_is_refused(immich, monkeypatch):
+    """長さの上限も置く. 識別子は UUID で、長い値は識別子ではない."""
+    from mediaferry.adapters.immich import IDENTIFIER_MAX_CHARS
+
+    with ImmichClient(immich.url, API_KEY) as client, pytest.raises(ImmichProtocolError):
+        client.set_date_time_original("a" * (IDENTIFIER_MAX_CHARS + 1), "2026-08-17T14:30:00+09:00")

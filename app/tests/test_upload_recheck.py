@@ -351,3 +351,270 @@ def test_stamping_refuses_a_record_that_is_not_complete(world):
     row = record_of(db)
     assert row["remote_asset_id"] is None
     assert row["remote_checked_at"] is None
+
+
+def _three_complete_records(world):
+    """batch の分割を起こすために、`complete` の行を 3 件にする."""
+    server, rechecker, ctx, destination_id, db = world
+    profile = ProfileRegistry(db).current("dji-osmo")
+    revision_id = db.execute("SELECT destination_revision_id FROM upload_record").fetchone()[0]
+    for index in (2, 3):
+        extra = a_media_file(
+            db,
+            (profile.profile_id, profile.revision_id),
+            rel_path=f"library/dji-osmo/DCIM/{index}.MP4",
+            sha1=f"{index:040d}",
+        )
+        UploadRepository(
+            db, ProfileRegistry(db), DestinationRepository(db, CredentialStore(db, _box_of(db)))
+        ).create_pairs([extra], [destination_id])
+    db.execute(
+        "UPDATE upload_record SET state = 'complete', remote_asset_id = 'asset-1',"
+        " remote_is_trashed = 0, destination_revision_id = ? WHERE state = 'pending'",
+        (revision_id,),
+    )
+
+
+def test_a_recheck_cancelled_while_the_target_is_checked_sends_no_check(world):
+    """**preflight の後、最初の batch の前にも見る。**
+
+    向き先の再確認は相手待ちなので、その間にキャンセルが commit されうる。
+    最初の batch だけ確認を飛ばすと、キャンセル済みのジョブから鍵付きの
+    照合要求が出る（§14）。
+    """
+    server, rechecker, ctx, destination_id, db = world
+    real = FakeImmich.route
+
+    def cancel_during_users_me(self, method, path, body, headers):  # noqa: ANN001, ANN202
+        if path == "/api/users/me":
+            db.execute("UPDATE job SET status = 'cancelling' WHERE id = ?", (ctx.job_id,))
+        return real(self, method, path, body, headers)
+
+    server.route = cancel_during_users_me.__get__(server, FakeImmich)
+
+    outcome = rechecker.run(ctx, destination_id)
+
+    assert outcome.checked == 0
+    assert ("POST", "/api/assets/bulk-upload-check") not in server.requests
+
+
+def test_a_recheck_that_lost_its_lease_between_batches_sends_no_more(world, monkeypatch):
+    """**batch の合間はキャンセルだけでなくリースも見る。**
+
+    `status` が `running` のままリースだけ失効した場合、キャンセルの確認は
+    素通りする。失効した worker が残りの batch を送り続け、書けないと分かるのは
+    最後の `stamp_many` になる。
+    """
+    from mediaferry.db.jobs import LeaseLost
+
+    server, rechecker, ctx, destination_id, db = world
+    _three_complete_records(world)
+    monkeypatch.setattr("mediaferry.jobs.recheck.BULK_CHECK_BATCH", 1)
+    monkeypatch.setattr("mediaferry.adapters.immich.BULK_CHECK_BATCH", 1)
+    real = ImmichClient.bulk_upload_check
+
+    def expire_the_lease(self, items):  # noqa: ANN001, ANN202
+        db.execute(
+            "UPDATE job SET lease_expires_at = '2020-01-01T00:00:00+00:00' WHERE id = ?",
+            (ctx.job_id,),
+        )
+        return real(self, items)
+
+    monkeypatch.setattr(ImmichClient, "bulk_upload_check", expire_the_lease)
+
+    with pytest.raises(LeaseLost):
+        rechecker.run(ctx, destination_id)
+
+    assert server.requests.count(("POST", "/api/assets/bulk-upload-check")) == 1
+
+
+def test_a_record_that_moved_while_it_was_checked_is_not_stamped_with_the_old_result(world):
+    """**照合の結果は、照合したときの行にしか書かない。**
+
+    消滅と判定された `complete` を利用者が requeue し、送り直しが済んで別の
+    資産で `complete` に戻ったところへ古い結果を書くと、新しい
+    `remote_asset_id` を古い観測（消滅＝NULL）で消してしまう。
+    """
+    server, rechecker, ctx, destination_id, db = world
+    # サーバには無い（accept ＝ 消滅と判定される）。
+    server.assets.clear()
+    db.execute("UPDATE upload_record SET remote_asset_id = NULL, remote_checked_at = ?", ("t0",))
+    real = FakeImmich.route
+
+    def resend_during_check(self, method, path, body, headers):  # noqa: ANN001, ANN202
+        if path == "/api/assets/bulk-upload-check":
+            # 利用者が requeue し、送り直しが別の資産で完了した。
+            db.execute(
+                "UPDATE upload_record SET remote_asset_id = 'asset-new', remote_checked_at = ?,"
+                " remote_is_trashed = 0",
+                ("t1",),
+            )
+        return real(self, method, path, body, headers)
+
+    server.route = resend_during_check.__get__(server, FakeImmich)
+
+    outcome = rechecker.run(ctx, destination_id)
+
+    row = record_of(db)
+    assert row["remote_asset_id"] == "asset-new"
+    assert row["remote_checked_at"] == "t1"
+    # 書けなかった行を「確認した」と数えない。
+    assert outcome.checked == 0
+    assert outcome.vanished == 0
+    # 書けなかった行を「リモートに存在しない」と報せない（消えていない）。
+    events = [row["message"] for row in db.execute("SELECT message FROM job_event")]
+    assert "リモートに存在しない資産がある" not in events
+
+
+def test_a_result_older_than_the_last_check_is_not_written(world):
+    """**別の再確認が先に書いた行を、古い観測で上書きしない。**
+
+    資産の id が同じでも、`remote_checked_at` が進んでいれば相手の観測の方が
+    新しい。ゴミ箱の出入りは行の値だけでは見分けられないので、時刻も条件に
+    入れて古い結果を落とす。
+    """
+    server, rechecker, ctx, destination_id, db = world
+    db.execute("UPDATE upload_record SET remote_checked_at = ?", ("t0",))
+    server.trashed.add("asset-1")  # こちらの観測は「ゴミ箱にある」
+    real = FakeImmich.route
+
+    def another_recheck_wins(self, method, path, body, headers):  # noqa: ANN001, ANN202
+        if path == "/api/assets/bulk-upload-check":
+            db.execute("UPDATE upload_record SET remote_checked_at = ?", ("t1",))
+        return real(self, method, path, body, headers)
+
+    server.route = another_recheck_wins.__get__(server, FakeImmich)
+
+    outcome = rechecker.run(ctx, destination_id)
+
+    row = record_of(db)
+    assert row["remote_checked_at"] == "t1"
+    assert row["remote_is_trashed"] == 0
+    assert outcome.checked == 0
+
+
+def _uploads_of(db):
+    from mediaferry.db.credentials import CredentialStore
+    from mediaferry.db.destinations import DestinationRepository
+    from mediaferry.db.profiles import ProfileRegistry as Registry
+    from mediaferry.db.uploads import UploadRepository
+
+    return UploadRepository(
+        db, Registry(db), DestinationRepository(db, CredentialStore(db, _box_of(db)))
+    )
+
+
+def test_stamping_many_refuses_a_row_that_no_longer_matches_the_observation(world):
+    """**このメソッドは公開されている。** 別の経路から呼ばれても、観測した姿と
+    違う行は書き換えない（`stamp_many`）."""
+    from mediaferry.db.uploads import Stamp
+
+    server, rechecker, ctx, destination_id, db = world
+    uploads = _uploads_of(db)
+    record_id = record_of(db)["id"]
+    db.execute(
+        "UPDATE upload_record SET remote_asset_id = 'asset-new', remote_checked_at = ?", ("t0",)
+    )
+
+    written = uploads.stamp_many(
+        ctx,
+        [
+            Stamp(
+                record_id=record_id,
+                asset_id=None,
+                is_trashed=0,
+                # 観測したときは別の資産を指していた（照合の後に動いた）。
+                expect_asset_id="asset-1",
+                expect_checked_at="t0",
+            )
+        ],
+        checked_at="t1",
+    )
+
+    assert written == set()
+    row = record_of(db)
+    assert row["remote_asset_id"] == "asset-new"
+    assert row["remote_checked_at"] == "t0"
+
+
+def test_stamping_many_writes_nothing_when_the_lease_is_gone(world):
+    """リースが切れていれば 1 行も書かない（取引の中で確かめる）."""
+    from mediaferry.db.jobs import LeaseLost
+    from mediaferry.db.uploads import Stamp
+
+    server, rechecker, ctx, destination_id, db = world
+    uploads = _uploads_of(db)
+    record_id = record_of(db)["id"]
+    db.execute("UPDATE upload_record SET remote_checked_at = ?", ("t0",))
+    db.execute(
+        "UPDATE job SET lease_expires_at = '2020-01-01T00:00:00+00:00' WHERE id = ?", (ctx.job_id,)
+    )
+
+    with pytest.raises(LeaseLost):
+        uploads.stamp_many(
+            ctx,
+            [
+                Stamp(
+                    record_id=record_id,
+                    asset_id="asset-2",
+                    is_trashed=0,
+                    expect_asset_id="asset-1",
+                    expect_checked_at="t0",
+                )
+            ],
+            checked_at="t1",
+        )
+
+    row = record_of(db)
+    assert row["remote_asset_id"] == "asset-1"
+    assert row["remote_checked_at"] == "t0"
+
+
+def test_a_record_requeued_while_it_was_checked_is_not_stamped(world):
+    """**`complete` は終端ではない。** 消滅と判定された行は requeue できる.
+
+    requeue は `remote_asset_id` も `remote_checked_at` も変えない（状態だけを
+    `pending` に戻す）ので、値の一致だけでは古い結果が通ってしまう。
+    """
+    server, rechecker, ctx, destination_id, db = world
+    server.assets.clear()  # accept ＝ 消滅と判定される
+    db.execute("UPDATE upload_record SET remote_asset_id = NULL, remote_checked_at = ?", ("t0",))
+    real = FakeImmich.route
+
+    def requeue_during_check(self, method, path, body, headers):  # noqa: ANN001, ANN202
+        if path == "/api/assets/bulk-upload-check":
+            db.execute("UPDATE upload_record SET state = 'pending', remote_is_trashed = NULL")
+        return real(self, method, path, body, headers)
+
+    server.route = requeue_during_check.__get__(server, FakeImmich)
+
+    outcome = rechecker.run(ctx, destination_id)
+
+    row = record_of(db)
+    assert row["state"] == "pending"
+    assert row["remote_checked_at"] == "t0"
+    assert outcome.checked == 0
+
+
+def test_a_cancel_that_lands_just_before_the_write_is_not_a_failure(world, monkeypatch):
+    """**キャンセルの確認と書き込みの間にも窓がある。**
+
+    `ctx.cancelled()` を見た後に `cancelling` が commit されると、書き込みの
+    取引の中の `assert_lease` が `LeaseLost` を投げる。そのまま外へ出すと
+    `JobRunner` が**利用者の押したキャンセルをジョブの失敗として記録する**
+    （§9.9。取り込み・結合・送信と同じ形で降りる）。
+    """
+    from mediaferry.clock import now_iso as real_now_iso
+
+    server, rechecker, ctx, destination_id, db = world
+
+    def cancel_then_now():
+        db.execute("UPDATE job SET status = 'cancelling' WHERE id = ?", (ctx.job_id,))
+        return real_now_iso()
+
+    monkeypatch.setattr("mediaferry.jobs.recheck.now_iso", cancel_then_now)
+
+    outcome = rechecker.run(ctx, destination_id)
+
+    assert outcome.checked == 0
+    assert record_of(db)["remote_checked_at"] is None

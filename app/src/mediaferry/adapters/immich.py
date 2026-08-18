@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import base64
 import logging
+import re
 from collections.abc import Sequence
 from dataclasses import dataclass, replace
 from pathlib import Path
@@ -80,6 +81,11 @@ class CheckOutcome:
 class UploadOutcome:
     asset_id: str
     status: str  # created / duplicate
+
+
+# 識別子として許す形（RFC 3986 の unreserved）と長さの上限。Immich は UUID を返す。
+_UNRESERVED_RE = re.compile(r"[A-Za-z0-9._~-]+")
+IDENTIFIER_MAX_CHARS = 128
 
 
 def to_base64_checksum(sha1_hex: str) -> str:
@@ -175,7 +181,7 @@ class ImmichClient:
         return UploadOutcome(asset_id=self._identifier(asset_id, "POST /api/assets"), status=status)
 
     def _identifier(self, value: str, label: str) -> str:
-        """相手から受け取った識別子を、保存・URL へ使う前に検めた上で返す.
+        """識別子を、保存・URL へ使う前に検めた上で返す.
 
         **相手は「こちらが読む値」を選べる。** 侵害された Immich は、受け取った
         `x-api-key` を `assetId` やタグの id として返せる。形は仕様どおりなので
@@ -183,13 +189,24 @@ class ImmichClient:
         `upload_record.remote_asset_id` と API 応答に現れる。URL へ入れれば
         `_checked` の例外文（`job.error` とログ）にも届く。
 
-        経路ごとに塞ぐのではなく、**adapter の境界で 1 度だけ**弾く。
+        **許す形を並べる（allowlist）。拒む形を並べない。** 拒否の列挙は
+        fail-open になる: `%74%65%73%74` のように符号化した鍵は「使えない文字」を
+        1 つも含まないが、httpx はそのまま path に載せるし、可逆なので経路の先で
+        平文に戻る。RFC 3986 の unreserved だけを、長さの上限付きで通す
+        （Immich の識別子は UUID。§12.3 の実測）。
+
+        **受け取る値だけでなく、送る値も通す。** `remote_asset_id` とタグの id は
+        DB から読んで次の要求の URL に入る。この検査が無かった版が保存した行が
+        残っているので、境界の両方向で検める。
+
+        経路ごとに塞ぐのではなく、**adapter の境界で**弾く。
         """
+        if not isinstance(value, str) or not value:
+            raise ImmichProtocolError(f"{label} の識別子が文字列でない")
         if self._api_key in value:
             raise ImmichProtocolError(f"{label} の識別子に API キーが含まれている")
-        if any(character in value for character in "/?#") or value.strip() != value:
-            # 次の要求の path に入る値なので、経路を変えられる形を受け取らない。
-            raise ImmichProtocolError(f"{label} の識別子に使えない文字がある")
+        if len(value) > IDENTIFIER_MAX_CHARS or _UNRESERVED_RE.fullmatch(value) is None:
+            raise ImmichProtocolError(f"{label} の識別子が識別子の形をしていない")
         return value
 
     def find_tag(self, name: str) -> str | None:
@@ -222,10 +239,15 @@ class ImmichClient:
         return self.find_tag(name) or self.create_tag(name)
 
     def tag_assets(self, tag_id: str, asset_ids: Sequence[str]) -> None:
-        self._request("PUT", f"/api/tags/{tag_id}/assets", json={"ids": list(asset_ids)})
+        # **保存済みの識別子も境界で検める**（`_identifier`）。id は URL と本文の
+        # 両方に入り、検査の無かった版が書いた行が DB に残っている。
+        checked = [self._identifier(asset_id, "tag_assets の asset id") for asset_id in asset_ids]
+        tag = self._identifier(tag_id, "tag_assets の tag id")
+        self._request("PUT", f"/api/tags/{tag}/assets", json={"ids": checked})
 
     def set_date_time_original(self, asset_id: str, when: str) -> None:
-        self._request("PUT", f"/api/assets/{asset_id}", json={"dateTimeOriginal": when})
+        asset = self._identifier(asset_id, "set_date_time_original の asset id")
+        self._request("PUT", f"/api/assets/{asset}", json={"dateTimeOriginal": when})
 
     # ------------------------------------------------------------------
     def _request(
@@ -316,8 +338,10 @@ def _parsed_check(body: Any, expected: Sequence[str]) -> dict[str, CheckOutcome]
         if action not in CHECK_ACTIONS:
             raise ImmichProtocolError("bulk-upload-check の action が未知")
         asset_id = result.get("assetId")
-        if action == "reject" and not asset_id:
-            raise ImmichProtocolError("reject なのに assetId が無い")
+        if action == "reject" and (not isinstance(asset_id, str) or not asset_id):
+            # **型もここで見る。** 数値を返されると `_identifier` の照合が
+            # `TypeError` になり、プロトコルの違いではなく内部例外として落ちる。
+            raise ImmichProtocolError("reject なのに文字列の assetId が無い")
         trashed = result.get("isTrashed")
         if action == "reject" and not isinstance(trashed, bool):
             # **既定を False にしない。** 欄が無い応答を「ゴミ箱に無い」と

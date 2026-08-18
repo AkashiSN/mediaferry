@@ -37,6 +37,23 @@ RESULTS = frozenset(
 )
 
 ACTIVE_STATES = ("checking", "uploading", "asset_known", "tagging", "fixing_datetime")
+
+
+@dataclass(frozen=True)
+class Stamp:
+    """再確認 1 件分の結果と、**それを観測したときの行の姿**.
+
+    `expect_*` は「この結果が誰の観測か」を示す。書く直前に行が動いていたら、
+    こちらの観測は古いので書かない（`stamp_many`）。
+    """
+
+    record_id: str
+    asset_id: str | None
+    is_trashed: int
+    expect_asset_id: str | None
+    expect_checked_at: str | None
+
+
 CLAIMABLE_STATES = ("pending", "needs_recheck")
 
 
@@ -640,10 +657,10 @@ class UploadRepository:
     def stamp_many(
         self,
         ctx: JobContext,
-        stamps: Sequence[tuple[str, str | None, int]],
+        stamps: Sequence[Stamp],
         checked_at: str,
-    ) -> None:
-        """再確認の結果を**まとめて 1 つのトランザクションで**書く.
+    ) -> set[str]:
+        """再確認の結果を**まとめて 1 つのトランザクションで**書き、書けた id を返す.
 
         1 行ずつ commit すると、途中でキャンセルやリースの失効が起きたときに
         中途半端な状態が残る。`ctx.assert_lease()` を同じ取引に入れるので、
@@ -651,15 +668,37 @@ class UploadRepository:
         見ないので、これが要る）。
 
         **`complete` の行だけ**を対象にする。進行中の行には所有者がいる。
+
+        **照合したときの行にしか書かない。** `complete` は終端ではない: 消滅と
+        判定された行を利用者が requeue でき、送り直しが済めばまた `complete` に
+        戻る。id と現在の状態だけを条件にすると、その新しい `remote_asset_id` を
+        古い観測（消滅＝NULL）で消す。観測した値そのものを条件に入れて、動いた
+        行は**書かずに飛ばす**（相手側は新しい観測を持っているので、こちらの
+        古い結果で上書きする理由が無い）。書けた id を返すので、呼び出し側は
+        飛ばした行を「確認した」と数えずに済む。
         """
+        written: set[str] = set()
         with immediate(self._conn):
             ctx.assert_lease()
-            for record_id, asset_id, is_trashed in stamps:
-                self._conn.execute(
+            for stamp in stamps:
+                updated = self._conn.execute(
                     "UPDATE upload_record SET remote_asset_id = ?, remote_is_trashed = ?,"
-                    " remote_checked_at = ?, updated_at = ? WHERE id = ? AND state = 'complete'",
-                    (asset_id, is_trashed, checked_at, now_iso(), record_id),
+                    " remote_checked_at = ?, updated_at = ?"
+                    " WHERE id = ? AND state = 'complete'"
+                    "   AND remote_asset_id IS ? AND remote_checked_at IS ?",
+                    (
+                        stamp.asset_id,
+                        stamp.is_trashed,
+                        checked_at,
+                        now_iso(),
+                        stamp.record_id,
+                        stamp.expect_asset_id,
+                        stamp.expect_checked_at,
+                    ),
                 )
+                if updated.rowcount == 1:
+                    written.add(stamp.record_id)
+        return written
 
     def stamp_remote(
         self, record_id: str, asset_id: str | None, is_trashed: int, checked_at: str

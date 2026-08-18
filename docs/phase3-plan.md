@@ -8346,3 +8346,59 @@ prepare を消す／batch の合間のキャンセル確認を消す・分割を
 スライスの側が `BULK_CHECK_BATCH` を見たままなので**分割が消えない**。素通りを
 「テストが弱い」と読み違えかけた。ループ全体を元の形（全件を adapter へ）へ戻す
 変異に置き換えて、初めて検出できた。
+
+### 5 巡目（4 巡目の修正差分、blocker 2 / major 5 / minor 1）
+
+`bf548df..a37a0e1`（コミット `a37a0e1`）を見せた。**またしても全件が「直した箇所の
+周辺」から出ている**（3・4 巡目と同じ）。8 件とも実在を確認して直した。
+
+| # | 指摘 | 対応 |
+| --- | --- | --- |
+| 1 [blocker] | `_identifier` が鍵の**生の一致**しか見ておらず、パーセント符号化を許す。`%74%65%73%74…` は「使えない文字」を 1 つも含まないが、httpx はそのまま path に載せるし可逆なので平文に戻る。`%`・バックスラッシュ・制御文字も通る **fail-open** | 拒否の列挙をやめ、**許す形を並べる**（RFC 3986 の unreserved ＋ 長さの上限 128）。鍵との一致の検査は残す |
+| 2 [blocker] | 検査は新しく受け取る値にしか効かない。**旧版が保存した `remote_asset_id`** は一覧の API 応答に出続け、承認や再開では次の要求の URL に入る | 境界の**両方向**で検める（`tag_assets` / `set_date_time_original` が送る id も通す）。加えて `0006_scrub_stored_identifiers.sql` で、形で分かる汚染値を外す |
+| 3 [major] | `0005` が**既に指紋の値をもう一度ハッシュする**。指紋化を入れたアプリ（`ba9e483`）は新しいリビジョンを指紋で保存する一方、`schema_migration` はまだ 4 なので、生値と指紋が混ざった DB が正規に作れる。二重指紋になった宛先は preflight が恒久的に拒否する | `0005` を「指紋の形（64 文字の小文字 16 進）は変換しない」に直した。生の観測値がたまたま同じ形なら変換されないが、そのときは preflight が**閉じる側**に倒れる |
+| 4 [major] | 2 段 guard の**後段に `verify_eligibility` を渡していない**。preflight を待っている間に結合をやり直されると、後段はリースと claim しか見ずに送信へ進む。直したはずの「直前に確かめた」保証が、キャンセルにしか成立していない | 後段にも同じ指定を渡す |
+| 5 [major] | `accept` で始まった送信が `duplicate` で返ると `origin` は `unknown` になるが、**その後の再確認が無いままタグへ進む**。`tag_pre_existing` が真なら、他人の資産に、根拠を失ったままタグを付ける | 送信後に `origin != created_by_us` なら、タグの前に §10 を見直す |
+| 6 [major] | 再確認に **preflight 後・最初の batch 前の確認が無い**（`if start and …` なので初回は素通り）。batch の合間も `ctx.cancelled()` だけで、`running` のままリースが失効した worker は残りを送り続け、`stamp_many` で初めて気付く | 各 batch の直前でキャンセルとリースの両方を見る。`LeaseLost` はキャンセルなら握って正常に降りる（他は上げる） |
+| 7 [major] | `stamp_many` の条件が id と現在の `state` だけ。消滅と判定した行を利用者が requeue し、送り直しが別の資産で `complete` に戻ったところへ古い結果を書くと、**新しい `remote_asset_id` を消す**。黙って飛ばした行も `checked` に数えている | 観測したときの値（`remote_asset_id` / `remote_checked_at`）を条件に入れ、動いた行は書かずに飛ばす。書けた id を返し、飛ばした件数は数えず、イベントで報せる |
+| 8 [minor] | `_parsed_check` が `assetId` の型を見ない。数値を返されると `_identifier` の照合が `TypeError` になり、プロトコルの違いではなく内部例外としてジョブが落ちる | 境界で `str` を要求する |
+
+**退けた指摘は無い。** ただし 7 の直し方は指摘（「1 行でも変化していたら取引全体を
+abort する」）と変えた。**benign な競合で再確認全体を失敗にしない。** 利用者の
+requeue と送り直しは正常な操作で、相手側の行は**こちらより新しい**観測を持っている。
+古い結果で上書きしないことが目的なので、動いた行だけを飛ばし、`checked` から外し、
+飛ばした件数をイベントに出す（「N 件確認した」の N が嘘にならないことは §10 の
+既存の約束）。全体を abort すると、再実行しても同じ競合に当たり続ける。
+
+**変異試験（23 件。16 件は最初から検出、5 件はテストを 1 つずつ足して検出、2 件は
+構造的に検出できない）。** 当てた変異: 許す形の検査を外す／長さの上限だけ外す／鍵との
+一致を見ない／送る側の 3 経路（`tag_assets` の asset id・tag id、`set_date_time_original`）
+を検めない／`assetId` の型を見ない／`0005` で既に指紋の値も変換する・生値も変換しない／
+`0006` で汚染値を外さない・条件を反転・承認待ちを無効化しない・`last_error` を残さない／
+後段 prepare の `verify_eligibility` を落とす・後段そのものを消す／`duplicate` 後の
+見直しを消す・判定を反転／最初の batch の前を確認しない・batch の合間にリースを見ない／
+飛ばした行も数える・飛ばした行に消滅の警告を出す／`stamp_many` の観測条件（両方・
+asset id だけ・`remote_checked_at` だけ）を外す・`state = 'complete'` を外す・
+`assert_lease` を取引から外す・書けた行だけを返さない／`LeaseLost` を握らない／
+無効化の理由を上書きする。
+
+**「検出できない」と書く前に、テストを 1 つ足せないか試す**（Phase 2 と同じ結論）。
+最初の素通り 7 件のうち 5 件は、次のテストで固定できた:
+
+- `test_stamping_many_refuses_a_row_that_no_longer_matches_the_observation`
+  —— `stamp_many` は公開メソッドなので、Rechecker を通さず直接呼んで観測条件だけを見る
+- `test_a_record_requeued_while_it_was_checked_is_not_stamped`
+  —— **requeue は `remote_asset_id` も `remote_checked_at` も変えない**（状態だけ戻す）。
+  値の一致だけでは古い結果が通るので、`state = 'complete'` の条件はここでだけ効く
+- `test_stamping_many_writes_nothing_when_the_lease_is_gone`
+- `test_a_cancel_that_lands_just_before_the_write_is_not_a_failure`
+  —— `now_iso()` の呼び出しを seam にして、**キャンセルの確認と書き込みの間**に
+  `cancelling` を commit する。`LeaseLost` を握る枝はここでしか通らない
+- `test_an_identifier_longer_than_an_identifier_is_refused`
+
+**残る 2 件は構造的に検出できない（どちらも二重の保険）。**
+
+| 変異 | なぜ落ちないか |
+| --- | --- |
+| `_parsed_check` の `assetId` の型検査を外す | 同じ値を `_identifier` の `isinstance` が弾く。**両方外すと `TypeError` になってテストが落ちる**ことは手で確認した（片方ずつでは落とせない） |
+| 最初の batch の前の `ctx.cancelled()` を外す | 直後の `ctx.assert_lease()` が `cancelling` も拒むので、`LeaseLost` 経由で同じところへ降りる。明示の確認は「常の経路を例外にしない」ためのもの |

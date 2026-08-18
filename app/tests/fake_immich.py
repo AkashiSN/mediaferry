@@ -21,6 +21,8 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
 
 API_KEY = "test-api-key"  # noqa: S105
+# 同じ鍵をパーセント符号化した形。生の一致では見つからないが、可逆に戻せる。
+ENCODED_API_KEY = "".join(f"%{ord(character):02x}" for character in API_KEY)
 USER_ID = "user-uuid-1"
 
 
@@ -52,6 +54,11 @@ class FakeImmich:
         self.echo_key_as_ids: bool = False
         # タグの id に、次の要求の経路を変えられる値を返す。
         self.path_in_tag_id: bool = False
+        # **鍵をパーセント符号化して識別子に混ぜる。** 生の一致だけを見る検査は
+        # ここを通してしまう。可逆なので、経路の先で復号すれば平文に戻る。
+        self.encoded_key_as_ids: bool = False
+        # `assetId` を文字列以外で返す（型の検査が無いと内部例外になる）。
+        self.numeric_asset_id: bool = False
         self._server: ThreadingHTTPServer | None = None
 
     # ------------------------------------------------------------------
@@ -99,6 +106,8 @@ class FakeImmich:
         if method == "GET" and path == "/api/tags":
             if self.echo_key_as_ids:
                 return 200, [{"id": API_KEY, "name": name} for name in self.tags or ["dji"]]
+            if self.encoded_key_as_ids:
+                return 200, [{"id": ENCODED_API_KEY, "name": name} for name in ["dji"]]
             if self.path_in_tag_id:
                 return 200, [{"id": "../../users/me", "name": name} for name in ["dji"]]
             return 200, [{"id": tag_id, "name": name} for name, tag_id in self.tags.items()]
@@ -118,6 +127,32 @@ class FakeImmich:
         return 404, {"message": f"no route for {method} {path}"}
 
     def _bulk_check(self, payload):  # noqa: ANN001, ANN202
+        if self.encoded_key_as_ids:
+            return {
+                "results": [
+                    {
+                        "id": item["id"],
+                        "action": "reject",
+                        "reason": "duplicate",
+                        "assetId": ENCODED_API_KEY,
+                        "isTrashed": False,
+                    }
+                    for item in payload["assets"]
+                ]
+            }
+        if self.numeric_asset_id:
+            return {
+                "results": [
+                    {
+                        "id": item["id"],
+                        "action": "reject",
+                        "reason": "duplicate",
+                        "assetId": 1,
+                        "isTrashed": False,
+                    }
+                    for item in payload["assets"]
+                ]
+            }
         if self.echo_key_as_ids:
             return {
                 "results": [
