@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 import base64
+import hashlib
 import logging
 import os
 
@@ -76,3 +77,42 @@ def test_a_protocol_error_carries_no_value_from_the_response(immich, caplog):
         client.bulk_upload_check([("record-1", "0" * 40)])
     assert API_KEY not in str(caught.value)
     assert API_KEY not in caplog.text
+
+
+def test_an_identifier_that_carries_the_key_is_refused(immich):
+    """**形の正しい応答でも、識別子に鍵が入っていたら受け取らない。**
+
+    `assetId` はそのまま `upload_record.remote_asset_id` に保存され、一覧の
+    API 応答にも出る。タグの id は次の要求の URL に入る。型の検査だけでは
+    通ってしまうので、adapter の境界で秘密との一致を見る。
+    """
+    immich.echo_key_as_ids = True
+    with ImmichClient(immich.url, API_KEY) as client:
+        with pytest.raises(ImmichProtocolError) as caught:
+            client.bulk_upload_check([("record-1", "0" * 40)])
+        assert API_KEY not in str(caught.value)
+
+        with pytest.raises(ImmichProtocolError):
+            client.find_tag("dji")
+
+
+def test_an_uploaded_asset_id_that_carries_the_key_is_refused(immich, tmp_path):
+    immich.echo_key_as_ids = True
+    payload = tmp_path / "A.MP4"
+    payload.write_bytes(b"video-bytes")
+    digest = hashlib.sha1(payload.read_bytes(), usedforsecurity=False).hexdigest()
+    with ImmichClient(immich.url, API_KEY) as client, pytest.raises(ImmichProtocolError):
+        client.upload_asset(
+            payload,
+            sha1_hex=digest,
+            device_asset_id="mediaferry:x",
+            file_created_at="2026-08-17T14:30:00+09:00",
+            file_modified_at="2026-08-17T14:30:00+09:00",
+        )
+
+
+def test_an_identifier_that_would_change_the_path_is_refused(immich):
+    """タグの id は次の要求の URL に入る. 経路を変えられる値を受け取らない."""
+    immich.path_in_tag_id = True
+    with ImmichClient(immich.url, API_KEY) as client, pytest.raises(ImmichProtocolError):
+        client.find_tag("dji")

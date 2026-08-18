@@ -8322,3 +8322,27 @@ Task 1〜14 を実装したうえで `7f6794c..2d04165` を見せた。**文書�
 トランザクションの外へ戻す / 送信直前の見直しを消す・立てない / `created_by_us`
 を降格させる / guard の順序を戻す / キャンセル確認を preflight の後ろへ戻す /
 照合後のキャンセル確認を消す / 承認で preflight を claim より先に投げる。
+
+### 4 巡目（3 巡目の修正差分、blocker 2 / major 3 / minor 1）
+
+`2d04165..bf548df` を見せた。**指摘は全件、直した箇所の周辺から出た**（Phase 2 と
+同じ傾向）。6 件とも実在を確認して直し、追加したテストはすべて対応する変異を落とす。
+
+| # | 指摘 | 対応 |
+| --- | --- | --- |
+| 1 [blocker] | 例外文から値を落としただけでは足りない。`assetId` は `remote_asset_id` として保存され API 応答にも出る。タグの id は次の要求の URL に入る。相手が「正常な形」で鍵を返せば、平文がそのまま通る | `ImmichClient._identifier` を新設し、**adapter の境界で 1 度だけ**弾く。鍵を含む識別子と、経路を変えられる文字（`/?#`・前後の空白）を拒む |
+| 2 [blocker] | 指紋化に既存 DB の移行が無い。`2d04165` の DB を開くと旧平文が残り、preflight は全宛先を「変わった」と誤判定する | `0005_fingerprint_remote_identity.sql`。`destination_revision` は UPDATE を trigger が拒むので、外して変換し同じ本体で作り直す。**SQLite に SHA-256 が無い**ので、`migrate.apply_migrations` が `mediaferry_fingerprint` を接続へ登録する |
+| 3 [major] | 送信直前の見直しが accept 分岐にしか無い。reject（既存資産）の分岐は見直さずタグを変更する。**「もうリモートにある」はこちらが作った資産にしか当てはまらない** | reject の分岐でも、`asset_known` へ進む前に `verify_eligibility` を通す。`created_by_us` は既に置いてあるので見送っても取り消せず、そこは従来どおり |
+| 4 [major] | prepare → preflight の後に所有権を確かめていない。preflight は相手待ちでリース（60 秒）より長くなりうるので、「直前に確かめた」保証が消える | `_guard` を prepare → preflight → prepare の 2 段にした。`ApprovalService` も同じ |
+| 5 [major] | Rechecker の「キャンセルなら書かない」が原子的でない。`ctx.cancelled()` はジョブの状態しか見ずリースの失効を見ない。adapter の内部ループの合間にキャンセルを観測できない | 結果は `stamp_many` で 1 つの `BEGIN IMMEDIATE` に入れ、`ctx.assert_lease()` を同じ取引で通す。分割は Rechecker 側で行い、batch の合間にキャンセルを見る |
+| 6 [minor] | 既に無効化された行を `refuse` すると、最初の理由と時刻が二次的な文言で上書きされる | `COALESCE` で最初の理由と時刻を残す（claim は落とす） |
+
+**変異試験（すべて検出）:** 識別子の秘密検査／文字の検査を外す・`assetId` を検めない
+／移行で指紋へ変換しない／既存資産のタグ前の見直しを消す／preflight の後の 2 度目の
+prepare を消す／batch の合間のキャンセル確認を消す・分割をやめて全件を adapter に渡す
+／stamp をまとめず 1 行ずつ書く／無効化の理由を上書きする。
+
+**変異を「成立する形」で当てる難しさの実例。** `range` の刻みだけを変える変異は、
+スライスの側が `BULK_CHECK_BATCH` を見たままなので**分割が消えない**。素通りを
+「テストが弱い」と読み違えかけた。ループ全体を元の形（全件を adapter へ）へ戻す
+変異に置き換えて、初めて検出できた。

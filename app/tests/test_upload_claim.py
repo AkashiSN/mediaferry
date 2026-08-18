@@ -437,3 +437,30 @@ def test_a_completed_record_from_an_old_epoch_stays_as_history(db, world):
 
     assert uploads.invalidate_old_epoch(destination_id, epoch, "向き先が変わった") == 0
     assert uploads.get(record["id"])["invalidated_at"] is None
+
+
+def test_refusing_an_already_invalidated_record_keeps_the_first_reason(db, world):
+    """**最初の無効化の理由と時刻を残す。**
+
+    上書きすると、監査で見えるのが「無効化されている: 元の理由」という
+    二次的な文言になり、いつ何が起きたのかが読めなくなる。
+    """
+    _, _, destination_id, uploads = world
+    a_pending(db, world)
+    claimed = uploads.claim_next(destination_id, "job-1", "tok-1")
+    # claim を持ったまま、別の経路（グループの構成変更）で無効化された状態。
+    db.execute(
+        "UPDATE upload_record SET invalidated_at = '2026-08-18T00:00:00+00:00',"
+        " invalidated_reason = 'グループの構成が変わった' WHERE id = ?",
+        (claimed["id"],),
+    )
+    first = db.execute("SELECT invalidated_at, invalidated_reason FROM upload_record").fetchone()
+
+    uploads.refuse(claimed["id"], "tok-1", "無効化されている: グループの構成が変わった")
+
+    row = db.execute("SELECT * FROM upload_record").fetchone()
+    assert row["invalidated_reason"] == first["invalidated_reason"]
+    assert row["invalidated_at"] == first["invalidated_at"]
+    # claim は落ちている（所有したまま残さない）。
+    assert row["claim_token"] is None
+    assert row["state"] == "pending"

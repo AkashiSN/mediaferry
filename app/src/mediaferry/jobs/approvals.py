@@ -67,6 +67,8 @@ class ApprovalService:
             # キャンセル済みのジョブから出さない（§14）。別のライブラリの資産の
             # 日時を書き換えないための確認であることは変わらない。
             self._preflight.assert_target(revision["id"])
+            # 再確認の間にキャンセルが commit されていないか、もう一度見る。
+            self._uploads.prepare_side_effect(ctx, record_id, "fixing_datetime")
             with self._open_client(revision) as client:
                 # **PUT も pulse で囲む。** 遅い相手だと 60 秒を超え、claim が
                 # 切れて「リモートは変更済みなのに commit できない」状態になる。

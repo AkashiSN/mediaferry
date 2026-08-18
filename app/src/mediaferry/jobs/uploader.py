@@ -194,13 +194,15 @@ class Uploader:
         70 GiB の送信が TTL を跨いだ後の tag / 日時 PUT が**別のライブラリへ
         飛ぶ**（asset ID が偶然存在すれば他人の資産を書き換える）。
         """
-        # **順序が意味を持つ。** 向き先の再確認も鍵を付けた要求なので、所有権を
-        # 確かめる前に出さない（§14）。claim の直後にキャンセルが commit された
-        # ときも、1 要求も出さずに降りる。
+        # **prepare → preflight → prepare の 2 段。** 向き先の再確認も鍵を付けた
+        # 要求なので、所有権を確かめる前に出さない（§14）。そして再確認は相手待ち
+        # なので、リース（60 秒）より長くなりうる。前だけに置くと「直前に確かめた」
+        # という保証が消え、確認している間に commit されたキャンセルを見落とす。
         self._uploads.prepare_side_effect(
             ctx, record["id"], state, verify_eligibility=verify_eligibility
         )
         self._preflight.assert_target(revision_id)
+        self._uploads.prepare_side_effect(ctx, record["id"], state)
         if progress is not None:
             # ここを抜けた後は、リモートに触った可能性がある。
             progress.touched_remote = True
@@ -228,6 +230,11 @@ class Uploader:
                 origin = "created_by_us"
             else:
                 origin = "pre_existing" if first_check == "reject" else "unknown"
+                # **こちらはまだ何も変えていない。** 既存資産へのタグ付けが
+                # 最初の変更になるので、その前に §10 の根拠を見直す（§8）。
+                # 自分が作った資産（`created_by_us`）は既に置いてあるので、
+                # ここで見送っても取り消せない。
+                self._guard(ctx, record, revision_id, "checking", progress, verify_eligibility=True)
             self._uploads.advance_owned(
                 ctx,
                 record["id"],

@@ -14,13 +14,14 @@ import sqlite3
 from collections.abc import Callable
 from dataclasses import dataclass
 
-from ..adapters.immich import ImmichClient
+from ..adapters.immich import BULK_CHECK_BATCH, ImmichClient
 from ..clock import now_iso
 from ..db.jobs import JobContext
 from ..db.uploads import UploadRepository
 from .preflight import PreflightCache
 
-# 1 回の照合に載せる件数は ImmichClient が分割する。ここでは全件を渡す。
+# **分割はこちらで行う。** adapter に全件を渡すと、その内部ループの合間に
+# キャンセルを見る隙が無く、最初の batch の途中で中止しても残りを全部送る。
 COMPLETE = "complete"
 
 
@@ -65,40 +66,51 @@ class Rechecker:
         if not records:
             return RecheckOutcome(0, 0, 0, 0)
 
+        outcomes = {}
         with self._open_client(revision) as client:
-            outcomes = client.bulk_upload_check([(row["id"], row["checksum"]) for row in records])
+            for start in range(0, len(records), BULK_CHECK_BATCH):
+                if start and ctx.cancelled():
+                    # 続きは送らない。ここまでの結果も書かずに降りる。
+                    return RecheckOutcome(0, 0, 0, 0)
+                batch = records[start : start + BULK_CHECK_BATCH]
+                outcomes.update(
+                    client.bulk_upload_check([(row["id"], row["checksum"]) for row in batch])
+                )
 
         # **照合の最中にキャンセルされていたら、結果を書かずに降りる。** 書くと
         # 「キャンセルした」と表示しながら、リモートの観測を反映したことになる。
         if ctx.cancelled():
             return RecheckOutcome(0, 0, 0, 0)
 
-        trashed = vanished = restored = 0
-        for row in records:
-            outcome = outcomes.get(row["id"])
-            if outcome is None:
-                continue
-            if outcome.action == "accept":
-                # サーバに無い。**送り直さない。** 見えるようにするだけ。
-                self._stamp(row, asset_id=None, is_trashed=0)
-                vanished += 1
-                ctx.emit(
-                    "warning",
-                    "リモートに存在しない資産がある",
-                    {"upload_record_id": row["id"]},
-                )
-                continue
-            self._stamp(row, asset_id=outcome.asset_id, is_trashed=1 if outcome.is_trashed else 0)
-            if outcome.is_trashed and not row["remote_is_trashed"]:
-                trashed += 1
-            if not outcome.is_trashed and row["remote_is_trashed"]:
-                restored += 1
+        vanished = [row for row in records if _action_of(outcomes, row) == "accept"]
+        present = [row for row in records if _action_of(outcomes, row) == "reject"]
+        # **結果は 1 つのトランザクションで書く。** 1 行ずつ commit すると、
+        # 途中でキャンセルやリースの失効が起きたときに「全件か 0 件か」ではなく
+        # 中途半端な状態が残る。リースも同じ取引の中で確かめる。
+        self._uploads.stamp_many(
+            ctx,
+            [(row["id"], None, 0) for row in vanished]
+            + [
+                (row["id"], outcomes[row["id"]].asset_id, int(outcomes[row["id"]].is_trashed))
+                for row in present
+            ],
+            checked_at=now_iso(),
+        )
+        for row in vanished:
+            # **送り直さない。** 見えるようにするだけ。
+            ctx.emit("warning", "リモートに存在しない資産がある", {"upload_record_id": row["id"]})
+        trashed = sum(
+            1 for row in present if outcomes[row["id"]].is_trashed and not row["remote_is_trashed"]
+        )
+        restored = sum(
+            1 for row in present if not outcomes[row["id"]].is_trashed and row["remote_is_trashed"]
+        )
         return RecheckOutcome(
-            checked=len(records), trashed=trashed, vanished=vanished, restored=restored
+            checked=len(records), trashed=trashed, vanished=len(vanished), restored=restored
         )
 
-    def _stamp(self, row: sqlite3.Row, asset_id: str | None, is_trashed: int) -> None:
-        """claim を取らずに更新する. `complete` の行は誰も所有していない."""
-        self._uploads.stamp_remote(
-            row["id"], asset_id=asset_id, is_trashed=is_trashed, checked_at=now_iso()
-        )
+
+def _action_of(outcomes: dict, record_id) -> str | None:  # noqa: ANN001, ANN401
+    """応答に無い行は触らない（`_parsed_check` が全単射を保証するので通常は無い）."""
+    outcome = outcomes.get(record_id["id"])
+    return None if outcome is None else outcome.action

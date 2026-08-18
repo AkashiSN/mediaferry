@@ -518,11 +518,18 @@ class UploadRepository:
         `IntegrityError` になる。無効化された行は claim の条件
         （`invalidated_at IS NULL`）で弾かれるので、`pending` に戻しても
         拾われない。
+
+        **既に無効化されている行の理由と時刻は上書きしない。** claim を持っている
+        間に別の経路（グループの構成変更など）で無効化されることがあり、
+        上書きすると監査で見えるのが二次的な文言に変わって、いつ何が起きたのかを
+        読めなくする。
         """
         self._cas(
             record_id,
             token,
-            "state = 'pending', invalidated_at = ?, invalidated_reason = ?,"
+            "state = 'pending',"
+            " invalidated_at = COALESCE(invalidated_at, ?),"
+            " invalidated_reason = COALESCE(invalidated_reason, ?),"
             " claim_job_id = NULL, claim_token = NULL, claim_expires_at = NULL",
             (now_iso(), reason),
         )
@@ -629,6 +636,30 @@ class UploadRepository:
                 (destination_id, target_epoch),
             )
         )
+
+    def stamp_many(
+        self,
+        ctx: JobContext,
+        stamps: Sequence[tuple[str, str | None, int]],
+        checked_at: str,
+    ) -> None:
+        """再確認の結果を**まとめて 1 つのトランザクションで**書く.
+
+        1 行ずつ commit すると、途中でキャンセルやリースの失効が起きたときに
+        中途半端な状態が残る。`ctx.assert_lease()` を同じ取引に入れるので、
+        リースが切れていれば 1 行も書かない（`cancelled()` はジョブの状態しか
+        見ないので、これが要る）。
+
+        **`complete` の行だけ**を対象にする。進行中の行には所有者がいる。
+        """
+        with immediate(self._conn):
+            ctx.assert_lease()
+            for record_id, asset_id, is_trashed in stamps:
+                self._conn.execute(
+                    "UPDATE upload_record SET remote_asset_id = ?, remote_is_trashed = ?,"
+                    " remote_checked_at = ?, updated_at = ? WHERE id = ? AND state = 'complete'",
+                    (asset_id, is_trashed, checked_at, now_iso(), record_id),
+                )
 
     def stamp_remote(
         self, record_id: str, asset_id: str | None, is_trashed: int, checked_at: str

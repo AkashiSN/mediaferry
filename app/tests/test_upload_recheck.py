@@ -246,6 +246,72 @@ def test_a_recheck_cancelled_during_the_check_writes_nothing(world):
     ]
 
 
+def test_a_recheck_whose_lease_expired_writes_nothing(world):
+    """**キャンセルだけでなくリースの失効も見る。**
+
+    `ctx.cancelled()` はジョブの `status` しか見ない。リースが切れた
+    （＝起動時の回収が同じジョブを別の worker へ渡しうる）状態のまま書くと、
+    2 つの書き手が同じ行を触る。
+    """
+    from mediaferry.db.jobs import LeaseLost
+
+    server, rechecker, ctx, destination_id, db = world
+    before = [row["remote_checked_at"] for row in db.execute("SELECT * FROM upload_record")]
+    db.execute(
+        "UPDATE job SET lease_expires_at = '2020-01-01T00:00:00+00:00' WHERE id = ?",
+        (ctx.job_id,),
+    )
+
+    with pytest.raises(LeaseLost):
+        rechecker.run(ctx, destination_id)
+
+    after = [row["remote_checked_at"] for row in db.execute("SELECT * FROM upload_record")]
+    assert after == before
+
+
+def test_a_recheck_cancelled_between_batches_sends_no_more(world, monkeypatch):
+    """**batch の合間にもキャンセルを見る。**
+
+    1 回の照合が 500 件ずつに割れるので、adapter に任せきりにすると、最初の
+    batch の途中でキャンセルしても残りを全部送ってしまう。
+    """
+    server, rechecker, ctx, destination_id, db = world
+    # **1 件だけだと分割が起きない。** 3 件にして、batch を 1 に絞る。
+    profile = ProfileRegistry(db).current("dji-osmo")
+    revision_id = db.execute("SELECT destination_revision_id FROM upload_record").fetchone()[0]
+    for index in (2, 3):
+        extra = a_media_file(
+            db,
+            (profile.profile_id, profile.revision_id),
+            rel_path=f"library/dji-osmo/DCIM/{index}.MP4",
+            sha1=f"{index:040d}",
+        )
+        UploadRepository(
+            db, ProfileRegistry(db), DestinationRepository(db, CredentialStore(db, _BOXES[id(db)]))
+        ).create_pairs([extra], [destination_id])
+    db.execute(
+        "UPDATE upload_record SET state = 'complete', remote_asset_id = 'asset-1',"
+        " remote_is_trashed = 0, destination_revision_id = ? WHERE state = 'pending'",
+        (revision_id,),
+    )
+    assert db.execute("SELECT count(*) FROM upload_record").fetchone()[0] == 3
+    # **adapter 側も 1 件ずつにする。** ここを絞らないと、全件を adapter へ
+    # 渡す実装（＝直したかった形）でも要求は 1 本に見え、区別が付かない。
+    monkeypatch.setattr("mediaferry.jobs.recheck.BULK_CHECK_BATCH", 1)
+    monkeypatch.setattr("mediaferry.adapters.immich.BULK_CHECK_BATCH", 1)
+    real = ImmichClient.bulk_upload_check
+
+    def cancel_after_first(self, items):  # noqa: ANN001, ANN202
+        db.execute("UPDATE job SET status = 'cancelling' WHERE id = ?", (ctx.job_id,))
+        return real(self, items)
+
+    monkeypatch.setattr(ImmichClient, "bulk_upload_check", cancel_after_first)
+
+    rechecker.run(ctx, destination_id)
+
+    assert server.requests.count(("POST", "/api/assets/bulk-upload-check")) == 1
+
+
 def test_a_record_in_flight_is_not_stamped_by_a_recheck(world):
     """進行中の行には所有者がいる. claim を持たない経路では触らない."""
     from mediaferry.db.jobs import JobStore

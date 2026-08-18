@@ -21,7 +21,7 @@ from __future__ import annotations
 import base64
 import logging
 from collections.abc import Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
@@ -90,6 +90,8 @@ def to_base64_checksum(sha1_hex: str) -> str:
 class ImmichClient:
     def __init__(self, base_url: str, api_key: str, timeout_seconds: int = 86400) -> None:
         self._base_url = base_url.rstrip("/")
+        # 相手から受け取った識別子と突き合わせるためだけに持つ（`_identifier`）。
+        self._api_key = api_key
         self._client = httpx.Client(
             base_url=self._base_url,
             headers={"x-api-key": api_key, "accept": "application/json"},
@@ -124,7 +126,18 @@ class ImmichClient:
                 "assets": [{"id": key, "checksum": to_base64_checksum(sha1)} for key, sha1 in batch]
             }
             body = self._request("POST", "/api/assets/bulk-upload-check", json=payload).json()
-            outcomes.update(_parsed_check(body, [key for key, _ in batch]))
+            parsed = _parsed_check(body, [key for key, _ in batch])
+            outcomes.update(
+                {
+                    key: outcome
+                    if outcome.asset_id is None
+                    else replace(
+                        outcome,
+                        asset_id=self._identifier(outcome.asset_id, "bulk-upload-check"),
+                    )
+                    for key, outcome in parsed.items()
+                }
+            )
         return outcomes
 
     def upload_asset(
@@ -158,9 +171,26 @@ class ImmichClient:
         status = body.get("status")
         if status not in UPLOAD_STATUSES:
             raise ImmichProtocolError("POST /api/assets の status が未知")
-        if not body.get("id"):
-            raise ImmichProtocolError("POST /api/assets の応答に id が無い")
-        return UploadOutcome(asset_id=body["id"], status=status)
+        asset_id = _required_str(body, "id", "POST /api/assets")
+        return UploadOutcome(asset_id=self._identifier(asset_id, "POST /api/assets"), status=status)
+
+    def _identifier(self, value: str, label: str) -> str:
+        """相手から受け取った識別子を、保存・URL へ使う前に検めた上で返す.
+
+        **相手は「こちらが読む値」を選べる。** 侵害された Immich は、受け取った
+        `x-api-key` を `assetId` やタグの id として返せる。形は仕様どおりなので
+        型の検査では落ちない。これを保存すると、暗号化したはずの鍵の平文が
+        `upload_record.remote_asset_id` と API 応答に現れる。URL へ入れれば
+        `_checked` の例外文（`job.error` とログ）にも届く。
+
+        経路ごとに塞ぐのではなく、**adapter の境界で 1 度だけ**弾く。
+        """
+        if self._api_key in value:
+            raise ImmichProtocolError(f"{label} の識別子に API キーが含まれている")
+        if any(character in value for character in "/?#") or value.strip() != value:
+            # 次の要求の path に入る値なので、経路を変えられる形を受け取らない。
+            raise ImmichProtocolError(f"{label} の識別子に使えない文字がある")
+        return value
 
     def find_tag(self, name: str) -> str | None:
         """既存のタグを探す（読み取りのみ）."""
@@ -171,7 +201,7 @@ class ImmichClient:
             if not isinstance(tag, dict) or not isinstance(tag.get("name"), str):
                 raise ImmichProtocolError("GET /api/tags の要素の形が違う")
             if tag["name"] == name:
-                return _required_str(tag, "id", "GET /api/tags")
+                return self._identifier(_required_str(tag, "id", "GET /api/tags"), "GET /api/tags")
         return None
 
     def create_tag(self, name: str) -> str:  # noqa: D401
@@ -181,11 +211,8 @@ class ImmichClient:
         ごとに所有権と向き先を確かめる必要があり、探索と作成が 1 メソッドに
         まとまっていると、その間に guard を挟めない。
         """
-        return _required_str(
-            _as_object(self._request("POST", "/api/tags", json={"name": name}), "POST /api/tags"),
-            "id",
-            "POST /api/tags",
-        )
+        body = _as_object(self._request("POST", "/api/tags", json={"name": name}), "POST /api/tags")
+        return self._identifier(_required_str(body, "id", "POST /api/tags"), "POST /api/tags")
 
     def ensure_tag(self, name: str) -> str:
         """探して無ければ作る. **guard を挟めないので、ジョブからは使わない。**

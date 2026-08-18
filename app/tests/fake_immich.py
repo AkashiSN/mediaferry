@@ -47,6 +47,11 @@ class FakeImmich:
         # 「こちらが読む値」に秘密を混ぜてきたとき、それが DB・API 応答・
         # 例外・ログのどこにも出ないことを確かめるためのつまみ。
         self.echo_key_in_scalars: bool = False
+        # **「正常な応答」の識別子として鍵を返す。** 形は仕様どおりなので
+        # 型の検査では落ちない。保存・URL への組み立てまで到達しうる値。
+        self.echo_key_as_ids: bool = False
+        # タグの id に、次の要求の経路を変えられる値を返す。
+        self.path_in_tag_id: bool = False
         self._server: ThreadingHTTPServer | None = None
 
     # ------------------------------------------------------------------
@@ -92,6 +97,10 @@ class FakeImmich:
         if method == "POST" and path == "/api/assets":
             return self._upload(body, headers)
         if method == "GET" and path == "/api/tags":
+            if self.echo_key_as_ids:
+                return 200, [{"id": API_KEY, "name": name} for name in self.tags or ["dji"]]
+            if self.path_in_tag_id:
+                return 200, [{"id": "../../users/me", "name": name} for name in ["dji"]]
             return 200, [{"id": tag_id, "name": name} for name, tag_id in self.tags.items()]
         if method == "POST" and path == "/api/tags":
             name = json.loads(body)["name"]
@@ -109,6 +118,19 @@ class FakeImmich:
         return 404, {"message": f"no route for {method} {path}"}
 
     def _bulk_check(self, payload):  # noqa: ANN001, ANN202
+        if self.echo_key_as_ids:
+            return {
+                "results": [
+                    {
+                        "id": item["id"],
+                        "action": "reject",
+                        "reason": "duplicate",
+                        "assetId": API_KEY,
+                        "isTrashed": False,
+                    }
+                    for item in payload["assets"]
+                ]
+            }
         if self.echo_key_in_scalars:
             # 未知の action として鍵を返す。クライアントは protocol error にする。
             return {
@@ -140,6 +162,8 @@ class FakeImmich:
         self.uploads.append(
             {**{k: v for k, v in fields.items() if k != "assetData"}, "size": len(data)}
         )
+        if self.echo_key_as_ids:
+            return 201, {"id": API_KEY, "status": "created"}
         if self.echo_key_in_scalars:
             return 200, {"id": "asset-echo", "status": API_KEY}
         existing = self.assets.get(checksum)

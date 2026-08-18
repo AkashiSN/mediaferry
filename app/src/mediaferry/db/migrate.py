@@ -17,6 +17,8 @@ import re
 import sqlite3
 from pathlib import Path
 
+from ..core.destinations.identity import fingerprint
+
 MIGRATIONS_DIR = Path(__file__).parent / "migrations"
 
 _VERSION_RE = re.compile(r"^(\d{4})_")
@@ -34,6 +36,9 @@ class MigrationError(RuntimeError):
 
 def apply_migrations(conn: sqlite3.Connection) -> list[int]:
     """未適用の版を順に適用し、適用した版番号を返す."""
+    # **SQLite に SHA-256 が無い。** データを作り替える版のために、こちらから
+    # 関数を渡す（`0005`）。接続に紐づくので、他の経路には漏れない。
+    conn.create_function("mediaferry_fingerprint", 1, fingerprint, deterministic=True)
     conn.execute(
         "CREATE TABLE IF NOT EXISTS schema_migration ("
         " version INTEGER PRIMARY KEY,"

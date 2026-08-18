@@ -176,3 +176,60 @@ def test_immediate_takes_the_write_lock_immediately(tmp_path):
         b.execute("BEGIN IMMEDIATE")
     a.close()
     b.close()
+
+
+def test_an_existing_raw_remote_id_is_converted_to_a_fingerprint(tmp_path):
+    """**指紋化より前に作られた DB の平文を残さない**（§12.3）.
+
+    残ると、相手が API キーを echo していた場合にその平文が DB に居座り、
+    一覧の API 応答にも出続ける。`preflight` も生値と指紋を比べて、
+    変わっていない向き先を「変わった」と誤判定する。
+    """
+    from mediaferry.core.destinations.identity import fingerprint
+
+    conn = Database(tmp_path / "old.sqlite3").connect()
+    apply_migrations(conn)
+    _a_destination_revision(conn, "user-a")
+
+    # 指紋化の版が入る前の DB を作る（適用の記録を外し、生値へ戻す）。
+    conn.execute("DELETE FROM schema_migration WHERE version = 5")
+    conn.execute("DROP TRIGGER destination_revision_no_update")
+    conn.execute("UPDATE destination_revision SET remote_user_id = 'user-a'")
+    # 古い DB では trigger が居るところから始まる。
+    conn.execute(
+        "CREATE TRIGGER destination_revision_no_update BEFORE UPDATE ON destination_revision"
+        " BEGIN SELECT RAISE(ABORT, 'destination_revision is immutable'); END"
+    )
+
+    assert apply_migrations(conn) == [5]
+
+    assert conn.execute("SELECT remote_user_id FROM destination_revision").fetchone()[0] == (
+        fingerprint("user-a")
+    )
+    # 版を戻した trigger も元どおり（リビジョンは不変のまま）。
+    with pytest.raises(sqlite3.IntegrityError):
+        conn.execute("UPDATE destination_revision SET remote_user_id = 'x'")
+    conn.close()
+
+
+def _a_destination_revision(conn, user_id):
+    """転送先とリビジョンを 1 つ作る（repository を通さず、最小の行だけ）."""
+    when = "2026-08-18T00:00:00+00:00"
+    conn.execute(
+        "INSERT INTO upload_destination (id, name, kind, enabled, created_at)"
+        " VALUES ('d-1', 'home', 'immich', 1, ?)",
+        (when,),
+    )
+    conn.execute(
+        "INSERT INTO destination_credential (id, destination_id, revision, secret_encrypted,"
+        " key_fingerprint, created_at) VALUES ('c-1', 'd-1', 1, X'00', 'fp', ?)",
+        (when,),
+    )
+    conn.execute(
+        "INSERT INTO destination_revision (id, destination_id, revision, target_epoch,"
+        " base_url, public_url, credential_id, remote_user_id, server_instance_id,"
+        " verified_at, created_at)"
+        " VALUES ('r-1', 'd-1', 1, 1, 'http://immich.invalid:2283', NULL, 'c-1', ?, NULL, ?, ?)",
+        (user_id, when, when),
+    )
+    conn.execute("UPDATE upload_destination SET current_revision_id = 'r-1' WHERE id = 'd-1'")

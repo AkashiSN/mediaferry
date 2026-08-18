@@ -1,3 +1,5 @@
+import base64
+import hashlib
 import os
 
 import pytest
@@ -356,6 +358,70 @@ def test_a_record_that_loses_its_ground_before_the_send_is_not_sent(world, db, m
     row = record_of(db)
     assert row["state"] == "pending"
     assert row["invalidated_at"] is not None
+
+
+def test_an_existing_asset_that_loses_its_ground_is_not_tagged(world, db, monkeypatch):
+    """**既存資産にも、最初の変更の前に §10 を見直す。**
+
+    「もうリモートにあるので見送っても取り消せない」は、こちらが作った資産に
+    しか当てはまらない。他人が上げた資産にタグを付けるのは、こちらが起こす
+    最初の変更なので、根拠を失っていたら手を出さない。
+    """
+    server, uploader, ctx, uploads, _, destination_id, media_id = world
+    # 相手には既にある（送信は起きず、reject の分岐へ入る）。
+    checksum = base64.b64encode(hashlib.sha1(PAYLOAD, usedforsecurity=False).digest()).decode()
+    server.assets[checksum] = "asset-9"
+
+    db.execute("DELETE FROM upload_record")
+    media = db.execute("SELECT * FROM media_file WHERE id = ?", (media_id,)).fetchone()
+    group_id = a_merge_group(
+        db, (media["profile_id"], media["profile_revision_id"]), "digest-1", status="failed"
+    )
+    db.execute(
+        "INSERT INTO merge_member (merge_group_id, media_file_id, position, active)"
+        " VALUES (?, ?, 0, 1)",
+        (group_id, media_id),
+    )
+    uploads.create_pairs([media_id], [destination_id])
+
+    real_check = ImmichClient.bulk_upload_check
+
+    def flip_then_check(self, pairs):  # noqa: ANN001, ANN202
+        db.execute("UPDATE merge_group SET status = 'merging' WHERE id = ?", (group_id,))
+        return real_check(self, pairs)
+
+    monkeypatch.setattr(ImmichClient, "bulk_upload_check", flip_then_check)
+
+    uploader.run(ctx, destination_id)
+
+    assert server.tagged == {}
+    assert server.datetimes == {}
+    row = record_of(db)
+    assert row["invalidated_at"] is not None
+
+
+def test_a_cancel_while_the_target_is_re_checked_stops_before_the_send(world, db, monkeypatch):
+    """**preflight の後にもう一度所有権を確かめる。**
+
+    向き先の再確認は相手待ちで、リース（60 秒）より長くなりうる。prepare を
+    その前だけに置くと「直前に確かめた」という保証が消え、確認している間に
+    commit されたキャンセルを見落として送信を始める。
+    """
+    server, uploader, ctx, _, _, destination_id, _ = world
+    real_users_me = ImmichClient.users_me
+
+    def cancel_during_users_me(self):  # noqa: ANN001, ANN202
+        body = real_users_me(self)
+        db.execute("UPDATE job SET status = 'cancelling' WHERE id = ?", (ctx.job_id,))
+        return body
+
+    monkeypatch.setattr(ImmichClient, "users_me", cancel_during_users_me)
+
+    uploader.run(ctx, destination_id)
+
+    # 照合すら始めていない（bulk-upload-check が出ていない）。
+    assert ("POST", "/api/assets/bulk-upload-check") not in server.requests
+    assert server.uploads == []
 
 
 def test_a_cancel_right_after_the_claim_sends_no_request(world, db, monkeypatch):

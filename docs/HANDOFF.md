@@ -27,7 +27,7 @@
 ### 検証状態
 
 ```
-uv run pytest                  829 passed, 4 deselected
+uv run pytest                  838 passed, 4 deselected
 uv run pytest -m needs_root      1 passed   ← detached mount の実証
 uv run pytest -m needs_immich    3 件       ← 実 Immich が要る。既定では走らない
 uv run ruff check .            All checks passed
@@ -164,7 +164,7 @@ blocker として指摘されたもの**で、理屈で戻すと同じ穴に落�
 
 **実装・検証とも済んでいる**（実 Immich での確認だけ残り）。根拠は `design.md`
 §21 の「Phase 3 の実装で確定した事項」と `phase3-plan.md` の各タスク。
-**3 巡のレビューで blocker として挙がったものを含む。**
+**4 巡のレビューで blocker として挙がったものを含む。**
 
 | 判断 | 理由 |
 | --- | --- |
@@ -186,6 +186,10 @@ blocker として指摘されたもの**で、理屈で戻すと同じ穴に落�
 | **最初の 1 バイトの直前に §10 の根拠を見直す**（`verify_eligibility`） | claim 直後の判定はその時点の状態でしかない。判定から送信までの間に結合をやり直されると、結合中のグループの構成ファイルを送る。タグ・日時の前では見直さない（見送っても取り消せない） |
 | **一度確定した `created_by_us` は降格させない** | 後処理の 503 で再開すると、自分が上げた資産は当然 `reject` で返る。付け直すと `unknown` になり、タグが付かず日時が承認待ちになる |
 | **リースの確認は preflight より先** | preflight の `users/me` も鍵付きの要求。キャンセル済みのジョブから出さない |
+| **相手から受け取った識別子は adapter の境界で検める** | `assetId` は `remote_asset_id` として保存され API 応答にも出る。タグの id は次の要求の URL に入る。**「正常な形」で鍵を返されると、例外文を綺麗にしただけでは平文が通る。** 4 巡目の blocker |
+| **guard は prepare → preflight → prepare の 2 段** | 再確認は相手待ちでリース（60 秒）より長くなりうる。前だけに置くと「直前に確かめた」保証が消える |
+| **既存資産へのタグ付けの前にも §10 を見直す** | 「もうリモートにあるので取り消せない」は、こちらが作った資産にしか当てはまらない |
+| **再確認の結果は 1 つのトランザクションで書き、分割も Rechecker 側で行う** | 1 行ずつ commit すると中途半端な状態が残る。adapter に全件を渡すと、内部ループの合間にキャンセルを見られない |
 | **fake Immich はループバックで実際に listen させる** | httpx 0.28 の `ASGITransport` は非同期用で、同期の `httpx.Client` から使えない。実物の httpx を通すのでプロトコルの取り違えも見逃さない |
 
 ---
@@ -291,9 +295,10 @@ codex には readiness handshake が無いので `spawn.sh` は待たずに返�
 
 1. **実 Immich に `-m needs_immich` を当てる**（§1「残っていること」1）。
    タグと日時更新のエンドポイントは Phase 0 で実測していない
-2. **4 巡目のレビューを依頼するかを決める。** 3 巡目の修正は、`remote_user_id`
-   の意味（指紋）と `prepare_side_effect` の責務を変えている。**Phase 2 でも
-   2 巡目の blocker は「直した箇所の周辺」から出た**ので、見せるならそこ
+2. **5 巡目のレビューを依頼するかを決める。** 3・4 巡目とも、**指摘は全件
+   「直した箇所の周辺」から出ている**（Phase 2 の 2 巡目と同じ傾向）。4 巡目の
+   修正で新しくなったのは、adapter の識別子検査・`0005` の移行・2 段 guard・
+   `stamp_many`。回すならそこを見せる
 3. **`phase1-manual-checklist.md` を TrueNAS ホストで実行する。** 特に 11 番
    （mtime の解釈）は実装の前提の確認なので、結果を `phase0-findings.md` に残す。
    12 番（`attached_pic`）は Phase 2 で足した項目
