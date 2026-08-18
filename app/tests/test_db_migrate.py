@@ -296,6 +296,7 @@ def test_a_database_from_the_previous_release_still_opens(tmp_path):
         "0005_fingerprint_remote_identity.sql": None,
         "0006_scrub_stored_identifiers.sql": None,
         "0007_reset_untrusted_remote_state.sql": None,
+        "0008_sessions.sql": None,
     }
     shipped = sorted(path.name for path in MIGRATIONS_DIR.glob("*.sql"))
     assert shipped == sorted(frozen), "版を足したら、この一覧にも足す"
