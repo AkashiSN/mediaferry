@@ -11,8 +11,9 @@
 ## 1. 現在地
 
 **Phase 1〜3 は実装・検証とも完了。** Phase 3 は計画のレビューを 2 巡してから
-14 タスクを実行した。**残るのは実 Immich に当てる `needs_immich` の 3 件と、
-実装差分の 3 巡目レビュー。** 次のフェーズは 4（Web UI）。
+14 タスクを実行し、**実装差分の 3 巡目レビュー（blocker 1 / major 4 / minor 1）も
+全件反映済み**。**残るのは実 Immich に当てる `needs_immich` の 3 件。**
+次のフェーズは 4（Web UI）。
 
 | Phase | 内容 | 状態 |
 | --- | --- | --- |
@@ -26,7 +27,7 @@
 ### 検証状態
 
 ```
-uv run pytest                  820 passed, 4 deselected
+uv run pytest                  829 passed, 4 deselected
 uv run pytest -m needs_root      1 passed   ← detached mount の実証
 uv run pytest -m needs_immich    3 件       ← 実 Immich が要る。既定では走らない
 uv run ruff check .            All checks passed
@@ -163,7 +164,7 @@ blocker として指摘されたもの**で、理屈で戻すと同じ穴に落�
 
 **実装・検証とも済んでいる**（実 Immich での確認だけ残り）。根拠は `design.md`
 §21 の「Phase 3 の実装で確定した事項」と `phase3-plan.md` の各タスク。
-**2 巡のレビューで blocker として挙がったものを含む。**
+**3 巡のレビューで blocker として挙がったものを含む。**
 
 | 判断 | 理由 |
 | --- | --- |
@@ -180,6 +181,11 @@ blocker として指摘されたもの**で、理屈で戻すと同じ穴に落�
 | **URL の検証は接続の検証より先** | 逆にすると `javascript:` のような値でもまず接続を試し、400 ではなく 502 を返す |
 | **`refuse` は所有を落とすと同時に `state` を `pending` へ戻す** | 進行中の状態のまま所有だけ外すと `upload_record` の CHECK に触れる |
 | **承認はジョブ、却下は同期** | 承認はリモートの日時を書き換えるのでリースとキャンセルの下で行う。同じレコードの承認が実行待ちなら 409 で断る（積めると 1 本目の後の残りが軒並み失敗として並ぶ） |
+| **相手は「こちらが読む値」を選べる。`remote_user_id` は指紋（SHA-256）で保存する** | 侵害された転送先は、受け取った `x-api-key` を `users/me` の `id` や `POST /api/assets` の `status` として返せる。生の値を保存・引用すると、**暗号化したはずの鍵の平文が DB の列・API 応答・例外文（`job.error` とログ）に現れる**。用途は等値比較の guard だけなので指紋で足りる。3 巡目の blocker |
+| **`create_pairs` は現行リビジョンを INSERT と同じトランザクションで読む** | 外で読むと、読んだ後・書く前に epoch が進んで無効化まで済み、旧 epoch の行がすり抜ける。claim されないまま次の起動の掃除まで残る |
+| **最初の 1 バイトの直前に §10 の根拠を見直す**（`verify_eligibility`） | claim 直後の判定はその時点の状態でしかない。判定から送信までの間に結合をやり直されると、結合中のグループの構成ファイルを送る。タグ・日時の前では見直さない（見送っても取り消せない） |
+| **一度確定した `created_by_us` は降格させない** | 後処理の 503 で再開すると、自分が上げた資産は当然 `reject` で返る。付け直すと `unknown` になり、タグが付かず日時が承認待ちになる |
+| **リースの確認は preflight より先** | preflight の `users/me` も鍵付きの要求。キャンセル済みのジョブから出さない |
 | **fake Immich はループバックで実際に listen させる** | httpx 0.28 の `ASGITransport` は非同期用で、同期の `httpx.Client` から使えない。実物の httpx を通すのでプロトコルの取り違えも見逃さない |
 
 ---
@@ -283,14 +289,11 @@ codex には readiness handshake が無いので `spawn.sh` は待たずに返�
 
 ### 手順
 
-1. **実装差分の 3 巡目レビューを codex に依頼する。** 2 巡目までは*計画*を
-   読ませたもので、**文書に埋め込んだコードは型検査も実行もできない**ため、
-   機械的な欠陥が毎巡残った（実際、実装時に `claim_job_id` の外部キー、
-   monkeypatch の対象モジュール、ビルトインの `tag_pre_existing` など複数が
-   落ちた）。**動くコードを読ませるのはここが初めて**になる。先にコミットして
-   hash を渡す（§5「レビューの依頼先」）
-2. **実 Immich に `-m needs_immich` を当てる**（§1「残っていること」1）。
+1. **実 Immich に `-m needs_immich` を当てる**（§1「残っていること」1）。
    タグと日時更新のエンドポイントは Phase 0 で実測していない
+2. **4 巡目のレビューを依頼するかを決める。** 3 巡目の修正は、`remote_user_id`
+   の意味（指紋）と `prepare_side_effect` の責務を変えている。**Phase 2 でも
+   2 巡目の blocker は「直した箇所の周辺」から出た**ので、見せるならそこ
 3. **`phase1-manual-checklist.md` を TrueNAS ホストで実行する。** 特に 11 番
    （mtime の解釈）は実装の前提の確認なので、結果を `phase0-findings.md` に残す。
    12 番（`attached_pic`）は Phase 2 で足した項目
