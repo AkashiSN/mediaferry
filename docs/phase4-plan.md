@@ -24,9 +24,19 @@
 | 結合グループの手動作成・構成変更・破棄・再結合（`superseded_by_id`）—— Phase 3 の先送り | 継ぎ目サムネイル → Phase 5（§13 の「検証結果と継ぎ目サムネイル」の後半） |
 | 転送先の `PATCH`（改名・有効無効・新リビジョン） | 鍵のローテート（`SECRET_KEY`）→ Phase 5 |
 | 8 画面（ダッシュボード / デバイス / ライブラリ / 転送先 / 結合 / 承認待ち / ジョブ / 設定） | プロファイル**編集** UI → Phase 5（読み取りと `test` は Phase 4） |
-| アップロードのワーカー多重化（`UPLOAD_CONCURRENCY` を効かせる） | |
+| **API のエラー形式（`{code, detail}`）と code の一覧** —— 画面が日本語のメッセージを出すのに要る | **アップロードのワーカー多重化（`UPLOAD_CONCURRENCY`）→ Phase 5**（下記） |
+| **リモートの日時の観測**（承認画面の「現在値」に要る。列と移行を含む） | |
+| **E2E の土台**（実 FastAPI + ビルド資産 + worker + fake broker + fake Immich 2 台） | |
 
-**`UPLOAD_CONCURRENCY` をここで効かせる。** Phase 3 は「宛先ごとに 1 本のジョブで 1 件ずつ直列」に倒し、設定を読んでいない（`phase3-plan.md` の冒頭）。多重化は**ジョブを増やす方向**で行う —— 1 つのジョブ内で 2 本の HTTP を並行させると、状態遷移の commit を別スレッドから行うことになり `BEGIN IMMEDIATE` が交差する（DB 接続はスコープごとに 1 本、という §3 の契約に触れる）。**宛先が違えばジョブが違う**ので、`JobRunner` が同時に走らせるジョブ本数を `UPLOAD_CONCURRENCY` にする。同じ宛先への 2 本目は作らない（preflight とリースの共有が壊れる）。
+**`UPLOAD_CONCURRENCY` は Phase 5 へ送る。** 当初この計画に入れていたが、計画レビューで
+「範囲に入れたのに Task も完了条件も無い」と blocker として指摘され、調べ直して外した。
+理由は 3 つ。(1) **`design.md` §20 の Phase 4 は「React SPA、SSE、認証、CSRF」**で、多重化は
+入っていない。(2) 現行の `JobRunner` は**全ジョブ種で共通の単一 worker**で、`claim_next()` は
+type も宛先も見ない。同時実行数を上げると import / merge / scan まで並列になり、停止処理
+（走っているジョブの完了を待つ、§3）も 1 本しか見ていない。(3) 「宛先ごとに 1 本」を保つには
+**claim のトランザクションで宛先単位の排他**を取る必要があり、これは Phase 3 で固めた
+リースと停止の契約に触れる**独立した設計課題**である。UI の完了条件（CLI に触れず一連の
+操作が通る）は逐次実行でも満たせるので、ここでは扱わない。
 
 ## この計画の書き方（コードをどこまで埋めるか）
 
@@ -89,345 +99,386 @@ npm --prefix web run test:e2e     # Playwright。ビルド済み資産を FastAP
 ### 実装順序と依存
 
 ```
-1 auth core ─→ 2 sessions ─→ 3 security（Origin/CSRF）─┐
-                                                        ├─→ 10 static ─→ 11 UI 土台 ─→ 12〜16 画面 ─→ 17 受け入れ
-4 SSE ──────────────────────────────────────────────────┤
-5 thumbnails ───────────────────────────────────────────┤
-6 絞り込みとページング ─────────────────────────────────┤
-7 承認待ちの差分 ───────────────────────────────────────┤
-8 結合の手動編集と supersede ───────────────────────────┤
-9 転送先の PATCH ───────────────────────────────────────┘
-   （1〜9 はバックエンド。10 以降がフロント）
+0 error envelope ─┬─→ 3 security（Origin/Host/CSRF）
+1 auth core ─→ 2 sessions ─┘
+                            ├─→ 12 static ─→ 13 UI 土台 ─→ 14〜17 画面 ─→ 18 受け入れ
+5 SSE ──────────────────────┤
+6 thumbnails ───────────────┤
+7 絞り込みとページング ─────┤
+8 リモート日時の観測 ─→ 9 承認待ちの差分 ─┤
+10 結合の手動編集と supersede ─────────────┤
+11 転送先の PATCH ─────────────────────────┘
+
+4 E2E の土台（system harness）と OpenAPI の型生成は、5 以降と**並行して**育てる
 ```
 
-**バックエンドを先に全部通す。** 画面から作ると、足りない API を「画面の都合」で足すことになり、§11 の形から離れる。
+**バックエンドを先に通す。ただし「全部終わってから UI」にはしない。** 画面から作ると
+足りない API を「画面の都合」で足すことになり §11 の形から離れるが、逆に全部終わってから
+接続すると、**読み取りの契約の不足（承認画面の現在値、ダッシュボードの集計、送信の
+enqueue）が最後にまとめて出る**。計画レビューの指摘に従い、**backend の slice ごとに
+OpenAPI の型を生成し、最小の UI consumer を 1 つ通す**形にする（Task 4 の土台をそのために
+先に作る）。
 
 ---
 
-### Task 1: パスワードのハッシュとセッション ID（`core/auth.py`）
+### Task 0: API のエラー形式と code の一覧
 
-**Files:**
-- Create: `app/src/mediaferry/core/auth.py`
-- Test: `app/tests/test_auth_core.py`
-- Modify: `app/pyproject.toml`（`argon2-cffi` を足す）
+**Files:** Create `app/src/mediaferry/api/errors.py` / Modify すべての `routes_*.py` / Test `app/tests/test_api_errors.py`
 
-**Interfaces:**
-- Produces: `hash_password(plain: str) -> str` / `verify_password(stored: str, plain: str) -> bool` / `new_session_id() -> str` / `session_fingerprint(session_id: str) -> str`
+**なぜ最初か:** 画面は「例外の文字列をそのまま出さない」（§13）。だが現行の API は
+`HTTPException(detail="…日本語の文…")` が中心で、**機械が読める code が無い**。この形の
+まま UI を作ると、`ErrorBanner` は未知の code しか受け取れず、結局 detail をそのまま出す
+（＝相手由来の値や内部の文言が画面に再露出する）。**入口の防御より前に決める。**
 
-**なぜ独立したモジュールか:** 「平文を保存しない」「比較は定数時間」「セッション ID を推測させない」という判断はドメインの外側でも内側でもない小さな純粋層で、API とストアの両方から呼ぶ。ここに閉じておけば、Argon2 のパラメータを変えるときに触る場所が 1 つで済む。
-
-**決めること（この計画で確定させる）:**
-- `AUTH_PASSWORD` は **env にしか無い**（`Tier.BOOTSTRAP`、`secret=True`）。DB へ平文を置く経路は作らない（`settings.py` のコメントがそう宣言している）
-- 起動時に env の平文を Argon2 でハッシュし、**メモリ上のハッシュだけ**を保持する。DB にも書かない（書くと「env を変えたのに古いパスワードで入れる」が起きる）
-- **セッション ID は DB に生値で保存しない。** `session_fingerprint`（SHA-256）を保存し、Cookie の値と突き合わせる。DB のバックアップが漏れても、そこから有効な Cookie を作れない（転送先の `remote_user_id` と同じ理屈。`HANDOFF.md` §3）
-
-- [ ] **Step 1: 失敗するテストを書く**
-
-```python
-def test_a_hash_does_not_contain_the_password():
-    stored = hash_password("correct horse")
-    assert "correct horse" not in stored
-    assert stored.startswith("$argon2")
-
-def test_verification_accepts_the_password_and_rejects_others():
-    stored = hash_password("correct horse")
-    assert verify_password(stored, "correct horse")
-    assert not verify_password(stored, "correct horses")
-
-def test_a_broken_hash_is_refused_without_raising():
-    # 壊れた保存値で 500 にしない（認証は落とさず拒む）。
-    assert not verify_password("not-a-hash", "correct horse")
-
-def test_session_ids_are_unpredictable_and_unique():
-    ids = {new_session_id() for _ in range(1000)}
-    assert len(ids) == 1000
-    assert all(len(value) >= 32 for value in ids)
-
-def test_the_stored_fingerprint_is_not_the_session_id():
-    session_id = new_session_id()
-    assert session_fingerprint(session_id) != session_id
-    assert session_fingerprint(session_id) == session_fingerprint(session_id)
+**契約:**
+```json
+{"error": {"code": "destination_unreachable", "detail": "転送先に接続できない", "meta": {}}}
 ```
+- `code` は **snake_case の安定した語彙**。一覧を `errors.py` に置き、増やすときはここに足す
+- `detail` は**こちらが書いた日本語**だけ。相手の応答・例外の文字列・秘密を混ぜない（§14）
+- `meta` は画面が使う構造化データ（件数、対象 id など）。**秘密を入れない**
+- FastAPI の既定のバリデーション誤り（422）も同じ封筒に包む
 
-- [ ] **Step 2: 最小実装**（`argon2.PasswordHasher`、`secrets.token_urlsafe(32)`、`hashlib.sha256`）
-- [ ] **Step 3: 変異試験** —— `verify_password` の例外握りを外す / `new_session_id` の長さを縮める / `session_fingerprint` を恒等関数にする
-- [ ] **Step 4: コミット**
+- [ ] Step 1: 失敗するテストを書く（既知の失敗経路すべてが `code` を返す / 未知の例外は
+      `internal` + 定型文で、例外文字列を含まない / 422 も封筒に入る / 秘密が混ざらない）
+- [ ] Step 2〜4（実装 → 変異 → コミット）
 
 ---
 
-### Task 2: セッションの保存と失効（`db/sessions.py` + `0008_sessions.sql`）
+### Task 1: パスワードのハッシュとセッション ID（`core/auth.py`）—— **実装済み**（`4ca31fd`）
 
-**Files:**
-- Create: `app/src/mediaferry/db/sessions.py`, `app/src/mediaferry/db/migrations/0008_sessions.sql`
-- Test: `app/tests/test_sessions.py`
-- Modify: `app/tests/test_db_migrate.py`（**版の一覧に 0008 を足す**。Task 0 ではなく、ここで足すのを忘れると回帰テストが落ちる）
-
-**Interfaces:**
-- Produces: `SessionStore.create(now) -> tuple[session_id, expires_at]` / `.verify(session_id) -> bool` / `.revoke(session_id)` / `.revoke_all()` / `.purge_expired()`
-
-**スキーマ:**
-
-```sql
-CREATE TABLE auth_session (
-    fingerprint TEXT PRIMARY KEY,       -- SHA-256。生の session id は保存しない
-    created_at  TEXT NOT NULL,
-    expires_at  TEXT NOT NULL,
-    last_seen_at TEXT NOT NULL
-);
-```
-
-**決めること:**
-- **有効期限は 14 日、`last_seen_at` の更新で延長する**（画面を開いたまま寝かせても翌朝使える）。延長は 1 時間に 1 回までにして、毎リクエストの書き込みを避ける
-- **`AUTH_PASSWORD` が変わったら全セッションを失効させる。** 起動時に「今のパスワードのハッシュ」と DB に残る世代印を比べ、違えば `revoke_all()`。パスワードを変える理由は普通「漏れたから」なので、既存の Cookie が生き残ってはいけない
-- 掃除（`purge_expired`）は起動時と 1 日 1 回
-
-- [ ] **Step 1: 失敗するテストを書く**（作成 → 検証 → 失効 → 期限切れは不可 / 生の id が DB に無い / パスワード世代が変わると全部無効）
-- [ ] **Step 2: 最小実装**
-- [ ] **Step 3: 変異試験** —— 期限の比較を反転 / 失効を no-op に / 生の id を保存する / 世代印の比較を外す
-- [ ] **Step 4: コミット**
+`hash_password` / `verify_password` / `new_session_id` / `session_fingerprint`。
+`AUTH_PASSWORD` は env のみ（`Tier.BOOTSTRAP`）。壊れた保存値は例外にせず拒む。
+セッション ID は生値を保存せず指紋で突き合わせる。変異 4 件を検出。
 
 ---
 
-### Task 3: 入口の防御（`api/security.py`）
+### Task 2: セッションの保存と失効（`db/sessions.py` + `0008_sessions.sql`）—— **実装済み**（`9215b53`）
 
-**Files:**
-- Create: `app/src/mediaferry/api/security.py`, `app/src/mediaferry/api/routes_auth.py`
-- Test: `app/tests/test_api_auth.py`, `app/tests/test_api_csrf.py`
-- Modify: `app/src/mediaferry/api/app.py`
+`auth_session`（指紋が主キー）と `auth_password`（1 行）。有効期間 14 日、延長は最後に
+見てから 1 時間経ってから（画面は数秒おきに叩くので毎回は書かない）。
 
-**Interfaces:**
-- Produces: `require_session`（依存関数）/ `require_same_origin`（依存関数）/ `issue_csrf(response)` / `CSRF_COOKIE`, `CSRF_HEADER`
-- `POST /auth/login`（本文 `{"password": ...}`）/ `POST /auth/logout` / `GET /auth/session`（`{"required": bool, "authenticated": bool}`）
-
-**なぜここが薄い層で要るか:** 状態を変える API は既に 20 本以上ある。個々のルータで「認証を見る」「Origin を見る」を書くと、次に足したルータで**書き忘れる**。**既定で全部に掛かる形**（ルータ単位の `dependencies=`）にして、`/auth/login` と `/health` だけを例外にする。
-
-**決めること（安全性の判断。順序が効く）:**
-
-1. **Origin/Host の検証は、認証の有無に関わらず行う。** 認証が無効なら CSRF は無意味に見えるが、**ブラウザが罠サイトから `127.0.0.1:8080` を叩ける**（drive-by CSRF、DNS rebinding）。無設定の LAN 運用でこそ効く
-2. **状態を変えるメソッド（POST/PUT/PATCH/DELETE）だけに掛ける。** GET は Origin を持たない経路がある（`curl`、`fetch` の単純要求）ので、掛けると素の API 利用を壊す
-3. **CSRF は二重送信 Cookie。** `XSRF-TOKEN`（HttpOnly でない）を発行し、要求は `X-CSRF-Token` で送り返す。サーバは**同値であることだけ**を見る（セッションに紐付けない ＝ 認証無効でも同じ経路で動く）
-4. **Cookie は `HttpOnly` / `SameSite=Lax` / `Path=/`。** `Secure` は**要求が https のときだけ**付ける（LAN の http で付けるとログインできない）
-5. 検証の順序は **Origin → CSRF → セッション**。相手に一番情報を与えない順（未認証でも Origin 違反は 403 で落ちる）
-
-```python
-async def require_same_origin(request: Request) -> None:
-    """状態を変える要求だけに掛ける（GET には掛けない）."""
-    if request.method in SAFE_METHODS:
-        return
-    origin = request.headers.get("origin")
-    if origin is None:
-        # ブラウザ以外（curl など）は Origin を送らない。Host との一致で見る。
-        referer = request.headers.get("referer")
-        if referer is not None and not _same_origin(referer, request):
-            raise HTTPException(status_code=403, detail="別のサイトからの要求は受け付けない")
-        return
-    if not _same_origin(origin, request):
-        raise HTTPException(status_code=403, detail="別のサイトからの要求は受け付けない")
-```
-
-- [ ] **Step 1: 失敗するテストを書く**
-  - ログインしないと 401、ログインすると 200、ログアウトすると 401 に戻る
-  - **`AUTH_PASSWORD` 未設定なら全部素通り**（既定 off の方針。`GET /auth/session` は `required: false`）
-  - 別オリジンの `Origin` を付けた POST は 403、GET は 200
-  - `X-CSRF-Token` が無い / Cookie と違う POST は 403
-  - **`/health` と `/auth/login` は例外**（ログインできないと詰む）
-  - ログインの失敗にレート制限（同一 IP で 10 回/分を超えたら 429）
-  - **応答にもログにもパスワードが出ない**（`test_secret_leaks.py` と同じ作法で確かめる）
-- [ ] **Step 2: 最小実装**
-- [ ] **Step 3: 変異試験** —— `SAFE_METHODS` に POST を入れる / Origin の比較をホスト名だけにする（スキームとポートを無視）/ CSRF の比較を `!=` に / 例外リストへ他のパスを足す / レート制限を外す
-- [ ] **Step 4: コミット**
+**パスワードの世代印は Argon2 のハッシュそのもの。** 当初の計画は「起動のたびに env の
+平文をハッシュしてメモリに持ち、DB には書かない」だったが、**Argon2 の salt は毎回変わる**
+ので同じ平文でも一致せず、再起動のたびに全員がログアウトする（計画レビューの blocker）。
+保存済みハッシュに現在の平文を `verify` して世代を判定する。認証を切ったときも全失効。
+変異 9 件を検出。
 
 ---
 
-### Task 4: 非 loopback バインドの解禁と警告
+### Task 3: 入口の防御（`api/security.py`）と公開の警告
 
-**Files:**
-- Modify: `app/src/mediaferry/settings.py`, `app/src/mediaferry/api/routes_system.py`, `app/src/mediaferry/__main__.py`
-- Test: `app/tests/test_settings.py`, `app/tests/test_api.py`
+**Files:** Create `api/security.py`, `api/routes_auth.py` / Modify `api/app.py`, `settings.py`,
+`api/routes_system.py` / Test `test_api_auth.py`, `test_api_csrf.py`, `test_settings.py`
 
-**決めること:**
-- **既定は `127.0.0.1` のまま。** 変えない（意図せず公開されるより、明示的に開ける方が安全）
-- 認証が無いまま非 loopback で待ち受けている場合、**起動ログの警告は既にある**（`settings.py`）。Phase 4 では `GET /settings` の応答に `warnings: [{"code": "unauthenticated_exposure", "message": ...}]` を足し、**UI のバナー**として常時出す
-- §20 の「ここで初めて非 loopback バインドを既定にできる」は、**「配布可能なリリースにできる」**の意味として読む。既定値そのものは変えない（`HANDOFF.md` §7 の「認証を既定 off のまま」を維持）
+**Interfaces:** `require_session` / `require_trusted_origin` / `issue_csrf` / `POST /auth/login`
+/ `POST /auth/logout` / `GET /auth/session`
 
-- [ ] Step 1〜4（テスト → 実装 → 変異 → コミット）
+**なぜ薄い層で要るか:** 状態を変える API は既に 20 本以上ある。ルータごとに書くと**次に
+足すルータで書き忘れる**。ルータ単位の `dependencies=` で既定を掛ける。
+
+**決めること（順序が効く。計画レビューで 1 件 blocker が出た箇所）:**
+
+1. **Origin だけを見ても DNS rebinding は防げない。** 攻撃者のドメインを LAN の IP へ
+   rebind すると、ブラウザが送る `Origin` も `Host` も攻撃者のホスト名になり、
+   「Origin と Host が一致するか」は**通ってしまう**。認証が無効なら、その origin で
+   `GET /auth/session` を叩いて XSRF Cookie を取り、JS で読んで同じ origin の POST に
+   ヘッダを付けられる（二重送信 Cookie も通る）。
+   → **`Host` を信頼できる集合と突き合わせる。** `MEDIAFERRY_TRUSTED_HOSTS`（既定は
+   `localhost`, `127.0.0.1`, `[::1]` と `BIND_HOST` の値）に無い `Host` は 421 で拒む。
+   Starlette の `TrustedHostMiddleware` を使い、**設定を空にできないようにする**
+2. **`/auth/login` は Origin/Host 検証の例外にしない。** セッションと CSRF の例外にする
+   だけ（そうしないとログインできない）。丸ごと例外にすると、罠サイトからログインを
+   試行させられる
+3. **Origin/Host の検証は認証の有無に関わらず、状態を変えるメソッドにだけ掛ける。**
+   GET は `curl` から Origin 無しで来るので掛けない
+4. **CSRF は二重送信 Cookie。** セッションに紐付けない（認証無効でも同じ経路で動く）。
+   **発行点を固定する**: `GET /auth/session` と、静的な `index.html` の応答で必ず
+   `XSRF-TOKEN` を発行し、既に有効な値があれば作り直さない
+5. **Cookie は種類ごとに属性を分ける**（計画レビューの minor）:
+
+   | Cookie | HttpOnly | SameSite | Path | Secure | 寿命 |
+   | --- | --- | --- | --- | --- | --- |
+   | `mediaferry_session` | **付ける** | `Lax` | `/` | 要求が https のときだけ | セッションの期限 |
+   | `XSRF-TOKEN` | **付けない**（JS が読む） | `Lax` | `/` | 同上 | セッションと同じ |
+
+6. 検証の順序は **Host → Origin → CSRF → セッション**（相手に一番情報を与えない順）
+7. **非 loopback バインドは既定にしない**（`127.0.0.1` のまま）。認証が無いまま非 loopback で
+   待ち受けていたら、起動ログ（既存）に加えて `GET /settings` の `warnings[]` に
+   `unauthenticated_exposure` を出し、UI が常時バナーを出す
+
+- [ ] Step 1: 失敗するテストを書く
+  - 未ログインで 401 / ログインで 200 / ログアウトで 401
+  - **`AUTH_PASSWORD` 未設定なら素通り**（`GET /auth/session` は `required: false`）
+  - 別オリジンの POST は 403、GET は 200
+  - **信頼していない `Host` は 421**（rebinding の筋書き）。`/auth/login` にも掛かる
+  - CSRF が無い / 一致しない POST は 403。**発行点を叩けば必ず Cookie が付く**
+  - ログイン失敗のレート制限（同一 IP で 10 回/分 → 429）
+  - 応答にもログにもパスワードが出ない
+- [ ] Step 2〜4（変異: `SAFE_METHODS` に POST を入れる / Host の突き合わせを外す /
+      login を Origin 検証の例外にする / CSRF の比較を反転 / レート制限を外す）
+
+---
+
+### Task 4: E2E の土台（system harness）と OpenAPI の型生成
+
+**Files:** Create `web/tests/harness.ts`, `app/tests/system/__init__.py`,
+`app/tests/system/server.py` / Modify `web/package.json`
+
+**なぜ先に作るか:** 計画レビューの指摘。**実 FastAPI + ビルド済み資産 + ジョブ worker +
+fake broker + fake Immich 2 台**を立ち上げる仕掛けが無いと、E2E は `fetch` の mock に落ちて
+**静的配信・Cookie・SSE・worker を通らない**。土台が無いまま画面を作ると、最後に E2E を
+書く段で環境ごと作り直しになる。
+
+**契約:**
+- 一時ディレクトリを `DATA_ROOT` にし、`SECRET_KEY` と（必要なら）`AUTH_PASSWORD` を注入して
+  実プロセスとして起動する。**ポートは 0 番で取り、テストへ渡す**（固定しない）
+- fake broker は既存のテスト用実装を使い、**SCM_RIGHTS の受け渡しはそのまま**通す
+- fake Immich は `app/tests/fake_immich.py` を**そのまま**2 インスタンス起動する
+- 型は `GET /openapi.json` から `openapi-typescript` で生成し、`web/src/api/types.ts` を
+  **コミットする**（API を変えたら差分が出る）
+
+- [ ] Step 1: harness だけの smoke（起動 → `/health` → 停止）を書き、CI で回す
+- [ ] Step 2: backend の slice が増えるたびに型を再生成し、最小の UI consumer を 1 つ通す
 
 ---
 
 ### Task 5: SSE（`GET /events`）
 
-**Files:**
-- Create: `app/src/mediaferry/api/routes_events.py`
-- Test: `app/tests/test_api_events.py`
+**Files:** Create `api/routes_events.py` / Test `test_api_events.py` / Modify `docs/design.md` §11
 
-**Interfaces:** `GET /events`（`text/event-stream`）。`Last-Event-ID` または `?after_seq=` で再開。イベントは `job_event` を元に `{"job_id", "seq", "level", "message", "data"}`。
+**決めること（計画レビューで名称の衝突が指摘された）:**
+- **再開の cursor は `job_event.id`（全ジョブ横断の自動採番）。** `seq` はジョブ内の連番
+  なので、ジョブをまたぐ再開位置にならない。**`design.md` §11 の「`job_event.seq` から
+  再開」も直す。** query 名は `after_event_id`（`after_seq` は使わない —— 既存の
+  `JobStore.events(job_id, after_seq)` と紛らわしく、流用すると取りこぼす）
+- **cursor 無しの初回接続は「接続時点以後」だけ流す。** 全履歴を replay すると、長く運用した
+  後に新しいタブを開くだけで全 `job_event` が流れる
+- 消えた cursor（掃除済み）と未来の cursor は、**空から再開**して警告イベントを 1 本流す
+- 接続ごとに DB 接続を 1 本開く（§3）。0.5 秒間隔のポーリング。15 秒ごとに `: keep-alive`
+- 同時接続の上限（既定 8）。超えたら 503
 
-**決めること（Phase 1 の判断を引き継ぐ）:**
-- **`job_event.id`（自動採番）を SSE の `id:` にする。** `seq` はジョブ内の連番なので、ジョブをまたぐ再開位置にならない
-- **接続ごとに DB 接続を 1 本開く**（§3 の契約）。閉じるのは接続が切れたとき
-- **ポーリングで実装する**（0.5 秒間隔で新しい `job_event` を読む）。SQLite に通知は無い。**取りこぼさないこと**が要件で、遅延 0.5 秒は §13 の要求（進捗表示）に足りる
-- **15 秒ごとにコメント行（`: keep-alive`）を送る。** 途中のリバースプロキシが無通信で切る
-- 同時接続数に上限を置く（既定 8）。超えたら 503。**上限が無いと、タブを開きっぱなしにするだけで DB 接続が増える**
-
-- [ ] **Step 1: 失敗するテストを書く** —— 再開位置が効く / 取りこぼさない / keep-alive が出る / 切断で接続が閉じる / 上限を超えると 503 / **認証が有効なら未ログインで 401**
-- [ ] Step 2〜4
+- [ ] Step 1〜4（テスト: 再開位置・取りこぼし無し・初回は履歴を流さない・消えた cursor・
+      未来の cursor・keep-alive・上限・**認証が有効なら未ログインで 401**）
 
 ---
 
 ### Task 6: サムネイル（`GET /media/{id}/thumbnail`）
 
-**Files:**
-- Create: `app/src/mediaferry/adapters/thumbnails.py`
-- Modify: `app/src/mediaferry/api/routes_media.py`
-- Test: `app/tests/test_thumbnails.py`
+**Files:** Create `adapters/thumbnails.py` / Modify `routes_media.py` / Test `test_thumbnails.py`
 
-**決めること（パスと資源の判断）:**
-- 置き場所は **`DATA_ROOT/cache/thumbnails/<media_id>/<at>.jpg`**。`cache/` は §7 のレイアウトに足す。**DB には入れない**（派生物ではなく再生成できるキャッシュ。DB に絶対パスを置かない規約とも整合する）
-- **`at` は整数秒だけを受け付ける**（0〜動画長）。文字列をそのままファイル名にしない
-- 生成は ffmpeg を引数配列で起動し、**タイムアウトを付ける**（既定 30 秒）。失敗したら 422 とし、**空ファイルを残さない**（`.part` に書いて `os.replace`）
-- 応答は `ETag`（media の `sha1` + `at`）と `Cache-Control: private, max-age=604800`
-- **写真はデコードして縮小、動画は 1 フレーム抜く。** どちらも長辺 512px
+**決めること（計画レビューで資源の上限が無いと指摘された）:**
+- 置き場所は `DATA_ROOT/cache/thumbnails/<media_id>/<at>.jpg`。**DB には入れない**（再生成
+  できるキャッシュ。DB に絶対パスを置かない規約とも整合する）
+- **`at` は刻みを固定する。** 任意の秒を受けると、1 本の動画で何千枚も作れて `DATA_ROOT` を
+  埋められる（認証 off の LAN なら誰でも）。**10 秒刻みに丸め、1 メディアあたり最大 32 枚**
+- **同じキーの同時生成は 1 本にまとめる**（single-flight）。`<at>.jpg.<uuid>.part` に書いて
+  `os.replace`。共通の `.part` を使うと、並行要求が互いの一時ファイルを壊す
+- **容量の上限**（既定 1 GiB）を持ち、超えたら古い順に消す。起動時と生成時に確かめる
+- 生成は ffmpeg を引数配列で、タイムアウト付き。**写真も ffmpeg でデコードする**
+  （画像ライブラリを足さない。実 ffmpeg は既にテストの前提）
+- 応答は `ETag`（`sha1` + `at`）と `Cache-Control: private, max-age=604800`
 
-- [ ] **Step 1: 失敗するテストを書く** —— 実 ffmpeg で 1 枚出る / 2 度目はキャッシュから（ffmpeg を呼ばない）/ `at` に `../` や小数を渡すと 422 / 生成失敗で空ファイルが残らない / ETag が効く
-- [ ] Step 2〜4
+- [ ] Step 1〜4（テスト: 生成・キャッシュ命中・`at` の丸めと上限・`../` を弾く・並行要求で
+      壊れない・容量超過で古いものが消える・失敗時に空ファイルが残らない）
 
 ---
 
 ### Task 7: 一覧の絞り込みとページング
 
-**Files:** Modify `routes_media.py`, `routes_uploads.py`, `routes_merges.py` / Test: `app/tests/test_api_listing.py`
+**Files:** Modify `routes_media.py`, `routes_uploads.py`, `routes_merges.py` / Test `test_api_listing.py`
 
-**決めること:**
-- **並びは `(captured_at DESC, id DESC)` で固定**（同時刻が複数あるので id を tie-break に入れる。入れないとページの境目で行が重複・欠落する）
-- ページングは `page` + `page_size`（既定 50、上限 200）。**総件数も返す**（画面が「12 / 87 件」を出す。§13）
-- `q` は `original_filename` の部分一致（SQLite の `LIKE`、`%` と `_` をエスケープ）
-- `status` は **宛先ごとの状態**（§13 の「宛先 D に未送信」）。`destination_id` と併せて指定する
+- 並びは `(captured_at DESC, id DESC)` で固定（同時刻があるので tie-break が要る。無いと
+  ページの境目で行が重複・欠落する）
+- `page` + `page_size`（既定 50、上限 200）、**総件数も返す**（§13 の「12 / 87 件」）
+- `q` は `original_filename` の部分一致（`%` と `_` をエスケープ）
+- `status` は**宛先ごとの状態**。`destination_id` と併せて指定する
+- ダッシュボードの集計（宛先ごとの同期状況サマリ）もここで API にする
 
-- [ ] Step 1〜4（**境界のテストを厚く**: ページの境目、同時刻、`%` を含む検索語、上限超え）
+- [ ] Step 1〜4（境界を厚く: ページの境目、同時刻、`%` を含む検索語、上限超え）
 
 ---
 
-### Task 8: 承認待ちの差分（Phase 3 の先送り）
+### Task 8: リモートの日時を観測して保存する
 
-**Files:** Modify `routes_uploads.py` / Test: `app/tests/test_api_uploads.py`
+**Files:** Modify `adapters/immich.py`, `db/uploads.py`, `jobs/uploader.py`, `jobs/recheck.py` /
+Create `db/migrations/0009_remote_datetime.sql` / Test `test_remote_datetime.py`
+
+**なぜ要るか（計画レビューの blocker）:** 承認画面は「現在値と変更案を並べて表示」する
+（§13）。しかし `upload_record` が持つのは `remote_asset_id` / `remote_is_trashed` /
+`remote_checked_at` だけで、**リモートの `dateTimeOriginal` はどこにも無い**。Uploader も
+Rechecker も観測していないので、`routes_uploads.py` を直すだけでは現在値を出せない。
 
 **決めること:**
-- `GET /uploads?state=awaiting_datetime_approval` に **`proposed`（補正案）と `remote_current`（現在のリモートの値）** を含める
-- **`remote_current` はその場で取りに行かない。** 一覧の描画で N 件分の HTTP を出すことになる。`upload_record` に保存済みの観測（`remote_checked_at` の時点の値）を返し、**画面に「いつ時点の値か」を出す**。最新が要るなら宛先の再確認ジョブを回す導線を出す
-- 差分が無い（提案と現在が同じ）レコードは **`identical: true`** を付ける。画面はそれを「変更なし」と表示して、承認の必要が無いことを示す
+- `ImmichClient.asset(asset_id)`（`GET /api/assets/{id}`）を足し、**識別子は既存の
+  `_identifier` を通す**（相手が返す値の検査は adapter の境界で 1 度だけ、が既存の契約）
+- 列は `remote_datetime_original`（TEXT、NULL 可）を `upload_record` に足す
+- **観測は `remote_checked_at` と同じトランザクションで書く。** 別々に書くと「日時は新しいが
+  観測時刻は古い」行ができる
+- **古い観測で新しい値を上書きしない。** 書き込みは `stamp_many` と同じ CAS の形にする
+  （観測したときの姿を条件に入れる。Phase 3 の 5・7 巡目で確定した契約）
+- 観測する場所は 2 つ: 初回 `checking` で `reject`（既存資産）だったときと、宛先ごとの
+  再確認。**承認画面を開いたときには取りに行かない**（一覧の描画で N 件分の HTTP を出す）
+
+- [ ] Step 1〜4（テスト: 観測が保存される・古い結果で上書きしない・identifier の検査を通る・
+      取得できない相手でも承認待ちの一覧は壊れない）
+
+---
+
+### Task 9: 承認待ちの差分（Phase 3 の先送り）
+
+**Files:** Modify `routes_uploads.py` / Test `test_api_uploads.py`
+
+- `GET /uploads?state=awaiting_datetime_approval` に `proposed`・`remote_current`・
+  `remote_checked_at`・`identical` を含める
+- **「いつ時点の値か」を必ず一緒に返す**（画面がそう表示する）。最新が要るなら宛先の
+  再確認ジョブを回す導線を出す
+- `identical` が真なら画面は「変更なし」と表示し、承認を促さない
 
 - [ ] Step 1〜4
 
 ---
 
-### Task 9: 結合グループの手動編集と supersede（Phase 3 の先送り）
+### Task 10: 結合グループの手動編集と supersede（Phase 3 の先送り）
 
-**Files:** Modify `db/merges.py`, `api/routes_merges.py` / Test: `app/tests/test_merge_supersede.py`
+**Files:** Modify `db/merges.py`, `api/routes_merges.py` / Test `test_merge_supersede.py`
 
-**Interfaces:** `POST /merge-groups`（手動作成）/ `PATCH /merge-groups/{id}`（構成変更・skip・不合格の採用）/ `POST /merge-groups/{id}/discard`（破棄）/ 再結合は「新グループを作って旧を supersede」
+**Interfaces:** `POST /merge-groups`（手動作成）/ `PATCH /merge-groups/{id}`（構成変更・skip・
+不合格の採用）/ `POST /merge-groups/{id}/discard` / 再結合は「新グループを作って旧を supersede」
 
-**なぜ Phase 3 で先送りしたか（`HANDOFF.md` §3）:** 破棄と再結合はどちらも**公開済みの `media_file` を取り残す**。旧グループを `superseded_by_id` で向け直す仕組みが要り、それは手動編集と共通なので画面と一緒に入れる、と決めた。**スキーマは既にある**（`0003` の `superseded_by_id`、部分索引、`active` の trigger）。
+**決めること（計画レビューで禁止集合の定義が誤りと指摘された）:**
+- **編集を拒む条件は「これから送られる根拠になっている」こと。** 具体的には
+  (a) その構成ファイルを指す `upload_record` が**進行中**（`checking` / `uploading` /
+  `asset_known` / `tagging` / `fixing_datetime`）である、または
+  (b) `pending` / `needs_recheck` の記録があり、その宛先の `upload` ジョブが
+  **`queued` か `running`** である
+- **`complete` / `failed` / `refused` / `awaiting_datetime_approval` は編集を妨げない。**
+  「一度でも送ったグループは二度と直せない」は、この機能の目的（破棄と再結合）を潰す
+- **(b) に当たらない `pending` の記録は、編集と同じトランザクションで無効化する。**
+  残すと、編集直後に既存のジョブが claim して `verify_eligibility` で無効化され、
+  **理由の分かりにくい失敗**が並ぶ
+- supersede は 1 つの `BEGIN IMMEDIATE`（割れると `input_digest` の部分索引が一時的に
+  2 行を許して UNIQUE 違反になる）
+- 公開済みの派生物は消さない（§3 の「孤立ファイルは報告するだけ」と同じ方針）
 
-**決めること（トランザクションの判断）:**
-- **supersede は 1 つの `BEGIN IMMEDIATE` で行う。** 「新グループの作成」「旧グループの `superseded_by_id` 設定」「member の付け替え」が割れると、`input_digest` の部分索引（`WHERE superseded_by_id IS NULL`）が一時的に 2 行を許して UNIQUE 違反になる
-- **公開済みの派生物は消さない。** 旧グループの `media_file` は残し、選択肢（§10）から外れるだけにする。**削除はデータを失う経路**（§3 の「孤立ファイルは報告するだけ」と同じ方針）
-- **進行中のアップロードを持つグループは編集できない。** `upload_record` が `pending` 以外で参照している間は 409（送信中に根拠を動かすと、§10 の再確認が「根拠が消えた」で無効化する）
-
-- [ ] Step 1〜4（**変異は「3 つの UPDATE を別トランザクションにする」を必ず含める**）
+- [ ] Step 1〜4（変異に「3 つの UPDATE を別トランザクションにする」と「禁止集合から
+      進行中を外す」を必ず含める）
 
 ---
 
-### Task 10: 転送先の PATCH
+### Task 11: 転送先の PATCH
 
-**Files:** Modify `api/routes_destinations.py` / Test: `app/tests/test_api_destinations.py`
+**Files:** Modify `api/routes_destinations.py` / Test `test_api_destinations.py`
 
-**決めること:**
-- **改名と有効無効は新しいリビジョンを作らない**（向き先が変わらないので `target_epoch` を進める理由が無い）
-- **`base_url` / `api_key` の変更は新しいリビジョンを作る**（§12.3。既存の `POST /destinations` と同じ経路を通す）
-- 応答に **API キーはマスク値も含めない**（§11）
+- 改名と有効無効は新リビジョンを作らない（向き先が変わらない）
+- `base_url` / `api_key` の変更は新リビジョンを作る（§12.3。既存の POST と同じ経路）
+- 応答に API キーはマスク値も含めない（§11）
 
 - [ ] Step 1〜4
 
 ---
 
-### Task 11: `web/` の足場と静的配信
+### Task 12: `web/` の足場と静的配信
 
-**Files:**
-- Create: `web/package.json`, `web/vite.config.ts`, `web/tsconfig.json`, `web/index.html`, `web/src/main.tsx`
-- Create: `app/src/mediaferry/api/static.py`
-- Modify: `app/Dockerfile`（多段ビルド）, `pyproject.toml`（ruff の `extend-exclude` に `web`）
-- Test: `app/tests/test_api_static.py`
+**Files:** Create `web/package.json` ほか, `api/static.py` / Modify `app/Dockerfile`, `pyproject.toml`
+/ Test `test_api_static.py`
 
-**決めること:**
-- **同一オリジンで配る。** FastAPI が `/` 以下でビルド成果物を返し、`/api` はそのまま。別ポートで配ると CORS と Cookie の設定が増え、CSRF の前提（同一オリジン）も崩れる
-- **SPA フォールバックは `/api` と `/health` を除いた GET のみ。** 何でも `index.html` を返すと、消したはずの API が 200 を返すようになって気づけない
-- **CSP を静的応答に付ける**: `default-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'`（§14。外部からスクリプトも書体も読まない）
-- 開発時は Vite の dev server が `/api` を `127.0.0.1:8080` へ proxy する。**proxy 先はローカルに固定**（環境固有の値を焼かない）
-- **Dockerfile は多段**（node でビルド → 成果物だけを app イメージへコピー）。実行イメージに node を残さない
+- **同一オリジンで配る**（別ポートにすると CORS と Cookie が増え、CSRF の前提も崩れる）
+- SPA フォールバックは `/api` と `/health` を除いた GET のみ（何でも `index.html` を返すと、
+  消したはずの API が 200 を返して気づけない）
+- CSP: `default-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline';
+  connect-src 'self'; frame-ancestors 'none'; base-uri 'none'`
+- `index.html` の応答で **XSRF Cookie を発行する**（Task 3 の発行点）
+- Dockerfile は多段（node でビルド → 成果物だけを app イメージへ）
 
-- [ ] **Step 1: 失敗するテストを書く** —— `/` が `index.html`、`/assets/*` が配られる、`/api/unknown` は 404（`index.html` を返さない）、CSP ヘッダが付く、`..` を含む要求で `web/dist` の外へ出られない
-- [ ] Step 2〜4
+- [ ] Step 1〜4（テスト: `/` が `index.html` / `/api/unknown` は 404 / CSP が付く /
+      `..` で `dist` の外へ出られない / Cookie が発行される）
 
 ---
 
-### Task 12: 画面の共通土台
+### Task 13: 画面の共通土台
 
-**Files:** `web/src/api/client.ts`, `web/src/api/types.ts`, `web/src/hooks/useEvents.ts`, `web/src/components/{ConfirmDialog,ErrorBanner,JobProgress,Layout}.tsx`
+**Files:** `web/src/api/{client,types}.ts`, `web/src/hooks/useEvents.ts`,
+`web/src/components/{ConfirmDialog,ErrorBanner,JobProgress,Layout}.tsx`
 
-**契約:**
-- `client.ts` は **CSRF トークンを Cookie から読んで `X-CSRF-Token` に載せる**。401 を受けたらログイン画面へ、403（CSRF）は「画面を再読み込みしてください」を出す
-- `useEvents.ts` は `EventSource` で `/api/events` を購読し、**再接続時は `Last-Event-ID` を自動で送る**（ブラウザの既定動作）。ジョブ ID ごとに購読者へ配る
-- `ErrorBanner` は **API の `detail` をそのまま出さない**。`code` → 日本語の対応表を持ち、未知の code だけ「詳細: <detail>」を添える
-- `ConfirmDialog` は **件数・合計サイズ・宛先名**を必須の props にする（§13。型で強制する）
-
-- [ ] 型は **手書きしない**。`GET /openapi.json` から `openapi-typescript` で生成し、`web/src/api/types.ts` をコミットする（生成物を追跡し、API を変えたら差分が出るようにする）
-
----
-
-### Task 13: ダッシュボードとジョブ画面
-
-- ダッシュボード: 接続中デバイス / 実行中ジョブ / **宛先ごとの同期状況サマリ** / 最近の取り込み / **孤立ファイルと承認待ちの警告** / **認証が無いまま公開している警告バナー**（Task 4）
-- ジョブ: 一覧（実行中・履歴）、詳細（進捗バー、`job_event` のログ、キャンセル）。進捗は **ファイル名と件数**（§13）
-
-**受け入れ:** 取り込みジョブを開始して、**画面を再読み込みせずに**進捗が進み、完了で一覧の状態が変わる（SSE が効いている）。キャンセルを押すと、走っているジョブが `cancelled` で終わる（`failed` にならない —— §9.9 の契約が UI から見えること）。
+- `client.ts` は CSRF トークンを Cookie から読んで `X-CSRF-Token` に載せる。401 → ログイン、
+  403（CSRF）→「画面を再読み込みしてください」
+- `useEvents.ts` は `EventSource` で `/api/events` を購読（再接続時の `Last-Event-ID` は
+  ブラウザ既定）
+- `ErrorBanner` は **Task 0 の `code` → 日本語**の対応表を持つ。未知の code だけ定型文
+- **`ConfirmDialog` は操作種別ごとの discriminated union にする**（計画レビューの指摘）。
+  `{kind: "upload", count, totalBytes, destinationNames}` /
+  `{kind: "archive_destination", name}` / `{kind: "discard_merge_group", groupLabel, publishedCount}` /
+  `{kind: "adopt_failed_merge", groupLabel, reason}` / `{kind: "approve_datetime", current, proposed}`。
+  **件数・合計サイズ・宛先名を全部の操作に強いない**（archive や破棄には意味が無い）
+- 型は手書きせず `openapi-typescript` で生成（Task 4）
 
 ---
 
-### Task 14: デバイス画面
+### Task 14: ダッシュボードとジョブ画面
 
-- ボリューム一覧と**判定結果・確度・信頼状態**、対象外ボリュームも**理由付き**で表示（§13）
-- 初回は承認（信頼登録）ボタン。スキャン → 結果表示 → 取り込み
-- **`POST /volumes/{id}/close`** の導線（アンマウント）
+- ダッシュボード: 接続中デバイス / 実行中ジョブ / 宛先ごとの同期状況サマリ（Task 7 の集計）/
+  最近の取り込み / 孤立ファイルと承認待ちの警告 / **認証が無いまま公開している警告バナー**
+- ジョブ: 一覧と詳細（進捗バー、`job_event` のログ、キャンセル）。進捗は**ファイル名と件数**
 
-**受け入れ:** 未信頼のカードを挿すと一覧に出て、理由が読める。信頼 → スキャン → 取り込みまで CLI に触れず通る。
-
----
-
-### Task 15: ライブラリ画面
-
-- 一覧（サムネイル、撮影日時、**宛先ごとの状態バッジ**）、フィルタ（`status` / `profile` / `kind` / 期間 / `q`、**「宛先 D に未送信」**）
-- 複数選択 → **宛先を複数選択** → 確認ダイアログ（件数・合計サイズ・宛先名）→ `POST /uploads` → ジョブ開始
-- **選択肢の規則は API に従う**（`GET /uploads/selectable`）。ブラウザ側で「送れるかどうか」を再実装しない
-
-**受け入れ:** 2 つの宛先へ同じメディアを送り、**宛先ごとに独立して**状態が進む（§20 の完了条件）。既に送信済みのものは既定で選択肢に出ない。
+**受け入れ:** 取り込みを開始して**再読み込みせずに**進捗が進む。キャンセルすると
+`cancelled` で終わる（`failed` にならない —— §9.9 の契約が UI から見える）。
 
 ---
 
-### Task 16: 結合・転送先・承認待ち・設定画面
+### Task 15: デバイス画面
 
-- **結合**: 候補一覧に**構成ファイル・ギャップ秒数・パートサイズ**を出し、**なぜグループ化されたかが分かる**ようにする（§13）。閾値スライダは `POST /merge-groups/preview`（保存しない）。手動の分割・結合、検証結果の表示、**不合格でも採用**できる導線、失敗の再試行、破棄と再結合（Task 9）
-- **転送先**: 一覧と編集、接続検証、**同じアカウントを指す宛先の警告**、`archive`。API キーの欄は「新しい値を入れる」だけ（既存値は出ない）
-- **承認待ち**: 現在値と補正案を**並べて**表示（Task 8）。`identical` は「変更なし」として承認を促さない
-- **設定**: 値・出所（env / db / default）・**ロック状態**。env 由来は錠前アイコン付きの読み取り専用で、変更しようとすると 409（§12）
+- ボリューム一覧と判定結果・確度・信頼状態。対象外も**理由付き**で表示
+- 信頼登録 → スキャン → 取り込み → `close`（アンマウント）の導線
+
+**受け入れ:** 未信頼のカードが理由付きで出て、信頼から取り込みまで CLI に触れず通る。
 
 ---
 
-### Task 17: 受け入れとドキュメント
+### Task 16: ライブラリ画面
 
-- [ ] Playwright で **§20 の完了条件**をなぞる 1 本を書く: 認証を有効にしてログイン → デバイスを信頼 → スキャン → 取り込み → 結合 → 2 宛先へ送信 → 承認待ちを承認 → ジョブ履歴で確認
-- [ ] `docs/design.md` に Phase 4 で確定した事項を書き戻す（§11 に `/auth/*` と `/events` の実装形、§12 に警告の出し方、§13 に画面の実装との差分）
-- [ ] `docs/HANDOFF.md` を更新（現在地、Phase 4 で確定した契約、次のフェーズ）
-- [ ] **`--fresh` でレビューを 1 巡**（実装差分に対して。`HANDOFF.md` §5 の手順）
+- 一覧（サムネイル、撮影日時、宛先ごとの状態バッジ）、フィルタ、複数選択
+- **送信は 2 段階**（計画レビューの指摘）。`POST /uploads` は media × destination の pair を
+  `pending` で作るだけで、**送信は始まらない**。その後に**宛先ごとに**
+  `POST /destinations/{id}/upload` を呼ぶ。画面はこの 2 段階を 1 つの操作として見せる:
+  1. 確認ダイアログ（件数・合計サイズ・宛先名）
+  2. `POST /uploads` の結果（pair ごとの成否）を出す
+  3. 作成できた宛先について**それぞれ 1 回だけ** `upload` ジョブを開始する
+  4. 一部の宛先が失敗したら、**成功した分は進めたまま**、失敗した宛先だけ再試行させる
+- 選択肢の規則は `GET /uploads/selectable` に従う（ブラウザ側で再実装しない）
+
+**受け入れ:** 2 つの宛先へ送り、宛先ごとに独立して状態が進む。1 つの宛先の enqueue が
+失敗しても、もう 1 つは進む。
+
+---
+
+### Task 17: 結合・転送先・承認待ち・設定・プロファイル
+
+- **結合**: 候補に構成ファイル・ギャップ秒数・パートサイズを出し、**なぜグループ化されたか**
+  が分かるようにする。閾値スライダは `preview`（保存しない）。手動の分割・結合、検証結果、
+  不合格でも採用、失敗の再試行、破棄と再結合（Task 10）
+- **転送先**: 一覧と編集、接続検証、同じアカウントを指す宛先の警告、archive。
+  **空の DB から画面だけで 1 件目を作れること**を受け入れに入れる（§12.3 の初回セットアップ）
+- **承認待ち**: 現在値と変更案を並べ、`identical` は「変更なし」と表示（Task 9）
+- **設定**: 値・出所・ロック状態。env 由来は読み取り専用で、変更しようとすると 409
+- **プロファイル（読み取り）**: 一覧と定義の表示、`POST /profiles/{id}/test` で指定ボリューム
+  に対する判定・スキャンの試行。**編集は Phase 5**
+
+---
+
+### Task 18: 受け入れとドキュメント
+
+- [ ] Playwright で §20 の完了条件をなぞる: **空の DB から**認証を有効にしてログイン →
+      転送先を 2 件作る → デバイスを信頼 → スキャン → 取り込み → 結合 → 2 宛先へ送信 →
+      承認待ちを承認 → ジョブ履歴で確認
+- [ ] **不可逆な操作ごとに確認ダイアログが出ることを、呼び出し側それぞれで確かめる**
+      （upload / archive / discard / adopt / approve）
+- [ ] **秘密が画面に出ないことを E2E でも確かめる**: 転送先の API キーが DOM・ネットワーク
+      応答・`job_event`・ブラウザのコンソールに出ない
+- [ ] `docs/design.md` に Phase 4 で確定した事項を書き戻す（§11 の `/auth/*`・`/events`・
+      cursor の名前、§12 の `TRUSTED_HOSTS` と警告、§13 の画面との差分）
+- [ ] `docs/HANDOFF.md` を更新
+- [ ] **`--fresh` で実装差分のレビューを回す**
 
 ---
 
@@ -437,13 +488,16 @@ async def require_same_origin(request: Request) -> None:
 
 | 条件 | 確かめ方 |
 | --- | --- |
-| CLI に触れず一連の操作が通る | Task 17 の Playwright の 1 本 |
+| **空の DB から**、CLI に触れず一連の操作が通る | Task 18 の Playwright（転送先の作成から含める） |
 | 認証を有効にできる | `test_api_auth.py`（ログイン・ログアウト・未認証で 401） |
 | 認証が無くても LAN で使える | `test_api_auth.py`（`AUTH_PASSWORD` 未設定で素通り、警告は出る） |
-| 別サイトから操作されない | `test_api_csrf.py`（Origin 違反と CSRF 不一致が 403） |
-| 進捗が画面に届く | `test_api_events.py`（再開位置・取りこぼし無し）＋ Task 13 の受け入れ |
-| 不可逆な操作の前に確認が出る | `ConfirmDialog` の props（型で強制）＋ Task 15 の受け入れ |
-| 秘密が UI に出ない | `test_secret_leaks.py` に「`/auth/login` の応答とログにパスワードが出ない」を足す |
+| 別サイトから操作されない | `test_api_csrf.py`（Origin 違反・CSRF 不一致が 403、**信頼していない `Host` が 421**） |
+| 進捗が画面に届く | `test_api_events.py`（再開位置・取りこぼし無し・初回は履歴を流さない）＋ Task 14 |
+| **不可逆な操作すべて**で確認が出る | 呼び出し側ごとのコンポーネントテスト（upload / archive / discard / adopt / approve） |
+| エラーが日本語で、内部の文言を出さない | `test_api_errors.py`（全経路が `code` を返す）＋ `ErrorBanner` のテスト |
+| 承認画面が現在値を出せる | `test_remote_datetime.py`（観測の保存と CAS）＋ `test_api_uploads.py`（差分） |
+| 秘密が UI に出ない | Task 18 の E2E（API キーが DOM・ネットワーク応答・`job_event`・コンソールに出ない） |
+| E2E が本物を通る | Task 4 の harness（実 FastAPI + ビルド資産 + worker + fake broker + fake Immich 2 台） |
 
 ## Phase 4 でやらないこと（意図的な除外）
 
@@ -462,8 +516,43 @@ async def require_same_origin(request: Request) -> None:
 1. **フロントは React + TypeScript + Vite**（`design.md` §17 のとおり）。app イメージは多段ビルドで `web/dist` だけを焼く。**代案**（サーバ側テンプレート + htmx）は、ビルド鎖が消える代わりに §13 の対話（複数選択・スライダ・SSE の部分更新）が重くなるので採らない
 2. **認証は既定 off のまま、`BIND_HOST` の既定も `127.0.0.1` のまま**（`HANDOFF.md` §7 の利用者判断を維持）。Phase 4 が変えるのは「**認証を入れれば公開してよい状態になる**」ことだけ
 3. **セッションは DB に保存する**（再起動で切れない）。生の session id は保存せず指紋を持つ
-4. **UPLOAD_CONCURRENCY はジョブ本数で効かせる**（1 ジョブ内で HTTP を並行させない）。同じ宛先への 2 本目は作らない
+4. **`UPLOAD_CONCURRENCY` は Phase 4 で扱わない**（Phase 5 へ送る）。`design.md` §20 の
+   Phase 4 に多重化は入っておらず、現行の `JobRunner` は全ジョブ種で共通の単一 worker な
+   ので、同時実行数を上げると import / merge / scan まで並列になる。「宛先ごとに 1 本」を
+   保つには claim のトランザクションで宛先単位の排他が要り、Phase 3 で固めたリースと停止の
+   契約に触れる独立した設計課題になる
+5. **`TRUSTED_HOSTS` を設定に足す**（既定は loopback と `BIND_HOST`）。DNS rebinding は
+   Origin と Host の一致では防げないので、`Host` を信頼できる集合と突き合わせる
 
 ## レビュー記録
 
-（実装差分に対して `--fresh` で回す。結果はここに追記する）
+### 計画レビュー 1 巡目（2026-08-19、codex `--fresh`。blocker 4 / major 8 / minor 2）
+
+**全件を反映した。退けた指摘は無い。** 「実装コードではなく範囲と契約を見てほしい」と
+依頼した狙いどおり、**計画が前提にしていた backend の状態が実在しない**という層の指摘が
+中心になった。
+
+| # | 指摘 | 反映 |
+| --- | --- | --- |
+| 1 [blocker] | パスワードの世代判定が成立しない（Argon2 の salt は毎回変わるので、起動のたびに全セッションが失効する）。0008 に保存先も無い | Task 2。保存済みハッシュに env の平文を `verify` する形へ。**実装済み**（`9215b53`） |
+| 2 [blocker] | Origin と Host の一致は **DNS rebinding を防げない**（どちらも攻撃者のホスト名になる）。`/auth/login` を丸ごと例外にすると「認証の有無に関わらず Origin を検証」と矛盾する | Task 3。`TRUSTED_HOSTS` と `Host` の突き合わせ（421）を足し、login は session/CSRF の例外に留める。CSRF の発行点と Cookie ごとの属性表も固定 |
+| 3 [blocker] | 承認画面の「現在値」の情報源が**実在しない**（`upload_record` にリモートの日時の列が無く、Uploader も Rechecker も観測していない） | **Task 8 を新設**（adapter の取得・列と移行 0009・観測の CAS）。Task 9 はそれに依存させた |
+| 4 [blocker] | `UPLOAD_CONCURRENCY` を範囲に入れたのに Task も完了条件も無い。単に同時実行数を上げると import / merge / scan まで並列になり、停止と「宛先ごとに 1 本」の契約に触れる | **Phase 5 へ送った**（§20 の Phase 4 にも多重化は入っていない） |
+| 5 [major] | 結合の編集を拒む条件を `!= pending` にすると、一度送ったグループが**永久に編集できない**。逆に `pending` は次に送られる根拠なのに許してしまう | Task 10。禁止集合を「進行中の記録」と「queued/running のジョブを持つ pending」に定義し直し、残る `pending` は同じトランザクションで無効化 |
+| 6 [major] | `POST /uploads` は pair を作るだけで**送信は始まらない**（宛先ごとの `POST /destinations/{id}/upload` が要る） | Task 16。2 段階であることと、部分失敗の扱いを画面契約に書いた |
+| 7 [major] | `ErrorBanner` が前提にする `code` が backend に無い（現行は `detail` の文字列だけ） | **Task 0 を新設**し、入口の防御より前に置いた |
+| 8 [major] | サムネイルに資源の上限・single-flight・退避が無く、写真のデコード手段も未定 | Task 6。`at` の丸めと枚数上限、一時ファイルの一意化、容量上限、**ffmpeg で写真もデコード**（依存を足さない） |
+| 9 [major] | SSE の cursor 名が衝突（`job_event.id` と言いながら query は `after_seq`）。初回接続の意味も未定 | Task 5。`after_event_id` に統一し、初回は「接続時点以後」。消えた cursor と未来の cursor の扱いもテストに入れた。**`design.md` §11 も直す** |
+| 10 [major] | `ConfirmDialog` の props 型は「すべての不可逆操作で出た」証明にならない。件数・サイズ・宛先名は archive や破棄には意味が無い | Task 13。操作種別ごとの discriminated union にし、完了条件を**呼び出し側ごとのテスト**に変えた |
+| 11 [major] | プロファイルの読み取りと `test` の画面が無い。**空の DB から転送先を作る**受け入れも無い（E2E が seed で通ってしまう） | Task 17 と完了条件。E2E は空の DB から始める |
+| 12 [major] | E2E を回す土台（実 FastAPI + ビルド資産 + worker + fake broker + fake Immich 2 台）がどの Task にも無い | **Task 4 を新設**し、backend の slice と並行して育てる形にした。秘密の完了条件も DOM・ネットワーク・コンソールまで広げた |
+| 13 [minor] | 依存図の番号が Task と 1 つずつずれている | 図を書き直した |
+| 14 [minor] | Cookie の属性が「XSRF は HttpOnly でない」と「Cookie は HttpOnly」で矛盾 | Task 3 に Cookie ごとの属性表を置いた |
+
+**順序についての助言も採った。** 「全 backend 完了後に UI を接続すると、読み取りの契約の
+不足が最後に集中する」。backend の slice ごとに OpenAPI の型を再生成して最小の UI consumer を
+通す形に変えた（Task 4）。
+
+### 実装差分のレビュー
+
+（`--fresh` で回す。結果はここに追記する）
