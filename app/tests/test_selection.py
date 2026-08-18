@@ -242,3 +242,81 @@ def test_unadopted_derived_outputs_can_be_shown_with_a_filter(db, profile):
     )
     assert ids(shown) == {output_id}
     assert {item.reason for item in shown} == {"unadopted_derived"}
+
+
+def test_a_current_group_reports_itself_as_current(db, profile):
+    from mediaferry.db.selection import group_is_current
+
+    members = a_pair(db, profile)
+    output_id = a_derived(db, profile)
+    group_id = a_group(db, profile, members, output_id=output_id)
+    assert group_is_current(db, ProfileRegistry(db), group_id, output_id) is True
+
+
+def test_a_stale_digest_is_not_current(db, profile):
+    from mediaferry.db.selection import group_is_current
+
+    members = a_pair(db, profile)
+    output_id = a_derived(db, profile)
+    group_id = a_group(db, profile, members, output_id=output_id, digest="stale-digest")
+    assert group_is_current(db, ProfileRegistry(db), group_id, output_id) is False
+
+
+def test_another_media_file_is_not_the_output_of_this_group(db, profile):
+    from mediaferry.db.selection import group_is_current
+
+    members = a_pair(db, profile)
+    output_id = a_derived(db, profile)
+    other_id = a_derived(db, profile, name="OTHER")
+    group_id = a_group(db, profile, members, output_id=output_id)
+    assert group_is_current(db, ProfileRegistry(db), group_id, other_id) is False
+
+
+def test_a_superseded_group_is_not_current(db, profile):
+    from mediaferry.db.selection import group_is_current
+
+    output_id = a_derived(db, profile)
+    old = a_group(db, profile, [], output_id=output_id)
+    newer = a_merge_group(db, (profile.profile_id, profile.revision_id), "digest-new")
+    db.execute("UPDATE merge_group SET superseded_by_id = ? WHERE id = ?", (newer, old))
+    assert group_is_current(db, ProfileRegistry(db), old, output_id) is False
+
+
+def test_an_unknown_group_is_not_current(db, profile):
+    from mediaferry.db.selection import group_is_current
+
+    assert group_is_current(db, ProfileRegistry(db), "no-such-group", "no-such-media") is False
+
+
+def test_the_list_and_the_single_check_agree(db, profile):
+    """一覧の判定と claim 側の判定が食い違わない."""
+    from mediaferry.db.selection import group_is_current
+
+    members = a_pair(db, profile)
+    output_id = a_derived(db, profile)
+    group_id = a_group(db, profile, members, output_id=output_id)
+    listed = SelectionService(db, ProfileRegistry(db)).selectable()
+    assert [item.media_file_id for item in listed] == [output_id]
+    assert group_is_current(db, ProfileRegistry(db), group_id, output_id) is True
+
+
+def test_the_digest_follows_the_member_position_not_the_insert_order(db, profile):
+    from mediaferry.core.merge.digest import input_digest
+    from mediaferry.db.selection import expected_digest
+
+    first, second = a_pair(db, profile)
+    group_id = a_merge_group(db, (profile.profile_id, profile.revision_id), "d")
+    # position とは逆の順で挿入する。
+    db.execute(
+        "INSERT INTO merge_member (merge_group_id, media_file_id, position, active)"
+        " VALUES (?, ?, 1, 1)",
+        (group_id, second[0]),
+    )
+    db.execute(
+        "INSERT INTO merge_member (merge_group_id, media_file_id, position, active)"
+        " VALUES (?, ?, 0, 1)",
+        (group_id, first[0]),
+    )
+    assert expected_digest(db, ProfileRegistry(db), group_id) == input_digest(
+        [first, second], profile.definition.merge, profile.revision_id
+    )

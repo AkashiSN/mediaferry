@@ -168,3 +168,45 @@ def _verification_passed(verification_json: str | None) -> bool:
         return json.loads(verification_json).get("passed") is True
     except (AttributeError, TypeError, ValueError):
         return False
+
+
+def expected_digest(
+    conn: sqlite3.Connection, registry: ProfileRegistry, group_id: str
+) -> str | None:
+    """現行の構成・設定・リビジョンから計算し直した digest.
+
+    グループが無ければ None。**保存値との比較は呼び出し側が行う。**
+    """
+    row = conn.execute("SELECT profile_id FROM merge_group WHERE id = ?", (group_id,)).fetchone()
+    if row is None:
+        return None
+    members = [
+        (member["media_file_id"], member["sha1"])
+        for member in conn.execute(
+            "SELECT m.id AS media_file_id, m.sha1 AS sha1 FROM merge_member mm"
+            " JOIN media_file m ON m.id = mm.media_file_id"
+            " WHERE mm.merge_group_id = ? AND mm.active = 1 ORDER BY mm.position",
+            (group_id,),
+        )
+    ]
+    profile = registry.by_id(row["profile_id"])
+    return input_digest(members, profile.definition.merge, profile.revision_id)
+
+
+def group_is_current(
+    conn: sqlite3.Connection, registry: ProfileRegistry, group_id: str, media_file_id: str
+) -> bool:
+    """§10 (a) の derived 条件. claim 時と一覧の両方がこれを使う.
+
+    supersede されておらず、その media_file がこのグループの出力で、
+    入力の同一性が現行と一致していること。
+    """
+    row = conn.execute(
+        "SELECT superseded_by_id, output_media_file_id, input_digest FROM merge_group WHERE id = ?",
+        (group_id,),
+    ).fetchone()
+    if row is None or row["superseded_by_id"] is not None:
+        return False
+    if row["output_media_file_id"] != media_file_id:
+        return False
+    return expected_digest(conn, registry, group_id) == row["input_digest"]

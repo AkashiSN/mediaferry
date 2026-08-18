@@ -2747,9 +2747,38 @@ def test_a_disabled_destination_rejects_the_whole_request(db, profile, destinati
 def test_an_archived_destination_rejects_the_whole_request(db, profile, destinations, uploads):
     media_id = a_media_file(db, (profile.profile_id, profile.revision_id))
     destination_id = a_destination(destinations)
-    destinations.archive(destination_id)
+    # `archive` は enabled も落とすので、**保管の判定だけ**が効く状態を作る
+    # （enabled の判定が先に効くと、この分岐を一度も通らない）。
+    db.execute(
+        "UPDATE upload_destination SET archived_at = ?, enabled = 1 WHERE id = ?",
+        ("2026-08-17T00:00:00+00:00", destination_id),
+    )
     with pytest.raises(UploadRequestInvalid):
         uploads.create_pairs([media_id], [destination_id])
+
+
+def test_a_destination_without_a_verified_revision_is_refused(db, profile, destinations, uploads):
+    media_id = a_media_file(db, (profile.profile_id, profile.revision_id))
+    destination_id = a_destination(destinations)
+    db.execute("UPDATE upload_destination SET current_revision_id = NULL WHERE id = ?",
+               (destination_id,))
+    with pytest.raises(UploadRequestInvalid):
+        uploads.create_pairs([media_id], [destination_id])
+
+
+def test_the_pair_carries_the_current_epoch(db, profile, destinations, uploads):
+    """epoch を進めた後に作った pair は、新しい epoch に属する（§8）."""
+    media_id = a_media_file(db, (profile.profile_id, profile.revision_id))
+    destination_id = a_destination(destinations)
+    destinations.add_revision(
+        destination_id, base_url="http://home.invalid:2283", public_url=None, secret="key-2",
+        identity=RemoteIdentity(remote_user_id="user-b", server_instance_id=None),
+    )
+    assert destinations.current(destination_id)["target_epoch"] == 2
+
+    uploads.create_pairs([media_id], [destination_id])
+
+    assert db.execute("SELECT target_epoch FROM upload_record").fetchone()[0] == 2
 
 
 def test_a_missing_file_is_rejected_per_pair(db, profile, destinations, uploads):
@@ -2850,14 +2879,18 @@ def test_a_complete_record_is_a_no_op(db, profile, destinations, uploads):
 
 
 def test_an_active_record_is_not_claimed_twice(db, profile, destinations, uploads):
+    from mediaferry.db.jobs import JobStore
+
     media_id = a_media_file(db, (profile.profile_id, profile.revision_id))
     destination_id = a_destination(destinations)
     uploads.create_pairs([media_id], [destination_id])
     revision_id = destinations.current(destination_id)["id"]
+    # claim_job_id は job(id) への外部キー。実在するジョブでないと入らない。
+    job_id = JobStore(db).enqueue("upload", {"destination_id": destination_id})
     db.execute(
-        "UPDATE upload_record SET state = 'uploading', claim_job_id = 'j', claim_token = 't',"
+        "UPDATE upload_record SET state = 'uploading', claim_job_id = ?, claim_token = 't',"
         " claim_expires_at = '2999-01-01T00:00:00+00:00', destination_revision_id = ?",
-        (revision_id,),
+        (job_id, revision_id),
     )
     assert uploads.create_pairs([media_id], [destination_id])[0].result == "already_active"
 
@@ -3182,7 +3215,7 @@ Expected: PASS（16 件）
 | --- | --- |
 | `_load_media` の実在確認を消す | `test_an_unknown_media_id_rejects_the_whole_request` |
 | `enabled` の確認を消す | `test_a_disabled_destination_rejects_the_whole_request` |
-| `archived_at` の確認を消す | `test_an_archived_destination_rejects_the_whole_request` |
+| `archived_at` の確認を消す | `test_an_archived_destination_rejects_the_whole_request`。**`archive()` は `enabled` も落とすので、保管の判定だけが効く状態を SQL で作る**（そうしないと `enabled` の判定が先に効く） |
 | `missing_at` の確認を消す | `test_a_missing_file_is_rejected_per_pair` |
 | 1 件の拒否で全体を落とす（例外にする） | 同上（`present` が作られない） |
 | `failed` / `skipped` の分岐を消す | `test_a_member_of_a_failed_group_is_allowed_with_its_rule` |
@@ -3195,7 +3228,8 @@ Expected: PASS（16 件）
 | `awaiting_datetime_approval` の分岐を消す | `test_a_waiting_record_is_left_to_the_approval_flow` |
 | `failed` の再投入で `attempts` を 0 に戻す | `test_a_failed_record_is_queued_again_without_changing_its_rule` |
 | `invalidated_at` の判定を消す | `test_an_invalidated_record_is_not_reused` |
-| `target_epoch` を常に 1 にする | **落ちない**。テストのデータはすべて epoch 1。**epoch を進めた宛先のケースを Task 8 で足す**（claim 側で epoch 不一致を見る） |
+| `target_epoch` を常に 1 にする | `test_the_pair_carries_the_current_epoch`（**追加**。epoch を進めた宛先で作る） |
+| 現行リビジョンの確認を消す | `test_a_destination_without_a_verified_revision_is_refused`（**追加**） |
 
 - [ ] **Step 6: コミット**
 
