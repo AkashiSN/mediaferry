@@ -8159,6 +8159,18 @@ Phase 0 で実測した **v3.1.0**（sourceCommit 8aa95c6）を対象にして�
 実装で計画から外れた判断、検出できなかった変異、追加したテストを、この
 `docs/phase3-plan.md` の該当タスクへ書き戻す。
 
+**実装で外れた判断（Task 14）**
+
+| 計画 | 実装 | 理由 |
+| --- | --- | --- |
+| e2e の 2 つ目の宛先 `family` は別ホスト（`http://family.invalid:2283`） | **同じ fake を指す** | 別ホストだと接続できず、テストがそこで落ちる。「宛先ごとに独立して進む」と「同じリモートへの 2 度目は重複になる」を 1 つの世界で見たいので、同じ fake に向ける |
+| 2 つ目の宛先も `complete` になる | **`awaiting_datetime_approval` で止まる** | チェックサムが一致するので送信は起きず、既存資産を引き受ける。自作と証明できないので日時の補正は承認待ちになる（§9.10）。**これが設計どおりの振る舞い**なので、期待の方を直した。あわせて `remote_asset_id` が 1 つ目と同じであること、サーバ側のアップロードが 1 件のままであることも見る |
+
+`design.md` へ書き戻したのは §9.10（宛先ごとに 1 本・直列、preflight の TTL）、
+§11 の API 表（実装した経路に合わせて全面的に差し替え）、§12 の
+`UPLOAD_CONCURRENCY`（Phase 3 では効かない）、§20 の Phase 3 を完了に、
+§21 に「Phase 3 の実装で確定した事項」。
+
 ```bash
 git add docs/ README.md app/tests/test_upload_e2e.py app/tests/test_immich_live.py
 git commit -m "docs(mediaferry): record what phase 3 settled"

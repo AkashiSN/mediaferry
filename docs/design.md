@@ -971,6 +971,15 @@ pending → checking → uploading → asset_known → tagging → fixing_dateti
 のいずれかに達した時点で終了する。** 承認待ちのレコードがあってもジョブは
 進行中のままにしない。承認は別の操作として扱う。
 
+**送信は宛先ごとに 1 本のジョブで、レコードを 1 件ずつ直列に処理する。** 並列化は
+しない。1 つの Immich に同時に投げる本数を増やしても律速はネットワークと
+サーバ側の取り込みで、こちらが増やせるのは失敗の同時多発だけになる。直列なら、
+キャンセルの観測点も「次の 1 件に入る前」だけで済む。
+
+**preflight（§10）は「その宛先のリビジョンで最初の 1 件を送る前に 1 回」。**
+成功は 15 分間だけ憶える。失敗はリビジョンが変わるまで憶え続ける —— 向き先が
+違うまま何度も試すと、間違った Immich に少しずつ資産が積み上がる。
+
 1. **checking**: 対象の `sha1` を集めて `POST /api/assets/bulk-upload-check` に送る。
    既存と判定されたら `remote_asset_id` を得て `asset_known` へ進む。
 
@@ -1272,14 +1281,20 @@ claim では **(a) を必ず評価し、`selection_rule` に対応する現在�
 | POST | `/merge-groups` | 手動でグループを作成 |
 | PATCH | `/merge-groups/{id}` | 構成変更 / skip / 検証不合格の採用 |
 | POST | `/merge-groups/{id}/merge` | 結合ジョブを開始 |
-| GET/POST/PUT/DELETE | `/destinations` | 転送先プロファイル。API キーはレスポンスで常にマスク |
+| GET | `/destinations` | 転送先の一覧。**API キーは応答に一切出さない**（マスク値も返さない） |
+| POST | `/destinations` | 転送先を作る。URL を検証してから接続を確かめ、`remote_user_id` を記録する |
+| PATCH | `/destinations/{id}` | 改名・有効無効の切り替え、または新しいリビジョン（URL・鍵の変更）を作る |
 | POST | `/destinations/{id}/verify` | 接続を検証し `remote_user_id` を取得・記録する |
+| POST | `/destinations/{id}/archive` | 転送先を退役させる（記録は残す） |
+| POST | `/destinations/{id}/upload` | その宛先の送信ジョブを開始（宛先ごとに 1 本、§9.10） |
+| POST | `/destinations/{id}/recheck` | その宛先の再確認ジョブを開始 |
 | GET | `/uploads/selectable` | §10 の選択肢。`destination_id` と `status` でフィルタ |
-| POST | `/uploads` | アップロードジョブを開始。`media_ids` と **`destination_ids`（複数可）** |
-| GET | `/uploads/pending-approval` | `pre_existing` で日時変更の承認待ちの一覧と差分 |
-| POST | `/uploads/{id}/approve-datetime` | 日時変更を承認して書き戻す |
-| POST | `/uploads/{id}/skip-datetime` | 日時変更を却下し、リモートを変えずに完了にする |
-| POST | `/uploads/{id}/recheck` | リモートの現状を照合し直す（ゴミ箱・消滅の反映） |
+| POST | `/uploads` | media × destination の組を作る。`media_ids` と **`destination_ids`（複数可）** |
+| GET | `/uploads` | 記録の一覧。`destination_id` / `state` で絞り込む |
+| POST | `/uploads/{id}/retry` | `failed` を `pending` に戻す。`selection_rule` は書き換えない（§8） |
+| POST | `/uploads/{id}/requeue` | リモートから消えた資産を送り直す |
+| POST | `/uploads/{id}/approve` | 日時変更を承認して書き戻す（ジョブとして実行する） |
+| POST | `/uploads/{id}/reject` | 日時変更を却下し、リモートを変えずに完了にする |
 | GET | `/jobs`, `/jobs/{id}` | ジョブ一覧・詳細 |
 | POST | `/jobs/{id}/cancel` | キャンセル |
 | GET | `/events` | SSE。`Last-Event-ID` で `job_event.seq` から再開 |
@@ -1320,7 +1335,7 @@ claim では **(a) を必ず評価し、`selection_rule` に対応する現在�
 | `HTTP_PORT` | `8080` | 待ち受けポート |
 | `AUTH_PASSWORD` | 未設定 | 設定すると認証が有効になる |
 | `SECRET_KEY` | 未設定 | 転送先の API キーを暗号化するマスター鍵（§12.3）。転送先が 1 件でもあれば必須 |
-| `UPLOAD_CONCURRENCY` | `2` | アップロード並列度 |
+| `UPLOAD_CONCURRENCY` | `2` | アップロード並列度。**Phase 3 では効かない**（送信は 1 件ずつ直列。多重化は Phase 4 のワーカー多重化と一緒に入れる） |
 | `UPLOAD_TIMEOUT_SECONDS` | `86400` | HTTP タイムアウト |
 | `UPLOAD_MAX_ATTEMPTS` | `3` | リトライ上限 |
 | `AUTO_IMPORT` | `trusted` | `trusted` / `off`。§12.1 |
@@ -1700,7 +1715,7 @@ Phase 0 と Phase 1 に集める**という基準で切った。
 | **0. スパイク** | ① コンテナ間 `SCM_RIGHTS` fd 受け渡しとブローカープロトコルの確定（UID/GID、ソケット権限含む）② 対象 Immich 版の固定、`deviceAssetId` の永続性、サーバインスタンス ID とユーザ ID の取得可否 ③ 32GiB アップロードの疎通と、不可の場合に §10 の選択肢規則をどう変えるかの決定 | §18-1〜3 が解消し、代替が必要な場合は方式が確定している |
 | **1. 基盤 + 取り込み**（完了） | 共通の `ArtifactPublisher` / `Reconciler` の契約、DB スキーマとマイグレーション、プロファイルリビジョン（編集 UI は後でも ID の記録は今から）、既知 DJI カードの手動 scan / import、crash consistency テスト一式。API のみ、loopback バインド | 実 USB で取り込め、§9.3 の任意の手順で落としても reconciliation が回収する。**手順 11 段すべてで子プロセスを落とす試験は import / merge の両方で通っている。実 USB の確認は `phase1-manual-checklist.md`** |
 | **2. 結合**（完了） | グループ検出、結合、検証、§10 の選択肢規則。公開は Phase 1 の `ArtifactPublisher` をそのまま使う | 分割動画が結合され、検証結果と選択肢が API で取れる |
-| **3. Immich 同期** | 状態機械、**転送先プロファイルの CRUD と接続検証**、`origin` 判別、タグ、タイムゾーン補正、複数宛先への同時アップロード | 実 Immich にアップロードでき、途中で落としても再開し、既存アセットを勝手に変更しない。2 つの宛先へ同じメディアを送って独立に追跡できる |
+| **3. Immich 同期**（完了） | 状態機械、**転送先プロファイルの CRUD と接続検証**、`origin` 判別、タグ、タイムゾーン補正、複数宛先への同時アップロード | 実 Immich にアップロードでき、途中で落としても再開し、既存アセットを勝手に変更しない。2 つの宛先へ同じメディアを送って独立に追跡できる。**実機の確認は `needs_immich` の `test_immich_live.py`**（既定の `pytest` では走らない） |
 | **4. Web UI** | React SPA、SSE、認証、CSRF。ここで初めて非 loopback バインドを既定にできる | エンドユーザが CLI に触れず一連の操作を完了できる |
 | **5. 汎用化** | `generic-dcim` / `canon-eos`、プロファイル編集 UI、信頼登録 UX、複数デバイス | EOS 70D の SD カードを取り込める |
 
@@ -1864,3 +1879,22 @@ content-addressed ストレージも採用しない。`library/` が SD の DCIM
 | **検出は「アクティブな member」を境界として扱う** | 列から取り除くだけだと、その前後がつながって別の録画を 1 つのグループにする。写真も同じ理由で候補の列に入れない（duration を持たないので境界として働く） |
 | **`record_verification` と `mark_merged` は成立条件を DB 側で確かめる** | 呼び出し順のバグ 1 つで「merged なのに出力が無い」行ができ、選択肢の側が隠すので静かに残る |
 | **選択肢は `input_digest` を現行の構成から計算し直して照合する** | 見ないと、グループを編集した後に旧派生物が選択肢へ戻る（旧グループは `status = merged` のまま残るため）。member は 1 回の query でまとめて引く |
+
+### Phase 3 の実装で確定した事項（2026-08-18）
+
+| 判断 | 理由 |
+| --- | --- |
+| **送信は宛先ごとに 1 本のジョブで、1 件ずつ直列に処理する** | 律速はネットワークと Immich 側の取り込みで、同時本数を増やしても増えるのは失敗の同時多発だけ。直列ならキャンセルの観測点も「次の 1 件に入る前」で足りる |
+| **preflight は成功を 15 分だけ憶え、失敗はリビジョンが変わるまで憶える** | 向き先が違うまま試し続けると、間違った Immich に少しずつ資産が積み上がる。直し方は「宛先を編集する」＝リビジョンを変えることなので、そこまで憶える |
+| **リビジョンを変えると `target_epoch` が上がり、旧 epoch の未完了レコードは*同じトランザクションで*無効化する** | 別トランザクションにすると、その隙間で claim された記録が旧 epoch のまま送られる。無効化した件数は `RevisionOutcome` で返して API がそのまま利用者へ見せる |
+| **claim は宛先の現行リビジョンを同じトランザクションで解決する** | 先に読むと、claim までの間に編集されたリビジョンで送ることになる。ジョブは claim したリビジョンで送り切る |
+| **リモートに触る手前は `prepare_side_effect`（`assert_lease` + 厳密な CAS）を 1 トランザクションで通す** | `assert_lease` は `cancelling` を拒むが `extend_lease` は拒まない。心拍だけを頼りにすると、キャンセル要求の後にアップロードを始めうる |
+| **`with_lease_pulse` は publisher から `core/lease_pulse.py` へ出した** | 中断できない長い処理はアップロードにもある（大きなファイルの送信）。公開と同じ仕掛けを両方から使う |
+| **キャンセルで送信が途切れたら `needs_recheck` に落とし、`LeaseLost` はジョブの外へ出さない** | サーバ側の成否が不明なまま `failed` にすると、次に「未送信」として上げ直して重複する。例外を上げると利用者が押したキャンセルがジョブの失敗として記録される（結合と同じ形） |
+| **`refuse` は所有を落とすと同時に `state` を `pending` に戻す** | 進行中の状態のまま所有だけ外すと、`upload_record` の CHECK（進行中の状態は所有者を持つ）に触れる |
+| **承認はジョブとして実行し、却下は同期で済ませる** | 承認はリモートの日時を書き換える。リースとキャンセルの下で行い、途中で落ちても決着させる。却下はリモートに触らないので待たせる必要が無い |
+| **`ImmichClient` は redirect を追わない。本文を伴う要求では `allow_redirect=False`** | `x-api-key` はカスタムヘッダなので cross-origin の redirect でも剥がれず、外部へ 301 を返す誤設定でそのまま渡る。本文を伴う要求では、ファイルが 1 回目で EOF に達しているので追うと空の本文を送る |
+| **例外にも応答にも API キーと相手の応答本文を入れない** | 本文は相手が決める値で、送った鍵をそのまま返す実装がありうる。転送先の一覧はマスク値すら返さない |
+| **URL の検証は接続の検証より先** | 逆にすると `javascript:` のような値でもまず接続を試し、400 ではなく 502 を返す |
+| **fake Immich はループバックで listen する実 HTTP サーバにする** | httpx 0.28 の `ASGITransport` は async 専用（`handle_request` を持たない）ので、同期クライアントからは使えない。実物の httpx を通すことでプロトコルの取り違えも見逃さない |
+| **同じリモートを指す 2 つ目の宛先は、送信せずに既存資産を引き受ける** | チェックサムが一致するので送る意味が無い。ただし自作と証明できないので、日時の補正は承認待ちになる |

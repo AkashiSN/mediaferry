@@ -12,9 +12,15 @@ TrueNAS カスタムアプリ。
 | [`docs/phase1-plan.md`](docs/phase1-plan.md) | Phase 1 の実装計画（実行済み） |
 | [`docs/phase1-backup.md`](docs/phase1-backup.md) | バックアップとリストア、再構築できる範囲 |
 | [`docs/phase1-manual-checklist.md`](docs/phase1-manual-checklist.md) | 実 USB での確認手順 |
+| [`docs/phase2-plan.md`](docs/phase2-plan.md) | Phase 2（結合）の実装計画（実行済み） |
+| [`docs/phase3-plan.md`](docs/phase3-plan.md) | Phase 3（Immich 同期）の実装計画（実行済み） |
 
-**Phase 1（基盤 + 取り込み）まで完了。** 配布可能なリリースではない
+**Phase 3（Immich 同期）まで完了。** 配布可能なリリースではない
 （認証と CSRF が入る Phase 4 より前に LAN へ公開しない）。
+
+**対象 Immich は v3.1.0**（Phase 0 で実測した版）。API の形が変わっていたら
+`app/src/mediaferry/adapters/immich.py` だけを直せば済むように、呼び出し側は
+`ImmichClient` のメソッドしか触らない。
 
 ## 構成
 
@@ -48,6 +54,10 @@ root を要するテストは `-m needs_root`、実 Immich を要するテスト
 
 ```bash
 uv run pytest -m needs_root     # ユーザ名前空間が使える環境でのみ通る
+
+# 実 Immich に当てる。書き込むので、捨ててよいインスタンスを使うこと
+MEDIAFERRY_TEST_IMMICH_URL=... MEDIAFERRY_TEST_IMMICH_KEY=... \
+  uv run pytest -m needs_immich
 ```
 
 ## 設定

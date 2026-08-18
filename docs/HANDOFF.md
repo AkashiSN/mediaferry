@@ -1,7 +1,7 @@
 # mediaferry 引き継ぎ資料
 
 最終更新: 2026-08-18
-ブランチ: `main`（単独リポジトリ、72 コミット。先頭は Phase 2 の実装）
+ブランチ: `main`（単独リポジトリ、90 コミット。先頭は Phase 3 の実装）
 
 このファイルは、別セッションが作業を引き継ぐための出発点。
 **まずここを読み、次に `design.md` §20 と該当フェーズの計画を読む。**
@@ -10,33 +10,35 @@
 
 ## 1. 現在地
 
-**Phase 1 と Phase 2 は実装・検証とも完了。Phase 3 は計画のレビュー 1 巡目
-（blocker 8 / major 6 / minor 1）を反映したところ。次は 2 巡目のレビュー。**
+**Phase 1〜3 は実装・検証とも完了。** Phase 3 は計画のレビューを 2 巡してから
+14 タスクを実行した。**残るのは実 Immich に当てる `needs_immich` の 3 件と、
+実装差分の 3 巡目レビュー。** 次のフェーズは 4（Web UI）。
 
 | Phase | 内容 | 状態 |
 | --- | --- | --- |
 | 0 | スパイク。未検証項目の実測とブローカーの最小実装 | **完了** |
 | 1 | 基盤 + 取り込み。`ArtifactPublisher` / `Reconciler` / DB スキーマ / scan / import / API | **完了**（実 USB の確認だけ残り） |
 | 2 | 結合。検出 / ffmpeg / 検証 / 公開 / 回収 / 選択肢 / API | **完了**（`phase2-plan.md` の 14 タスク。実装との差分は書き戻し済み） |
-| 3 | Immich 同期（転送先プロファイル、状態機械） | **計画完了・未実装**（`phase3-plan.md`、14 タスク。codex レビュー **1 巡目を反映済み**。2 巡目は未実施） |
+| 3 | Immich 同期（転送先プロファイル、状態機械、タグ、日時補正、複数宛先） | **完了**（`phase3-plan.md` の 14 タスク。codex レビュー 2 巡を反映。実装との差分は書き戻し済み。**実 Immich での確認だけ残り**） |
 | 4 | Web UI | 未着手 |
 | 5 | 汎用化（Canon、プロファイル編集 UI、複数デバイス） | 未着手 |
 
 ### 検証状態
 
 ```
-uv run pytest                  596 passed
+uv run pytest                  820 passed, 4 deselected
 uv run pytest -m needs_root      1 passed   ← detached mount の実証
+uv run pytest -m needs_immich    3 件       ← 実 Immich が要る。既定では走らない
 uv run ruff check .            All checks passed
-uv run ruff format --check .   113 files already formatted
+uv run ruff format --check .   144 files already formatted
 ```
 
 **結合のテストは実 ffmpeg を使う**（`shutil.which("ffmpeg")` が無いときだけ skip）。
 開発コンテナには `~/.local/bin/ffmpeg` が入っている。
 
-`ruff format` の対象が 88 件なのは、`docs/` を `extend-exclude` で外していても
-**ルート直下の `CLAUDE.md` は対象に入る**ため（Markdown 内のコードブロックが
-整形される）。
+`ruff format` の件数がソースの本数より多いのは、`docs/` を `extend-exclude` で
+外していても**ルート直下の `CLAUDE.md` は対象に入る**ため（Markdown 内の
+コードブロックが整形される）。
 
 `docker restart` や電源断に相当する試験は、§9.3 の手順 11 段すべてで子プロセスを
 `os._exit` で落として **import / merge / merge_prepared の 3 経路**を回収できる
@@ -45,8 +47,10 @@ assert している。
 
 ### 残っていること
 
-1. **Phase 3（Immich 同期）の計画。** まだ計画も書いていない。範囲は
-   `design.md` §20 の表と §10 (a)(c)、`upload_record` / `selection_rule`。
+1. **実 Immich での確認（`-m needs_immich` の 3 件）。** `app/tests/test_immich_live.py`。
+   `MEDIAFERRY_TEST_IMMICH_URL` と `MEDIAFERRY_TEST_IMMICH_KEY` を渡して実行する。
+   **タグの取得・作成・付与と日時の更新は Phase 0 のプローブに入っていない**ので、
+   ここが初めての実測になる。形が違っていたら `adapters/immich.py` だけを直す。
 2. **実 USB での手動確認（`phase1-manual-checklist.md` の 12 項目）。**
    開発コンテナ（入れ子の非特権 LXC）ではマウントが AppArmor に阻まれるので、
    TrueNAS ホストで実行する必要がある。
@@ -68,7 +72,7 @@ assert している。
 | `docs/design.md` | **設計仕様書。正本。** | ✅ |
 | `docs/phase1-plan.md` | Phase 1 の実装計画。**実行済み**。実装との差分は都度書き戻してある | ✅ |
 | `docs/phase2-plan.md` | Phase 2（結合）の実装計画。**実行済み**。codex のレビュー 2 巡を反映し、実装で外れた判断と検出できなかった変異を書き戻してある | ✅ |
-| `docs/phase3-plan.md` | Phase 3（Immich 同期）の実装計画。**未レビュー・未実行**。14 タスク | ✅ |
+| `docs/phase3-plan.md` | Phase 3（Immich 同期）の実装計画。**実行済み**。codex のレビュー 2 巡を反映し、実装で外れた判断と検出できなかった変異を書き戻してある | ✅ |
 | `docs/phase1-backup.md` | バックアップとリストア、再構築できる範囲（§18-4） | ✅ |
 | `docs/phase1-manual-checklist.md` | 実 USB での確認手順 | ✅ |
 | `docs/phase0-findings.md` | Phase 0 の実測結果と設計への反映 | ✅ |
@@ -154,6 +158,30 @@ blocker として指摘されたもの**で、理屈で戻すと同じ穴に落�
 | **サイズ検査の許容誤差 2% は実機の大きさが前提**（実装で判明） | コンテナのオーバーヘッドは 16 GiB では 0.002% だが、数百 KB の合成クリップでは 7〜8% になる。lavfi のクリップで組んだ e2e は必ずサイズ検査に落ちるので、採用（`adopt`）まで通す形にしてある |
 | **`record_verification` と `mark_merged` は成立条件を DB 側で確かめる** | 呼び出し順のバグ 1 つで「merged なのに出力が無い」行ができ、選択肢の側が隠すので静かに残る |
 
+
+### Phase 3 で確定した契約（蒸し返さないこと）
+
+**実装・検証とも済んでいる**（実 Immich での確認だけ残り）。根拠は `design.md`
+§21 の「Phase 3 の実装で確定した事項」と `phase3-plan.md` の各タスク。
+**2 巡のレビューで blocker として挙がったものを含む。**
+
+| 判断 | 理由 |
+| --- | --- |
+| **送信は宛先ごとに 1 本のジョブで、1 件ずつ直列に処理する** | 律速はネットワークと Immich 側の取り込み。同時本数を増やしても増えるのは失敗の同時多発だけで、接続をスコープごとに 1 本に保つ約束も崩れる |
+| **リモートに触る手前は必ず `prepare_side_effect` を通る** | `assert_lease` は `cancelling` を拒むが `extend_lease` は拒まない。心拍だけを頼りにすると、**キャンセル要求の後にアップロードを始める** |
+| **キャンセルで途切れた送信は `needs_recheck`。`failed` にしない** | サーバ側の成否が不明なまま失敗にすると、次に「未送信」として上げ直して重複する |
+| **`LeaseLost` をジョブの外へ出さない** | `_run_one` が例外をすべて `failed` にするので、利用者が押したキャンセルがジョブの失敗として記録される（結合・取り込みと同じ形） |
+| **リビジョンを変えたら、旧 epoch の未完了レコードを*同じトランザクションで*無効化する** | 別トランザクションにすると、その隙間で claim された記録が旧 epoch のまま送られる |
+| **claim は宛先の現行リビジョンを同じトランザクションで解決する** | 先に読むと、claim までの間に編集されたリビジョンで送ることになる |
+| **preflight は成功を 15 分、失敗はリビジョンが変わるまで憶える** | 向き先が違うまま試し続けると、**間違った Immich に少しずつ資産が積み上がる**。直し方は宛先の編集＝リビジョンの更新なので、そこまで憶える |
+| **`origin` が `created_by_us` でなければ日時の補正は承認待ち** | 別経路で上がっていて、ユーザが手で直しているかもしれない。同じリモートを指す 2 つ目の宛先も、送信せずに既存資産を引き受けて承認待ちになる |
+| **`ImmichClient` は redirect を追わない。本文を伴う要求では特に** | `x-api-key` はカスタムヘッダなので cross-origin の redirect でも剥がれず、**外部へ 301 を返す誤設定で鍵がそのまま渡る**。本文つきの要求は 1 回目で EOF に達しているので、追うと空の本文を送る |
+| **応答も例外もメッセージに秘密と相手の本文を含めない** | 転送先の一覧は API キーのマスク値すら返さない。応答本文は相手が決める値で、送った鍵をそのまま返す実装がありうる |
+| **URL の検証は接続の検証より先** | 逆にすると `javascript:` のような値でもまず接続を試し、400 ではなく 502 を返す |
+| **`refuse` は所有を落とすと同時に `state` を `pending` へ戻す** | 進行中の状態のまま所有だけ外すと `upload_record` の CHECK に触れる |
+| **承認はジョブ、却下は同期** | 承認はリモートの日時を書き換えるのでリースとキャンセルの下で行う。同じレコードの承認が実行待ちなら 409 で断る（積めると 1 本目の後の残りが軒並み失敗として並ぶ） |
+| **fake Immich はループバックで実際に listen させる** | httpx 0.28 の `ASGITransport` は非同期用で、同期の `httpx.Client` から使えない。実物の httpx を通すのでプロトコルの取り違えも見逃さない |
+
 ---
 
 ## 4. 環境の癖と罠
@@ -228,61 +256,33 @@ blocker として指摘されたもの**で、理屈で戻すと同じ穴に落�
 
 ### 手順
 
-1. **`docs/phase3-plan.md` の 2 巡目レビューを依頼する。** 1 巡目（blocker 8 /
-   major 6 / minor 1）は全件反映済み。**修正が新しい境界を作るので、そこを
-   もう一度見せる**（Phase 2 では 2 巡目でさらに blocker が 2 件出た。どちらも
-   「直した箇所の周辺」）。見せる箇所は計画末尾「レビュー記録 / 2 巡目」に
-   列挙してある。反映したら Task 1 から実行する
-2. **`phase1-manual-checklist.md` を TrueNAS ホストで実行する。** 特に 11 番
+1. **実装差分の 3 巡目レビューを codex に依頼する。** 2 巡目までは*計画*を
+   読ませたもので、**文書に埋め込んだコードは型検査も実行もできない**ため、
+   機械的な欠陥が毎巡残った（実際、実装時に `claim_job_id` の外部キー、
+   monkeypatch の対象モジュール、ビルトインの `tag_pre_existing` など複数が
+   落ちた）。**動くコードを読ませるのはここが初めて**になる。先にコミットして
+   hash を渡す（§5「レビューの依頼先」）
+2. **実 Immich に `-m needs_immich` を当てる**（§1「残っていること」1）。
+   タグと日時更新のエンドポイントは Phase 0 で実測していない
+3. **`phase1-manual-checklist.md` を TrueNAS ホストで実行する。** 特に 11 番
    （mtime の解釈）は実装の前提の確認なので、結果を `phase0-findings.md` に残す。
    12 番（`attached_pic`）は Phase 2 で足した項目
+4. **Phase 4（Web UI）の計画を書く。** 範囲は `design.md` §20 と §13。
+   ここで初めて認証・CSRF・非 loopback バインドが入る。**Phase 3 で先送りした
+   ものが 2 つある**: 結合グループの破棄と再結合（`superseded_by_id`）、
+   `GET /uploads/pending-approval` の差分表示
 
-この 2 つは並行してよい。1 は開発コンテナで進められる。
+1〜2 は独立して進められる。3 は TrueNAS ホストが要る。
 
-### Phase 3 の計画で決めたこと（1 巡目のレビュー済み）
+### Phase 3 で実装しなかったもの（意図的な先送り）
 
-- **アップロードは逐次実行**にする。`UPLOAD_CONCURRENCY` は Phase 4 の
-  ワーカー多重化まで効かない（ジョブ内で並行させると、接続をスコープごとに
-  1 本に保てない）
-- **`upload` ジョブは宛先ごとに 1 本**。状態の再確認は同じジョブ種別の
-  `params.mode = "recheck"`（`job.type` の CHECK を書き換えるとテーブルの
-  作り直しになる）
-- **マイグレーションは足さない。** `0004_destinations_and_uploads.sql` に
-  必要なテーブル・複合外部キー・trigger がすべて入っている
-- Phase 2 で作った `_with_lease_pulse` を `core/lease_pulse.py` へ移し、
-  巨大ファイルの送信中のリース維持にも使う
-- **外部への副作用は `prepare_side_effect` を通ってからだけ行う。** `assert_lease`
-  と claim の CAS を 1 つの `BEGIN IMMEDIATE` に入れる（`extend_lease` は
-  `cancelling` でもリースを延ばすので、これが無いとキャンセル後も送信が完走する）
-- **承認は `upload` ジョブの `mode="approve"` として所有権を取ってから行う。**
-  却下はリモートに触らないので同期のまま
-- **fake Immich はループバックで実際に listen させる。** httpx 0.28 の
-  `ASGITransport` は非同期用で、同期の `httpx.Client` から使えない
-
-### Phase 3 の範囲（`design.md` §20）
-
-> 状態機械、転送先プロファイルの CRUD と接続検証、`origin` 判別、タグ、
-> タイムゾーン補正、複数宛先への同時アップロード。
->
-> 完了条件: 実 Immich にアップロードでき、途中で落としても再開し、既存アセットを
-> 勝手に変更しない。2 つの宛先へ同じメディアを送って独立に追跡できる。
-
-Phase 2 側で既に用意してあるもの:
-
-- `GET /uploads/selectable`（§10 **(b)** の選択肢）と `SelectionService`。
-  **(a) 安全条件と (c) `selection_rule` ごとの条件は Phase 3 で足す**（claim の
-  ときに評価するもので、`upload_record` と一緒に入れる）
-- `media_file` に `role`（`original` / `derived`）と `sha1`、`captured_at`
-- 結合グループの `verification_json` と `adopted_at`（不合格の採用）
-- `ArtifactPublisher` の 11 手順と `_with_lease_pulse`（長い処理の間のリース維持）
-- `JobRunner` のキャンセル決着の作法（**例外で上げず、正常 return する**）
-
-Phase 0 で実測済みの前提（`phase0-findings.md`）:
-
-- 接続先 URL と表示用 URL を分ける（公開 URL 経由では 622 MiB で 502）
-- `remote_user_id` は同一性ではなく向き先変化の guard
-- `origin` は `status: created` を commit できた場合だけ `created_by_us`
-- `isTrashed` を無視しない / checksum は base64
+- **`UPLOAD_CONCURRENCY` は効かない。** 逐次実行に倒してあり、多重化は
+  Phase 4 のワーカー多重化と一緒に入れる
+- **マイグレーションは 1 本も足していない。** `0004_destinations_and_uploads.sql`
+  に必要なテーブル・複合外部キー・trigger がすべて入っていた
+- **`GET /uploads/pending-approval` は作っていない。** `GET /uploads?state=...`
+  で絞れるので足りている。差分（現在のリモートの日時 vs 補正案）の表示は
+  画面と一緒に決める
 
 ### 作業の作法
 
