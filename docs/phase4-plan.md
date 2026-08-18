@@ -121,7 +121,7 @@ OpenAPI の型を生成し、最小の UI consumer を 1 つ通す**形にする
 
 ---
 
-### Task 0: API のエラー形式と code の一覧
+### Task 0: API のエラー形式と code の一覧 —— **実装済み**（`4b2fb4e`）
 
 **Files:** Create `app/src/mediaferry/api/errors.py` / Modify すべての `routes_*.py` / Test `app/tests/test_api_errors.py`
 
@@ -139,9 +139,10 @@ OpenAPI の型を生成し、最小の UI consumer を 1 つ通す**形にする
 - `meta` は画面が使う構造化データ（件数、対象 id など）。**秘密を入れない**
 - FastAPI の既定のバリデーション誤り（422）も同じ封筒に包む
 
-- [ ] Step 1: 失敗するテストを書く（既知の失敗経路すべてが `code` を返す / 未知の例外は
-      `internal` + 定型文で、例外文字列を含まない / 422 も封筒に入る / 秘密が混ざらない）
-- [ ] Step 2〜4（実装 → 変異 → コミット）
+`api/errors.py` に `ErrorCode` と `ApiError`、`install_error_handlers` を置き、既存の
+31 箇所を移した。未処理の例外は定型文だけ返してログにのみ残す。検証の失敗は**どの欄か**
+だけを `meta.fields` で返す（受け取った値を反射させない）。変異 6 件を検出（うち 2 件は
+「未知のパスへの GET」と「5xx を投げる経路」のテストを足して固定した）。
 
 ---
 
