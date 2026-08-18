@@ -251,62 +251,6 @@ blocker として指摘されたもの**で、理屈で戻すと同じ穴に落�
 - `-timecode 00:00:00:00` を付けると `tmcd` の data ストリームが増える。
   TS 経路が運べないケースの再現に使う
 
-### agmsg（codex とのやり取り）
-
-**⚠ 2026-08-18 の作業中に `~/.agents/skills/agmsg/` の中身が消えた。** 残って
-いるのは `run/` の watcher ログだけで、スクリプト・DB・チーム定義がすべて無い
-（ログには `no store yet` と出る）。**`mediaferry` チームの名簿とメッセージ履歴も
-一緒に失われている。** 別セッションが同じマシンで agmsg 自体を触っている（chezmoi
-リポジトリ）ので、その作業の巻き添えと思われる。**再開するときは、まず
-`ls ~/.agents/skills/agmsg/scripts/` で入っているかを確かめ、無ければ agmsg を
-入れ直してから `join.sh` でチームを作り直す。** 以下はスクリプトが在る前提の手順。
-
-**この案件専用のチームは `mediaferry`。** 自分は `deckhand`（claude-code）、
-レビュー役の codex は `lookout`。チーム名は名前空間なので、`chezmoi` や
-`node-rotation-controller` と同名のメンバーが居ても衝突しない（メンバー名が
-一意である必要があるのはチームの中だけ）。**Phase 3 の 2 巡目までは `chezmoi`
-チームの `codex` とやり取りしていた**ので、それ以前の履歴はそちらにある。
-
-**レビューのたびに codex を spawn する**（常駐させない）。**依頼の本文は
-`--boot-prompt` で渡す**:
-
-```bash
-bash ~/.agents/skills/agmsg/scripts/spawn.sh codex lookout \
-  --project "$(pwd)" --team mediaferry --boot-prompt "<依頼>"
-bash ~/.agents/skills/agmsg/scripts/despawn.sh mediaferry deckhand lookout   # 終わったら
-```
-
-**codex は Monitor を持たないので、idle になった後に届いたメッセージに気づかない。**
-spawn だけして後から `send.sh` を打つと、受信箱に未読のまま積まれてレビューが
-始まらない（実際に 1 度これで空振りした）。`--boot-prompt` は actas の指示に
-改行区切りで連結され、最初のターンで「名乗る + 依頼を実行する」が同時に走る。
-本文が長いときは、先に `send.sh` で送っておき、boot prompt では
-`inbox.sh mediaferry lookout` を読ませる形にすると短く済む。
-
-codex には readiness handshake が無いので `spawn.sh` は待たずに返る
-（`--no-wait` 相当）。ペインは herdr（tmux ではない）で開く。**despawn は
-`--force` が要る**（graceful は codex 側の watcher の応答を待つが、その watcher が
-居ない）。
-
-- **`delivery.sh status` の `watch processes: 0 alive` は「codex が死んでいる」
-  ことを意味しない。** codex 側は自前の bridge と `watch-once.sh` で受け取る。
-  生死は `pgrep -af codex` で `codex-bridge.js` と `watch-once.sh` を見る方が確実
-- `team.sh mediaferry` で名簿を確認できる
-- `history.sh` は全件を渡すと `sqlite3: Argument list too long` で落ちる。
-  **件数を指定する**（`history.sh mediaferry deckhand 3`）
-- **返信は待ち方を用意しておく。** 直近 1 件が codex 発になるまで回す:
-
-  ```bash
-  until bash ~/.agents/skills/agmsg/scripts/history.sh mediaferry deckhand 1 \
-      | grep -q "lookout → deckhand"; do sleep 20; done
-  ```
-
-  4800 行の計画のレビューで**返信まで約 6 分**だった
-- **長文メッセージは配送が遅れる。** 変更点の全文を貼らず、**commit hash と
-  ファイル名を渡して読ませる**方が速くて確実
-- codex がレビューする版が**編集の反映前**だったことがある。**先にコミットして
-  から hash を伝える**と取り違えが起きない
-
 ---
 
 ## 5. 次にやること
@@ -327,8 +271,7 @@ codex には readiness handshake が無いので `spawn.sh` は待たずに返�
    ものが 2 つある**: 結合グループの破棄と再結合（`superseded_by_id`）、
    `GET /uploads/pending-approval` の差分表示
 
-1・2 は独立して進められる。3 は TrueNAS ホストが要る。**2 を回すには agmsg が
-入っている必要がある**（§4 の警告）。
+1・2 は独立して進められる。3 は TrueNAS ホストが要る。
 
 ### Phase 3 で実装しなかったもの（意図的な先送り）
 
@@ -393,20 +336,15 @@ PYTHONDONTWRITEBYTECODE=1 uv run python mutate.py \
 5. 計画から外れる判断をしたら、その場で計画側にも書き戻す
 6. 詰まったら codex に相談する
 
-### レビューの依頼先
+### レビューの依頼
 
-```bash
-bash ~/.agents/skills/agmsg/scripts/spawn.sh codex lookout --project "$(pwd)" --team mediaferry
-bash ~/.agents/skills/agmsg/scripts/send.sh mediaferry deckhand lookout "<本文>"
-bash ~/.agents/skills/agmsg/scripts/history.sh mediaferry deckhand 3
-```
+**先にコミットしてから、hash とファイル名を渡して読ませる。** 差分の全文を本文へ
+貼ると、反映前の版をレビューされることがある（実際に 1 度起きた）。
 
-**チームは `mediaferry`、自分は `deckhand`、codex は `lookout`。** レビューの
-たびに spawn し、終わったら despawn する（§4 の agmsg）。
-
-**先にコミットしてから、hash とファイル名を渡して読ませる。** 本文に全文を
-貼ると配送が遅れるうえ、反映前の版をレビューされることがある。返信の待ち方と
-生死の確認は §4 の agmsg にある。
+**何を見せるかで、出るものが変わる。** 文書に埋め込んだコードは型検査も実行も
+できないので、機械的な欠陥が毎巡残る（§1 の表）。**実装差分を見せると、
+文書では出なかった層**（SQLite の並行性、相手が値を選べる応答、実装した順序）
+**が出る。** 直した箇所の周辺をもう一度見せると、また出る。
 
 ---
 
