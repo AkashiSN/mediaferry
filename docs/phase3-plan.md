@@ -551,7 +551,11 @@ class CredentialStore:
 
         宛先の作成・編集は 1 トランザクションで反映する必要がある（§8）ので、
         リポジトリ側の `BEGIN IMMEDIATE` の中から呼べる形を用意する。
+        docstring だけの約束にしない —— 単独で呼ばれると autocommit になり、
+        孤立した credential を作れてしまう。
         """
+        if not self._conn.in_transaction:
+            raise RuntimeError("store_locked は呼び出し側のトランザクションの中で使う")
         credential_id = new_id()
         row = self._conn.execute(
             "SELECT COALESCE(MAX(revision), 0) AS revision FROM destination_credential"
@@ -1006,9 +1010,12 @@ class DestinationRepository:
         """編集を新しいリビジョンとして反映する. 戻り値は revision_id."""
         endpoints = _endpoints(base_url, public_url)
         _require_identity(identity)
-        current = self.current(destination_id)
-        epoch = _next_epoch(current, endpoints[0], identity, same_library)
         with immediate(self._conn):
+            # **現行の読出しと版番号の決定もトランザクションの中で行う。**
+            # 外に出すと、同時に 2 つの編集が同じ revision N を読み、片方が
+            # UNIQUE 違反で 500 になる。
+            current = self.current(destination_id)
+            epoch = _next_epoch(current, endpoints[0], identity, same_library)
             credential_id = self._credentials.store_locked(destination_id, secret)
             revision_id = self._write_revision(
                 destination_id=destination_id,
@@ -1063,6 +1070,25 @@ class DestinationRepository:
             )
         )
 
+    def rename_or_toggle(
+        self, destination_id: str, name: str | None = None, enabled: bool | None = None
+    ) -> None:
+        """接続に関わらない編集. **リビジョンを増やさない**（§8 の「編集」ではない）."""
+        assignments, params = [], []
+        if name is not None:
+            assignments.append("name = ?")
+            params.append(name)
+        if enabled is not None:
+            assignments.append("enabled = ?")
+            params.append(1 if enabled else 0)
+        if not assignments:
+            return
+        with immediate(self._conn):
+            self._conn.execute(
+                f"UPDATE upload_destination SET {', '.join(assignments)} WHERE id = ?",  # noqa: S608
+                (*params, destination_id),
+            )
+
     def set_enabled(self, destination_id: str, enabled: bool) -> None:
         with immediate(self._conn):
             self._conn.execute(
@@ -1107,6 +1133,8 @@ class DestinationRepository:
         identity: RemoteIdentity,
     ) -> str:
         """**呼び出し側が開いたトランザクションの中で使う。** 単独では開かない."""
+        if not self._conn.in_transaction:
+            raise RuntimeError("_write_revision は呼び出し側のトランザクションの中で使う")
         revision_id = new_id()
         base_url, public_url = endpoints
         self._conn.execute(
@@ -1482,7 +1510,7 @@ def immich():
     """ループバックで listen する fake Immich. テストごとに新しいポート."""
     from .fake_immich import FakeImmich
 
-    server = immich  # conftest のフィクスチャ（ループバックで listen している）
+    server = FakeImmich()
     server.start()
     yield server
     server.stop()
@@ -1676,6 +1704,13 @@ def test_a_reject_without_an_asset_id_is_a_protocol_error(client, immich, monkey
         client.bulk_upload_check([("k1", "0" * 40)])
 
 
+def test_a_malformed_response_is_a_protocol_error(client, immich, monkeypatch):
+    """scalar や配列を返す相手でも、プロトコル不一致として分類できる."""
+    monkeypatch.setattr(immich, "_bulk_check", lambda payload: ["not", "an", "object"])
+    with pytest.raises(ImmichProtocolError):
+        client.bulk_upload_check([("k1", "0" * 40)])
+
+
 def test_an_unknown_upload_status_is_a_protocol_error(client, immich, tmp_path, monkeypatch):
     path, sha1 = a_file(tmp_path)
     monkeypatch.setattr(
@@ -1862,7 +1897,7 @@ class ImmichClient:
                 files={"assetData": (path.name, stream, "application/octet-stream")},
                 headers={"x-immich-checksum": to_base64_checksum(sha1_hex)},
             )
-        body = response.json()
+        body = _as_object(response, "POST /api/assets")
         status = body.get("status")
         if status not in UPLOAD_STATUSES:
             raise ImmichProtocolError(f"POST /api/assets の status が未知: {status!r}")
@@ -1870,12 +1905,37 @@ class ImmichClient:
             raise ImmichProtocolError("POST /api/assets の応答に id が無い")
         return UploadOutcome(asset_id=body["id"], status=status)
 
-    def ensure_tag(self, name: str) -> str:
-        """既にあれば作らない. タグ付けは追加操作だけにする（§9.10）."""
-        for tag in self._request("GET", "/api/tags").json():
+    def find_tag(self, name: str) -> str | None:
+        """既存のタグを探す（読み取りのみ）."""
+        tags = self._request("GET", "/api/tags").json()
+        if not isinstance(tags, list):
+            raise ImmichProtocolError("GET /api/tags の応答が配列ではない")
+        for tag in tags:
+            if not isinstance(tag, dict) or not isinstance(tag.get("name"), str):
+                raise ImmichProtocolError("GET /api/tags の要素の形が違う")
             if tag["name"] == name:
-                return tag["id"]
-        return self._request("POST", "/api/tags", json={"name": name}).json()["id"]
+                return _required_str(tag, "id", "GET /api/tags")
+        return None
+
+    def create_tag(self, name: str) -> str:  # noqa: D401
+        """タグを作る（変更を伴う）.
+
+        **`find_tag` と分けてある。** 呼び出し側は「変更を伴う呼び出しの直前」
+        ごとに所有権と向き先を確かめる必要があり、探索と作成が 1 メソッドに
+        まとまっていると、その間に guard を挟めない。
+        """
+        return _required_str(
+            _as_object(self._request("POST", "/api/tags", json={"name": name}), "POST /api/tags"),
+            "id",
+            "POST /api/tags",
+        )
+
+    def ensure_tag(self, name: str) -> str:
+        """探して無ければ作る. **guard を挟めないので、ジョブからは使わない。**
+
+        `needs_immich` の疎通確認のような、所有権の要らない場面向け。
+        """
+        return self.find_tag(name) or self.create_tag(name)
 
     def tag_assets(self, tag_id: str, asset_ids: Sequence[str]) -> None:
         self._request("PUT", f"/api/tags/{tag_id}/assets", json={"ids": list(asset_ids)})
@@ -1930,14 +1990,42 @@ class ImmichClient:
         return response
 
 
-def _parsed_check(body: dict[str, Any], expected: Sequence[str]) -> dict[str, CheckOutcome]:
-    """応答を検証して写像にする. 欠落・重複・未知の値は protocol error."""
+def _as_object(response: httpx.Response, label: str) -> dict[str, Any]:
+    """JSON を object として読む. 壊れた応答も protocol error に正規化する."""
+    try:
+        body = response.json()
+    except ValueError as exc:
+        raise ImmichProtocolError(f"{label} の応答が JSON ではない") from exc
+    if not isinstance(body, dict):
+        raise ImmichProtocolError(f"{label} の応答が object ではない")
+    return body
+
+
+def _required_str(body: dict[str, Any], key: str, label: str) -> str:
+    value = body.get(key)
+    if not isinstance(value, str) or not value:
+        raise ImmichProtocolError(f"{label} の応答に {key} が無い")
+    return value
+
+
+def _parsed_check(body: Any, expected: Sequence[str]) -> dict[str, CheckOutcome]:
+    """応答を検証して写像にする. 欠落・重複・未知の値は protocol error.
+
+    **型も見る。** proxy や別バージョンが scalar や list を返したとき、
+    `AttributeError` ではなく「プロトコルが違う」として分類・表示できるようにする。
+    """
+    if not isinstance(body, dict):
+        raise ImmichProtocolError("bulk-upload-check の応答が object ではない")
     results = body.get("results")
     if not isinstance(results, list):
         raise ImmichProtocolError("bulk-upload-check の応答に results が無い")
     outcomes: dict[str, CheckOutcome] = {}
     for result in results:
+        if not isinstance(result, dict):
+            raise ImmichProtocolError("bulk-upload-check の results の要素が object ではない")
         key = result.get("id")
+        if not isinstance(key, str):
+            raise ImmichProtocolError("bulk-upload-check の結果に文字列の id が無い")
         if key in outcomes:
             raise ImmichProtocolError(f"bulk-upload-check の応答に重複した id: {key!r}")
         action = result.get("action")
@@ -1981,6 +2069,8 @@ Expected: PASS（21 件）
 | `bulk_upload_check` の `checksum` を hex にする | `test_a_known_checksum_comes_back_with_its_asset_id`（照合できず accept になる） |
 | `is_trashed` を `result.get("isTrashed", False)` に戻す | `test_a_trashed_asset_is_reported_as_trashed` は落ちないが、**`isTrashed` を落とした応答を受理してしまう**。`_parsed_check` の bool 判定を消す変異として `test_a_reject_without_an_asset_id_is_a_protocol_error` と同じ形のテストで捕まえる |
 | `_parsed_check` の全単射チェックを消す | `test_a_missing_result_is_a_protocol_error` |
+| 応答の型検証（`isinstance`）を消す | `test_a_malformed_response_is_a_protocol_error` |
+| `ensure_tag` を分けずに 1 メソッドへ戻す | Task 9 の「タグごとに guard」が書けなくなる。`test_a_tag_is_created_once_and_reused` は通るので、**呼び出し側の変異**として Task 9 側で捕まえる |
 | `action` の検証を消す | `test_an_unknown_action_is_a_protocol_error` |
 | `reject` の `assetId` 検証を消す | `test_a_reject_without_an_asset_id_is_a_protocol_error` |
 | `upload_asset` の `status` 検証を消す | `test_an_unknown_upload_status_is_a_protocol_error` |
@@ -2067,7 +2157,7 @@ BASE_URL = "http://immich.invalid:2283"
 
 
 @pytest.fixture
-def world(db):
+def world(db, immich):
     server = immich  # conftest のフィクスチャ（ループバックで listen している）
     repo = DestinationRepository(db, CredentialStore(db, SecretBox(os.urandom(32))))
     destination_id = repo.create(
@@ -3098,6 +3188,8 @@ git commit -m "feat(mediaferry): expand upload requests into per pair work items
   - `.check_eligibility(row: sqlite3.Row) -> str | None`（満たさない理由。満たすなら `None`）
   - `.prepare_side_effect(ctx: JobContext, record_id: str, expect_state: str, lease_seconds: int = 60) -> None`
   - `.extend_claim(record_id: str, token: str, lease_seconds: int = 60) -> None`
+  - `.advance_owned(ctx: JobContext, record_id: str, state: str, expect_state: str, **fields) -> None`
+  - `.finish_owned(ctx: JobContext, record_id: str, state: str, expect_state: str, **fields) -> None`
   - `.advance(record_id: str, token: str, state: str, expect_state: str, **fields: object) -> None`
   - `.finish(record_id: str, token: str, state: str, expect_state: str, **fields: object) -> None`
   - `.release_to(record_id: str, token: str, state: str, **fields: object) -> None`
@@ -3119,7 +3211,14 @@ git commit -m "feat(mediaferry): expand upload requests into per pair work items
 | グループの supersede で無効化された後も進める | 条件に `invalidated_at IS NULL` を入れる |
 
 **`prepare_side_effect` を通ってから HTTP を呼ぶ。** 戻ってきた結果を commit する
-`advance` / `finish` にも同じ条件と `expect_state` を入れる。
+ときは **`advance_owned` / `finish_owned`**（`ctx` を取り、同じ
+`BEGIN IMMEDIATE` の中で `ctx.assert_lease()` も行う）を使う。
+
+**commit 側で claim だけを見ては足りない。** HTTP を待っている間にキャンセルが
+commit されると、claim は生きたままなので `asset_known` や `complete` を書けて
+しまい、**画面はキャンセル済みなのにタグと日時まで進む**。`advance` /
+`finish`（`ctx` を取らない版）は、リースをもう見られない後始末の経路
+（`_release_unknown` など）だけで使う。
 
 **claim してから (a)(c) を評価する。** 評価を CAS の中に書けない（`selection_rule`
 ごとに別のテーブルを見る）ので、取ってから確かめ、満たさなければ `refuse` で
@@ -3626,13 +3725,47 @@ RELEASED_STATES = ("pending", "needs_recheck")
                 "UPDATE upload_record SET claim_expires_at = ?, updated_at = ?"
                 " WHERE id = ? AND claim_token = ? AND state = ? AND invalidated_at IS NULL"
                 "   AND claim_expires_at > ?",
-                (_expiry(lease_seconds), now_iso(), record_id, token, expect_state, now_iso()),
+                (
+                    _expiry(lease_seconds),
+                    now_iso(),
+                    record_id,
+                    ctx.lease_token,
+                    expect_state,
+                    now_iso(),
+                ),
             )
             if updated.rowcount != 1:
                 raise ClaimLost(f"レコード {record_id} の所有権を失っている")
 
     def extend_claim(self, record_id: str, token: str, lease_seconds: int = 60) -> None:
         self._cas(record_id, token, "claim_expires_at = ?", (_expiry(lease_seconds),), strict=True)
+
+    def advance_owned(
+        self, ctx: JobContext, record_id: str, state: str, expect_state: str, **fields: object
+    ) -> None:
+        """外部副作用の結果を commit する. **リースも同じ取引の中で確かめる。**"""
+        with immediate(self._conn):
+            ctx.assert_lease()
+            self._locked_cas(
+                record_id, ctx.lease_token, "state = ?", (state,), expect_state, **fields
+            )
+
+    def finish_owned(
+        self, ctx: JobContext, record_id: str, state: str, expect_state: str, **fields: object
+    ) -> None:
+        """終端へ倒して claim を外す. **リースも同じ取引の中で確かめる。**"""
+        if state not in TERMINAL_STATES:
+            raise ValueError(f"終端ではない状態: {state}")
+        with immediate(self._conn):
+            ctx.assert_lease()
+            self._locked_cas(
+                record_id,
+                ctx.lease_token,
+                "state = ?, claim_job_id = NULL, claim_token = NULL, claim_expires_at = NULL",
+                (state,),
+                expect_state,
+                **fields,
+            )
 
     def advance(
         self, record_id: str, token: str, state: str, expect_state: str, **fields: object
@@ -3748,6 +3881,23 @@ RELEASED_STATES = ("pending", "needs_recheck")
         自分が持っていた行は片付けられる必要がある。
         """
         extra = "".join(f", {name} = ?" for name in fields)
+        with immediate(self._conn):
+            self._locked_cas(
+                record_id, token, assignment, params, expect_state, strict=strict, **fields
+            )
+
+    def _locked_cas(
+        self,
+        record_id: str,
+        token: str,
+        assignment: str,
+        params: tuple,
+        expect_state: str | None,
+        strict: bool = True,
+        **fields: object,
+    ) -> None:
+        """**呼び出し側が開いたトランザクションの中で使う。** 条件は `_cas` と同じ."""
+        extra = "".join(f", {name} = ?" for name in fields)
         clauses = ["id = ?", "claim_token = ?"]
         guard: list[object] = [record_id, token]
         if strict:
@@ -3756,14 +3906,13 @@ RELEASED_STATES = ("pending", "needs_recheck")
         if expect_state is not None:
             clauses.append("state = ?")
             guard.append(expect_state)
-        with immediate(self._conn):
-            updated = self._conn.execute(
-                f"UPDATE upload_record SET {assignment}{extra}, updated_at = ?"  # noqa: S608
-                f" WHERE {' AND '.join(clauses)}",
-                (*params, *fields.values(), now_iso(), *guard),
-            )
-            if updated.rowcount != 1:
-                raise ClaimLost(f"レコード {record_id} の claim を失っている")
+        updated = self._conn.execute(
+            f"UPDATE upload_record SET {assignment}{extra}, updated_at = ?"  # noqa: S608
+            f" WHERE {' AND '.join(clauses)}",
+            (*params, *fields.values(), now_iso(), *guard),
+        )
+        if updated.rowcount != 1:
+            raise ClaimLost(f"レコード {record_id} の claim を失っている")
 ```
 
 ファイル冒頭に足すもの:
@@ -4068,7 +4217,8 @@ def with_lease_pulse[T](
     後から 30 GiB を送り終える**（呼び出し側は失敗したと見ているのに副作用は進む）。
     `core` は `db.uploads` を知らないので、集合は呼び出し側から渡す。
 
-    所有権を失っても、処理の完了を待ってから送出する。
+    所有権を失っても、処理の完了を待ってから送出する。**走っているスレッドを
+    残したまま抜けると、後から副作用が起きる。**
     """
     outcome: list[T] = []
     failure: list[BaseException] = []
@@ -4088,6 +4238,10 @@ def with_lease_pulse[T](
             break
         if lost is None:
             try:
+                # **先に assert_lease を呼ぶ。** `extend_lease` は `cancelling` でも
+                # 延ばすので、heartbeat だけでは 28 GiB の送信中のキャンセルに
+                # 気づけない（`assert_lease` は `cancelling` を通さない）。
+                ctx.assert_lease()
                 ctx.heartbeat()
                 if also is not None:
                     also()
@@ -4256,6 +4410,7 @@ def test_a_pre_existing_asset_is_not_tagged_by_default(world, db):
 
 
 def test_the_preflight_stops_everything_before_a_byte_is_sent(world, db):
+    """preflight は claim の後だが、**リモートに触る前**なので pending へ戻す."""
     server, uploader, ctx, _, _, destination_id, _ = world
     server.user_id = "someone-else"
 
@@ -4263,7 +4418,52 @@ def test_the_preflight_stops_everything_before_a_byte_is_sent(world, db):
         uploader.run(ctx, destination_id)
 
     assert server.uploads == []
-    assert record_of(db)["state"] == "pending"
+    row = record_of(db)
+    assert row["state"] == "pending"
+    assert row["claim_job_id"] is None
+
+
+def test_a_cancel_while_the_upload_is_in_flight_stops_the_commit(world, db, monkeypatch):
+    """送信は成功しても、キャンセル後の commit は通さない（§8）.
+
+    通すと、画面はキャンセル済みなのにタグと日時まで進む。
+    """
+    server, uploader, ctx, _, _, destination_id, _ = world
+    real = ImmichClient.upload_asset
+
+    def cancel_then_upload(self, *args, **kwargs):
+        db.execute("UPDATE job SET status = 'cancelling' WHERE id = ?", (ctx.job_id,))
+        return real(self, *args, **kwargs)
+
+    monkeypatch.setattr(ImmichClient, "upload_asset", cancel_then_upload)
+    uploader.run(ctx, destination_id)
+
+    row = record_of(db)
+    # サーバには上がったかもしれないので needs_recheck。タグも日時も付けない。
+    assert row["state"] == "needs_recheck"
+    assert server.tagged == {}
+    assert server.datetimes == {}
+
+
+def test_the_target_is_re_checked_before_the_tags_when_the_ttl_expired(world, db, monkeypatch):
+    """送信が TTL を跨いだら、タグと日時の前に向き先を取り直す."""
+    server, uploader, ctx, _, _, destination_id, _ = world
+    uploader._preflight._ttl = 0  # noqa: SLF001 - TTL 切れを再現する
+    real = ImmichClient.upload_asset
+
+    def upload_then_move(self, *args, **kwargs):
+        outcome = real(self, *args, **kwargs)
+        # 送信中に別のライブラリへ差し替わった。
+        server.user_id = "someone-else"
+        return outcome
+
+    monkeypatch.setattr(ImmichClient, "upload_asset", upload_then_move)
+    with pytest.raises(PreflightFailed):
+        uploader.run(ctx, destination_id)
+
+    # 別ライブラリにタグも日時も書かない。
+    assert server.tagged == {}
+    assert server.datetimes == {}
 
 
 def test_a_server_error_is_retried_and_then_failed(world, db, monkeypatch):
@@ -4444,6 +4644,18 @@ class UploadOutcome:
     awaiting: int
 
 
+@dataclass
+class _Progress:
+    """1 レコードの進み具合.
+
+    `touched_remote` は「リモートに触った可能性があるか」。降りるときの
+    戻し先（`pending` か `needs_recheck` か）を決める。
+    """
+
+    settled: bool = False
+    touched_remote: bool = False
+
+
 class Uploader:
     def __init__(
         self,
@@ -4490,7 +4702,7 @@ class Uploader:
         `claim_next` は進行中の状態を拾わないので、**次の起動まで誰も触れなく
         なる**。決着が付かずに抜ける経路はすべて解放してから送出する。
         """
-        settled = False
+        progress = _Progress()
         try:
             reason = self._uploads.check_eligibility(record)
             if reason is not None:
@@ -4499,20 +4711,26 @@ class Uploader:
                 ctx.emit(
                     "warning", f"送信を見送った: {reason}", {"upload_record_id": record["id"]}
                 )
-                settled = True
+                progress.settled = True
                 return "refused"
-            state = self._one(ctx, record)
-            settled = True
+            state = self._one(ctx, record, progress)
+            progress.settled = True
             return state
         finally:
-            if not settled:
-                # 例外で抜けた。サーバ側の成否が分からない。
-                self._release_unknown(ctx, record)
+            if not progress.settled:
+                # **副作用の境界を越えたかで戻し先を変える。** 越える前の失敗
+                # （preflight、資格情報の復号、クライアントの構築）は確定的なので
+                # `pending` へ。越えた後だけ「サーバ側の成否が不明」＝
+                # `needs_recheck` にする。
+                if progress.touched_remote:
+                    self._release_unknown(ctx, record)
+                else:
+                    self._release_pending(ctx, record)
 
-    def _one(self, ctx: JobContext, record: sqlite3.Row) -> str:
+    def _one(self, ctx: JobContext, record: sqlite3.Row, progress: _Progress) -> str:
         revision = self._destinations.revision(record["destination_revision_id"])
-        # **1 バイトも送る前に向き先を確かめる。** リビジョンごとに 1 回で、
-        # 判定には寿命がある（長いジョブの途中で DNS や proxy が変わりうる）。
+        # **1 バイトも送る前に向き先を確かめる。** ここで落ちれば、まだ何も
+        # 起きていない（`progress.touched_remote` は偽のまま）。
         self._preflight.assert_target(revision["id"])
         media = self._conn.execute(
             "SELECT * FROM media_file WHERE id = ?", (record["media_file_id"],)
@@ -4520,7 +4738,7 @@ class Uploader:
         profile = self._registry.by_id(media["profile_id"])
         with self._open_client(revision) as client:
             try:
-                return self._steps(ctx, client, record, media, profile)
+                return self._steps(ctx, client, record, media, profile, revision["id"], progress)
             except ImmichUnavailable as exc:
                 return self._retry_or_fail(ctx, record, exc)
             except (ImmichAuthFailed, ImmichRedirected, ImmichProtocolError):
@@ -4537,6 +4755,27 @@ class Uploader:
                 )
                 return "failed"
 
+    def _guard(
+        self,
+        ctx: JobContext,
+        record: sqlite3.Row,
+        revision_id: str,
+        state: str,
+        progress: _Progress | None = None,
+    ) -> None:
+        """**ネットワークへ触る直前に必ず通す。**
+
+        向き先の再確認（TTL 内ならキャッシュが返るので通信は増えない）と、
+        リース・claim の確認をまとめる。レコードの先頭で 1 回だけにすると、
+        70 GiB の送信が TTL を跨いだ後の tag / 日時 PUT が**別のライブラリへ
+        飛ぶ**（asset ID が偶然存在すれば他人の資産を書き換える）。
+        """
+        self._preflight.assert_target(revision_id)
+        self._uploads.prepare_side_effect(ctx, record["id"], state)
+        if progress is not None:
+            # ここを抜けた後は、リモートに触った可能性がある。
+            progress.touched_remote = True
+
     def _steps(
         self,
         ctx: JobContext,
@@ -4544,16 +4783,17 @@ class Uploader:
         record: sqlite3.Row,
         media: sqlite3.Row,
         profile,  # noqa: ANN001 - ProfileRef
+        revision_id: str,
+        progress: _Progress,
     ) -> str:
-        token = ctx.lease_token
-        # 1. checking —— 外部への要求なので、直前に所有権を確かめる。
-        self._uploads.prepare_side_effect(ctx, record["id"], "checking")
+        # 1. checking —— 外部への要求なので、直前に所有権と向き先を確かめる。
+        self._guard(ctx, record, revision_id, "checking", progress)
         outcome = client.bulk_upload_check([(record["id"], media["sha1"])])[record["id"]]
         first_check = record["first_check_result"] or outcome.action
         if outcome.action == "reject":
             origin = "pre_existing" if first_check == "reject" else "unknown"
-            self._uploads.advance(
-                record["id"], token, "asset_known", expect_state="checking",
+            self._uploads.advance_owned(
+                ctx, record["id"], "asset_known", expect_state="checking",
                 first_check_result=first_check,
                 remote_asset_id=outcome.asset_id,
                 remote_is_trashed=1 if outcome.is_trashed else 0,
@@ -4561,30 +4801,35 @@ class Uploader:
                 origin=origin,
             )
         else:
-            self._uploads.advance(
-                record["id"], token, "uploading", expect_state="checking",
+            self._uploads.advance_owned(
+                ctx, record["id"], "uploading", expect_state="checking",
                 first_check_result=first_check,
                 remote_checked_at=now_iso(),
             )
             # 送信の直前にもう一度。ここを通ってから初めて 1 バイトを送る。
-            self._uploads.prepare_side_effect(ctx, record["id"], "uploading")
+            self._guard(ctx, record, revision_id, "uploading", progress)
             uploaded = self._send(ctx, client, record, media)
             origin = origin_after_upload(first_check, uploaded.status)
             # 2〜3. asset_known。ここで初めて「サーバ側に存在する」が確定する。
-            self._uploads.advance(
-                record["id"], token, "asset_known", expect_state="uploading",
+            # **commit も所有権付きで行う。** 送信中にキャンセルされていたら
+            # ここで止まり、`_guarded` が needs_recheck へ落とす。
+            self._uploads.advance_owned(
+                ctx, record["id"], "asset_known", expect_state="uploading",
                 remote_asset_id=uploaded.asset_id,
                 origin=origin,
             )
 
         row = self._uploads.get(record["id"])
-        # 4. tagging
-        self._uploads.advance(record["id"], token, "tagging", expect_state="asset_known")
-        names = tags_to_apply(profile.definition.immich, row["origin"])
-        if names:
-            self._uploads.prepare_side_effect(ctx, record["id"], "tagging")
-            for name in names:
-                client.tag_assets(client.ensure_tag(name), [row["remote_asset_id"]])
+        # 4. tagging —— **変更を伴う呼び出しごとに guard する。**
+        self._uploads.advance_owned(ctx, record["id"], "tagging", expect_state="asset_known")
+        for name in tags_to_apply(profile.definition.immich, row["origin"]):
+            self._guard(ctx, record, revision_id, "tagging", progress)
+            tag_id = client.find_tag(name)
+            if tag_id is None:
+                self._guard(ctx, record, revision_id, "tagging", progress)
+                tag_id = client.create_tag(name)
+            self._guard(ctx, record, revision_id, "tagging", progress)
+            client.tag_assets(tag_id, [row["remote_asset_id"]])
 
         # 5. fixing_datetime
         plan = datetime_plan(
@@ -4594,25 +4839,27 @@ class Uploader:
             row["origin"],
         )
         if plan.proposed is None:
-            self._uploads.finish(record["id"], token, "complete", expect_state="tagging")
+            self._uploads.finish_owned(ctx, record["id"], "complete", expect_state="tagging")
             return "complete"
         if not plan.automatic:
             ctx.emit(
                 "info", f"日時の補正に承認が要る: {plan.reason}",
                 {"upload_record_id": record["id"]},
             )
-            self._uploads.finish(
-                record["id"], token, "awaiting_datetime_approval", expect_state="tagging"
+            self._uploads.finish_owned(
+                ctx, record["id"], "awaiting_datetime_approval", expect_state="tagging"
             )
             return "awaiting_datetime_approval"
-        self._uploads.advance(
-            record["id"], token, "fixing_datetime", expect_state="tagging"
+        self._uploads.advance_owned(
+            ctx, record["id"], "fixing_datetime", expect_state="tagging"
         )
         # 既存資産の日時を書き換える。**最も取り返しがつかない副作用**なので、
         # 直前に必ず確かめる。
-        self._uploads.prepare_side_effect(ctx, record["id"], "fixing_datetime")
+        self._guard(ctx, record, revision_id, "fixing_datetime", progress)
         client.set_date_time_original(row["remote_asset_id"], plan.proposed)
-        self._uploads.finish(record["id"], token, "complete", expect_state="fixing_datetime")
+        self._uploads.finish_owned(
+            ctx, record["id"], "complete", expect_state="fixing_datetime"
+        )
         return "complete"
 
     def _send(self, ctx: JobContext, client: ImmichClient, record: sqlite3.Row, media: sqlite3.Row):  # noqa: ANN202
@@ -4652,6 +4899,13 @@ class Uploader:
         self._sleep(ctx, min(BACKOFF_BASE_SECONDS**attempts, BACKOFF_MAX_SECONDS))
         return "pending"
 
+    def _release_pending(self, ctx: JobContext, record: sqlite3.Row) -> None:
+        """リモートに触る前に降りた. **確定的な失敗**なので `pending` へ戻す."""
+        try:
+            self._uploads.release_to(record["id"], ctx.lease_token, "pending")
+        except ClaimLost:
+            logger.warning("claim を失った状態で降りた: %s", record["id"])
+
     def _release_unknown(self, ctx: JobContext, record: sqlite3.Row) -> None:
         """サーバ側の成否が不明なまま降りる. 次回 `checking` から照合し直す.
 
@@ -4688,7 +4942,10 @@ Expected: PASS（13 + 12 件）
 | 変異 | 落ちるべきテスト |
 | --- | --- |
 | preflight の呼び出しを消す | `test_the_preflight_stops_everything_before_a_byte_is_sent` |
-| preflight を最初の claim の後に移す | 同上（`state` が `pending` でなくなる） |
+| preflight の失敗で `needs_recheck` へ落とす | `test_the_preflight_stops_everything_before_a_byte_is_sent`（リモートに触っていないので `pending`） |
+| `advance_owned` / `finish_owned` を `advance` / `finish` に戻す | `test_a_cancel_while_the_upload_is_in_flight_stops_the_commit` |
+| `_guard` をレコードの先頭で 1 回だけにする | `test_the_target_is_re_checked_before_the_tags_when_the_ttl_expired` |
+| `_guard` から preflight を外す | 同上 |
 | `check_eligibility` の呼び出しを消す | `test_a_record_that_lost_its_grounds_is_refused_not_sent` |
 | `outcome.action == "reject"` の分岐を消して常に送る | `test_an_asset_that_already_exists_is_not_uploaded_again` |
 | `is_trashed` を記録しない | `test_a_trashed_asset_is_recorded_as_trashed` |
@@ -4916,11 +5173,13 @@ def test_records_from_an_old_epoch_are_not_touched(world):
 
     before = record_of(db)["remote_asset_id"]
     destinations = DestinationRepository(db, CredentialStore(db, _box_of(db)))
+    # **別アカウントへ向け替える**（ホストが同じままだと epoch は進まない）。
     destinations.add_revision(
         destination_id, base_url=server.url, public_url=None, secret=API_KEY,
-        identity=RemoteIdentity(remote_user_id=server.user_id, server_instance_id=None),
-        same_library=False,
+        identity=RemoteIdentity(remote_user_id="another-user", server_instance_id=None),
     )
+    assert destinations.current(destination_id)["target_epoch"] == 2
+    server.user_id = "another-user"  # preflight を通す
     server.assets.clear()  # 新しいライブラリには何も無い
 
     outcome = rechecker.run(ctx, destination_id)
@@ -5241,7 +5500,7 @@ CAPTURED = "2026-08-17T14:30:00+09:00"
 
 
 @pytest.fixture
-def world(db, data_root):
+def world(db, data_root, immich):
     server = immich  # conftest のフィクスチャ（ループバックで listen している）
     ProfileRegistry(db).sync_builtins()
     profile = ProfileRegistry(db).current("dji-osmo")
@@ -5406,9 +5665,10 @@ from collections.abc import Callable
 from ..adapters.immich import ImmichClient
 from ..clock import now_iso
 from ..db.connection import immediate
-from ..db.jobs import JobContext
+from ..core.lease_pulse import with_lease_pulse
+from ..db.jobs import JobContext, LeaseLost
 from ..db.profiles import ProfileRegistry
-from ..db.uploads import UploadRepository
+from ..db.uploads import ClaimLost, UploadRepository
 from .preflight import PreflightCache
 
 WAITING = "awaiting_datetime_approval"
@@ -5456,9 +5716,18 @@ class ApprovalService:
         try:
             self._uploads.prepare_side_effect(ctx, record_id, "fixing_datetime")
             with self._open_client(revision) as client:
-                client.set_date_time_original(row["remote_asset_id"], media["captured_at"])
-            self._uploads.finish(
-                record_id, ctx.lease_token, "complete", expect_state="fixing_datetime"
+                # **PUT も pulse で囲む。** 遅い相手だと 60 秒を超え、claim が
+                # 切れて「リモートは変更済みなのに commit できない」状態になる。
+                with_lease_pulse(
+                    ctx,
+                    lambda: client.set_date_time_original(
+                        row["remote_asset_id"], media["captured_at"]
+                    ),
+                    also=lambda: self._uploads.extend_claim(record_id, ctx.lease_token),
+                    ownership_errors=(LeaseLost, ClaimLost),
+                )
+            self._uploads.finish_owned(
+                ctx, record_id, "complete", expect_state="fixing_datetime"
             )
             settled = True
         finally:
@@ -5806,10 +6075,31 @@ class ReconcileReport:
             )
 ```
 
-`Reconciler.__init__` に `uploads: UploadRepository | None = None` と
-`destinations: DestinationRepository | None = None` を足す（既存の呼び出し 4 か所は
-変えずに済む。`app.py` だけが渡す。マスター鍵が無い環境では両方 `None` になり、
-アップロード側の回収だけが飛ぶ）。
+`Reconciler.__init__` に **keyword-only** で
+`uploads: UploadRepository | None = None` と
+`destinations: DestinationRepository | None = None` を足し、**片方だけ渡したら
+起動時に落とす**。
+
+```python
+    def __init__(
+        self,
+        conn: sqlite3.Connection,
+        data_root: Path,
+        publisher: ArtifactPublisher,
+        store: JobStore,
+        *,
+        uploads: UploadRepository | None = None,
+        destinations: DestinationRepository | None = None,
+    ) -> None:
+        # **黙って skip しない。** 片方だけ渡す配線ミスをすると、claim の解放も
+        # 旧 epoch の sweep も旧鍵の破棄も、何も言わずに行われなくなる。
+        if (uploads is None) != (destinations is None):
+            raise ValueError("uploads と destinations は組で渡す")
+        ...
+```
+
+既存の呼び出し 4 か所（位置引数 4 つ）はそのまま通る。`app.py` は
+マスター鍵がある場合だけ両方を渡す。
 
 `DestinationRepository` に `get_current_or_none(destination_id)` を足す
 （現行リビジョンが無い宛先で例外にしない）:
@@ -5854,7 +6144,7 @@ def test_startup_purges_superseded_keys_and_sweeps_old_epochs(db, data_root):
 
     report = Reconciler(
         db, data_root, ArtifactPublisher(db, data_root, StubProbe()), JobStore(db),
-        uploads, destinations,
+        uploads=uploads, destinations=destinations,
     ).run()
 
     assert report.uploads_invalidated == 1
@@ -5884,7 +6174,9 @@ def _reconcile(db, data_root):
     publisher = ArtifactPublisher(db, data_root, StubProbe())
     destinations = DestinationRepository(db, CredentialStore(db, SecretBox(os.urandom(32))))
     uploads = UploadRepository(db, ProfileRegistry(db), destinations)
-    return Reconciler(db, data_root, publisher, JobStore(db), uploads).run()
+    return Reconciler(
+        db, data_root, publisher, JobStore(db), uploads=uploads, destinations=destinations
+    ).run()
 ```
 
 - [ ] **Step 5: epoch を進めた宛先の未 claim 項目を破棄する**
@@ -6115,10 +6407,27 @@ _IN_FLIGHT = (
 起動時の reconciliation に置く。** 進行中のジョブが終わってから消えるように、
 両方から呼ぶ。
 
-- [ ] **Step 7: 変異試験**
+- [ ] **Step 7-3: 配線ミスを起動時に落とすテスト**
+
+```python
+def test_the_reconciler_refuses_a_half_wired_pair(db, data_root):
+    """片方だけ渡すと、回収がすべて黙って skip される（気づけない）."""
+    import pytest
+
+    from mediaferry.db.uploads import UploadRepository
+
+    with pytest.raises(ValueError):
+        Reconciler(
+            db, data_root, ArtifactPublisher(db, data_root, StubProbe()), JobStore(db),
+            uploads=UploadRepository(db, ProfileRegistry(db), None),
+        )
+```
+
+- [ ] **Step 8: 変異試験**
 
 | 変異 | 落ちるべきテスト |
 | --- | --- |
+| 片方だけでも動くようにする（`ValueError` を消す） | `test_the_reconciler_refuses_a_half_wired_pair` |
 | `release_interrupted` を `pending` へ落とす | `test_an_interrupted_upload_is_released_for_a_recheck` |
 | `invalidate_old_epoch` の `target_epoch < ?` を消す | `test_records_of_the_current_epoch_are_left_alone` |
 | `invalidate_old_epoch` の `state <> 'complete'` を消す | `test_a_completed_record_from_an_old_epoch_stays_as_history` |
@@ -6133,7 +6442,7 @@ _IN_FLIGHT = (
 | `_settle_uploads` の `invalidate_old_epoch` / `purge_superseded_credentials` を消す | `test_startup_purges_superseded_keys_and_sweeps_old_epochs` |
 | `_settle_uploads` を `_settle_merges` の前に置く | **落ちない**。テストのグループは reconciliation で状態が変わらない。**`merging` のまま残ったグループの derived を対象にするテストを Task 14 の統合で見る**（そこでは `_settle_merges` が `merged` へ倒してから評価する必要がある） |
 
-- [ ] **Step 8: コミット**
+- [ ] **Step 9: コミット**
 
 ```bash
 uv run ruff check . && uv run ruff format .
@@ -6257,22 +6566,58 @@ def test_rotating_the_key_keeps_the_epoch(secret_env, immich, client, api_db):
     assert epochs == [1, 1]
 
 
-def test_a_changed_host_needs_an_answer(secret_env, immich, client):
+@pytest.fixture
+def second_immich():
+    """別ホストに見える 2 台目（ポートが違えば `_host_of` は別ホストと見なす）."""
+    from .fake_immich import FakeImmich
+
+    server = FakeImmich()
+    server.start()
+    yield server
+    server.stop()
+
+
+def test_a_changed_host_needs_an_answer(secret_env, immich, second_immich, client):
+    """**到達できる 2 台目を使う。** 届かない URL だと検証で 502 になり、
+    epoch の判断まで到達しない."""
+    second_immich.user_id = immich.user_id  # 同じユーザを指したまま経路だけ変える
     destination_id = client.post("/api/destinations", json=a_body(immich)).json()["id"]
     response = client.patch(
         f"/api/destinations/{destination_id}",
-        json={"base_url": "http://other.invalid:2283", "api_key": API_KEY},
+        json={"base_url": second_immich.url, "api_key": API_KEY},
     )
     assert response.status_code == 409
     assert "same_library" in response.json()["detail"]
 
 
-def test_the_answer_can_be_given(secret_env, immich, client, api_db):
+def test_renaming_does_not_create_a_revision(secret_env, immich, client, api_db):
+    destination_id = client.post("/api/destinations", json=a_body(immich)).json()["id"]
+    assert client.patch(
+        f"/api/destinations/{destination_id}", json={"name": "family"}
+    ).status_code == 200
+    assert api_db.execute("SELECT count(*) FROM destination_revision").fetchone()[0] == 1
+    assert api_db.execute("SELECT name FROM upload_destination").fetchone()[0] == "family"
+
+
+def test_a_failed_verification_does_not_disable_the_destination(secret_env, immich, client,
+                                                                api_db):
+    """検証に失敗した編集は、どの欄も反映しない（§12.3）."""
     destination_id = client.post("/api/destinations", json=a_body(immich)).json()["id"]
     response = client.patch(
         f"/api/destinations/{destination_id}",
-        json={"base_url": "http://other.invalid:2283", "api_key": API_KEY,
-              "same_library": False},
+        json={"enabled": False, "base_url": "http://unreachable.invalid:2283",
+              "api_key": API_KEY},
+    )
+    assert response.status_code == 502
+    assert api_db.execute("SELECT enabled FROM upload_destination").fetchone()[0] == 1
+
+
+def test_the_answer_can_be_given(secret_env, immich, second_immich, client, api_db):
+    second_immich.user_id = immich.user_id
+    destination_id = client.post("/api/destinations", json=a_body(immich)).json()["id"]
+    response = client.patch(
+        f"/api/destinations/{destination_id}",
+        json={"base_url": second_immich.url, "api_key": API_KEY, "same_library": False},
     )
     assert response.status_code == 200
     assert api_db.execute(
@@ -6660,10 +7005,15 @@ def edit_destination(
 ) -> dict[str, Any]:
     repo = _repo(conn, box)
     current = _found(repo, destination_id)
-    if "enabled" in body:
-        repo.set_enabled(destination_id, bool(body["enabled"]))
-        if len(body) == 1:
-            return {"id": destination_id}
+    unknown = set(body) - {"name", "enabled", "base_url", "public_url", "api_key",
+                           "same_library"}
+    if unknown:
+        raise HTTPException(status_code=400, detail=f"知らない欄: {sorted(unknown)}")
+    if set(body) <= {"name", "enabled"}:
+        # 接続に関わらない編集は、検証もリビジョンも要らない。
+        repo.rename_or_toggle(destination_id, name=body.get("name"),
+                              enabled=body.get("enabled"))
+        return {"id": destination_id}
     base_url = body.get("base_url", current["base_url"])
     public_url = body.get("public_url", current["public_url"])
     api_key = body.get("api_key")
@@ -6684,7 +7034,7 @@ def edit_destination(
     except EndpointRejected as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     current = repo.current(destination_id)
-    # epoch が進んだなら、旧 epoch の未 claim 項目を理由付きで破棄する（§8）。
+    # epoch の破棄は `add_revision` が同じトランザクションで済ませている（Task 3）。
     invalidated = _uploads_of(conn, box).invalidate_old_epoch(
         destination_id, current["target_epoch"], "宛先の向き先が変わった"
     )
@@ -6947,8 +7297,20 @@ def approve_upload(
         raise HTTPException(status_code=404, detail="そのレコードは無い")
     if row["state"] != "awaiting_datetime_approval":
         raise HTTPException(status_code=409, detail=f"承認待ちではない（{row['state']}）")
-    return {
-        "job_id": JobStore(conn).enqueue(
+    if row["invalidated_at"] is not None:
+        raise HTTPException(status_code=409, detail="無効化されている")
+    with immediate(conn):
+        # **同じレコードの承認ジョブを二重に積まない。** 積めてしまうと、
+        # 1 本目が終わった後の残りが軒並み失敗として画面に並ぶ。
+        active = conn.execute(
+            "SELECT 1 FROM job WHERE type = 'upload'"
+            "   AND status IN ('queued', 'running', 'cancelling')"
+            "   AND params_json LIKE ?",
+            (f'%"upload_record_id": "{record_id}"%',),
+        ).fetchone()
+        if active is not None:
+            raise HTTPException(status_code=409, detail="この承認は既に実行待ち")
+        job_id = JobStore(conn).enqueue(
             "upload",
             {
                 "destination_id": row["destination_id"],
@@ -6956,7 +7318,7 @@ def approve_upload(
                 "upload_record_id": record_id,
             },
         )
-    }
+    return {"job_id": job_id}
 
 
 @router.post("/uploads/{record_id}/reject")
@@ -7175,7 +7537,7 @@ CAPTURED = "2026-08-17T14:30:00+09:00"
 
 
 @pytest.fixture
-def world(db, data_root):
+def world(db, data_root, immich):
     server = immich  # conftest のフィクスチャ（ループバックで listen している）
     ProfileRegistry(db).sync_builtins()
     profile = ProfileRegistry(db).current("dji-osmo")
@@ -7269,7 +7631,8 @@ def test_an_interrupted_upload_is_recovered_at_startup(world, db, data_root, mon
 
     monkeypatch.undo()
     report = Reconciler(
-        db, data_root, _publisher(db, data_root), JobStore(db), uploads
+        db, data_root, _publisher(db, data_root), JobStore(db),
+        uploads=uploads, destinations=destinations,
     ).run()
     assert report.uploads_released == 0  # 既に needs_recheck へ落ちている
 
@@ -7300,6 +7663,38 @@ def test_a_record_whose_group_changed_is_never_sent(world, db):
     assert db.execute(
         "SELECT invalidated_at FROM upload_record WHERE media_file_id = ?", (output_id,)
     ).fetchone()[0] is not None
+
+
+def test_a_group_settled_at_startup_changes_what_can_be_sent(world, db, data_root):
+    """`_settle_merges` → `_settle_uploads` の順序を、実際の効果で確かめる.
+
+    `merging` のまま残ったグループは起動時に `detected` へ戻る（出力が無い場合）。
+    その member を対象にした `default` の pair は、**根拠が成立しなくなる**ので
+    無効化されなければならない。順序が逆だと、グループが `merging` のままの状態で
+    評価してしまい、この判定に至らない。
+    """
+    from .test_selection import a_group, a_pair
+
+    _, destinations, uploads, home, _, _, a_job, _ = world
+    profile = ProfileRegistry(db).current("dji-osmo")
+    members = a_pair(db, profile)
+    group_id = a_group(db, profile, members, status="failed", verification=None)
+    # failed のグループの member として送信を許可する。
+    uploads.create_pairs([members[0][0]], [home])
+    # 実際には結合の途中だった（起動時に detected へ戻る）。
+    db.execute("UPDATE merge_group SET status = 'merging' WHERE id = ?", (group_id,))
+
+    report = Reconciler(
+        db, data_root, _publisher(db, data_root), JobStore(db),
+        uploads=uploads, destinations=destinations,
+    ).run()
+
+    assert report.merges_released == 1
+    row = db.execute(
+        "SELECT * FROM upload_record WHERE media_file_id = ?", (members[0][0],)
+    ).fetchone()
+    # 「結合できなかったグループの member」という根拠は、もう成立しない。
+    assert row["invalidated_at"] is not None
 
 
 def _publisher(db, data_root):
@@ -7644,21 +8039,49 @@ git commit -m "docs(mediaferry): record what phase 3 settled"
 ことになり層が逆転するので、**捕まえる例外の集合を呼び出し側から渡す形**にした
 （意図は同じ）。
 
-### 2 巡目（未実施）
+### 2 巡目（2026-08-18、codex。blocker 8 / major 5 / minor 1 + 補足）
 
-1 巡目の反映をコミットしてから依頼する。**修正が新しい境界を作るので、
-そこをもう一度見せる**（Phase 2 では 1 巡目の blocker を直した後の 2 巡目で、
-さらに blocker が 2 件出た。どちらも「直した箇所の周辺」だった）。
+**Phase 2 と同じく、1 巡目の修正が作った境界から新しい blocker が出た。**
+指摘は 2 つの性質に分かれた。
 
-特に見せる箇所:
+**A. 文書内のコードが動かない（#1 #2 #7 #10 #14）** —— 未定義変数
+（`prepare_side_effect` の `token`）、自己参照フィクスチャ（`server = immich` を
+`def immich()` の中に書いた一括置換の副作用）、テストと実装の食い違い
+（preflight を claim 後へ移したのにテストは `pending` を期待）、テストが前提の
+状態を作れていない（`same_library=False` はホストが同じだと epoch を進めない）、
+JSON の型検証漏れ。**いずれも `pytest` を 1 回回せば数秒で出る類**で、
+計画が Markdown の中に完全なコードを持っていることの副作用である。
 
-1. `prepare_side_effect` と `advance` / `finish` の `expect_state` の組み合わせ
-   （新しく作った境界。commit 側の条件が実際に全経路へ入っているか）
-2. `_guarded` の `finally` と `_release_unknown` の冪等性（二重解放、
-   終端に達した後の解放）
-3. `claim_next` が現行リビジョンを解決する形にしたことで、preflight の
-   キャッシュ・TTL とどう噛み合うか
-4. 承認をジョブにしたことによる新しい競合（承認ジョブが claim した後に
-   却下 API が来る／`invalidate_stale` が承認待ちを無効化する）
-5. 宛先の編集を 1 トランザクションにしたことで、`CredentialStore` の
-   公開 API（`store`）と内部 API（`store_locked`）が混在する点
+**B. 1 巡目の修正が開いた設計の穴（#3 #4 #5 #6 #8 #9 #11 #12 #13）** ——
+契約を変える指摘。
+
+| # | 指摘 | 反映先 |
+| --- | --- | --- |
+| 3 [blocker] | commit 側が claim しか見ない。HTTP 待機中にキャンセルされても `asset_known` / `complete` を書けて、タグと日時まで進む | Task 8（`advance_owned` / `finish_owned`。`ctx.assert_lease()` と strict CAS を 1 つの `BEGIN IMMEDIATE` に） |
+| 4 [blocker] | pulse は `heartbeat` だけ呼ぶが、`extend_lease` は `cancelling` でも延ばす。28 GiB の送信中のキャンセルを検出できない | Task 9（pulse ごとに `ctx.assert_lease()` を先に呼ぶ） |
+| 5 [blocker] | TTL 付き preflight がレコード先頭で 1 回だけ。送信が TTL を跨ぐと、タグと日時が別ライブラリへ飛びうる | Task 9（`_guard` を作り、**ネットワーク副作用ごとに** preflight + claim を確認。TTL 内はキャッシュが返るので通信は増えない） |
+| 6 [major] | タグの guard が複数の副作用（`ensure_tag` の GET → POST、`tag_assets` の PUT）を 1 回で包んでいる | Task 4（`find_tag` / `create_tag` に分割）+ Task 9（変更を伴う呼び出しごとに guard） |
+| 7 [blocker] | preflight を claim 後へ移したのに、失敗時の期待状態が旧設計のまま。確定的な失敗まで「成否不明」と表示する | Task 9（`_Progress.touched_remote` で境界を持ち、越える前は `pending`、越えた後だけ `needs_recheck`） |
+| 8 [blocker] | 承認の PUT が pulse の外。60 秒を超えると claim が切れ、リモートは変更済みなのに commit できない | Task 11（PUT を `with_lease_pulse` で囲み、commit は `finish_owned`） |
+| 9 [major] | 承認 API を連打すると重複ジョブを無制限に積める | Task 13（同じレコードの実行待ちジョブがあれば 409） |
+| 11 [major] | `store_locked` / `_write_revision` がトランザクションを強制しない。`current` の読出しと版番号の決定が取引の外 | Task 3（`conn.in_transaction` を検査。読出しと計算も `BEGIN IMMEDIATE` の中へ） |
+| 12 [major] | `Reconciler` に片方だけ渡すと、回収が全部黙って skip される | Task 12（keyword-only にして、組で渡さなければ `ValueError`） |
+| 13 [major] | PATCH が `enabled` を別トランザクションで先に反映する。`name` を扱わない。host 変更のテストが届かない URL を使っている | Task 13（検証後に 1 トランザクション、`rename_or_toggle` を分離、2 台目の fake で host 変更を再現） |
+| 14 [minor] | JSON の型を仮定しており、scalar や配列を返す相手で `AttributeError` になる | Task 4（`_as_object` / `_required_str` で `ImmichProtocolError` に正規化） |
+
+**補足への対応:** `claim_expires_at` の strict 条件は「takeover 経路が無い」ことと
+分けて、短いリースで検出できるテストを Task 8 に置いた
+（`test_an_expired_claim_cannot_commit_a_side_effect`）。`_settle_merges` →
+`_settle_uploads` の順序は、Task 14 に「起動時にグループが決着した結果、
+`failed_group_member` の根拠が消える」ケースを足して実効で固定した。
+
+**A については、計画の上でも 1 行で直る 4 件（#1 #2 #7 #10）を直したうえで、
+残りは実装時の TDD で潰す方針にした。** 文書内のコードは実行も型検査もされない
+ので、同じ類の欠陥はレビューを何巡回しても出続ける。**次はレビューではなく
+実装へ進み、`pytest` が落とす。**
+
+### 3 巡目（実装後に依頼する）
+
+Task 1 から実装し、**動くコードの差分**を見せてレビューする。文書のレビューでは
+拾えない層（実際の SQLite の挙動、httpx の実装差、CHECK 制約の実効）が、
+そこで初めて確かめられる。
