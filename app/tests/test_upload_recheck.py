@@ -1,10 +1,12 @@
 import base64
 import hashlib
 import os
+from datetime import timedelta
 
 import pytest
 
 from mediaferry.adapters.immich import ImmichClient
+from mediaferry.clock import iso, utcnow
 from mediaferry.core.crypto import SecretBox
 from mediaferry.db.credentials import CredentialStore
 from mediaferry.db.destinations import DestinationRepository, RemoteIdentity
@@ -618,3 +620,82 @@ def test_a_cancel_that_lands_just_before_the_write_is_not_a_failure(world, monke
 
     assert outcome.checked == 0
     assert record_of(db)["remote_checked_at"] is None
+
+
+def test_a_recheck_whose_lease_expired_sends_no_preflight(world):
+    """**最初のリモート要求は preflight。** その前にもリースを見る.
+
+    `status` が `running` のままリースだけ失効した worker でも、
+    `ctx.cancelled()` は素通りする。preflight の `GET /api/users/me` も鍵を
+    付けた要求なので、所有権を失った worker から出してはいけない（§14）。
+    """
+    from mediaferry.db.jobs import LeaseLost
+
+    server, rechecker, ctx, destination_id, db = world
+    db.execute(
+        "UPDATE job SET lease_expires_at = '2020-01-01T00:00:00+00:00' WHERE id = ?",
+        (ctx.job_id,),
+    )
+
+    with pytest.raises(LeaseLost):
+        rechecker.run(ctx, destination_id)
+
+    assert server.requests == []
+
+
+def test_a_slow_check_keeps_the_lease_alive(world, monkeypatch):
+    """**照合の待ち時間はリースより長くなりうる。**
+
+    `assert_lease` は見るだけで延ばさない。相手待ちの間に心拍を打たないと、
+    遅い Immich では正常な再確認が必ずリース切れになり、`JobRunner` が
+    failed として記録する（**遅いだけで壊れていないのに完了できない**）。
+
+    リースの満了を 1 秒にした別のジョブで回す。1 本の照合がそれより長い。
+    """
+    import time
+
+    server, rechecker, _, destination_id, db = world
+    monkeypatch.setattr("mediaferry.core.lease_pulse.HEARTBEAT_INTERVAL", 0.05)
+    # **満了も延長幅も 1 秒の store。** 心拍が効いていなければ照合中に切れる。
+    store = JobStore(db, lease_seconds=1)
+    store.enqueue("upload", {"destination_id": destination_id, "mode": "recheck"})
+    ctx = store.claim_next()
+    real = ImmichClient.bulk_upload_check
+
+    def slow_check(self, items):  # noqa: ANN001, ANN202
+        time.sleep(1.5)
+        return real(self, items)
+
+    monkeypatch.setattr(ImmichClient, "bulk_upload_check", slow_check)
+
+    outcome = rechecker.run(ctx, destination_id)
+
+    assert outcome.checked == 1
+    assert record_of(db)["remote_checked_at"] is not None
+
+
+def test_a_slow_preflight_does_not_eat_the_lease(world, monkeypatch):
+    """**最初のリモート要求の前に満期にしておく。**
+
+    `assert_lease` を通った時点で残りが僅かだと、preflight（相手待ち）の間に
+    切れて、最初の照合に入れない。見るだけでなく、そこで延ばす。
+    """
+    import time
+
+    server, rechecker, ctx, destination_id, db = world
+    real_users_me = ImmichClient.users_me
+
+    def slow_users_me(self):  # noqa: ANN001, ANN202
+        time.sleep(0.6)
+        return real_users_me(self)
+
+    monkeypatch.setattr(ImmichClient, "users_me", slow_users_me)
+    # 残り 0.3 秒。preflight の方が長いので、延ばさなければ照合の前に切れる。
+    db.execute(
+        "UPDATE job SET lease_expires_at = ? WHERE id = ?",
+        (iso(utcnow() + timedelta(seconds=0.3)), ctx.job_id),
+    )
+
+    outcome = rechecker.run(ctx, destination_id)
+
+    assert outcome.checked == 1

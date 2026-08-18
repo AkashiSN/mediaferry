@@ -16,6 +16,7 @@ from dataclasses import dataclass
 
 from ..adapters.immich import BULK_CHECK_BATCH, ImmichClient
 from ..clock import now_iso
+from ..core.lease_pulse import with_lease_pulse
 from ..db.jobs import JobContext, LeaseLost
 from ..db.uploads import Stamp, UploadRepository
 from .preflight import PreflightCache
@@ -46,14 +47,35 @@ class Rechecker:
         self._open_client = open_client
         self._preflight = preflight
 
+    def _cancelled_or_raise(self, ctx: JobContext) -> RecheckOutcome:
+        """**利用者が押したキャンセルを失敗として記録しない**（§9.9）.
+
+        `assert_lease` は `cancelling` を通さないので、確認の直後にキャンセルが
+        commit されるとリースを失った形で降りてくる。キャンセルでないリースの
+        喪失はそのまま上げる（取り込み・結合・送信と同じ形）。
+        """
+        if ctx.cancelled():
+            ctx.emit("info", "キャンセルを観測したので再確認を中止した")
+            return RecheckOutcome(0, 0, 0, 0)
+        raise
+
     def run(self, ctx: JobContext, destination_id: str) -> RecheckOutcome:
         # **キャンセルの確認はリモートへ触る前。** preflight も鍵を付けた要求
         # なので、キャンセル済みのジョブから出してよいものではない（§14）。
         if ctx.cancelled():
             return RecheckOutcome(0, 0, 0, 0)
         revision = self._destinations.current(destination_id)
-        # 向き先が変わっていたら、別ライブラリの照合結果で上書きしてしまう。
-        self._preflight.assert_target(revision["id"])
+        try:
+            # **リースも preflight より先に見る。** `cancelled()` はジョブの状態
+            # しか見ないので、`running` のままリースだけ失効した worker を止め
+            # られない。最初のリモート要求はこの preflight なので、その前に置く。
+            ctx.assert_lease()
+            # 直後の照合まで満期で入る（`assert_lease` は見るだけで延ばさない）。
+            ctx.heartbeat()
+            # 向き先が変わっていたら、別ライブラリの照合結果で上書きしてしまう。
+            self._preflight.assert_target(revision["id"])
+        except LeaseLost:
+            return self._cancelled_or_raise(ctx)
 
         # **現行 epoch だけを照合する。** 旧 epoch は別ライブラリへの履歴。
         # **黙って打ち切らない。** 上限で切ると「N 件確認した」の N が実際の
@@ -80,8 +102,17 @@ class Rechecker:
                         return RecheckOutcome(0, 0, 0, 0)
                     ctx.assert_lease()
                     batch = records[start : start + BULK_CHECK_BATCH]
+                    # **待っている間もリースを延ばす。** `assert_lease` は見る
+                    # だけなので、1 本の照合が 60 秒を超えると正常な再確認でも
+                    # 必ずリースを失う（`JobRunner` はそれを failed にする）。
+                    # 相手待ちの間 DB へ触るのは待つ側だけ（接続は 1 本のまま）。
                     outcomes.update(
-                        client.bulk_upload_check([(row["id"], row["checksum"]) for row in batch])
+                        with_lease_pulse(
+                            ctx,
+                            lambda batch=batch: client.bulk_upload_check(
+                                [(row["id"], row["checksum"]) for row in batch]
+                            ),
+                        )
                     )
 
             # **照合の最中にキャンセルされていたら、結果を書かずに降りる。** 書くと
@@ -108,13 +139,7 @@ class Rechecker:
                 checked_at=now_iso(),
             )
         except LeaseLost:
-            # **利用者が押したキャンセルを失敗として記録しない**（§9.9）。
-            # `assert_lease` は `cancelling` を通さないので、確認の直後に
-            # キャンセルが commit されるとここへ来る。
-            if ctx.cancelled():
-                ctx.emit("info", "キャンセルを観測したので再確認を中止した")
-                return RecheckOutcome(0, 0, 0, 0)
-            raise
+            return self._cancelled_or_raise(ctx)
 
         for row in vanished:
             if row["id"] not in written:

@@ -13,22 +13,25 @@
 -- 指紋で保存する一方、この版が無ければ schema_migration は 4 のままなので、
 -- 「古い行は生値・新しい行は指紋」という DB が正規に作れる。指紋をもう一度
 -- ハッシュすると、観測値の一重指紋と永久に一致せず、その宛先が恒久的に拒否
--- される。指紋の形（64 文字の小文字 16 進）の値は変換しない。
+-- される。
 --
--- 生の観測値がたまたま同じ形だった場合は変換されずに残る。そのときは
--- preflight が一致しないと言って**閉じる側**に倒れ、宛先を編集し直せば直る。
+-- **見分けは形の推定ではなく接頭辞で行う**（`sha256:`）。64 文字の 16 進という
+-- 形で判定すると、同じ形の API キーを相手が `users/me` の `id` に返していた
+-- DB で「もう指紋だ」と誤認し、**鍵の平文がこの列と API 応答に残る**
+-- —— この版が塞ごうとしている脅威そのものになる。接頭辞の無い値は、
+-- 中身が何であれ観測値として扱って変換する。
 
 DROP TRIGGER destination_revision_no_update;
 
 UPDATE destination_revision
    SET remote_user_id = mediaferry_fingerprint(remote_user_id)
  WHERE remote_user_id IS NOT NULL
-   AND NOT (length(remote_user_id) = 64 AND remote_user_id NOT GLOB '*[^0-9a-f]*');
+   AND remote_user_id NOT LIKE 'sha256:%';
 
 UPDATE destination_revision
    SET server_instance_id = mediaferry_fingerprint(server_instance_id)
  WHERE server_instance_id IS NOT NULL
-   AND NOT (length(server_instance_id) = 64 AND server_instance_id NOT GLOB '*[^0-9a-f]*');
+   AND server_instance_id NOT LIKE 'sha256:%';
 
 CREATE TRIGGER destination_revision_no_update BEFORE UPDATE ON destination_revision
 BEGIN

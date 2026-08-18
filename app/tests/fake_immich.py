@@ -59,6 +59,8 @@ class FakeImmich:
         self.encoded_key_as_ids: bool = False
         # `assetId` を文字列以外で返す（型の検査が無いと内部例外になる）。
         self.numeric_asset_id: bool = False
+        # タグの id に dot-segment を返す（unreserved だけの検査は通ってしまう）。
+        self.dot_segment_in_tag_id: bool = False
         self._server: ThreadingHTTPServer | None = None
 
     # ------------------------------------------------------------------
@@ -108,6 +110,8 @@ class FakeImmich:
                 return 200, [{"id": API_KEY, "name": name} for name in self.tags or ["dji"]]
             if self.encoded_key_as_ids:
                 return 200, [{"id": ENCODED_API_KEY, "name": name} for name in ["dji"]]
+            if self.dot_segment_in_tag_id:
+                return 200, [{"id": "..", "name": name} for name in ["dji"]]
             if self.path_in_tag_id:
                 return 200, [{"id": "../../users/me", "name": name} for name in ["dji"]]
             return 200, [{"id": tag_id, "name": name} for name, tag_id in self.tags.items()]

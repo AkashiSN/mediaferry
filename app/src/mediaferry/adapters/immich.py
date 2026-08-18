@@ -85,6 +85,8 @@ class UploadOutcome:
 
 # 識別子として許す形（RFC 3986 の unreserved）と長さの上限。Immich は UUID を返す。
 _UNRESERVED_RE = re.compile(r"[A-Za-z0-9._~-]+")
+# 点だけの値（dot-segment）。unreserved の集合に入るが、経路の意味を持つ。
+_DOTS_RE = re.compile(r"\.+")
 IDENTIFIER_MAX_CHARS = 128
 
 
@@ -207,6 +209,11 @@ class ImmichClient:
             raise ImmichProtocolError(f"{label} の識別子に API キーが含まれている")
         if len(value) > IDENTIFIER_MAX_CHARS or _UNRESERVED_RE.fullmatch(value) is None:
             raise ImmichProtocolError(f"{label} の識別子が識別子の形をしていない")
+        if _DOTS_RE.fullmatch(value) is not None:
+            # **unreserved だけでも経路は変えられる。** `.` と `..` は RFC 3986 の
+            # dot-segment で、`/api/tags/../assets` は要求の組み立てで
+            # `/api/assets` へ畳まれる（別のエンドポイントを叩く）。
+            raise ImmichProtocolError(f"{label} の識別子が経路の記号になっている")
         return value
 
     def find_tag(self, name: str) -> str | None:

@@ -163,3 +163,20 @@ def test_an_identifier_longer_than_an_identifier_is_refused(immich, monkeypatch)
 
     with ImmichClient(immich.url, API_KEY) as client, pytest.raises(ImmichProtocolError):
         client.set_date_time_original("a" * (IDENTIFIER_MAX_CHARS + 1), "2026-08-17T14:30:00+09:00")
+
+
+def test_an_identifier_that_is_only_dots_is_refused(immich):
+    """**unreserved だけでも経路は変えられる。** `.` と `..` は dot-segment.
+
+    タグの id が `..` だと、意図した `/api/tags/../assets` は要求の組み立てで
+    `/api/assets` へ畳まれる（別のエンドポイントを叩く）。
+    """
+    immich.dot_segment_in_tag_id = True
+    with ImmichClient(immich.url, API_KEY) as client:
+        with pytest.raises(ImmichProtocolError):
+            client.find_tag("dji")
+        for value in ("..", "."):
+            with pytest.raises(ImmichProtocolError):
+                client.tag_assets(value, ["asset-1"])
+            with pytest.raises(ImmichProtocolError):
+                client.set_date_time_original(value, "2026-08-17T14:30:00+09:00")

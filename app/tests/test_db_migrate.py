@@ -243,10 +243,11 @@ def _a_destination_revision(conn, user_id, suffix="1"):
 def test_a_value_that_is_already_a_fingerprint_is_not_hashed_again(tmp_path):
     """**生値と指紋が混ざった DB が正規に作れる**（§12.3）.
 
-    指紋化を入れた版のアプリは新しいリビジョンを指紋で保存するが、
-    `schema_migration` はまだ 4 のまま。その DB に版 5 を当てたとき、
-    指紋をもう一度ハッシュすると観測値の一重指紋と永久に一致せず、
-    その宛先が恒久的に拒否される。
+    指紋化を入れた版のアプリは新しいリビジョンを指紋で保存するが、この版が
+    無ければ `schema_migration` はまだ 4。そこへ版 5 を当てたとき、指紋をもう
+    一度ハッシュすると観測値の一重指紋と永久に一致せず、その宛先が恒久的に
+    拒否される。**指紋であることは形の推定ではなく接頭辞で分かる**（生の
+    観測値と見分けが付かない形にすると、鍵をそのまま残す経路が開く）。
     """
     from mediaferry.core.destinations.identity import fingerprint
 
@@ -273,49 +274,80 @@ def test_a_value_that_is_already_a_fingerprint_is_not_hashed_again(tmp_path):
     stored = dict(conn.execute("SELECT id, remote_user_id FROM destination_revision"))
     assert stored["r-1"] == fingerprint("user-a")
     assert stored["r-2"] == fingerprint("user-b")  # 二重にしない
+
+
+def test_a_raw_value_shaped_like_a_hash_is_still_converted(tmp_path):
+    """**形で指紋を推定しない。** 64 文字の 16 進の API キーはありうる.
+
+    侵害された旧 Immich が `users/me` の `id` にその鍵を返していた DB で、
+    「指紋の形だから変換しない」と判断すると、**鍵の平文が
+    `destination_revision` に残り、転送先の一覧と `verify` の応答に出る**
+    （0005 が塞ごうとしている脅威そのもの）。
+    """
+    from mediaferry.core.destinations.identity import fingerprint
+
+    looks_like_a_hash = "a" * 64
+    conn = Database(tmp_path / "hexkey.sqlite3").connect()
+    apply_migrations(conn)
+    _a_destination_revision(conn, "user-a", suffix="1")
+    conn.execute("DELETE FROM schema_migration WHERE version = 5")
+    conn.execute("DROP TRIGGER destination_revision_no_update")
+    conn.execute(
+        "UPDATE destination_revision SET remote_user_id = ? WHERE id = 'r-1'", (looks_like_a_hash,)
+    )
+    conn.execute(
+        "CREATE TRIGGER destination_revision_no_update BEFORE UPDATE ON destination_revision"
+        " BEGIN SELECT RAISE(ABORT, 'destination_revision is immutable'); END"
+    )
+
+    assert apply_migrations(conn) == [5]
+
+    stored = conn.execute("SELECT remote_user_id FROM destination_revision").fetchone()[0]
+    assert stored == fingerprint(looks_like_a_hash)
+    assert looks_like_a_hash not in stored
     conn.close()
 
 
-def test_a_stored_identifier_that_could_not_be_an_identifier_is_removed(tmp_path):
-    """**検査の無かった版が保存した識別子を残さない**（§12.3 / §14）.
+def test_every_identifier_stored_before_the_check_is_dropped(tmp_path):
+    """**検査より前の版が保存した識別子は、値を見て選り分けない**（§12.3 / §14）.
 
-    受け取る側の検査は新しく受け取る値にしか効かない。旧版が保存した
-    `remote_asset_id` は一覧の API 応答に出続け、承認や再開の URL にも入る。
+    形で選ると、`test-api-key` のように unreserved だけでできた鍵が残る
+    （一覧の API 応答に平文が出続ける）。SQL からは鍵を復号できないので
+    「形が正しいかどうか」しか見られないが、**版そのものが「検査を入れる前に
+    書かれた行」という cohort を指せる**ので、値に関係なく一度外す。
+
+    `complete` は `remote_checked_at` も外す。外さないと「リモートに存在しない
+    と確認済み」と同じ形になり、requeue で送り直せてしまう（実際には在る）。
+    再確認はチェックサムで照合するので、正しい識別子はそこで戻る。
     """
     from .test_schema_artifacts import a_media_file
     from .test_schema_sources import a_profile
     from .test_schema_uploads import a_destination, an_upload
 
-    encoded_key = "%74%65%73%74%2d%61%70%69%2d%6b%65%79"
     conn = Database(tmp_path / "old.sqlite3").connect()
     apply_migrations(conn)
     profile = a_profile(conn)
     destination = a_destination(conn)
     _, revision_id, _ = destination
     common = {"destination_revision_id": revision_id, "remote_checked_at": "2026-08-18T00:00:00Z"}
-    poisoned = an_upload(
-        conn,
-        destination,
-        a_media_file(conn, profile),
-        state="complete",
-        remote_asset_id=encoded_key,
-        **common,
-    )
+    # 鍵そのもの（unreserved だけ）・NUL 入り・空文字・正しい UUID。
+    stored = {
+        value: an_upload(
+            conn,
+            destination,
+            a_media_file(conn, profile),
+            state="complete",
+            remote_asset_id=value,
+            **common,
+        )
+        for value in ("test-api-key", "s\x00e\x00c", "", "6f9619ff-8b86-d011-b42d-00c04fc964ff")
+    }
     awaiting = an_upload(
         conn,
         destination,
         a_media_file(conn, profile),
         state="awaiting_datetime_approval",
-        remote_asset_id=encoded_key,
-        **common,
-    )
-    healthy = an_upload(
-        conn,
-        destination,
-        a_media_file(conn, profile),
-        state="complete",
-        origin="created_by_us",
-        remote_asset_id="6f9619ff-8b86-d011-b42d-00c04fc964ff",
+        remote_asset_id="test-api-key",
         **common,
     )
 
@@ -323,16 +355,14 @@ def test_a_stored_identifier_that_could_not_be_an_identifier_is_removed(tmp_path
     assert apply_migrations(conn) == [6]
 
     rows = {row["id"]: row for row in conn.execute("SELECT * FROM upload_record")}
-    assert rows[poisoned]["remote_asset_id"] is None
-    assert "識別子" in rows[poisoned]["last_error"]
-    # **complete は止めない。** 「リモートに存在しない」と同じ形になり、
-    # 再確認と requeue で自力で直る。
-    assert rows[poisoned]["invalidated_at"] is None
+    for value, record_id in stored.items():
+        assert rows[record_id]["remote_asset_id"] is None, value
+        assert "識別子" in rows[record_id]["last_error"]
+        # **「リモートに存在しない」に見せない。** requeue ではなく再確認で戻す。
+        assert rows[record_id]["remote_checked_at"] is None
+        assert rows[record_id]["invalidated_at"] is None
     # 承認は人の操作で、指す資産が無いと直しようがない。
     assert rows[awaiting]["remote_asset_id"] is None
     assert rows[awaiting]["invalidated_at"] is not None
     assert "承認" in rows[awaiting]["invalidated_reason"]
-    # 正しい形の識別子は触らない。
-    assert rows[healthy]["remote_asset_id"] == "6f9619ff-8b86-d011-b42d-00c04fc964ff"
-    assert rows[healthy]["last_error"] is None
     conn.close()
