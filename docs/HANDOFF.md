@@ -231,17 +231,34 @@ blocker として指摘されたもの**で、理屈で戻すと同じ穴に落�
 
 ### agmsg（codex とのやり取り）
 
+**この案件専用のチームは `mediaferry`。** 自分は `deckhand`（claude-code）、
+レビュー役の codex は `lookout`。チーム名は名前空間なので、`chezmoi` や
+`node-rotation-controller` と同名のメンバーが居ても衝突しない（メンバー名が
+一意である必要があるのはチームの中だけ）。**Phase 3 の 2 巡目までは `chezmoi`
+チームの `codex` とやり取りしていた**ので、それ以前の履歴はそちらにある。
+
+**レビューのたびに codex を spawn する**（常駐させない）:
+
+```bash
+bash ~/.agents/skills/agmsg/scripts/spawn.sh codex lookout \
+  --project "$(pwd)" --team mediaferry
+bash ~/.agents/skills/agmsg/scripts/despawn.sh mediaferry deckhand lookout   # 終わったら
+```
+
+codex には readiness handshake が無いので `spawn.sh` は待たずに返る
+（`--no-wait` 相当）。tmux のペインとして開く。
+
 - **`delivery.sh status` の `watch processes: 0 alive` は「codex が死んでいる」
   ことを意味しない。** codex 側は自前の bridge と `watch-once.sh` で受け取る。
   生死は `pgrep -af codex` で `codex-bridge.js` と `watch-once.sh` を見る方が確実
-- `team.sh chezmoi` で名簿を確認できる（`claude-code` と `codex` が参加済み）
+- `team.sh mediaferry` で名簿を確認できる
 - `history.sh` は全件を渡すと `sqlite3: Argument list too long` で落ちる。
-  **件数を指定する**（`history.sh chezmoi claude-code 3`）
+  **件数を指定する**（`history.sh mediaferry deckhand 3`）
 - **返信は待ち方を用意しておく。** 直近 1 件が codex 発になるまで回す:
 
   ```bash
-  until bash ~/.agents/skills/agmsg/scripts/history.sh chezmoi claude-code 1 \
-      | grep -q "codex → claude-code"; do sleep 20; done
+  until bash ~/.agents/skills/agmsg/scripts/history.sh mediaferry deckhand 1 \
+      | grep -q "lookout → deckhand"; do sleep 20; done
   ```
 
   4800 行の計画のレビューで**返信まで約 6 分**だった
@@ -311,12 +328,13 @@ blocker として指摘されたもの**で、理屈で戻すと同じ穴に落�
 ### レビューの依頼先
 
 ```bash
-bash ~/.agents/skills/agmsg/scripts/send.sh chezmoi claude-code codex "<本文>"
-bash ~/.agents/skills/agmsg/scripts/history.sh chezmoi claude-code 3
+bash ~/.agents/skills/agmsg/scripts/spawn.sh codex lookout --project "$(pwd)" --team mediaferry
+bash ~/.agents/skills/agmsg/scripts/send.sh mediaferry deckhand lookout "<本文>"
+bash ~/.agents/skills/agmsg/scripts/history.sh mediaferry deckhand 3
 ```
 
-codex は `chezmoi` チームに参加済み。落ちていたら
-`bash ~/.agents/skills/agmsg/scripts/spawn.sh codex codex --project "$(pwd)" --team chezmoi`
+**チームは `mediaferry`、自分は `deckhand`、codex は `lookout`。** レビューの
+たびに spawn し、終わったら despawn する（§4 の agmsg）。
 
 **先にコミットしてから、hash とファイル名を渡して読ませる。** 本文に全文を
 貼ると配送が遅れるうえ、反映前の版をレビューされることがある。返信の待ち方と
