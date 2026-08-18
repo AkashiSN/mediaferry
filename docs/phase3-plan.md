@@ -298,7 +298,8 @@ def normalize_endpoint(raw: str) -> str:
         # 範囲外・数値でないポートは urlsplit が読むときに落ちる。
         raise EndpointRejected(f"ポート番号として解釈できない: {parts.netloc}") from exc
 
-    host = parts.hostname.lower()
+    # `hostname` は urlsplit が小文字にして返す（大文字のホスト名はここで揃う）。
+    host = parts.hostname
     if ":" in host:
         # IPv6 は括弧で囲み直す。素で組むと `http://::1:2283` になって壊れる。
         host = f"[{host}]"
@@ -327,7 +328,7 @@ Expected: PASS（16 件。parametrize を展開した数）
 | IPv6 の括弧付けを消す | `test_an_ipv6_host_keeps_its_brackets` |
 | `parts.port` の `ValueError` を捕まえない | `test_an_unusable_port_is_refused` |
 | `path.rstrip("/")` を `path` にする | `test_accepted_endpoints_are_normalised` |
-| `parts.hostname.lower()` を `parts.hostname` にする | 同上（大文字のホスト名のケース） |
+| `parts.hostname.lower()` を `parts.hostname` にする | **落ちない**。`urlsplit().hostname` は既に小文字を返すので `.lower()` は冗長だった。実装から外した（テストは大文字のホスト名を通したままにして、`hostname` の性質が変わったら気づけるようにする） |
 
 - [ ] **Step 6: コミット**
 
