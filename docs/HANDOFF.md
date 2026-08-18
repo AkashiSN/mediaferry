@@ -355,30 +355,53 @@ codex とのやり取りは agmsg 経由。チーム `mediaferry`、こちらが
 
 ```bash
 S=~/.agents/skills/agmsg/scripts
+TEAM=mediaferry FROM=mediaferry-dev REVIEWER=mediaferry-reviewer
+
+# この役割の bridge の pid だけを取る。行を team/role で固定するのは、別の codex
+# 役割が増えたときに pid が複数行になって後段の ps が壊れないようにするため
+bridge_pid() {
+  "$S/delivery.sh" status codex "$(pwd)" \
+    | sed -n "s|^Codex bridge: $TEAM/$REVIEWER alive (pid \([0-9]*\)).*|\1|p"
+}
+# ラベル完全一致でペイン id を取る（grep の部分一致だと別役割を拾う）
+pane_id() {
+  herdr pane list | python3 -c "import sys,json;print(next((p['pane_id'] \
+    for p in json.load(sys.stdin)['result']['panes'] \
+    if p.get('label')=='$REVIEWER'),''))"
+}
 
 # 1. 起動（この環境は tmux ではなく herdr のペインになる）
-$S/spawn.sh codex mediaferry-reviewer --project "$(pwd)"
+"$S/spawn.sh" codex "$REVIEWER" --project "$(pwd)"
+PANE=$(pane_id)
 
 # 2. bridge が起きるまで待つ。spawn は codex の readiness を待たずに返るので、
-#    1 度見て not running でも失敗ではない。alive になるまで期限付きで回す
+#    1 度見て not running でも失敗ではない
 BPID=""
-for _ in $(seq 30); do
-  BPID=$($S/delivery.sh status codex "$(pwd)" | sed -n 's/.*alive (pid \([0-9]*\)).*/\1/p')
-  [ -n "$BPID" ] && break
-  sleep 1
-done
-[ -n "$BPID" ] || echo "bridge が上がらない。送らずに調べること"
+for _ in $(seq 30); do BPID=$(bridge_pid); [ -n "$BPID" ] && break; sleep 1; done
 
-# 3. 依頼（コミット済みの hash とファイル名を渡す。上の「レビューの依頼」を参照）
-$S/send.sh mediaferry mediaferry-dev mediaferry-reviewer "<依頼>"
+# 3. 依頼。alive を確かめられたときだけ送る（待ちが空振りしたら送らない）
+if [ -n "$BPID" ]; then
+  "$S/send.sh" "$TEAM" "$FROM" "$REVIEWER" "<依頼>"   # hash とファイル名を渡す
+else
+  echo "bridge が上がらない。送らずに調べること"
+fi
 
 # 4. 片付け。--force を最初から付ける
-$S/despawn.sh mediaferry mediaferry-dev mediaferry-reviewer --force   # → status=forced
+"$S/despawn.sh" "$TEAM" "$FROM" "$REVIEWER" --force   # → status=forced
 
-# 5. 確認。status=forced は成功の証明にならないので、3 つを別々に見る
-herdr pane list | grep mediaferry-reviewer   # → 出なければペインは閉じた
-$S/identities.sh "$(pwd)" codex              # → 空なら登録は消えた
-ps -p "$BPID"                                # → 無ければ bridge は終了した
+# 5. 確認。status=forced は証明にならないので 3 つを別々に見る
+"$S/identities.sh" "$(pwd)" codex                     # → 空なら登録は消えた
+[ -n "$PANE" ] && pane_id | grep -q . && echo "ペインが残っている: $PANE"
+#    bridge は即死しない。launcher が登録の消失を 2 tick 連続で見てから落とす
+#    設計で、poll は 0.3→2 秒に伸びる（実測で終了まで 3 秒。即時の ps 1 回だと
+#    正常系でも「生存」と誤読する）。消えるまで期限付きで待つ。args も見るのは
+#    pid が再利用されていた場合に別プロセスを「生存」と誤読しないため
+for _ in $(seq 15); do
+  ps -p "$BPID" -o args= 2>/dev/null | grep -q codex-bridge.js || break
+  sleep 1
+done
+ps -p "$BPID" -o args= 2>/dev/null | grep -q codex-bridge.js \
+  && echo "bridge が残っている: $BPID"
 ```
 
 **`--force` を最初から付けること。素の graceful を先に打ってはいけない。**
@@ -415,8 +438,16 @@ pid を直接見る。同じ理由で `despawn.sh` の `status=forced` も証明
 **起動しっぱなしにしない理由**: codex CLI が居なくなっても bridge プロセスだけが
 生き残ることがあり、その状態で `mediaferry-reviewer` 宛に送るとメッセージを黙って
 飲み込む。手で `herdr pane close <pane_id>` だけした場合がこれに当たる（登録が
-残るので bridge も残る。ペインを閉じても SessionEnd フックは走らない）。その
-ときは `delivery.sh status codex` が出す pid に `kill -TERM` が要る。
+残るので bridge も残る。ペインを閉じても SessionEnd フックは走らない）。
+
+**この状態を bridge の `kill` で直そうとしない。効かない。** 登録と app-server が
+残っている限り launcher の子は生きていて、pidfile が消えたのを見て bridge を
+起動し直す（`codex-bridge-launcher.sh` の再利用判定。pidfile が無い / pid が死んで
+いる枝は、そのまま起動へ落ちる）。**ペインを閉じただけなら placement レコードは
+残っているので、`despawn.sh ... --force` がそのまま使える**（消すのは graceful の
+`free` 分岐と `--force` 自身だけ）。それも通らないときは
+`delivery.sh set off codex "$(pwd)"` で launcher の寿命元である app-server ごと
+落とし、`set monitor` で戻す。
 
 （2026-08-18 に確認。graceful → `--force` の順で打って詰まり、`--force` を最初から
 打つ手順で spawn から片付けまで 1 サイクル通ることを実測した。）
