@@ -12,6 +12,8 @@ from __future__ import annotations
 import base64
 import hashlib
 import os
+import shutil
+import subprocess
 import uuid
 
 import pytest
@@ -53,9 +55,8 @@ def test_the_whole_upload_path_works_against_a_real_server(client, tmp_path):
     """
     import os
 
-    payload = uuid.uuid4().bytes * 64  # 毎回ユニーク。既存資産と衝突しない
     path = tmp_path / f"mediaferry-test-{uuid.uuid4().hex[:8]}.jpg"
-    path.write_bytes(_a_unique_jpeg(payload))
+    _a_unique_jpeg(path, uuid.uuid4().bytes)  # 毎回ユニーク。既存資産と衝突しない
     sha1 = hashlib.sha1(path.read_bytes(), usedforsecurity=False).hexdigest()
     tag_name = f"mediaferry-test-{uuid.uuid4().hex[:8]}"
 
@@ -98,16 +99,35 @@ def test_the_whole_upload_path_works_against_a_real_server(client, tmp_path):
         )
 
 
-def _a_unique_jpeg(seed: bytes) -> bytes:
-    """最小の有効な JPEG。中身は毎回変える（既存資産と重複させない）."""
-    import io
+def _a_unique_jpeg(path, seed: bytes) -> bytes:  # noqa: ANN001
+    """**実 ffmpeg で本物の JPEG を作る**（中身は毎回変える）.
 
-    from PIL import Image  # type: ignore[import-not-found]
-
-    image = Image.frombytes("RGB", (8, 8), (seed * 3)[: 8 * 8 * 3])
-    buffer = io.BytesIO()
-    image.save(buffer, format="JPEG", quality=95)
-    return buffer.getvalue()
+    相手は実 Immich で、上げたファイルは実際に取り込み処理へ回る。手で組んだ
+    最小 JPEG や画像ライブラリの出力より、結合テストと同じ実 ffmpeg で作った
+    ものを送る（この案件は「実物で確かめる」に倒している）。色をシードから
+    決めるので、既存の資産とチェックサムが衝突しない。
+    """
+    if shutil.which("ffmpeg") is None:
+        pytest.skip("ffmpeg が要る（テスト用の画像を作る）")
+    colour = seed[:3].hex()
+    subprocess.run(  # noqa: S603
+        [  # noqa: S607 - 既存の結合テストと同じく PATH の ffmpeg を使う
+            "ffmpeg",
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-f",
+            "lavfi",
+            "-i",
+            f"color=c=0x{colour}:s=64x64",
+            "-frames:v",
+            "1",
+            "-y",
+            str(path),
+        ],
+        check=True,
+    )
+    return path.read_bytes()
 
 
 def _cleanup(url: str, key: str, asset_id: str | None, tag_name: str) -> None:
