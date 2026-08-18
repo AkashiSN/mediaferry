@@ -205,7 +205,10 @@ class Uploader:
         self._uploads.prepare_side_effect(
             ctx, record["id"], state, verify_eligibility=verify_eligibility
         )
-        self._preflight.assert_target(revision_id)
+        # **相手待ちも心拍で守る。** `users/me` はクライアントの timeout まで
+        # 待ちうるので、リース（60 秒）を跨ぐ。囲まれるのは相手待ちだけで、
+        # DB へ触るのは待つ側のまま（接続はスコープごとに 1 本）。
+        self._preflight.assert_target(revision_id, wait=lambda work: with_lease_pulse(ctx, work))
         self._uploads.prepare_side_effect(
             ctx, record["id"], state, verify_eligibility=verify_eligibility
         )

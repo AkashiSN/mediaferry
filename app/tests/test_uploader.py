@@ -662,3 +662,32 @@ def test_an_asset_that_turns_out_to_exist_is_not_tagged_when_the_ground_is_gone(
     assert server.datetimes == {}
     row = record_of(db)
     assert row["invalidated_at"] is not None
+
+
+def test_a_slow_target_check_does_not_lose_the_lease(world, db, monkeypatch):
+    """**向き先の再確認の待ち時間もリースを跨ぐ。**
+
+    `users/me` はクライアントの timeout（既定 86400 秒）まで待ちうる。心拍を
+    打たずに待つと、遅いだけで壊れていない Immich で送信が失敗として記録される。
+    """
+    import time
+
+    from mediaferry.db.jobs import JobStore
+
+    server, uploader, _, _, _, destination_id, _ = world
+    monkeypatch.setattr("mediaferry.core.lease_pulse.HEARTBEAT_INTERVAL", 0.05)
+    store = JobStore(db, lease_seconds=1)
+    store.enqueue("upload", {"destination_id": destination_id})
+    ctx = store.claim_next()
+    real_users_me = ImmichClient.users_me
+
+    def slow_users_me(self):  # noqa: ANN001, ANN202
+        time.sleep(1.5)
+        return real_users_me(self)
+
+    monkeypatch.setattr(ImmichClient, "users_me", slow_users_me)
+
+    outcome = uploader.run(ctx, destination_id)
+
+    assert outcome.sent == 1
+    assert record_of(db)["state"] == "complete"

@@ -13,6 +13,7 @@ from __future__ import annotations
 import sqlite3
 import time
 from collections.abc import Callable
+from typing import Any
 
 from ..adapters.immich import ImmichClient, ImmichError
 from ..core.destinations.identity import fingerprint
@@ -42,7 +43,18 @@ class PreflightCache:
         self._failed: dict[str, PreflightFailed] = {}
         self._verified_at: dict[str, float] = {}
 
-    def assert_target(self, revision_id: str) -> None:
+    def assert_target(
+        self,
+        revision_id: str,
+        wait: Callable[[Callable[[], Any]], Any] | None = None,
+    ) -> None:
+        """向き先を確かめる. `wait` を渡すと**相手待ちだけ**をそれで囲む.
+
+        `users/me` の応答はクライアントの timeout（既定 86400 秒）まで待ちうる
+        ので、リース（60 秒）を跨ぐ。呼び出し側が `with_lease_pulse` を渡せば、
+        待っている間も心拍が打てる。**DB へ触る部分（リビジョンの解決と資格
+        情報の復号）は呼び出し側のスレッドに残す**（接続はスコープごとに 1 本）。
+        """
         failure = self._failed.get(revision_id)
         if failure is not None:
             # 一度失敗したリビジョンへは、同じジョブ内でもう試さない。
@@ -51,13 +63,15 @@ class PreflightCache:
         if checked is not None and time.monotonic() - checked < self._ttl:
             return
         try:
-            self._check(revision_id)
+            self._check(revision_id, wait)
         except PreflightFailed as exc:
             self._failed[revision_id] = exc
             raise
         self._verified_at[revision_id] = time.monotonic()
 
-    def _check(self, revision_id: str) -> None:
+    def _check(
+        self, revision_id: str, wait: Callable[[Callable[[], Any]], Any] | None = None
+    ) -> None:
         try:
             revision = self._repo.revision(revision_id)
         except DestinationNotFound as exc:
@@ -69,8 +83,11 @@ class PreflightCache:
             )
         try:
             with self._open_client(revision) as client:
+                # **囲むのは相手待ちだけ。** クライアントの構築（資格情報の復号）は
+                # DB を読むので、呼び出し側のスレッドで済ませてある。
+                body = client.users_me() if wait is None else wait(client.users_me)
                 # 記録側と同じ指紋にしてから比べる（`core.destinations.identity`）。
-                raw = client.users_me().get("id")
+                raw = body.get("id")
                 observed = fingerprint(raw if isinstance(raw, str) else None)
         except ImmichError as exc:
             raise PreflightFailed(f"向き先を確認できない: {exc}") from exc

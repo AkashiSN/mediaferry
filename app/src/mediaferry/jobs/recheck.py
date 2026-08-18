@@ -73,7 +73,11 @@ class Rechecker:
             # 直後の照合まで満期で入る（`assert_lease` は見るだけで延ばさない）。
             ctx.heartbeat()
             # 向き先が変わっていたら、別ライブラリの照合結果で上書きしてしまう。
-            self._preflight.assert_target(revision["id"])
+            # **`users/me` の待ち時間もリースを跨ぐ**ので、そこも心拍で守る
+            # （囲まれるのは相手待ちだけ。DB へ触るのは待つ側だけのまま）。
+            self._preflight.assert_target(
+                revision["id"], wait=lambda work: with_lease_pulse(ctx, work)
+            )
         except LeaseLost:
             return self._cancelled_or_raise(ctx)
 

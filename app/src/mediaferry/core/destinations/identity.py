@@ -15,14 +15,9 @@ from __future__ import annotations
 
 import hashlib
 
-# **指紋であることを値自身に持たせる。** 形（64 文字の 16 進）で推定すると、
-# 同じ形の生の観測値と見分けが付かない。移行が「もう指紋だ」と誤認した値は
-# 変換されずに残り、相手が鍵を echo していた場合はその平文が居座る。
-FINGERPRINT_PREFIX = "sha256:"
-
 
 def fingerprint(observed: str | None) -> str | None:
     """観測した識別子を指紋にする. 観測できていなければ None のまま."""
     if observed is None:
         return None
-    return FINGERPRINT_PREFIX + hashlib.sha256(observed.encode()).hexdigest()
+    return hashlib.sha256(observed.encode()).hexdigest()

@@ -699,3 +699,30 @@ def test_a_slow_preflight_does_not_eat_the_lease(world, monkeypatch):
     outcome = rechecker.run(ctx, destination_id)
 
     assert outcome.checked == 1
+
+
+def test_a_slow_preflight_keeps_the_lease_alive(world, monkeypatch):
+    """**preflight の待ち時間にも心拍が要る。**
+
+    直前に 1 回打つだけでは、`users/me` がリースより長くかかったときに、
+    最初の照合へ入る前に切れる（クライアントの timeout は最大 86400 秒）。
+    遅いだけで壊れていない Immich で、正常な再確認が failed になる。
+    """
+    import time
+
+    server, rechecker, _, destination_id, db = world
+    monkeypatch.setattr("mediaferry.core.lease_pulse.HEARTBEAT_INTERVAL", 0.05)
+    store = JobStore(db, lease_seconds=1)
+    store.enqueue("upload", {"destination_id": destination_id, "mode": "recheck"})
+    ctx = store.claim_next()
+    real_users_me = ImmichClient.users_me
+
+    def slow_users_me(self):  # noqa: ANN001, ANN202
+        time.sleep(1.5)
+        return real_users_me(self)
+
+    monkeypatch.setattr(ImmichClient, "users_me", slow_users_me)
+
+    outcome = rechecker.run(ctx, destination_id)
+
+    assert outcome.checked == 1

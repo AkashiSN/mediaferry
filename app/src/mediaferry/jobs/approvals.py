@@ -66,7 +66,9 @@ class ApprovalService:
             # **所有権を確かめてから向き先を見る。** 再確認も鍵を付けた要求なので、
             # キャンセル済みのジョブから出さない（§14）。別のライブラリの資産の
             # 日時を書き換えないための確認であることは変わらない。
-            self._preflight.assert_target(revision["id"])
+            self._preflight.assert_target(
+                revision["id"], wait=lambda work: with_lease_pulse(ctx, work)
+            )
             # 再確認の間にキャンセルが commit されていないか、もう一度見る。
             self._uploads.prepare_side_effect(ctx, record_id, "fixing_datetime")
             with self._open_client(revision) as client:

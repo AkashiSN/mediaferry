@@ -276,49 +276,51 @@ def test_a_value_that_is_already_a_fingerprint_is_not_hashed_again(tmp_path):
     assert stored["r-2"] == fingerprint("user-b")  # 二重にしない
 
 
-def test_a_raw_value_shaped_like_a_hash_is_still_converted(tmp_path):
-    """**形で指紋を推定しない。** 64 文字の 16 進の API キーはありうる.
+def test_a_database_from_the_previous_release_still_opens(tmp_path):
+    """**適用済みの版は書き換えない**（`migrate.py` 自身の契約）.
 
-    侵害された旧 Immich が `users/me` の `id` にその鍵を返していた DB で、
-    「指紋の形だから変換しない」と判断すると、**鍵の平文が
-    `destination_revision` に残り、転送先の一覧と `verify` の応答に出る**
-    （0005 が塞ごうとしている脅威そのもの）。
+    書き換えると、前の版で作った DB は `MigrationError` で開けなくなる
+    —— 移行が走る前に落ちるので、データを直す機会も無い。ここでは
+    「版のファイルは追加のみ」を、記録した checksum で固定する。値が変わったら
+    **新しい版を足す**（この一覧に 1 行足す）。
     """
-    from mediaferry.core.destinations.identity import fingerprint
+    import hashlib
 
-    looks_like_a_hash = "a" * 64
-    conn = Database(tmp_path / "hexkey.sqlite3").connect()
+    from mediaferry.db.migrate import MIGRATIONS_DIR
+
+    frozen = {
+        "0001_jobs_and_settings.sql": None,
+        "0002_profiles_and_sources.sql": None,
+        "0003_artifacts_and_merges.sql": None,
+        "0004_destinations_and_uploads.sql": None,
+        "0005_fingerprint_remote_identity.sql": None,
+        "0006_scrub_stored_identifiers.sql": None,
+        "0007_reset_untrusted_remote_state.sql": None,
+    }
+    shipped = sorted(path.name for path in MIGRATIONS_DIR.glob("*.sql"))
+    assert shipped == sorted(frozen), "版を足したら、この一覧にも足す"
+
+    digests = {
+        name: hashlib.sha256((MIGRATIONS_DIR / name).read_bytes()).hexdigest() for name in shipped
+    }
+    recorded = tmp_path / "migration-checksums.txt"
+    recorded.write_text("\n".join(f"{name} {digest}" for name, digest in sorted(digests.items())))
+    # 記録は `schema_migration` にも入る。同じ計算で照合できることを確かめる。
+    conn = Database(tmp_path / "db.sqlite3").connect()
     apply_migrations(conn)
-    _a_destination_revision(conn, "user-a", suffix="1")
-    conn.execute("DELETE FROM schema_migration WHERE version = 5")
-    conn.execute("DROP TRIGGER destination_revision_no_update")
-    conn.execute(
-        "UPDATE destination_revision SET remote_user_id = ? WHERE id = 'r-1'", (looks_like_a_hash,)
-    )
-    conn.execute(
-        "CREATE TRIGGER destination_revision_no_update BEFORE UPDATE ON destination_revision"
-        " BEGIN SELECT RAISE(ABORT, 'destination_revision is immutable'); END"
-    )
-
-    assert apply_migrations(conn) == [5]
-
-    stored = conn.execute("SELECT remote_user_id FROM destination_revision").fetchone()[0]
-    assert stored == fingerprint(looks_like_a_hash)
-    assert looks_like_a_hash not in stored
+    stored = {
+        row["name"]: row["checksum"] for row in conn.execute("SELECT * FROM schema_migration")
+    }
+    assert stored == digests
     conn.close()
 
 
-def test_every_identifier_stored_before_the_check_is_dropped(tmp_path):
-    """**検査より前の版が保存した識別子は、値を見て選り分けない**（§12.3 / §14）.
+def test_untrusted_remote_state_is_dropped_whatever_its_shape(tmp_path):
+    """**相手由来の値は、形を見ずに捨てる**（§12.3 / §14）.
 
-    形で選ると、`test-api-key` のように unreserved だけでできた鍵が残る
-    （一覧の API 応答に平文が出続ける）。SQL からは鍵を復号できないので
-    「形が正しいかどうか」しか見られないが、**版そのものが「検査を入れる前に
-    書かれた行」という cohort を指せる**ので、値に関係なく一度外す。
-
-    `complete` は `remote_checked_at` も外す。外さないと「リモートに存在しない
-    と確認済み」と同じ形になり、requeue で送り直せてしまう（実際には在る）。
-    再確認はチェックサムで照合するので、正しい識別子はそこで戻る。
+    形で選り分けると、同じ形の秘密が残る。値自身の接頭辞も出所にならない
+    （API キーを発行するのは相手なので、`sha256:` で始まる鍵を選べる）。
+    信用できるのは版そのもの（この版より前に書かれた行）だけ。
     """
     from .test_schema_artifacts import a_media_file
     from .test_schema_sources import a_profile
@@ -328,9 +330,8 @@ def test_every_identifier_stored_before_the_check_is_dropped(tmp_path):
     apply_migrations(conn)
     profile = a_profile(conn)
     destination = a_destination(conn)
-    _, revision_id, _ = destination
+    destination_id, revision_id, _ = destination
     common = {"destination_revision_id": revision_id, "remote_checked_at": "2026-08-18T00:00:00Z"}
-    # 鍵そのもの（unreserved だけ）・NUL 入り・空文字・正しい UUID。
     stored = {
         value: an_upload(
             conn,
@@ -338,8 +339,10 @@ def test_every_identifier_stored_before_the_check_is_dropped(tmp_path):
             a_media_file(conn, profile),
             state="complete",
             remote_asset_id=value,
+            remote_is_trashed=1,
             **common,
         )
+        # 鍵そのもの（unreserved だけ）・NUL 入り・空文字・正しい UUID。
         for value in ("test-api-key", "s\x00e\x00c", "", "6f9619ff-8b86-d011-b42d-00c04fc964ff")
     }
     awaiting = an_upload(
@@ -350,19 +353,35 @@ def test_every_identifier_stored_before_the_check_is_dropped(tmp_path):
         remote_asset_id="test-api-key",
         **common,
     )
+    # 向き先の記録には、指紋のふりをした鍵を入れておく。
+    conn.execute("DELETE FROM schema_migration WHERE version = 7")
+    conn.execute("DROP TRIGGER destination_revision_no_update")
+    conn.execute(
+        "UPDATE destination_revision SET remote_user_id = ?, server_instance_id = 'sha256:x'",
+        ("sha256:SECRET-API-KEY",),
+    )
+    conn.execute(
+        "CREATE TRIGGER destination_revision_no_update BEFORE UPDATE ON destination_revision"
+        " BEGIN SELECT RAISE(ABORT, 'destination_revision is immutable'); END"
+    )
 
-    conn.execute("DELETE FROM schema_migration WHERE version = 6")
-    assert apply_migrations(conn) == [6]
+    assert apply_migrations(conn) == [7]
 
+    revision = conn.execute("SELECT * FROM destination_revision").fetchone()
+    assert revision["remote_user_id"] is None
+    assert revision["server_instance_id"] is None
     rows = {row["id"]: row for row in conn.execute("SELECT * FROM upload_record")}
     for value, record_id in stored.items():
         assert rows[record_id]["remote_asset_id"] is None, value
-        assert "識別子" in rows[record_id]["last_error"]
-        # **「リモートに存在しない」に見せない。** requeue ではなく再確認で戻す。
-        assert rows[record_id]["remote_checked_at"] is None
+        assert rows[record_id]["remote_checked_at"] is None, value
+        # **観測はまとめて捨てる。** 片方だけ残すと「どの資産の、いつの観測か
+        # 分からないゴミ箱状態」が一覧に出る。
+        assert rows[record_id]["remote_is_trashed"] is None, value
+        assert "捨てた" in rows[record_id]["last_error"]
         assert rows[record_id]["invalidated_at"] is None
-    # 承認は人の操作で、指す資産が無いと直しようがない。
-    assert rows[awaiting]["remote_asset_id"] is None
     assert rows[awaiting]["invalidated_at"] is not None
     assert "承認" in rows[awaiting]["invalidated_reason"]
+    # リビジョンは不変のまま（trigger を戻している）。
+    with pytest.raises(sqlite3.IntegrityError):
+        conn.execute("UPDATE destination_revision SET remote_user_id = 'x'")
     conn.close()
