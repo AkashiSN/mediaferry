@@ -30,6 +30,7 @@ from ..jobs.importer import Importer
 from ..jobs.merger import Merger
 from ..jobs.preflight import PreflightCache
 from ..jobs.recheck import Rechecker
+from ..jobs.recompute import Recomputer
 from ..jobs.scan import Scanner
 from ..jobs.uploader import Uploader
 from ..jobs.volumes import VolumeSelection, VolumeService
@@ -111,6 +112,19 @@ class JobWorld:
             "info",
             f"結合完了: {result.rel_path}（経路 {result.route} /"
             f" 検証 {'合格' if result.passed else '不合格'}）",
+        )
+
+    def run_recompute_timestamps(self, ctx: JobContext, conn: sqlite3.Connection) -> None:
+        profile = _profile_ref(conn, ctx.params)
+        settings = SettingsService(conn, self._env).snapshot()
+        outcome = Recomputer(conn, settings.data_root, settings.default_timezone).run(ctx, profile)
+        # **キャンセルを「完了」と書かない。** 協調キャンセルは正常 return で降りて
+        # くるので、`finished` を見ないとログに「中止」の後で「完了」が並ぶ。
+        ctx.emit(
+            "info",
+            f"再計算{'完了' if outcome.finished else 'を中止した（ここまでの分は反映済み）'}:"
+            f" 変更 {outcome.changed} 件 / 据え置き {outcome.unchanged} 件"
+            f" / 飛ばし {outcome.skipped} 件 / 再確認へ戻し {outcome.requeued} 件",
         )
 
     def run_upload(self, ctx: JobContext, conn: sqlite3.Connection) -> None:

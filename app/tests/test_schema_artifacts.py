@@ -23,6 +23,8 @@ def a_media_file(db, profile, **over):
         "kind": "video",
         "captured_at": now_iso(),
         "captured_at_source": "filename",
+        # 取り込み時は「取り込みに使った版」と同じ（`0011`）。
+        "captured_at_revision_id": revision_id,
         "duration_seconds": 1.5,
         "probe_state": "ok",
         "created_at": now_iso(),
@@ -61,6 +63,57 @@ def a_source_entry(db, volume_id):
         (entry_id, volume_id, f"DCIM/{entry_id}.MP4", now_iso()),
     )
     return entry_id
+
+
+def test_captured_at_revision_must_be_present(db):
+    """**必ず値を持つ**（`0011`）.
+
+    `ALTER TABLE` では NOT NULL を後から足せないので trigger で作る。無いと
+    「どの定義で算出した日時か」が分からない行ができ、再計算の provenance が
+    最初から欠ける。
+    """
+    profile = a_profile(db)
+    with pytest.raises(sqlite3.IntegrityError):
+        a_media_file(db, profile, captured_at_revision_id=None)
+
+
+def test_captured_at_revision_must_belong_to_the_same_profile(db):
+    """**同じプロファイルの版であること**（`0011`）.
+
+    単一の FK は `profile_revision` のどの行でも通してしまうので、別機種の版を
+    指した行が作れる。`UNIQUE (profile_id, id)` に突き合わせて塞ぐ。
+    """
+    profile = a_profile(db)
+    _, other_revision = a_profile(db, slug="canon-eos")
+    with pytest.raises(sqlite3.IntegrityError):
+        a_media_file(db, profile, captured_at_revision_id=other_revision)
+    media = a_media_file(db, profile)
+    with pytest.raises(sqlite3.IntegrityError):
+        db.execute(
+            "UPDATE media_file SET captured_at_revision_id = ? WHERE id = ?",
+            (other_revision, media),
+        )
+
+
+def test_captured_at_revision_can_advance_within_the_same_profile(db):
+    """再計算はこの列だけを進める. `profile_revision_id` は触らない."""
+    profile_id, revision_id = a_profile(db)
+    media = a_media_file(db, (profile_id, revision_id))
+    next_revision = new_id()
+    db.execute(
+        "INSERT INTO profile_revision"
+        " (id, profile_id, revision, definition_json, schema_version, created_at)"
+        " VALUES (?, ?, 2, '{}', 1, ?)",
+        (next_revision, profile_id, now_iso()),
+    )
+    db.execute(
+        "UPDATE media_file SET captured_at_revision_id = ? WHERE id = ?", (next_revision, media)
+    )
+    row = db.execute(
+        "SELECT profile_revision_id, captured_at_revision_id FROM media_file WHERE id = ?", (media,)
+    ).fetchone()
+    assert row["profile_revision_id"] == revision_id
+    assert row["captured_at_revision_id"] == next_revision
 
 
 def test_media_rel_path_is_unique(db):

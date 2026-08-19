@@ -19,6 +19,7 @@ from ..adapters.fs import DirfdTree, exists_beneath
 from ..clock import now_iso
 from ..core.manifest import content_manifest_digest
 from ..core.profiles.matching import VolumeFacts, resolve_profile
+from ..db.connection import immediate
 from ..db.profiles import ProfileRegistry
 from ..db.sources import (
     detach_absent,
@@ -147,18 +148,24 @@ class VolumeService:
             # その間の抜き差しで pass の対象がずれる。
             volumes = self._client.list_volumes()
 
-            # pass 1: 観測を DB へ反映する
-            observed = []
-            seen_presence: list[str] = []
-            for volume in volumes:
-                device_id = upsert_device(self._conn, volume.usb)
-                volume_id = resolve_volume_instance(self._conn, volume, device_id)
-                presence_id = sync_presence(self._conn, volume_id, volume)
-                seen_presence.append(presence_id)
-                observed.append((volume, volume_id, presence_id))
+            # **pass 1 と 2 を 1 つのトランザクションに入れる。**
+            # この層は 2 つのインスタンスが別々の接続で同時に動く（API 側と
+            # VolumeWatcher）。囲まないと autocommit で 1 文ずつ流れ、
+            # 相手の観測が pass の合間に挟まって「反映済みなのに detach された」
+            # 接続ができる。判定（pass 3）はマウントを伴って長いので外に出す。
+            with immediate(self._conn):
+                # pass 1: 観測を DB へ反映する
+                observed = []
+                seen_presence: list[str] = []
+                for volume in volumes:
+                    device_id = upsert_device(self._conn, volume.usb)
+                    volume_id = resolve_volume_instance(self._conn, volume, device_id)
+                    presence_id = sync_presence(self._conn, volume_id, volume)
+                    seen_presence.append(presence_id)
+                    observed.append((volume, volume_id, presence_id))
 
-            # pass 2: 消えた接続を detach する
-            detach_absent(self._conn, seen_presence)
+                # pass 2: 消えた接続を detach する
+                detach_absent(self._conn, seen_presence)
 
             # pass 3: 確定した live 集合を使って判定する
             definitions = [ref.definition for ref in self._registry.active()]
@@ -209,11 +216,22 @@ class VolumeService:
         if outcome.slug is not None:
             ref = self._registry.current(outcome.slug)
             profile_id, revision_id = ref.profile_id, ref.revision_id
+        # **判定の結果は残らず DB に置く。** watcher は「積んでよいか」を毎 tick
+        # DB の現在値から組み直すので、VolumeView にしか無い値があると
+        # 組み直せない（§12.1）。provisional もその 1 つ。
         self._conn.execute(
             "UPDATE volume_instance SET profile_id = ?, profile_revision_id = ?,"
-            " identity_confidence = ?, content_manifest_digest = ?, last_seen_at = ?"
-            " WHERE id = ?",
-            (profile_id, revision_id, confidence, digest, now_iso(), volume_id),
+            " identity_confidence = ?, provisional = ?, content_manifest_digest = ?,"
+            " last_seen_at = ? WHERE id = ?",
+            (
+                profile_id,
+                revision_id,
+                confidence,
+                1 if outcome.provisional else 0,
+                digest,
+                now_iso(),
+                volume_id,
+            ),
         )
         selection = None
         if profile_id is not None:

@@ -239,3 +239,37 @@ def test_trying_an_unknown_profile_is_a_404(client):
 def test_trying_against_an_unknown_volume_is_a_404(client):
     response = client.post("/api/profiles/dji-osmo/test?volume_instance_id=nope")
     assert response.status_code == 404
+
+
+def test_devices_persists_whether_the_match_was_provisional(client, database, fake_card):
+    """判定の暫定フラグを DB に残す.
+
+    watcher は毎 tick DB の現在値から「積んでよいか」を組み直すので、
+    VolumeView にしか無い値があると組み直せない（§12.1）。
+
+    **両方の値を通す。** 既定が 0 なので、確定マッチだけを見ても
+    「書いている」ことの証拠にならない。
+    """
+
+    def stored_flag(view):
+        conn = database.connect()
+        try:
+            row = conn.execute(
+                "SELECT provisional FROM volume_instance WHERE id = ?",
+                (view["volume_instance_id"],),
+            ).fetchone()
+            assert row is not None
+            return bool(row["provisional"])
+        finally:
+            conn.close()
+
+    view = client.get("/api/devices").json()["volumes"][0]
+    assert view["provisional"] is False
+    assert stored_flag(view) is False
+
+    # 一致するファイルを消すと「対象だが中身が無い」になる（Phase 0 の発見 B）。
+    for path in (fake_card / "DCIM" / "DJI_001").iterdir():
+        path.unlink()
+    view = client.get("/api/devices").json()["volumes"][0]
+    assert view["provisional"] is True, "暫定マッチの筋書きになっていない"
+    assert stored_flag(view) is True

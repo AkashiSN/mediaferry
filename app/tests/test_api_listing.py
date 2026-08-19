@@ -214,3 +214,26 @@ def test_the_dashboard_reports_what_needs_attention(client, db, library):
     assert body["warnings"] == []
     assert body["running_jobs"] == 0
     assert "orphans" in body
+
+
+def test_media_can_be_filtered_by_profile(client, db, library):
+    """プロファイルでの絞り込み.
+
+    **`IN (SELECT ...)` ではなく `= (SELECT ...)` で書く。** `IN` だと SQLite は
+    複数の値を取りうると見て、索引があっても並べ替えを外せない（一覧は
+    `captured_at DESC, id DESC` 固定なので、`0014` の索引が効かなくなる）。
+    slug は UNIQUE なので値は高々 1 つで、意味は変わらない。
+    """
+    other = a_profile(db, slug="another-profile")
+    a_media_file(db, other, rel_path="library/another/CLIP_9.MP4")
+
+    got = client.get("/api/media?profile=listing-test").json()
+    assert got["total"] == len(library)
+    assert all("library/listing/" in row["rel_path"] for row in got["media"])
+
+
+def test_an_unknown_profile_matches_nothing(client, library):
+    """知らない slug は 0 件（`IN` から `=` へ変えても意味が変わらない）."""
+    got = client.get("/api/media?profile=nope").json()
+    assert got["total"] == 0
+    assert got["media"] == []

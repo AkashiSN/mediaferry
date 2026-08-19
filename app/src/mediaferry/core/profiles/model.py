@@ -19,6 +19,8 @@ from typing import Any
 
 import yaml
 
+from .patterns import compile_pattern
+
 PROFILE_SCHEMA_VERSION = 1
 BUILTIN_DIR = Path(__file__).parent / "builtin"
 
@@ -26,6 +28,9 @@ _SLUG_RE = re.compile(r"^[a-z0-9][a-z0-9-]*$")
 _TIMESTAMP_SOURCES = ("filename", "exif", "mtime")
 _TIMEZONE_POLICIES = ("none", "force_offset")
 _VIDEO_KEEP = ("primary", "all")
+# 正規表現の長さの上限。書き間違いを早く教えるためのもので、
+# catastrophic backtracking はこれでは防げない（patterns.py を見よ）。
+MAX_PATTERN_LENGTH = 512
 _AUDIO_KEEP = ("none", "primary", "all")
 
 
@@ -185,10 +190,18 @@ def _safe_components(names: Sequence[str], key: str) -> tuple[str, ...]:
 
 
 def _regex(data: Mapping[str, Any], key: str) -> str:
+    """正規表現として読めることと、長さの上限だけを見る.
+
+    **固まらないことの保証はここでは作れない。** 保存時に敵対的な標本を試しても
+    `(z+)+$` は `a` の標本を素通りする。実行時の上限（`patterns.py` の
+    `timeout`）が保証を持つ。ここは「書き間違いを早く教える」ための検査。
+    """
     pattern = _string(data, key)
+    if len(pattern) > MAX_PATTERN_LENGTH:
+        raise ProfileInvalid(f"{key} が長すぎる（{len(pattern)} > {MAX_PATTERN_LENGTH}）")
     try:
-        re.compile(pattern)
-    except re.error as exc:
+        compile_pattern(pattern)
+    except Exception as exc:  # noqa: BLE001 - regex は独自の例外型を投げる
         raise ProfileInvalid(f"{key} が正規表現として不正: {exc}") from exc
     return pattern
 
@@ -281,10 +294,22 @@ def _parse_merge(data: Mapping[str, Any]) -> MergeRule:
         },
         "merge",
     )
+    enabled = _bool(data, "enabled")
+    if not enabled:
+        # **無効なら連番の規則も出力名も要らない。** 書かせると、使われない値を
+        # 発明することになる（canon-eos と generic-dcim は結合を持たない）。
+        return MergeRule(
+            enabled=False,
+            tolerance_seconds=_positive_int(data, "tolerance_seconds"),
+            min_part_size_gib=_positive_int(data, "min_part_size_gib"),
+            sequence_pattern="",
+            output_name="",
+            keep_streams=_parse_keep_streams(_mapping(data, "keep_streams")),
+        )
     output_name = _string(data, "output_name")
     _safe_components([output_name], "merge.output_name")
     return MergeRule(
-        enabled=_bool(data, "enabled"),
+        enabled=True,
         tolerance_seconds=_positive_int(data, "tolerance_seconds"),
         min_part_size_gib=_positive_int(data, "min_part_size_gib"),
         sequence_pattern=_regex(data, "sequence_pattern"),

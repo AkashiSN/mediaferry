@@ -21,7 +21,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import BinaryIO
+from typing import Any, BinaryIO
 
 from ..clock import now_iso
 from ..core import lease_pulse
@@ -92,10 +92,21 @@ class ArtifactRequest:
     desired_rel_path: str
     source_rel_path: str
     extension: str
-    captured: CapturedAt
+    # **どちらか一方を必ず与える。** `captured` は呼び出し側が先に決めた値、
+    # `resolve_captured` は**ステージ済みのファイルから**決める遅延解決
+    # （`source: exif`）。呼び出し側は publish の前に staging を持っていない
+    # ので、ファイルを見て決める種類の値はここでしか解決できない（§9.3 手順 5）。
+    captured: CapturedAt | None
     mtime_ns: int
     source_entry_id: str | None
     merge_group_id: str | None
+    resolve_captured: Callable[[Path], CapturedAt] | None = None
+
+    def __post_init__(self) -> None:
+        # 「どちらか一方」をコメントで書くだけにしない。後から caller を足した
+        # ときに、どちらかが静かに優先される。
+        if (self.captured is None) == (self.resolve_captured is None):
+            raise ValueError("captured と resolve_captured はどちらか一方だけを与える")
 
 
 @dataclass(frozen=True)
@@ -213,7 +224,19 @@ class ArtifactPublisher:
         # 5. メタデータは公開前に確定させる。実体はあるがメタデータが欠けたまま
         #    永久にスキップされる状態を作らない。ffprobe の timeout はリースと
         #    同値なので、囲まないと手順 7 で失効しうる。
-        probe = _with_lease_pulse(ctx, lambda: self._probe.describe(staging_abs, request.extension))
+        #    **遅延解決もここで行う。** 手順 4（サイズの検証）の後なので、読むのは
+        #    検証済みのバイト列。前で読むと未完成のファイルを読み、後で読むと
+        #    metadata_json に載らないまま手順 7 で commit される。
+        #    リースの心拍で囲むのは ffprobe と同じ理由（相手待ちが長くなりうる）。
+        def _read_metadata() -> tuple[CapturedAt, Any]:
+            captured = request.captured
+            if captured is None:
+                # 例外を投げない契約（adapters/exif.py が握る）。投げると、
+                # 検証まで済んだファイルがここで落ちて staging に残る。
+                captured = request.resolve_captured(staging_abs)
+            return captured, self._probe.describe(staging_abs, request.extension)
+
+        captured, probe = _with_lease_pulse(ctx, _read_metadata)
         metadata = {
             "role": request.role,
             # 衝突時の別名系列は必ず「最初に望んだパス」から辿る。再開時に
@@ -223,10 +246,10 @@ class ArtifactPublisher:
             "profile_revision_id": request.profile_revision_id,
             "kind": probe.kind,
             # UTC へ正規化しない。復元した現地の壁時計が読めなくなる。
-            "captured_at": request.captured.at.isoformat(),
-            "captured_at_source": request.captured.source,
-            "captured_at_tz": request.captured.tz,
-            "captured_at_note": request.captured.note,
+            "captured_at": captured.at.isoformat(),
+            "captured_at_source": captured.source,
+            "captured_at_tz": captured.tz,
+            "captured_at_note": captured.note,
             "duration_seconds": probe.duration_seconds,
             "probe_state": probe.probe_state,
             "mtime_ns": request.mtime_ns,
@@ -437,8 +460,9 @@ class ArtifactPublisher:
                 self._conn.execute(
                     "INSERT INTO media_file (id, role, profile_id, profile_revision_id, rel_path,"
                     " size_bytes, mtime_ns, sha1, kind, captured_at, captured_at_source,"
-                    " captured_at_tz, captured_at_note, duration_seconds, probe_state, created_at)"
-                    " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    " captured_at_tz, captured_at_note, duration_seconds, probe_state,"
+                    " captured_at_revision_id, created_at)"
+                    " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                     (
                         media_file_id,
                         metadata["role"],
@@ -455,6 +479,9 @@ class ArtifactPublisher:
                         metadata["captured_at_note"],
                         metadata["duration_seconds"],
                         metadata["probe_state"],
+                        # 取り込みでは「算出に使った版」＝「取り込みに使った版」。
+                        # 再計算だけがこの列を進める（`0011`）。
+                        metadata["profile_revision_id"],
                         now_iso(),
                     ),
                 )

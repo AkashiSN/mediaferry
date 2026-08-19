@@ -11,7 +11,9 @@ export type Confirmation =
   | { kind: "archive_destination"; name: string }
   | { kind: "discard_merge_group"; groupLabel: string; publishedCount: number }
   | { kind: "adopt_failed_merge"; groupLabel: string; reason: string }
-  | { kind: "approve_datetime"; current: string | null; proposed: string };
+  | { kind: "approve_datetime"; current: string | null; proposed: string }
+  | { kind: "archive_profile"; slug: string }
+  | { kind: "trust_volume"; label: string; state: "starts" | "pending" | "blocked"; reason: string | null };
 
 export function describe(confirmation: Confirmation): { title: string; body: ReactNode } {
   switch (confirmation.kind) {
@@ -62,6 +64,62 @@ export function describe(confirmation: Confirmation): { title: string; body: Rea
         body: (
           <p>
             現在 {confirmation.current ?? "（不明）"} → 変更後 {confirmation.proposed}
+          </p>
+        ),
+      };
+    case "trust_volume":
+      return {
+        title: "このカードを信頼しますか",
+        body: (
+          <>
+            {confirmation.state === "starts" && (
+              <p>
+                {confirmation.label} を信頼すると、
+                <strong>
+                  いま入っている中身も含めて、以後このカードを挿すだけで NAS へコピーされます
+                </strong>
+                （画面の操作は要りません）。取り込みは承認の数秒後に始まります。
+              </p>
+            )}
+            {/* **条件は文全体に掛ける。** 約束を先に無条件で置いてから限定を
+                付け足すと、確かめられない媒体（`fs_uuid` が無い等）では前半が
+                成立せず、同じダイアログの中で矛盾する。 */}
+            {confirmation.state === "pending" && (
+              <p>
+                {confirmation.label} を信頼すると、
+                <strong>
+                  {confirmation.reason}に限り、いま入っている中身も含めて、以後このカードを
+                  挿すだけで NAS へコピーされます
+                </strong>
+                （画面の操作は要りません）。確かめられない媒体では、信頼を記録するだけで
+                取り込みは始まりません。
+              </p>
+            )}
+            {confirmation.state === "blocked" && (
+              // **始まらないのに「コピーされます」と書かない。** 同意の内容が
+              // 実挙動とずれる（`watcher.py` の CANDIDATES を満たしていない）。
+              <p>
+                {confirmation.label} の信頼を記録します。ただし{confirmation.reason}ので、
+                <strong>いまは自動取り込みは始まりません</strong>。条件が整うと、挿すだけで
+                NAS へコピーされるようになります。
+              </p>
+            )}
+            {/* **信頼の限界を明示する**（§12.1）。指紋は同一性の証明ではない。 */}
+            <p>
+              見分けはカードの中身の指紋で行うので、
+              <strong>同じ UUID の別のカードや、復元したカードを取り違えることがあります。</strong>
+            </p>
+          </>
+        ),
+      };
+    case "archive_profile":
+      return {
+        title: "このプロファイルを候補から外しますか",
+        body: (
+          <p>
+            {confirmation.slug} を候補から外します。取り込み済みのファイルと過去の
+            リビジョンは残りますが、
+            <strong>以後このプロファイルは新しいカードの判定に使われなくなります</strong>。
           </p>
         ),
       };

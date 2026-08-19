@@ -13,7 +13,7 @@ export type Running = {
   stop: () => void;
 };
 
-export async function start(password?: string): Promise<Running> {
+export async function start(password?: string, flags: string[] = []): Promise<Running> {
   const here = dirname(fileURLToPath(import.meta.url));
   const repo = resolve(here, "..", "..");
   const state = mkdtempSync(join(tmpdir(), "mediaferry-e2e-"));
@@ -21,6 +21,7 @@ export async function start(password?: string): Promise<Running> {
   if (password !== undefined) {
     args.push(password);
   }
+  args.push(...flags);
   const child: ChildProcessWithoutNullStreams = spawn("uv", args, {
     cwd: repo,
     env: { ...process.env, PYTHONPATH: join(repo, "app") },

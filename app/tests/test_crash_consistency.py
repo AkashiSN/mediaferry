@@ -12,6 +12,7 @@ from mediaferry.db.migrate import apply_migrations
 from mediaferry.jobs.reconcile import Reconciler
 
 from .crash_child import PAYLOAD
+from .exif_fixtures import a_jpeg_with
 
 CHILD = Path(__file__).parent / "crash_child.py"
 STEPS = list(range(1, 12))
@@ -43,15 +44,20 @@ def reconcile(data_root):
     return conn, report
 
 
-@pytest.mark.parametrize("kind", ["import", "merge", "merge_prepared"])
+@pytest.mark.parametrize("kind", ["import", "import_exif", "merge", "merge_prepared"])
 @pytest.mark.parametrize("step", STEPS)
 def test_reconciliation_recovers_from_a_crash_at_any_step(data_root, step, kind):
     crash_at(data_root, step, kind)
     conn, report = reconcile(data_root)
 
-    final = (
-        "library/dji-osmo/DCIM/A.MP4" if kind == "import" else "derived/dji-osmo/DCIM/MERGED.MP4"
-    )
+    final = {
+        "import": "library/dji-osmo/DCIM/A.MP4",
+        # 遅延解決（source: exif）の経路。中身は EXIF 付きの JPEG。
+        "import_exif": "library/dji-osmo/DCIM/A.JPG",
+        "merge": "derived/dji-osmo/DCIM/MERGED.MP4",
+        "merge_prepared": "derived/dji-osmo/DCIM/MERGED.MP4",
+    }[kind]
+    expected = a_jpeg_with(b"2026:03:04 05:06:07") if kind == "import_exif" else PAYLOAD
     rows = conn.execute("SELECT count(*) FROM media_file").fetchone()[0]
 
     if step <= 6:
@@ -62,11 +68,11 @@ def test_reconciliation_recovers_from_a_crash_at_any_step(data_root, step, kind)
     else:
         # staged 以降は永続情報だけで公開を再開できる。
         assert rows == 1
-        assert (data_root / final).read_bytes() == PAYLOAD
+        assert (data_root / final).read_bytes() == expected
         state = conn.execute("SELECT state FROM artifact_staging").fetchone()["state"]
         assert state == "published"
 
-    if kind != "import":
+    if kind.startswith("merge"):
         # 結合グループの決着も見る。**`_settle_merges` を `_recover_staging` の
         # 前へ動かすと、手順 7 で落とした場合に「detected なのに出力 ID が
         # 入っている」状態になり、ここで落ちる。**

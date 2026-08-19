@@ -53,14 +53,17 @@ test("空の DB から一連の操作が通る", async ({ page }) => {
     await expect(page.getByText(`immich-${index + 1}`)).toBeVisible();
   }
 
-  // 3. デバイス（信頼 → スキャン → 取り込み）。
+  // 3. デバイス（信頼 → スキャン → 取り込み）。**ボタンはカードごとに分かれている**
+  //    ので、どちらを操作しているかを名前で指す（2 枚差してある）。
   await page.getByRole("navigation").getByRole("link", { name: "デバイス" }).click();
-  const trust = page.getByRole("button", { name: "このカードを信頼する" });
+  const trust = page.getByRole("button", { name: "SD_Card を信頼する" });
   if (await trust.count()) {
-    await trust.first().click();
+    await trust.click();
+    // 信頼登録は確認を経る（以後そのカードは挿すだけで NAS へコピーされる）。
+    await page.getByRole("button", { name: "実行する" }).click();
   }
-  await page.getByRole("button", { name: "スキャン" }).first().click();
-  await page.getByRole("button", { name: "取り込む" }).first().click();
+  await page.getByRole("button", { name: "SD_Card をスキャン" }).click();
+  await page.getByRole("button", { name: "SD_Card を取り込む" }).click();
 
   // 4. ライブラリに出るまで待つ（取り込みのジョブが終わるまで）。
   const library = page.getByRole("navigation").getByRole("link", { name: "ライブラリ" });

@@ -1,6 +1,6 @@
 import pytest
 
-from mediaferry.core.profiles.model import definition_to_json
+from mediaferry.core.profiles.model import definition_to_json, load_builtin_definitions
 from mediaferry.db.profiles import ProfileRegistry, UnknownProfile
 
 
@@ -13,10 +13,13 @@ def test_sync_seeds_the_builtins(db):
 
 
 def test_sync_is_idempotent(db):
+    """2 度目は 1 つも版を作らない（同梱の本数に依存しない形で見る）."""
     registry = ProfileRegistry(db)
     registry.sync_builtins()
+    before = db.execute("SELECT count(*) FROM profile_revision").fetchone()[0]
+    assert before == len(load_builtin_definitions())
     assert registry.sync_builtins() == []
-    assert db.execute("SELECT count(*) FROM profile_revision").fetchone()[0] == 1
+    assert db.execute("SELECT count(*) FROM profile_revision").fetchone()[0] == before
 
 
 def test_a_changed_builtin_creates_a_new_revision_and_keeps_the_old_one(db):
@@ -39,7 +42,9 @@ def test_a_changed_builtin_creates_a_new_revision_and_keeps_the_old_one(db):
 def test_current_points_at_the_latest_revision(db):
     registry = ProfileRegistry(db)
     registry.sync_builtins()
-    row = db.execute("SELECT current_revision_id FROM device_profile").fetchone()
+    row = db.execute(
+        "SELECT current_revision_id FROM device_profile WHERE slug = 'dji-osmo'"
+    ).fetchone()
     assert row["current_revision_id"] == registry.current("dji-osmo").revision_id
 
 
@@ -51,6 +56,13 @@ def test_unknown_slug_raises(db):
 def test_archived_profiles_are_not_active(db):
     registry = ProfileRegistry(db)
     registry.sync_builtins()
-    assert [ref.definition.slug for ref in registry.active()] == ["dji-osmo"]
+    assert [ref.definition.slug for ref in registry.active()] == sorted(
+        d.slug for d in load_builtin_definitions()
+    )
+    db.execute(
+        "UPDATE device_profile SET archived_at = '2026-01-01T00:00:00+00:00'"
+        " WHERE slug = 'dji-osmo'"
+    )
+    assert "dji-osmo" not in [ref.definition.slug for ref in registry.active()]
     db.execute("UPDATE device_profile SET archived_at = '2026-01-01T00:00:00+00:00'")
     assert registry.active() == []

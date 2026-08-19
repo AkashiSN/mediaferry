@@ -3,6 +3,7 @@ import stat
 
 import pytest
 
+from mediaferry.clock import now_iso
 from mediaferry.db.connection import Database, immediate
 from mediaferry.db.migrate import MigrationError, apply_migrations
 
@@ -298,6 +299,11 @@ def test_a_database_from_the_previous_release_still_opens(tmp_path):
         "0007_reset_untrusted_remote_state.sql": None,
         "0008_sessions.sql": None,
         "0009_remote_datetime.sql": None,
+        "0010_auto_import.sql": None,
+        "0011_captured_at_revision.sql": None,
+        "0012_recompute_lookups.sql": None,
+        "0013_media_file_by_profile.sql": None,
+        "0014_media_file_listing.sql": None,
     }
     shipped = sorted(path.name for path in MIGRATIONS_DIR.glob("*.sql"))
     assert shipped == sorted(frozen), "版を足したら、この一覧にも足す"
@@ -387,3 +393,158 @@ def test_untrusted_remote_state_is_dropped_whatever_its_shape(tmp_path):
     with pytest.raises(sqlite3.IntegrityError):
         conn.execute("UPDATE destination_revision SET remote_user_id = 'x'")
     conn.close()
+
+
+def test_existing_rows_get_the_revision_they_were_imported_with(tmp_path):
+    """`0011`。既存行の `captured_at` は取り込みに使った版で算出されている.
+
+    **列を分けるのは provenance のため**（§6）。`profile_revision_id` は「その
+    レコードが使用した不変の版」なので、再計算で値だけを新しい定義から作ると
+    嘘になり、版ごと進めると timestamp 以外の新定義も適用したと偽る。
+    """
+    from .test_schema_sources import a_profile
+
+    conn = Database(tmp_path / "old.sqlite3").connect()
+    apply_migrations(conn)
+    profile_id, revision_id = a_profile(conn)
+    _, other_revision = a_profile(conn, slug="canon-eos")
+
+    # 0011 が入る前の DB へ戻す。
+    conn.execute("DELETE FROM schema_migration WHERE version = 11")
+    conn.execute("DROP TRIGGER media_file_captured_revision_insert")
+    conn.execute("DROP TRIGGER media_file_captured_revision_update")
+    conn.execute("ALTER TABLE media_file DROP COLUMN captured_at_revision_id")
+    conn.execute(
+        "INSERT INTO media_file (id, role, profile_id, profile_revision_id, rel_path,"
+        " size_bytes, mtime_ns, sha1, kind, captured_at, captured_at_source, probe_state,"
+        " created_at) VALUES ('m-1', 'original', ?, ?, 'library/dji-osmo/A.JPG', 10, 1,"
+        " '0000000000000000000000000000000000000000', 'photo', ?, 'filename', 'ok', ?)",
+        (profile_id, revision_id, now_iso(), now_iso()),
+    )
+
+    assert apply_migrations(conn) == [11]
+
+    assert (
+        conn.execute("SELECT captured_at_revision_id FROM media_file").fetchone()[0] == revision_id
+    )
+    # 移行で入れた値の上に、trigger の 2 つの契約がそのまま乗る。
+    with pytest.raises(sqlite3.IntegrityError):
+        conn.execute("UPDATE media_file SET captured_at_revision_id = NULL")
+    with pytest.raises(sqlite3.IntegrityError):
+        conn.execute("UPDATE media_file SET captured_at_revision_id = ?", (other_revision,))
+    conn.close()
+
+
+def test_the_recompute_lookups_do_not_scan_per_row(tmp_path):
+    """`0012`。再計算の対象抽出は `media_file` 1 行ごとに相関副問い合わせを回す.
+
+    索引が無いと `source_entry` を毎行 SCAN し、並べ替えに一時 B-tree を作る。
+    数万件のライブラリでは**最初の `assert_lease` に届く前に 60 秒を超え**、
+    正常なジョブがリース切れで落ちる（`jobs/recompute.py`）。
+    """
+    conn = Database(tmp_path / "db.sqlite3").connect()
+    apply_migrations(conn)
+    plan = " | ".join(
+        row[3]
+        for row in conn.execute(
+            "EXPLAIN QUERY PLAN"
+            " SELECT m.id,"
+            " (SELECT s.rel_path FROM source_entry s"
+            "   WHERE s.media_file_id = m.id AND s.state = 'published'"
+            "   ORDER BY s.observed_at, s.id LIMIT 1) AS source_rel_path"
+            " FROM media_file m WHERE m.profile_id = ? AND m.role = 'original'"
+            " ORDER BY m.rel_path",
+            ("x",),
+        )
+    )
+    conn.close()
+
+    assert "SCAN s" not in plan, plan
+    assert "TEMP B-TREE" not in plan, plan
+
+
+def test_the_derived_lookup_does_not_scan_members_per_row(tmp_path):
+    """派生物の抽出も同じ形（`merge_group.output_media_file_id` は FK だが索引が無い）.
+
+    **`SCAN g` が出ないことでは確かめられない。** 索引を落とすと SQLite は
+    `merge_member` の側から回すので `SCAN mm` に変わるだけで、`SCAN g` は
+    どちらでも出ない（そう書いた最初の版は変異試験を素通りした）。
+    """
+    conn = Database(tmp_path / "db.sqlite3").connect()
+    apply_migrations(conn)
+    plan = " | ".join(
+        row[3]
+        for row in conn.execute(
+            "EXPLAIN QUERY PLAN"
+            " SELECT f.captured_at FROM merge_group g"
+            " JOIN merge_member mm ON mm.merge_group_id = g.id AND mm.active = 1"
+            " JOIN media_file f ON f.id = mm.media_file_id"
+            " WHERE g.output_media_file_id = ?"
+            " ORDER BY mm.position LIMIT 1",
+            ("x",),
+        )
+    )
+    conn.close()
+
+    assert "SCAN g" not in plan, plan
+    assert "SCAN mm" not in plan, plan
+
+
+def test_the_recompute_keyset_is_bounded_by_the_profile(tmp_path):
+    """`0013`。ページの**返却件数**だけでなく、**探索する行数**も抑える.
+
+    `rel_path` の UNIQUE 索引だけだと、`LIMIT` は返す件数しか縛らない。
+    別プロファイルの大きなライブラリがあると、1 ページ読むだけでその全行を
+    走査しうる（`original` は `rel_path` の並び上、`derived/` も先に通る）。
+    **`fetch` の最中は heartbeat もキャンセル観測も無い**ので、そこでリース窓を
+    超える（`jobs/recompute.py` の `_pass`）。
+    """
+    conn = Database(tmp_path / "db.sqlite3").connect()
+    apply_migrations(conn)
+    plans = [
+        " | ".join(
+            row[3]
+            for row in conn.execute(
+                "EXPLAIN QUERY PLAN"
+                " SELECT m.id, m.rel_path FROM media_file m"
+                " WHERE m.profile_id = ? AND m.role = ? AND m.rel_path > ?"
+                " ORDER BY m.rel_path LIMIT ?",
+                ("x", role, "", 10),
+            )
+        )
+        for role in ("original", "derived")
+    ]
+    conn.close()
+
+    for plan in plans:
+        assert "media_file_by_profile" in plan, plan
+        assert "TEMP B-TREE" not in plan, plan
+
+
+def test_a_profile_filtered_listing_does_not_sort_the_whole_profile(tmp_path):
+    """`0014`。`0013` は一覧の実行計画を退行させる.
+
+    一覧は `captured_at DESC, id DESC` 固定で、ページは 50 件（§11）。
+    `media_file_captured_at` を辿れば先頭ページで止まれるのに、`0013` の
+    `(profile_id, role, rel_path)` が選ばれると**そのプロファイルの全行を拾って
+    から並べ替える**。プロファイルが大半を占める通常の構成ほど悪化する。
+    """
+    # **一覧が実際に組み立てる WHERE を使う。** 問い合わせを手で書き写すと、
+    # 絞り込みの形（`IN` か `=` か）を変えても試験が落ちない。
+    from mediaferry.api.routes_media import _filters
+
+    where, params = _filters(None, "x", None, None, None, None, None)
+    conn = Database(tmp_path / "db.sqlite3").connect()
+    apply_migrations(conn)
+    plan = " | ".join(
+        row[3]
+        for row in conn.execute(
+            "EXPLAIN QUERY PLAN"  # noqa: S608 - 値は params で渡す
+            f" SELECT m.* FROM media_file m {where}"
+            " ORDER BY m.captured_at DESC, m.id DESC LIMIT ? OFFSET ?",
+            (*params, 50, 0),
+        )
+    )
+    conn.close()
+
+    assert "TEMP B-TREE" not in plan, plan

@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import os
 import sys
-from datetime import datetime
+from datetime import UTC, datetime
 from pathlib import Path
 
 from mediaferry.adapters.ffprobe import ProbeResult
@@ -19,6 +19,14 @@ from mediaferry.db.jobs import JobStore
 from mediaferry.db.migrate import apply_migrations
 from mediaferry.db.profiles import ProfileRegistry
 from mediaferry.ids import new_id
+
+# このモジュールは 2 通りで読まれる —— 子プロセスとして直接起動されるときと、
+# test_crash_consistency.py が PAYLOAD を取るためにパッケージとして import する
+# とき。どちらでも同じ土台を使えるようにする。
+try:
+    from .exif_fixtures import a_jpeg_with
+except ImportError:  # pragma: no cover - 素のスクリプトとして起動されたとき
+    from exif_fixtures import a_jpeg_with
 
 PAYLOAD = b"payload-for-crash-tests"
 
@@ -38,6 +46,14 @@ class CrashingPublisher(ArtifactPublisher):
             os._exit(9)  # noqa: SLF001
 
 
+def _resolve_from_exif(staging_abs):  # noqa: ANN001, ANN202
+    """ステージ済みのファイルから決める（§9.3 手順 5）."""
+    from mediaferry.adapters.exif import read_datetime_original
+
+    wall = read_datetime_original(staging_abs)
+    return CapturedAt(at=wall.replace(tzinfo=UTC), source="exif", tz=None, note=None)
+
+
 def main() -> None:
     data_root = Path(sys.argv[1])
     die_after = int(sys.argv[2])
@@ -54,25 +70,30 @@ def main() -> None:
     ctx = store.claim_next()
 
     source_entry_id = merge_group_id = None
-    if kind == "import":
+    if kind in ("import", "import_exif"):
         volume_id, source_entry_id = _a_source(conn, profile)
     else:
         merge_group_id = _a_merge_group(conn, profile)
 
     publisher = CrashingPublisher(conn, data_root, _Probe(), die_after=die_after)
+    # **遅延解決（source: exif）も 11 段すべてで回収できること。** 解決は
+    # 手順 4 の後・手順 5 の中で完結するので、手順 7 の commit より前に載る。
+    exif = kind == "import_exif"
     request = ArtifactRequest(
-        kind="import" if kind == "import" else "merge",
-        role="original" if kind == "import" else "derived",
+        kind="merge" if kind.startswith("merge") else "import",
+        role="derived" if kind.startswith("merge") else "original",
         profile_id=profile.profile_id,
         profile_revision_id=profile.revision_id,
         desired_rel_path=(
-            "library/dji-osmo/DCIM/A.MP4"
-            if kind == "import"
-            else "derived/dji-osmo/DCIM/MERGED.MP4"
+            "derived/dji-osmo/DCIM/MERGED.MP4"
+            if kind.startswith("merge")
+            else ("library/dji-osmo/DCIM/A.JPG" if exif else "library/dji-osmo/DCIM/A.MP4")
         ),
-        source_rel_path="DCIM/A.MP4",
-        extension="MP4",
-        captured=CapturedAt(
+        source_rel_path="DCIM/A.JPG" if exif else "DCIM/A.MP4",
+        extension="JPG" if exif else "MP4",
+        captured=None
+        if exif
+        else CapturedAt(
             at=datetime.fromisoformat("2026-08-17T14:30:00+09:00"),
             source="filename",
             tz="Asia/Tokyo",
@@ -81,7 +102,9 @@ def main() -> None:
         mtime_ns=1_700_000_000_000_000_000,
         source_entry_id=source_entry_id,
         merge_group_id=merge_group_id,
+        resolve_captured=_resolve_from_exif if exif else None,
     )
+    payload = a_jpeg_with(b"2026:03:04 05:06:07") if exif else PAYLOAD
     if kind == "merge_prepared":
         work = data_root / "work" / ctx.job_id
         work.mkdir(parents=True, exist_ok=True)
@@ -89,7 +112,7 @@ def main() -> None:
         prepared.write_bytes(PAYLOAD)
         publisher.publish_prepared(ctx, request, prepared)
     else:
-        publisher.publish(ctx, request, lambda writer: writer.write(PAYLOAD))
+        publisher.publish(ctx, request, lambda writer: writer.write(payload))
     # ここへ来るのは die_after が 11 より大きいときだけ。
     sys.exit(0)
 

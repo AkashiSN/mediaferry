@@ -153,6 +153,55 @@ ffprobe -v error -print_format json -show_streams /path/to/DJI_....MP4
 - 立っていない → `keep_streams.video` が `primary` の間は影響しないが、`all` を
   使うプロファイルを足すときに `_is_thumbnail` の判定を増やす必要がある
 
+### 13. Canon EOS 70D の実カードで `canon-eos` に確定するか
+
+**`canon-eos` は仕様と知識から書いており、実データを一度も見ていない**（Phase 5
+Task 4）。E2E で通しているのは、その `require` から組み立てた合成カードまで。
+
+```bash
+lsblk -o NAME,LABEL,FSTYPE,SIZE
+ls /path/to/mount/DCIM
+ls /path/to/mount/DCIM/100CANON | head
+```
+
+- ボリュームラベルが `EOS_DIGITAL` か（違えば `hints.volume_labels` を直す）
+- `DCIM/100CANON/` の下に `IMG_0001.JPG` / `IMG_0001.CR2` / `MVI_0001.MOV` の形で
+  並んでいるか（違えば `require.filename_pattern` と `scan.extensions` を直す）
+- **カードリーダー経由で見える USB ID がリーダーのものであることを確かめる**
+  （`hints.usb_ids` を空にした根拠。機種の ID が見えるなら足してよい）
+
+### 14. EOS 70D の 4GB 分割が連番から判別できるか
+
+**`merge.enabled` を有効化してよいかの判断**。誤結合は公開済みの `media_file` を
+取り残すので高くつく（だから既定は無効にしてある）。
+
+- 4GB で分割された 1 本の録画が、どういう名前で並ぶか（`MVI_0001.MOV` の次が
+  `MVI_0002.MOV` なのか、別の規則があるのか）
+- **連続した別録画と区別が付くか。** 付かないなら `merge.enabled` は無効のまま、
+  手動結合（Phase 4）に委ねる
+
+### 15. Canon の MOV の `creation_time` が壁時計か UTC か
+
+**第 4 の timestamp source を足すかの判断**。`canon-eos` の MOV は EXIF を持たない
+ので、現状は `fallback: mtime` へ落ちる。
+
+```bash
+ffprobe -v error -show_entries format_tags=creation_time /path/to/MVI_0001.MOV
+TZ=UTC stat -c '%y %n' /path/to/MVI_0001.MOV
+```
+
+- `creation_time` が撮影時の壁時計と一致する → `source: container` を足す余地がある
+- UTC で書かれている → mtime へ落とす現状のままでよい（DJI と同じ罠）
+
+### 16. CR2 を Immich が受け取るか
+
+`scan.extensions` に `CR2` を入れてあるので、取り込みまでは通る。**送信で弾かれると
+`upload_record` が失敗のまま溜まる。**
+
+- 1 枚だけ手で送って、Immich 側で資産として見えるか
+- 見えないなら、`generic-dcim` と同じく `canon-eos` からも CR2 を外すか、
+  RAW を送らない選択肢を設定に足す（Phase 6 のスタッキングと合わせて考える）
+
 ## 関連
 
 - [`phase1-backup.md`](phase1-backup.md)（バックアップとリストア）

@@ -30,12 +30,32 @@ class UnknownProfile(LookupError):
     pass
 
 
+class ProfileIsBuiltin(RuntimeError):
+    """ビルトインは編集できない（§6）.
+
+    **`duplicate` 以外のすべての mutation で拒む。** 編集を許すと、次のアプリ
+    更新で `sync_builtins` が黙って上書きする。archive も同じで、
+    `sync_builtins` は `archived_at` を戻さないので、一度 archive すると
+    再起動しても候補から消えたままになる —— 元に戻す手段が無くなる。
+    """
+
+
+class ProfileExists(RuntimeError):
+    """その slug はもう使われている."""
+
+
+class ProfileAlreadyArchived(RuntimeError):
+    pass
+
+
 @dataclass(frozen=True)
 class ProfileRef:
     profile_id: str
     revision_id: str
     revision: int
     definition: ProfileDefinition
+    builtin: bool = True
+    archived: bool = False
 
 
 class ProfileRegistry:
@@ -93,7 +113,8 @@ class ProfileRegistry:
 
     def current(self, slug: str) -> ProfileRef:
         row = self._conn.execute(
-            "SELECT p.id AS profile_id, r.id AS revision_id, r.revision, r.definition_json"
+            "SELECT p.id AS profile_id, r.id AS revision_id, r.revision, r.definition_json,"
+            " p.builtin, p.archived_at"
             " FROM device_profile p JOIN profile_revision r ON r.id = p.current_revision_id"
             " WHERE p.slug = ?",
             (slug,),
@@ -104,7 +125,8 @@ class ProfileRegistry:
 
     def by_id(self, profile_id: str) -> ProfileRef:
         row = self._conn.execute(
-            "SELECT p.id AS profile_id, r.id AS revision_id, r.revision, r.definition_json"
+            "SELECT p.id AS profile_id, r.id AS revision_id, r.revision, r.definition_json,"
+            " p.builtin, p.archived_at"
             " FROM device_profile p JOIN profile_revision r ON r.id = p.current_revision_id"
             " WHERE p.id = ?",
             (profile_id,),
@@ -115,11 +137,99 @@ class ProfileRegistry:
 
     def active(self) -> list[ProfileRef]:
         rows = self._conn.execute(
-            "SELECT p.id AS profile_id, r.id AS revision_id, r.revision, r.definition_json"
+            "SELECT p.id AS profile_id, r.id AS revision_id, r.revision, r.definition_json,"
+            " p.builtin, p.archived_at"
             " FROM device_profile p JOIN profile_revision r ON r.id = p.current_revision_id"
             " WHERE p.archived_at IS NULL ORDER BY p.slug"
         )
         return [_to_ref(row) for row in rows]
+
+    def all(self) -> list[ProfileRef]:
+        """archive 済みも含む（画面は区別して出す）."""
+        rows = self._conn.execute(
+            "SELECT p.id AS profile_id, r.id AS revision_id, r.revision, r.definition_json,"
+            " p.builtin, p.archived_at"
+            " FROM device_profile p JOIN profile_revision r ON r.id = p.current_revision_id"
+            " ORDER BY p.builtin DESC, p.slug"
+        )
+        return [_to_ref(row) for row in rows]
+
+    # ------------------------------------------------------------------
+    # 編集（Phase 5）
+
+    def _assert_editable(self, slug: str) -> sqlite3.Row:
+        row = self._conn.execute(
+            "SELECT id, builtin, archived_at FROM device_profile WHERE slug = ?", (slug,)
+        ).fetchone()
+        if row is None:
+            raise UnknownProfile(slug)
+        if row["builtin"]:
+            raise ProfileIsBuiltin(slug)
+        return row
+
+    def create(self, defn: ProfileDefinition) -> ProfileRef:
+        """ユーザ定義を新規に作る. `slug` は以後不変."""
+        with immediate(self._conn):
+            if self._conn.execute(
+                "SELECT 1 FROM device_profile WHERE slug = ?", (defn.slug,)
+            ).fetchone():
+                raise ProfileExists(defn.slug)
+            profile_id, revision_id = new_id(), new_id()
+            self._conn.execute(
+                "INSERT INTO device_profile (id, slug, name, builtin, created_at)"
+                " VALUES (?, ?, ?, 0, ?)",
+                (profile_id, defn.slug, defn.name, now_iso()),
+            )
+            self._insert_revision(profile_id, revision_id, 1, definition_to_json(defn))
+        return self.current(defn.slug)
+
+    def update(self, slug: str, defn: ProfileDefinition) -> ProfileRef:
+        """新しいリビジョンを作る. **ビルトインは拒む。**"""
+        with immediate(self._conn):
+            row = self._assert_editable(slug)
+            current = self._conn.execute(
+                "SELECT r.revision FROM device_profile p"
+                " JOIN profile_revision r ON r.id = p.current_revision_id WHERE p.id = ?",
+                (row["id"],),
+            ).fetchone()
+            self._insert_revision(
+                row["id"], new_id(), current["revision"] + 1, definition_to_json(defn)
+            )
+            self._conn.execute(
+                "UPDATE device_profile SET name = ? WHERE id = ?", (defn.name, row["id"])
+            )
+        return self.current(slug)
+
+    def duplicate(self, slug: str, new_slug: str, name: str) -> ProfileRef:
+        """ビルトインからユーザ定義を作る. **元は変えない。**"""
+        source = self.current(slug)
+        from dataclasses import replace as _replace
+
+        return self.create(_replace(source.definition, slug=new_slug, name=name))
+
+    def archive(self, slug: str) -> None:
+        """候補から外す. **削除ではない** —— 使用済みの版は参照が残る."""
+        with immediate(self._conn):
+            row = self._assert_editable(slug)
+            if row["archived_at"] is not None:
+                raise ProfileAlreadyArchived(slug)
+            self._conn.execute(
+                "UPDATE device_profile SET archived_at = ? WHERE id = ?", (now_iso(), row["id"])
+            )
+
+    def _insert_revision(
+        self, profile_id: str, revision_id: str, revision: int, definition_json: str
+    ) -> None:
+        self._conn.execute(
+            "INSERT INTO profile_revision"
+            " (id, profile_id, revision, definition_json, schema_version, created_at)"
+            " VALUES (?, ?, ?, ?, ?, ?)",
+            (revision_id, profile_id, revision, definition_json, PROFILE_SCHEMA_VERSION, now_iso()),
+        )
+        self._conn.execute(
+            "UPDATE device_profile SET current_revision_id = ? WHERE id = ?",
+            (revision_id, profile_id),
+        )
 
     def definition_of(self, revision_id: str) -> ProfileDefinition:
         row = self._conn.execute(
@@ -131,9 +241,12 @@ class ProfileRegistry:
 
 
 def _to_ref(row: sqlite3.Row) -> ProfileRef:
+    keys = row.keys()
     return ProfileRef(
         profile_id=row["profile_id"],
         revision_id=row["revision_id"],
         revision=row["revision"],
         definition=parse_definition(json.loads(row["definition_json"])),
+        builtin=bool(row["builtin"]) if "builtin" in keys else True,
+        archived=(row["archived_at"] is not None) if "archived_at" in keys else False,
     )
