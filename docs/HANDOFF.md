@@ -1,8 +1,8 @@
 # mediaferry 引き継ぎ資料
 
 最終更新: 2026-08-19
-ブランチ: **`phase5-generalization`**（`main` から 6 コミット。単独リポジトリ、計 140 コミット）
-先頭は Phase 5 の Task 5（プロファイル編集 API）。**`main` へはまだマージしていない。**
+ブランチ: **`phase5-generalization`**（`main` から 11 コミット。単独リポジトリ、計 145 コミット）
+先頭は Phase 5 の Task 9（受け入れとドキュメント）。**`main` へはまだマージしていない。**
 
 このファイルは、別セッションが作業を引き継ぐための出発点。
 **まずここを読み、次に `design.md` §20 と該当フェーズの計画を読む。**
@@ -12,8 +12,8 @@
 ## 1. 現在地
 
 **Phase 0〜4 は実装・検証とも完了。** 実 Immich での確認も済んでいる
-（2026-08-19、v3.1.0）。**Phase 5 は計画（レビュー 2 巡）と実装の Task 0〜5 が完了。**
-**次は Task 6（`recompute_timestamps`）から。**
+（2026-08-19、v3.1.0）。**Phase 5 は計画（レビュー 2 巡）と実装の Task 0〜9 が完了。**
+**次は実装差分の codex レビュー（`--fresh`）と、`main` へのマージ。**
 
 | Phase | 内容 | 状態 |
 | --- | --- | --- |
@@ -22,7 +22,7 @@
 | 2 | 結合。検出 / ffmpeg / 検証 / 公開 / 回収 / 選択肢 / API | **完了**（`phase2-plan.md` の 14 タスク） |
 | 3 | Immich 同期（転送先プロファイル、状態機械、タグ、日時補正、複数宛先） | **完了**（`phase3-plan.md` の 14 タスク。レビュー 7 巡。**実 Immich でも確認済み**） |
 | 4 | Web UI（認証・CSRF・SSE・サムネイル・8 画面・E2E） | **完了**（`phase4-plan.md` の 19 タスク。計画レビュー 1 巡 + 実装差分レビュー 1 巡） |
-| 5 | 汎用化（Canon、プロファイル編集 UI、複数デバイス） | **実装中**（10 タスク中 6 つ完了。計画レビュー 2 巡は反映済み） |
+| 5 | 汎用化（Canon、プロファイル編集 UI、複数デバイス） | **実装完了**（10 タスク。計画レビュー 2 巡は反映済み。**実装差分のレビューは未実施**） |
 | 6 | `UPLOAD_CONCURRENCY` の多重化、RAW/JPEG のスタッキング | **未着手**（Phase 5 から送った） |
 
 ### Phase 5 の進捗（`docs/phase5-plan.md`）
@@ -35,13 +35,13 @@
 | 3 | `timestamp.source: exif` | **完了** | 11 中 10 検出 |
 | 4 | ビルトイン `generic-dcim` / `canon-eos`、`regex` への移行 | **完了** | 12 中 12 検出 |
 | 5 | プロファイル編集 API | **完了** | 10 中 10 検出 |
-| 6 | `recompute_timestamps` ジョブ（`0011`） | **未着手** | |
-| 7 | プロファイル編集 UI（設定画面） | **未着手** | |
-| 8 | デバイス画面（信頼登録 UX、複数デバイス） | **未着手** | |
-| 9 | 受け入れ（E2E）とドキュメント | **未着手** | |
+| 6 | `recompute_timestamps` ジョブ（`0011`） | **完了** | 22 中 21 検出 |
+| 7 | プロファイル編集 UI（設定画面） | **完了** | 11 中 11 検出 |
+| 8 | デバイス画面（信頼登録 UX、複数デバイス） | **完了** | 11 中 11 検出 |
+| 9 | 受け入れ（E2E）とドキュメント | **完了** | — |
 
-**Task 6 が残るバックエンドの山。** 計画レビューの blocker 3（再計算の入力が
-永続化されていない）と blocker 4（provenance）の両方がここに集中している。
+**残りは実装差分のレビュー。** 計画レビューで挙がった blocker はすべて実装に
+反映してある（§3 の「Phase 5 で確定した契約」）。
 
 ### レビューで分かったこと（この案件の中核）
 
@@ -78,13 +78,17 @@ blocker が 2 件ずつ出た。**巡を重ねても止まらない。** Phase 5
 ### 検証状態
 
 ```
-uv run pytest                  1106 passed, 4 deselected   ← Phase 5 Task 0〜5 を含む
+uv run pytest                  1134 passed, 4 deselected   ← Phase 5 Task 0〜9 を含む
 uv run pytest -m needs_root      1 passed   ← detached mount の実証
-uv run pytest -m needs_immich    3 passed   ← 実 Immich v3.1.0 で確認済み（2026-08-19）
-uv run pytest -m needs_system    6 passed   ← 実プロセスを起動する E2E の土台（SSE の線上の挙動を含む）
+uv run pytest -m needs_immich    3 passed   ← 実 Immich v3.1.0 で確認済み（2026-08-19。
+                                              環境変数が無いと skip される）
+uv run pytest -m needs_system    8 passed   ← 実プロセスを起動する E2E の土台
+                                              （SSE の線上の挙動と、2 枚差しの判定）
 uv run ruff check .            All checks passed
-uv run ruff format --check .   178 files already formatted
-npm --prefix web run lint / typecheck   通る
+uv run ruff format --check .   182 files already formatted
+npm --prefix web test          52 passed
+npm --prefix web run lint / typecheck / build   通る
+npm --prefix web run test:e2e  2 passed（journey と phase5）
 ```
 
 **全体テストは 2 分 45 秒ほどかかる。** 待つ前提で回すこと（バックグラウンドへ
@@ -129,11 +133,13 @@ assert している。
    まだ実データで走っていない。
 
 3. **Canon EOS 70D の実カードでの確認。** `canon-eos` のプロファイルは仕様と
-   知識から書いており、**実データを一度も見ていない**。特に次の 3 つは
-   `phase1-manual-checklist.md` へ送ってある（Task 9 で足す）。
-   - `DCIM/100CANON/` の構成とボリュームラベルが想定どおりか
-   - **4GB 分割が連番から判別できるか**（`merge.enabled` を有効化してよいかの判断）
-   - **MOV の `creation_time` が壁時計か UTC か**（第 4 の timestamp source を足すかの判断）
+   知識から書いており、**実データを一度も見ていない**。E2E で通しているのは、
+   その `require` から組み立てた合成カードまで。手順は
+   `phase1-manual-checklist.md` の 13〜16 番にある。
+   - 13: `DCIM/100CANON/` の構成とボリュームラベルが想定どおりか
+   - 14: **4GB 分割が連番から判別できるか**（`merge.enabled` を有効化してよいかの判断）
+   - 15: **MOV の `creation_time` が壁時計か UTC か**（第 4 の timestamp source を足すかの判断）
+   - 16: **CR2 を Immich が受け取るか**（弾かれると `upload_record` が失敗のまま溜まる）
 
 **1〜3 はいずれも「この環境では確かめられない」もの**（1 は TrueNAS ホスト、
 2 は実 DJI、3 は実 Canon のデータが要る）。**Phase 5 のコードは Task 6〜9 が残っている。**
@@ -309,7 +315,7 @@ blocker として指摘されたもの**で、理屈で戻すと同じ穴に落�
 
 ### Phase 5 で確定した契約（蒸し返さないこと）
 
-**Task 0〜5 は実装・検証とも済んでいる。** 根拠は `phase5-plan.md` の各タスクと
+**Task 0〜9 は実装・検証とも済んでいる。** 根拠は `phase5-plan.md` の各タスクと
 そこに書き戻した変異試験の結果。**計画レビュー 2 巡で blocker として挙がったものを含む。**
 
 | 判断 | 理由 |
@@ -334,6 +340,23 @@ blocker として指摘されたもの**で、理屈で戻すと同じ穴に落�
 | **プロファイルの読み取りは `all()`（archive 済みを含む）と `active()`（含まない）に分ける** | 同じ一覧を両方の用途に使うと、どちらかが必ず間違う。一覧 API は `all()` —— archive は削除ではないので、一覧から消すと「外した」のか「消えた」のか区別が付かない |
 | **自動取り込みが効くのは 2 度目以降の挿入から** | `_identity_confidence` は憶えた指紋が無ければ必ず `low` を返す（「初めて見るカードは §12.1 のとおり必ず承認を待つ」）。§12.1 の「一度承認すれば**以後は**挿すだけ」の「以後」がここに対応する |
 | **自動経路の at-most-once だけを保証する** | 手動の `POST /volumes/{id}/import` は `auto_import_at` を見ないので、同じ presence に手動 1 本と自動 1 本が積まれることはある。import は冪等なので受け入れる。ジョブ全体の重複排除は `JobStore` の契約を変える話として切り離す |
+| **`captured_at` を算出した版を、取り込みに使った版から分ける**（`media_file.captured_at_revision_id`、`0011`） | `profile_revision_id` は「そのレコードが使用した不変の版」という既存の契約。再計算で値だけ新しくすると旧版を指しながら中身は新版由来という嘘の行ができ、版ごと進めると timestamp 以外の新定義（`scan` / `merge` / `immich`）も適用したと偽る（計画レビュー 1 巡目 blocker） |
+| **その 2 列の関係は trigger 2 本で守る**（NOT NULL と「同じプロファイルの版」） | `ALTER TABLE` では複合 FK も NOT NULL も後から足せない。`media_file` は `upload_record` / `artifact_staging` / `merge_member` から参照されているので、**移行の失敗が最も高くつく表**で rebuild する利は無い。`profile_revision` の `UNIQUE (profile_id, id)` に突き合わせれば同じ強さが作れる |
+| **再計算の入力は role ごとに違う。`original` を全部直してから `derived` を直す** | `media_file` だけでは再計算できない。`filename` はカード上の原名（`source_entry.rel_path`）に当てる —— `media_file.rel_path` は衝突接尾辞つきの公開名。`derived` は算出ではなく先頭 active member からの継承（`Merger._captured_of`）なので順序が要る（計画レビュー 2 巡目 blocker） |
+| **`source_entry` が残っていない `original` は再計算せず、件数と理由を出す** | カードを再フォーマットすれば原名は消える。**勝手に mtime へ落とすと、正しかった値を壊す** |
+| **supersede した結合の出力は再導出しない** | active な member が無い。非 active から derive し直すと、退役した出力に新しい値を書くことになる |
+| **`recompute` は Immich に触らない。値が変わった送信済みは `needs_recheck` へ戻す** | `awaiting_datetime_approval` は `tagging` からしか入れず（`Uploader` の CAS）、承認画面が出す「現在値」は承認待ちにするその瞬間の観測。ローカルのジョブには埋められないし、クライアントを持たせると Phase 3 が 7 巡かけて固めた契約を丸ごと持ち込むことになる |
+| **戻すのは `immich.fix_datetime_after_upload` が真のプロファイルだけ。CAS は `state = 'complete'`** | 偽なら、こちらがリモートの日時を書いたことが無いので差は生じない。戻すと何も変わらない再送を全件に強いる。CAS を外すと進行中のレコードを横から動かす |
+| **差し戻しは `media_file` の更新と同じトランザクション** | 割ると「値は新しいのに `complete` のまま」が残る |
+| **`recompute` はビルトインでも受ける** | 編集はできないが、`DEFAULT_TIMEZONE` を後から設定した場合に既存レコードを直す手段がこれしかない（§12.2） |
+| **プロファイルの編集は YAML のテキストエリア 1 枚** | `filename_pattern` も `timestamp.pattern` も正規表現で、フォームに落とすと表現力が落ちるうえ規則が画面とサーバの 2 か所に散る。JSON だとバックスラッシュを二重に書くことになる（`js-yaml` を依存に足した。v5 は自前の型を持つので `@types/js-yaml` は要らない） |
+| **YAML の構文エラーはサーバへ送る前に落とす** | 送っても 400 が返るだけで、行番号を知っているのはパーサだけ |
+| **`validation_failed` だけは `detail` を画面に添える** | 定型文だけでは 1 枚の YAML のどこを直せばよいか分からない。`detail` は「こちらが書いた日本語だけ」という API 側の契約があるので、相手由来の値は出ない |
+| **ビルトインには編集ボタンも archive ボタンも出さない。代わりに「複製して編集」** | API も拒むが、`sync_builtins` が `archived_at` を戻さない以上、押せてしまう時点で設計が甘い。複製は **slug を先に決めさせる**（`library/<slug>/` に使うので作成後は変えられない） |
+| **判定の理由は一致したボリュームでも出す** | 「なぜそのプロファイルに決まったか」もプロファイルを直す手がかりになる。**E2E がこの抜けを捕まえた**（vitest では画面の一部しか見ていないので、無いことが仕様に見えた） |
+| **自動取り込みの文言は 3 つに割る**（未承認 / 信頼済みだが確度が低い / 信頼済み） | 未承認の文には「**次にこのカードを挿したときから**」を入れる。`_identity_confidence` は憶えた指紋が無ければ必ず `low` なので、承認してもその場では始まらない |
+| **信頼の確認ダイアログには「確認を取る理由」も書く** | 「取り違えることがある」だけだと、*なぜ* 確認するのか（以後そのカードが自動で NAS へコピーされる、§12.1 のプライバシー）が落ちる |
+| **E2E の土台は 2 枚差し。`DEFAULT_TIMEZONE` を env から外せる** | 1 枚だと「複数デバイスを独立に扱える」を受け入れの経路に載せられない。env に `DEFAULT_TIMEZONE` があると `locked` になり画面から変えられないので、再計算の筋書き（設定を変えてから直す）が通らない |
 
 ---
 
@@ -412,28 +435,15 @@ blocker として指摘されたもの**で、理屈で戻すと同じ穴に落�
 
 ### 手順
 
-**Phase 5 の Task 6 から続ける。** 計画は `docs/phase5-plan.md`、進捗表は §1。
+**Phase 5 の実装は Task 0〜9 まで終わっている。** 残りは次の 2 つ。
 
-1. **Task 6: `recompute_timestamps` ジョブ（`0011`）。** 残るバックエンドの山で、
-   計画レビューの blocker が 2 つ集中している。
-   - **provenance**: `media_file.profile_revision_id` は「そのレコードが使った不変の版」
-     という既存契約。値だけ新しくすると嘘になり、版を進めると timestamp 以外も
-     適用したと偽る。`0011` で `captured_at_revision_id` を分離し、**trigger で
-     「必ず値を持つ」と「同じプロファイルの版である」を強制する**
-   - **再計算の入力**: `media_file` だけでは再計算できない。`filename` はカード上の
-     原名に当てるが `media_file.rel_path` は公開先（衝突接尾辞つき）で、
-     `source_rel_path` はどこにも保存されていない。**role ごとに入力を決め、
-     `original` → `derived` の順序を固定する**（derived は先頭 active member から derive）
-   - **送信済みの扱い**: `awaiting_datetime_approval` へ直接戻してはいけない
-     （`tagging` からしか入れず、現在値の観測に Immich のクライアントが要る）。
-     **`needs_recheck` へ戻して既存のパイプラインに再実行させる**
-2. **Task 7〜8: 画面**（プロファイル編集、デバイス）。契約と受け入れ条件は計画にある
-3. **Task 9: 受け入れ（E2E）とドキュメント。** `design.md` §21 に「Phase 5 の実装で
-   確定した事項」を足し、**`subscribe` を採らなかった判断とその根拠を §9.2 の近くに残す**
-   （設計にはプロトコルとして残っているので、なぜ使っていないかが分からないと
-   次の担当が実装しようとする）
-4. **実装差分のレビューを `--fresh` で 1 巡以上回す**（§5 の agmsg の節）
-5. 終わったら `main` へマージする（`superpowers:finishing-a-development-branch`）
+1. **実装差分のレビューを `--fresh` で 1 巡以上回す**（下の agmsg の節）。
+   対象は `4bcda2e..HEAD` の 4 コミット（Task 6・7・8・9）。**直した箇所の周りを
+   もう一度見せると、また出る**（§1）ので、1 巡で終わらせない
+2. 終わったら `main` へマージする（`superpowers:finishing-a-development-branch`）
+
+その先は **Phase 6**（`UPLOAD_CONCURRENCY` の多重化、RAW/JPEG のスタッキング）。
+下の「Phase 5 から Phase 6 へ送ったもの」に、実測つきの前提が書いてある。
 
 ### この環境で確かめられないもの
 
@@ -753,9 +763,10 @@ uv run pytest -m needs_immich
 | TS フォールバックの実運用 | Phase 0 の実測では DJI は concat 経路で通っており、TS 経路は**まだ実データで走っていない**。テストは lavfi のクリップで両経路を通す（`tmcd` の脱落まで再現している） |
 | サイズ検査の許容誤差と合成クリップ | 2% は 16 GiB 級の実ファイルが前提（オーバーヘッド 0.002%）。数百 KB の合成クリップでは 7〜8% ずれるので、e2e は「不合格でも公開され、採用すれば選択肢に出る」経路で通している |
 | 5 パート連続録画（70 GiB 級）のアップロード | 28.36 GiB は完走した。同じ経路で扱える見込みだが未実測。タイムアウトは比例して伸びる |
-| Canon EOS 70D のプロファイル | **書いたが実データを一度も見ていない**（Task 4）。`merge` は無効、`hints.usb_ids` は空。実カードでの確認は §1「残っていること」3 |
-| **`0011`（`captured_at_revision_id`）** | Task 6 で入れる。**まだ無い。** `0010` までは適用済み |
-| **`main` へのマージ** | `phase5-generalization` は 6 コミット。Task 9 まで終えてからマージする |
+| Canon EOS 70D のプロファイル | **書いたが実データを一度も見ていない**（Task 4）。E2E で通しているのは `require` から組み立てた合成カードまで。`merge` は無効、`hints.usb_ids` は空。実カードでの確認は `phase1-manual-checklist.md` の 13〜16 番 |
+| **`0011`（`captured_at_revision_id`）** | **入れた**（Task 6）。既存 DB へは `profile_revision_id` の写しで埋め戻る。trigger 2 本が「必ず値を持つ」「同じプロファイルの版である」を守る |
+| **`js-yaml` を web の依存に足した** | プロファイル編集の YAML テキストエリア（Task 7）。**v5 は自前の型を持つ**ので `@types/js-yaml` は入れない（入れると衝突する） |
+| **`main` へのマージ** | `phase5-generalization` は 11 コミット。**実装差分のレビューを 1 巡以上回してからマージする** |
 | 認証を既定 off のままにするか | ユーザの判断で off。`BIND_HOST` の既定を loopback にし、認証無効で非 loopback にバインドしていたら警告する緩和のみ |
 | Phase 1〜3 を配布可能リリースにしない | 認証と CSRF が入る Phase 4 より前に LAN へ公開しない |
 | SSE（`GET /events`） | Phase 4 の Web UI と一緒に入れる。Phase 1 は `GET /api/jobs/{id}/events?after_seq=` のポーリング |
@@ -765,6 +776,18 @@ uv run pytest -m needs_immich
 ## 8. 作業の進め方（この案件で有効だったこと）
 
 **Phase 5 で分かったこと**（フェーズを跨いで効く）:
+
+- **受け入れ（E2E）は、単体では見えない抜けを捕まえる。** Task 8 の「判定の理由」は
+  対象外のときだけ出しており、vitest では画面の一部しか見ていないので**無いことが
+  仕様に見えていた**。E2E が一致したカードの理由を探して初めて落ちた
+- **変異が素通りしたら、まず「相方がマスクしていないか」を見る。** Task 6 の
+  「バッチの合間のキャンセル確認」は、続けて呼ぶ `assert_lease` が同じ場合を
+  `LeaseLost` として拾うので単独では検出できない。**対で壊せば検出できる**ので、
+  冗長さは意図であって削ってよい根拠にはならない
+- **「そういう契約だ」と書いた変異が、当てる形を間違えて素通りすることがある。**
+  Task 6 の「衝突接尾辞の付いた名前に当てる」は、先頭に錨を打った pattern では
+  原名でも別名でも同じ ts になるので差が出ない。**差が出る形（錨の無い pattern）を
+  持つプロファイルを試験に用意して初めて成立する**
 
 - **自分が書いたテストも素通りする。** Phase 5 の実装中、**書いた直後のテストが
   既定値と一致するだけで通っていた**ことが 1 度あった（`provisional` の永続化。
