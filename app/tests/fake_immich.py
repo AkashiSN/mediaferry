@@ -17,6 +17,7 @@ import base64
 import hashlib
 import json
 import threading
+import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
 
@@ -52,6 +53,10 @@ class FakeImmich:
         # **スタック id だけに鍵を混ぜる。** 資産の集合は正しいままなので、
         # 全単射の検査では落ちない（識別子の検査だけが守っている経路）。
         self.key_as_stack_id: bool = False
+        # PUT を受けても primary を動かさない（応答だけ正常に見える相手）。
+        self.ignore_primary_change: bool = False
+        # 応答を遅らせる（リースを跨ぐ相手待ちを作る）。
+        self.delay_seconds: float = 0.0
         self.empty_assets_in_the_stack_response: bool = False
         self.stack_list_has_a_scalar: bool = False
         self.malformed_stack_field: bool = False
@@ -101,6 +106,8 @@ class FakeImmich:
     # ------------------------------------------------------------------
     def route(self, method: str, path: str, body: bytes, headers: dict[str, str]):  # noqa: ANN201
         self.requests.append((method, path))
+        if self.delay_seconds:
+            time.sleep(self.delay_seconds)
         if self.redirect_to is not None:
             # **1 回だけ返す。** 毎回 301 にすると、追従した先で何が起きても
             # 「redirect が多すぎる」に化けて、追従の可否を見分けられない。
@@ -169,7 +176,8 @@ class FakeImmich:
             stack = self.stacks.get(stack_id)
             if stack is None:
                 return 404, {"message": "no such stack"}
-            stack["primary"] = json.loads(body)["primaryAssetId"]
+            if not self.ignore_primary_change:
+                stack["primary"] = json.loads(body)["primaryAssetId"]
             return 200, self._stack_view(stack_id)
         if method == "PUT" and path.startswith("/api/assets/"):
             asset_id = path.split("/")[3]
