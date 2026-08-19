@@ -284,11 +284,27 @@ def test_the_extraction_uses_the_partial_index(db):
     """**索引を足したら EXPLAIN で駆動を確かめる**（Phase 5 の 5・6 巡目の教訓）."""
     plan = db.execute(
         "EXPLAIN QUERY PLAN SELECT * FROM upload_record"
+        " WHERE destination_id = ? AND target_epoch = ? AND state = 'complete'"
+        "   AND stack_state IS NULL AND invalidated_at IS NULL AND id > ?"
+        " ORDER BY id LIMIT 50",
+        ("d", 1, ""),
+    ).fetchall()
+    assert any("upload_record_unstacked" in row["detail"] for row in plan)
+
+
+def test_the_index_is_not_used_without_the_epoch(db):
+    """**epoch を落とした問い合わせが「たまたま動く」ことを許さない。**
+
+    部分索引が使われないことを見て、条件の抜けを試験で捕まえる。
+    """
+    plan = db.execute(
+        "EXPLAIN QUERY PLAN SELECT * FROM upload_record"
         " WHERE destination_id = ? AND state = 'complete' AND stack_state IS NULL"
         "   AND invalidated_at IS NULL AND id > ? ORDER BY id LIMIT 50",
         ("d", ""),
     ).fetchall()
-    assert any("upload_record_unstacked" in row["detail"] for row in plan)
+    assert not any("upload_record_unstacked (destination_id=? AND target_epoch=?" in row["detail"]
+                   for row in plan)
 
 
 def test_the_dead_setting_row_is_removed(db):
@@ -349,7 +365,11 @@ END;
 
 -- 第 2 パスの抽出の駆動索引。**述語は問い合わせ側と一字一句そろえる**
 -- （部分索引は述語が一致しないと使われない）。
-CREATE INDEX upload_record_unstacked ON upload_record (destination_id, id)
+--
+-- **`target_epoch` を鍵に入れる。** 向き先を変えた宛先では旧 epoch の `complete` が
+-- 監査履歴として残る（無効化されない）ので、epoch で絞らないと別ライブラリへ送った
+-- 資産 ID を現行の資格情報で送ることになる（§9.11）。
+CREATE INDEX upload_record_unstacked ON upload_record (destination_id, target_epoch, id)
     WHERE stack_state IS NULL AND state = 'complete' AND invalidated_at IS NULL;
 
 -- 効かないまま残っていた設定行を消す（§21）。env に残っていても未知のキーは
@@ -519,19 +539,23 @@ class RemoteStack:
         body = _as_object(
             self._request("POST", "/api/stacks", json={"assetIds": checked}), "POST /api/stacks"
         )
-        return self._stack_from(body, "POST /api/stacks")
+        created = self._stack_from(body, "POST /api/stacks")
+        # **要求した集合と全単射であることを確かめる。** 吸収の仕様がある以上、
+        # 返ってきた集合が違えば「別のものを作った」ので、その id を確定させない。
+        if set(created.asset_ids) != set(checked):
+            raise ImmichProtocolError("POST /api/stacks が要求と違う集合を返した")
+        return created
 
     def stack_by_primary(self, primary_asset_id: str) -> RemoteStack | None:
         checked = self._identifier(primary_asset_id, "GET /api/stacks の primary asset id")
         response = self._request("GET", "/api/stacks", params={"primaryAssetId": checked})
-        body = response.json()
-        if not isinstance(body, list):
-            raise ImmichProtocolError("GET /api/stacks の応答が配列ではない")
-        for item in body:
-            if isinstance(item, dict):
-                stack = self._stack_from(item, "GET /api/stacks")
-                if stack.primary_asset_id == checked:
-                    return stack
+        # **非 JSON も object でない要素も、素通りさせずに protocol error にする**
+        # （`_as_object` と同じ作法。`response.json()` を直に呼ぶと `ValueError` が
+        # そのまま漏れて、第 2 パスの分岐に入らない）。
+        for item in _as_array(response, "GET /api/stacks"):
+            stack = self._stack_from(item, "GET /api/stacks")
+            if stack.primary_asset_id == checked:
+                return stack
         return None
 
     def set_stack_primary(self, stack_id: str, asset_id: str) -> None:
@@ -540,6 +564,7 @@ class RemoteStack:
         self._request("PUT", f"/api/stacks/{stack}", json={"primaryAssetId": asset})
 
     def _stack_from(self, body: dict[str, Any], label: str) -> RemoteStack:
+        """**壊れた応答を DB へ確定させない。** 形が違えば protocol error にする."""
         assets = body.get("assets")
         if not isinstance(assets, list) or not assets:
             raise ImmichProtocolError(f"{label} の応答に assets が無い")
@@ -550,14 +575,47 @@ class RemoteStack:
         )
         if len(ids) != len(assets):
             raise ImmichProtocolError(f"{label} の assets に object でない要素がある")
-        return RemoteStack(
+        if len(set(ids)) != len(ids):
+            raise ImmichProtocolError(f"{label} の assets に重複がある")
+        stack = RemoteStack(
             stack_id=self._identifier(_required_str(body, "id", label), label),
             primary_asset_id=self._identifier(
                 _required_str(body, "primaryAssetId", label), label
             ),
             asset_ids=ids,
         )
+        # **primary は必ず member。** 外れていると、こちらの primary 検査が
+        # 永久に一致せず PUT を打ち続ける。
+        if stack.primary_asset_id not in stack.asset_ids:
+            raise ImmichProtocolError(f"{label} の primaryAssetId が assets に無い")
+        return stack
 ```
+
+`_as_object` の隣に `_as_array` を足す（同じ作法で、配列を配列として読む）:
+
+```python
+def _as_array(response: httpx.Response, label: str) -> list[dict[str, Any]]:
+    """JSON を object の配列として読む. 壊れた応答も protocol error に正規化する."""
+    try:
+        body = response.json()
+    except ValueError as exc:
+        raise ImmichProtocolError(f"{label} の応答が JSON ではない") from exc
+    if not isinstance(body, list):
+        raise ImmichProtocolError(f"{label} の応答が配列ではない")
+    for item in body:
+        if not isinstance(item, dict):
+            # **黙って読み飛ばさない**（「N 件見た」と言いながら見ていない状態を作る）。
+            raise ImmichProtocolError(f"{label} の応答に object でない要素がある")
+    return body
+```
+
+`RemoteAsset.stack` の読み方も 2 つに分ける。**キーが無いのは旧版として `None`、
+キーがあって object でない・必須の値が無いのは protocol error。**
+
+**`allow_redirect=False` は付けない**（`tag_assets` / `set_date_time_original` と同じ
+扱い）。§21 の「本文を伴う要求では追わない」は**ストリームが 1 回で EOF に達する**
+`POST /api/assets` の話で、JSON 本文は再送できる。別 origin への redirect は
+`_same_origin_target` が必ず拒むので、鍵が外へ出る経路はここでも閉じている。
 
 fake 側（`fake_immich.py`）:
 
@@ -704,6 +762,19 @@ def test_an_extension_outside_the_rule_is_ignored():
     assert isinstance(resolve_group(_jpg(), [_jpg(), movie], RULE), Refusal)
 
 
+def test_a_partner_observed_only_on_another_card_is_refused():
+    """連番が一周した別カードとの誤結合を閉じる（§6）."""
+    other_card = _cr2(volume_instance_ids=frozenset({"volume-2"}))
+    assert isinstance(resolve_group(_jpg(), [_jpg(), other_card], RULE), Refusal)
+
+
+def test_a_partner_of_another_profile_is_refused():
+    """規則が 1 つに決まらない組は作らない（§9.11）."""
+    assert "別のプロファイル" in resolve_group(
+        _jpg(), [_jpg(), _cr2(profile_id="profile-2")], RULE
+    ).reason
+
+
 def test_the_stem_prefix_keeps_the_directory():
     assert stem_prefix("DCIM/100CANON/IMG_1234.JPG") == "DCIM/100CANON/IMG_1234."
 ```
@@ -784,7 +855,11 @@ HIGH_SENTINEL = "\U0010ffff"
 class Candidate:
     record_id: str
     media_file_id: str
+    profile_id: str
     rel_path: str            # **カード上の原名**（`source_entry.rel_path`）
+    # その観測が乗っていたボリューム。**集合で持つ**（1 つに絞ると、再スキャンで
+    # `observed_at` が動くたびに同じ組が変わりうる）。
+    volume_instance_ids: frozenset[str]
     captured_at: str
     captured_at_source: str
     origin: str
@@ -827,10 +902,15 @@ def resolve_group(
         if c.media_file_id != primary.media_file_id
         and stem_prefix(c.rel_path) == prefix
         and extension_of(c.rel_path) in rule.extensions
+        # **同じカードで観測が重なること。** 順序に依らない条件にする。
+        and c.volume_instance_ids & primary.volume_instance_ids
     ]
     if not partners:
         return Refusal("相方が見つからない")
     for partner in partners:
+        if partner.profile_id != primary.profile_id:
+            # 規則は 1 つに決まっている必要がある（§9.11）。
+            return Refusal("相方が別のプロファイルに属している")
         if partner.invalidated or partner.state != "complete":
             return Refusal("相方はまだ送信が終わっていない")
         if partner.captured_at_source != primary.captured_at_source:
@@ -859,9 +939,15 @@ def _within(left: str, right: str, tolerance_seconds: int) -> bool:
 
 ```python
     def unstacked_batch(
-        self, destination_id: str, after_id: str, limit: int
+        self, destination_id: str, target_epoch: int, after_id: str, limit: int
     ) -> list[sqlite3.Row]:
         """スタック未評価の完了レコードを id の昇順で取る（keyset）.
+
+        **`target_epoch` を必ず絞る。** 向き先を変えた宛先では旧 epoch の
+        `complete` が監査履歴として残る（`_invalidate_old_epoch_locked` は
+        `state <> 'complete'` だけを無効化する）。絞らないと**別ライブラリへ送った
+        資産 ID を現行の資格情報で送る**。`records_for_recheck` が同じ理由で
+        epoch を条件にしているのと同じ形にそろえる。
 
         **`LIMIT` を繰り返すだけでは足りない。** 相手が落ちていて未評価のまま
         残した行は次の周回でも条件を満たすので、同じ行を読み直して進まなくなる。
@@ -869,24 +955,27 @@ def _within(left: str, right: str, tolerance_seconds: int) -> bool:
         return list(
             self._conn.execute(
                 "SELECT * FROM upload_record"
-                " WHERE destination_id = ? AND state = 'complete' AND stack_state IS NULL"
-                "   AND invalidated_at IS NULL AND id > ?"
+                " WHERE destination_id = ? AND target_epoch = ? AND state = 'complete'"
+                "   AND stack_state IS NULL AND invalidated_at IS NULL AND id > ?"
                 " ORDER BY id LIMIT ?",
-                (destination_id, after_id, limit),
+                (destination_id, target_epoch, after_id, limit),
             )
         )
 
-    def source_of(self, media_file_id: str) -> sqlite3.Row | None:
-        """公開の元になったカード上の観測（最初のもの）.
+    def sources_of(self, media_file_id: str) -> list[sqlite3.Row]:
+        """公開の元になったカード上の観測（**すべて**）.
 
-        **公開名では組を作れない**（衝突時に改名される。§6）。
+        **1 つに絞らない。** `observed_at` は再スキャンのたびに更新されるので
+        （`scan.py` の `_touch`）、「最初の観測」を順序で選ぶと同じ組が実行のたびに
+        変わりうる。**公開名では組を作れない**（衝突時に改名される。§6）。
         """
-        return self._conn.execute(
-            "SELECT volume_instance_id, rel_path FROM source_entry"
-            " WHERE media_file_id = ? AND state = 'published'"
-            " ORDER BY observed_at, id LIMIT 1",
-            (media_file_id,),
-        ).fetchone()
+        return list(
+            self._conn.execute(
+                "SELECT volume_instance_id, rel_path FROM source_entry"
+                " WHERE media_file_id = ? AND state = 'published'",
+                (media_file_id,),
+            )
+        )
 
     def siblings_on_card(self, volume_instance_id: str, prefix: str) -> list[sqlite3.Row]:
         """同じカードで `<dir>/<stem>.` から始まる観測（UNIQUE 索引の範囲引き）."""
@@ -902,27 +991,62 @@ def _within(left: str, right: str, tolerance_seconds: int) -> bool:
     def record_for(
         self, destination_id: str, target_epoch: int, media_file_id: str
     ) -> sqlite3.Row | None:
+        """**現行 epoch のレコードだけ**を返す（旧 epoch は別ライブラリの履歴）."""
         return self._conn.execute(
             "SELECT * FROM upload_record"
             " WHERE destination_id = ? AND target_epoch = ? AND media_file_id = ?",
             (destination_id, target_epoch, media_file_id),
         ).fetchone()
 
-    def mark_stacked(self, record_ids: Sequence[str], remote_stack_id: str) -> None:
+    def guard_stack_group(
+        self, ctx: JobContext, members: Sequence[sqlite3.Row], target_epoch: int
+    ) -> None:
+        """**外部へ触る直前に通す。** `_guard`（§9.10）のスタック版.
+
+        `complete` のレコードは claim を持たないので `prepare_side_effect` は
+        流用できない。**ジョブのリースと、組の全員の現在値を 1 つの
+        `BEGIN IMMEDIATE` で照合する。** 1 件でも合わなければ `StackGroupChanged` を
+        送出して、その組を諦める（相手には触らない）。
+        """
+        with immediate(self._conn):
+            ctx.assert_lease()
+            for member in members:
+                row = self._conn.execute(
+                    "SELECT 1 FROM upload_record WHERE id = ? AND target_epoch = ?"
+                    "   AND state = 'complete' AND invalidated_at IS NULL"
+                    "   AND remote_asset_id = ? AND stack_state IS NOT 'stacked'",
+                    (member["id"], target_epoch, member["remote_asset_id"]),
+                ).fetchone()
+                if row is None:
+                    raise StackGroupChanged(f"レコード {member['id']} が変わった")
+
+    def mark_stacked(
+        self, ctx: JobContext, members: Sequence[sqlite3.Row], target_epoch: int,
+        remote_stack_id: str,
+    ) -> None:
         """組の全員を 1 つのトランザクションで記録する.
 
-        **見送り済みの相方も引き上げる。** 見送りは「今は組めない」の記録であって
+        **全員に当たらなければ 1 行も書かない。** 一部だけ `stacked` になると、
+        残りは別の組として再評価され、相手側に既にあるスタックを作り直そうとする。
+
+        **見送り済みの相方は引き上げる。** 見送りは「今は組めない」の記録であって
         永久の拒否ではない（§9.11）。
         """
         with immediate(self._conn):
-            for record_id in record_ids:
-                self._conn.execute(
+            # 記録もリースの下で行う（相手を待っている間にキャンセルされうる）。
+            ctx.assert_lease()
+            for member in members:
+                updated = self._conn.execute(
                     "UPDATE upload_record SET stack_state = 'stacked', remote_stack_id = ?,"
                     " stack_reason = NULL, updated_at = ?"
-                    " WHERE id = ? AND invalidated_at IS NULL"
+                    " WHERE id = ? AND target_epoch = ? AND state = 'complete'"
+                    "   AND invalidated_at IS NULL"
                     "   AND (stack_state IS NULL OR stack_state = 'skipped')",
-                    (remote_stack_id, now_iso(), record_id),
+                    (remote_stack_id, now_iso(), member["id"], target_epoch),
                 )
+                if updated.rowcount != 1:
+                    # ロールバックさせる（`immediate` の外へ出す）。
+                    raise StackGroupChanged(f"レコード {member['id']} を記録できない")
 
     def mark_skipped(self, record_id: str, reason: str) -> None:
         self._conn.execute(
@@ -1002,10 +1126,25 @@ def test_the_primary_is_not_moved_when_it_is_already_right(world):
 
 def test_an_existing_stack_with_the_same_members_is_adopted(world):
     """**中断からの回収**。送信直後に落ちた世界を作って、次の実行で拾わせる."""
-    world.immich.stacks["stack-9"] = {"primary": world.asset("JPG"), "assets": [...]}
+    world.immich.stacks["stack-9"] = {
+        "primary": world.asset("JPG"), "assets": [world.asset("JPG"), world.asset("CR2")]
+    }
     world.stacker().run(world.ctx, "dest-1")
     assert world.records()[0]["remote_stack_id"] == "stack-9"
     assert ("POST", "/api/stacks") not in world.immich.requests    # 作り直さない
+
+
+def test_adopting_an_existing_stack_still_fixes_the_primary(world):
+    """`POST` の直後・`PUT` の前に落ちた世界。**集合は一致するが primary が違う。**
+
+    検査しないと、望みの primary へ二度と直らない。
+    """
+    world.immich.stacks["stack-9"] = {
+        "primary": world.asset("CR2"), "assets": [world.asset("JPG"), world.asset("CR2")]
+    }
+    world.stacker().run(world.ctx, "dest-1")
+    assert world.immich.stacks["stack-9"]["primary"] == world.asset("JPG")
+    assert world.records()[0]["stack_state"] == "stacked"
 
 
 def test_a_foreign_stack_is_left_alone(world):
@@ -1021,6 +1160,52 @@ def test_a_5xx_leaves_the_record_unevaluated(world):
     world.immich.fail_next = 99
     world.stacker().run(world.ctx, "dest-1")
     assert world.records()[0]["stack_state"] is None
+
+
+def test_a_destination_failure_stops_the_whole_pass(world):
+    """**宛先の障害は組ごとの失敗ではない。**
+
+    次の組へ進むと、失効した鍵や停止したサーバへ未評価の全件ぶん要求を投げ続ける
+    （timeout は既定 86400 秒）。
+    """
+    world.with_pairs(5)
+    world.immich.fail_next = 99
+    outcome = world.stacker().run(world.ctx, "dest-1")
+    assert outcome.deferred == 1
+    assert world.immich.request_count() <= 2       # 1 組ぶんで止まる
+
+
+def test_an_auth_failure_stops_the_whole_pass(world):
+    world.with_pairs(5)
+    world.immich.api_key = "rotated"
+    outcome = world.stacker().run(world.ctx, "dest-1")
+    assert outcome.deferred == 1 and all(r["stack_state"] is None for r in world.records())
+
+
+def test_records_of_an_old_epoch_are_never_touched(world):
+    """**別ライブラリへ送った履歴に、現行の資格情報で触らない**（§9.11）.
+
+    旧 epoch の `complete` は監査履歴として無効化されずに残る。
+    """
+    world.repoint_to_another_library()          # epoch が進む。旧 complete は残る
+    outcome = world.stacker().run(world.ctx, "dest-1")
+    assert outcome == StackOutcome(0, 0, 0)
+    assert world.immich.requests == []
+
+
+def test_a_record_that_changed_during_the_network_wait_is_not_written(world):
+    """GET の間に無効化された組は、相手に触らず記録もしない."""
+    world.invalidate_partner_during_first_get()
+    world.stacker().run(world.ctx, "dest-1")
+    assert world.immich.stack_count() == 0
+    assert all(r["stack_state"] is None for r in world.records())
+
+
+def test_nothing_is_written_when_one_member_cannot_be_marked(world):
+    """**一部だけ stacked にしない。** 残りが別の組として再評価される."""
+    world.invalidate_partner_after_the_post()
+    world.stacker().run(world.ctx, "dest-1")
+    assert all(r["stack_state"] is None for r in world.records())
 
 
 def test_a_4xx_is_recorded_as_skipped(world):
@@ -1043,9 +1228,32 @@ def test_a_lost_lease_stops_before_touching_the_peer(world):
     assert world.immich.stack_count() == 0
 
 
+def test_a_cancel_committed_during_the_get_stops_before_the_post(world):
+    """**`POST` の直前に取り直す。** GET を待っている間にキャンセルは commit される."""
+    world.cancel_during_first_get()
+    world.stacker().run(world.ctx, "dest-1")
+    assert ("POST", "/api/stacks") not in world.immich.requests
+
+
+def test_a_cancel_committed_between_the_post_and_the_put_stops_the_put(world):
+    world.cancel_after_the_post()
+    world.stacker().run(world.ctx, "dest-1")
+    assert ("PUT", "/api/stacks") not in [(m, p.split("/")[0]) for m, p in world.immich.requests]
+
+
+def test_the_preflight_runs_before_the_first_touch(world):
+    """**向き先の再確認を飛ばさない**（§9.10 の `_guard` と同じ理由）.
+
+    TTL を跨いだ後の `POST` が別のライブラリへ飛ぶと、UUID が偶然存在すれば
+    他人の資産を束ねる。
+    """
+    assert world.immich.requests[0] == ("GET", "/api/users/me")
+
+
 def test_the_second_pass_runs_after_an_approval(world):
     """承認で complete になった行も対象（§9.11）."""
-    ...
+    world.approve_the_pending_datetime()          # mode=approve のジョブを回す
+    assert world.records()[0]["stack_state"] == "stacked"
 ```
 
 - [ ] **Step 2: 失敗を確認する**
@@ -1075,55 +1283,99 @@ class StackOutcome:
     deferred: int      # 相手が落ちていて未評価のまま残した数
 
 
+class StackGroupChanged(RuntimeError):
+    """組の前提が、相手を待っている間に変わった. その組は諦める."""
+
+
+class DestinationUnusable(RuntimeError):
+    """組ではなく宛先の障害. **第 2 パスごと打ち切る.**"""
+
+
 class Stacker:
     def __init__(self, conn, uploads, destinations, registry, open_client, preflight) -> None:
         ...
 
     def run(self, ctx: JobContext, destination_id: str) -> StackOutcome:
-        cursor, stacked = "", 0
-        skipped = deferred = 0
-        while True:
-            if ctx.cancelled():
-                break
-            batch = self._uploads.unstacked_batch(destination_id, cursor, BATCH_SIZE)
-            if not batch:
-                break
-            for row in batch:
-                cursor = row["id"]
+        # **開始時に現行リビジョンと epoch を固定する。** 抽出・相方の解決・記録の
+        # すべてがこの epoch で動く（旧 epoch は別ライブラリへ送った履歴）。
+        revision = self._destinations.current(destination_id)
+        epoch, cursor = revision["target_epoch"], ""
+        stacked = skipped = deferred = 0
+        with self._open_client(revision) as client:
+            while True:
                 if ctx.cancelled():
-                    return StackOutcome(stacked, skipped, deferred)
-                result = self._one(ctx, row)
-                ...
+                    break
+                batch = self._uploads.unstacked_batch(destination_id, epoch, cursor, BATCH_SIZE)
+                if not batch:
+                    break
+                for row in batch:
+                    cursor = row["id"]
+                    if ctx.cancelled():
+                        return StackOutcome(stacked, skipped, deferred)
+                    try:
+                        result = self._one(ctx, client, revision, epoch, row)
+                    except DestinationUnusable as exc:
+                        # **打ち切る。** 次の組へ進んでも同じ結果になるうえ、未評価の
+                        # 全件ぶん要求を投げ続けることになる。残りは次の送信へ渡す。
+                        ctx.emit("warning", f"宛先の障害でスタックを中断した: {exc}")
+                        return StackOutcome(stacked, skipped, deferred + 1)
+                    except StackGroupChanged as exc:
+                        # 前提が変わった。**記録もしない**（次の送信で組み直す）。
+                        ctx.emit("info", f"組が変わったのでスタックを見送った: {exc}")
+                        continue
+                    stacked += result == "stacked"
+                    skipped += result == "skipped"
         return StackOutcome(stacked, skipped, deferred)
 ```
 
 `_one` の骨子:
 
-1. 対象の `media_file` とプロファイル（**その `media_file` の `profile_revision_id` の
-   定義**を使う。レコードは使った版で解釈する、が本案件の作法）を読む
+1. 対象の `media_file` と、**そのプロファイルの現行リビジョン**
+   （`registry.by_id(media["profile_id"])`）を読む。`immich.tags` と同じ層の判断で、
+   取り込み時の版に固定しない（§9.11）
 2. `rule.enabled` が偽なら `mark_skipped("プロファイルがスタックを使わない")`
-3. `source_of` でカード上の原名を得る。無ければ
+3. `sources_of` でカード上の観測を**すべて**得る。空なら
    `mark_skipped("カード上の観測が残っていない")`
-4. `siblings_on_card` で相方候補を引き、`record_for` で宛先側のレコードを付ける
+4. 観測ごとに `siblings_on_card` で相方候補を引き、`record_for(destination_id, epoch,
+   media_file_id)` で宛先側のレコードを付ける（**現行 epoch のものだけ**）
 5. `resolve_group`。`Refusal` なら `mark_skipped(reason)`
-6. **ここから相手に触る。** `ctx.assert_lease()` を呼んでから、各 member の
+6. **ここから相手に触る。** `_guard`（下）を通してから、各 member の
    `client.asset(remote_asset_id)` を読む
-7. 全員 `stack_id is None` なら `create_stack` → 応答の primary が先頭 member で
-   なければ `set_stack_primary` → `mark_stacked`
+7. 全員 `stack_id is None` なら **`_guard` を通し直してから** `create_stack` →
+   応答の primary が先頭 member でなければ **`_guard` を通し直してから**
+   `set_stack_primary` → `mark_stacked`
 8. 全員が同じ `stack_id` を持ち、その primary が組の中に居るなら
-   `stack_by_primary` でメンバーを引き、集合が一致すれば `mark_stacked`（回収）、
+   `stack_by_primary` でメンバーを引き、集合が一致すれば **primary も検査し**
+   （違えば `_guard` → `set_stack_primary` → 読み直して確認）`mark_stacked`（回収）、
    一致しなければ `mark_skipped("相手側に別のスタックがある")`
 9. それ以外の形（一部だけスタック済み、別々のスタック）は
    `mark_skipped("相手側に別のスタックがある")`
+
+`_guard` は §9.10 の `_guard` と同じ 2 段にする。**`complete` のレコードは claim を
+持たないので `prepare_side_effect` は使えない**（Task 4 の `guard_stack_group`）。
+
+```python
+    def _guard(self, ctx, members, epoch, revision_id) -> None:
+        """**外部へ触る直前に必ず通す**（§9.10 の `_guard` と同じ作法）.
+
+        prepare → preflight（相手待ちなので `with_lease_pulse` で囲む）→ prepare。
+        前だけに置くと、向き先の再確認を待っている間に commit されたキャンセルを
+        見落とす。**`POST` と `PUT` のそれぞれの直前で通す。**
+        """
+        self._uploads.guard_stack_group(ctx, members, epoch)
+        self._preflight.assert_target(
+            revision_id, wait=lambda work: with_lease_pulse(ctx, work)
+        )
+        self._uploads.guard_stack_group(ctx, members, epoch)
+```
 
 例外の対応:
 
 ```python
         except (ImmichUnavailable, ImmichAuthFailed, ImmichRedirected) as exc:
-            # **未評価のまま残す。** 宛先が落ちている・鍵が失効しただけなら、
-            # 直したあとの送信で自然に再試行される。
-            ctx.emit("warning", f"スタックを保留した: {exc}")
-            return "deferred"
+            # **未評価のまま残し、第 2 パスごと打ち切る。** これは組ではなく宛先の
+            # 障害なので、次の組へ進んでも同じ結果になる（`run` が受ける）。
+            raise DestinationUnusable(str(exc)) from exc
         except (ImmichRejected, ImmichProtocolError) as exc:
             # 再試行しても直らない。**理由を残して画面に出す。**
             self._uploads.mark_skipped(row["id"], f"相手が受け付けない: {exc}")
@@ -1152,11 +1404,14 @@ Expected: PASS
 
 - [ ] **Step 5: 変異試験**
 
-`assert_lease` の呼び出しを消す、`ctx.cancelled()` の確認を消す、
-`cursor = row["id"]` を消す、既存スタックの集合一致を `>=` に緩める、
-`set_stack_primary` を無条件に呼ぶ、例外の 2 分岐を入れ替える、
-`BATCH_SIZE` を 1 にする（**これは検出できなくてよい変異** —— 検出できないなら
-その旨を記録する）。
+`_guard` の 2 段目（`POST` 直前の取り直し）を消す、preflight を消す、
+`with_lease_pulse` を外す、`ctx.cancelled()` の確認を消す、`cursor = row["id"]` を消す、
+既存スタックの集合一致を `>=` に緩める、回収の経路から primary の検査を消す、
+`unstacked_batch` から `epoch` を落とす、`DestinationUnusable` を `continue` に変える、
+例外の 2 分岐を入れ替える、`mark_stacked` の `rowcount != 1` の検査を消す。
+
+`BATCH_SIZE` を 1 にする変異は**検出できなくてよい**（挙動が同じ）。検出できないなら
+その旨を記録する。
 
 - [ ] **Step 6: コミット**
 
@@ -1410,9 +1665,16 @@ Expected: 3 spec すべて PASS（journey / phase5 / phase6）
 
 - [ ] **Step 4: crash consistency**
 
-`test_crash_consistency.py` に、**第 2 パスの `POST /stacks` の直後に
-`os._exit` する**筋書きを足し、次の送信で「既存スタックの集合一致」経路が
-回収することを確かめる。
+`test_crash_consistency.py` に、第 2 パスの**3 点**で `os._exit` する筋書きを足す。
+
+| 落とす場所 | 次の送信で起きるべきこと |
+| --- | --- |
+| `POST /stacks` の応答を受け取る前 | 相手にスタックがあるかは不明。集合一致なら回収、無ければ作る |
+| `POST /stacks` の直後・`PUT` の前 | 集合一致で回収し、**primary を望みの側へ直す**（検査を落とすとここが落ちる） |
+| `PUT /stacks/{id}` の直後・記録の前 | 集合も primary も一致するので、`PUT` を打たずに記録だけする |
+
+**primary まで assert する。** 集合の一致だけを見ると、`PUT` 前に落ちた世界で
+「回収できた」と誤読する。
 
 Run: `uv run pytest app/tests/test_crash_consistency.py -q`
 Expected: PASS
@@ -1493,8 +1755,10 @@ git commit -m "docs(mediaferry): Phase 6 の実測と引き継ぎを書き戻す
 
 | 項目 | 決め | 理由 |
 | --- | --- | --- |
-| 組の規則の版 | **対象レコードの `media_file.profile_revision_id` の定義**を使う | 「レコードは使った版で解釈する」が本案件の作法（§8）。相方が別の版で取り込まれていても、判断の根拠は 1 つに決まる |
-| 相方の探索範囲 | **同じ `volume_instance`** | 同じカードの同じシャッターだけを組にする。別カードから来た同名ファイルは組にしない |
+| 組の規則の版 | **プロファイルの現行リビジョン**（`ProfileRegistry.by_id`）を使い、**組の全員に同じ `profile_id` を要求する** | スタックは取り込みの記録ではなく、いま適用する操作。`immich.tags` と `fix_datetime_after_upload` が既に現行リビジョンを見ている（`by_id` は `current_revision_id` を join する）。取り込み時の版に固定すると、版ごとに規則が違う member でどちらが先に走るかで結果が変わり、`stack` を持たない旧版で取り込んだ既存ライブラリは永久に対象外になる |
+| 相方の探索範囲 | **published な観測が 1 つでも同じ `volume_instance` で重なること** | 同じカードの同じシャッターだけを組にする。集合で見るのは、`observed_at` が再スキャンで動くため（順序で 1 つ選ぶと組が実行のたびに変わる） |
+| 宛先の epoch | **現行 `target_epoch` に固定**（開始時に読み、抽出・相方の解決・記録すべてに使う） | 旧 epoch の `complete` は無効化されずに残る。絞らないと別ライブラリの資産 ID を現行の資格情報で送る |
+| 宛先の障害 | **最初の `deferred` で第 2 パスを打ち切る** | 認証失敗・redirect・5xx は組ではなく宛先の障害。次の組へ進むと未評価の全件ぶん要求を投げ続ける（timeout は既定 86400 秒） |
 | `BATCH_SIZE` | **50** | 再計算（Phase 5 Task 6）と同じ桁。1 件あたり相手への往復が 1〜3 回あるので、これ以上増やしてもリースの窓が伸びるだけ |
 | 保留（5xx）の上限 | **持たない** | 未評価のまま残すだけで、相手にも DB にも痕跡が増えない。宛先が直れば次の送信で解決する |
 | 手動の再スタック | **作らない** | 再評価の経路は「再送」と「再計算」の 2 つで足りる（YAGNI） |
@@ -1502,5 +1766,28 @@ git commit -m "docs(mediaferry): Phase 6 の実測と引き継ぎを書き戻す
 
 ## レビュー記録
 
-（計画レビューと実装差分レビューの記録をここへ書き足す。**`--fresh` で回すこと**
-—— 継ぎ足すと、自分が提案した対処の周りが盲点になる。`docs/HANDOFF.md` §5）
+**`--fresh` で回すこと** —— 継ぎ足すと、自分が提案した対処の周りが盲点になる
+（`docs/HANDOFF.md` §5）。
+
+### 計画レビュー 1 巡目（2026-08-19、codex `--fresh`。blocker 3 / major 5 / minor 1）
+
+**6 件は全面的に妥当、2 件は部分採用、1 件は「実装では閉じられない」ことの明記へ。**
+指摘はすべて実装を読んで裏を取った。
+
+| # | 指摘 | 判定 | 反映 |
+| --- | --- | --- | --- |
+| blocker 1 | **第 2 パスが `target_epoch` を絞らない。** 向き先を変えた宛先では旧 epoch の `complete` が無効化されずに残るので、**別ライブラリへ送った資産 ID を現行の資格情報で送る** | **妥当。** `_invalidate_old_epoch_locked` は `state <> 'complete'` だけを無効化し、`records_for_recheck` は同じ理由で epoch を条件にしていた。こちらだけ外れていた | 開始時に現行リビジョンと epoch を固定し、抽出・`record_for`・guard・記録のすべてに使う。索引も `(destination_id, target_epoch, id)` へ。旧 epoch を触らない試験を追加 |
+| blocker 2 | **外部副作用の手前が Phase 3 の契約を満たしていない。** 複数の GET の前に `assert_lease` を 1 回だけで、preflight も pulse も `POST`/`PUT` 直前の取り直しも無い。`mark_stacked` は一部だけ書ける | **妥当。** `uploader._guard` は prepare → preflight（pulse）→ prepare を**毎回の通信の直前**に通しており、コメントが「TTL を跨いだ後の tag が別ライブラリへ飛ぶ」危険まで書いている | `guard_stack_group`（リース + 組全員の現在値を 1 トランザクションで照合）を足し、`_guard` を `POST` と `PUT` の直前ごとに通す。`mark_stacked` は全員一致でなければ 1 行も書かない。GET 中・`POST` 前・`POST`〜`PUT` の間・記録前の競合を試験に追加 |
+| blocker 3 | **「既存スタックには触らない」は TOCTOU で保証できない。** Immich に条件付きの作成が無く、読み直しと `POST` の間に作られたスタックは吸収される | **妥当。実装では閉じられない。** 保証を主張したままにはできない | §9.11 の文言を「保証ではなく、窓を最小にした最善」へ改め、**残余の競合として明記して受容**。窓を最小にする 2 つの手当（直前に読み直す／`created_by_us` の組だけ）を書いた |
+| major 1 | **「同じカード」は証明にならない**（`volume_instance` は推測で、複製媒体は畳まれる）。`source_entry` は上書きされ、`observed_at` は再スキャンで動くので「最初の観測」は安定しない | **半分妥当。** 順序の不安定さは実在する（`scan.py::_touch`）。複製媒体の畳み込みも実在する | ① `source_of` を **`sources_of`（集合）** に変え、「published な観測が 1 つでも同じボリュームで重なる」を条件にした（順序に依らない）② 観測が残っていない場合は理由つきの見送り ③ **複製媒体は残余リスクとして明記して受容**。不変の観測 cohort を別表に持つ案は採らない —— 他の 3 条件（同じ stem・秒まで一致する `captured_at`・同じ `captured_at_source`）を別々のシャッターが同時に満たすことは実質的に無く、追加する表と provenance の維持コストが見合わない |
+| major 2 | **規則の版が member ごとに違うと結果が変わる。** かつ `stack` を持たない旧版で取り込んだ既存ライブラリは永久に対象外 | **妥当。** 後者は実害が大きい | **対処は指摘の案（rule digest の分離）ではなく、規則を「プロファイルの現行リビジョン」から読む形にした。** `ProfileRegistry.by_id` は `current_revision_id` を join しており、`immich.tags` と `fix_datetime_after_upload` は既にそう振る舞っている。**組の全員に同じ `profile_id` を要求**すれば規則は 1 つに決まり、既存ライブラリも版が進んだ時点で対象になる |
+| major 3 | **`POST` の直後・`PUT` の前に落ちると、望みの primary へ二度と直らない。** 集合一致の回収経路が primary を見ていない | **妥当** | 回収の経路でも primary を検査し、違えば guard → `PUT` → 読み直して確認。crash 試験の落とす場所を 3 点に増やし、**primary まで assert する** |
+| major 4 | **宛先の障害で未評価の全件へ通信を繰り返す。** 認証失敗・redirect・5xx は組固有ではない | **妥当。** timeout は既定 86400 秒なので事実上終わらなくなる | `DestinationUnusable` を送出して**第 2 パスごと打ち切る**。残りは未評価のまま次の送信へ渡す |
+| major 5 | **adapter の fail-closed が不足。** ① `POST`/`PUT` が `allow_redirect=False` でない ② 作成の応答が要求集合と一致するか、primary が member か、重複が無いかを見ていない | **② は妥当。① は退けた** —— `allow_redirect=False` の根拠は「ストリームが 1 回で EOF に達する」ことで（`upload_asset` のコメント）、JSON 本文の `tag_assets` / `set_date_time_original` は既定のまま。別 origin への redirect は `_same_origin_target` が必ず拒むので、鍵が外へ出る経路は閉じている | ② を全面採用（要求集合との全単射、primary ∈ members、重複の拒否、`PUT` 後の読み直し確認）。① は退けた理由を計画に明記 |
+| minor 1 | `stack_by_primary` が `response.json()` を直に呼ぶので、非 JSON が `ValueError` のまま漏れて分岐に入らない | **妥当** | `_as_array` を `_as_object` の隣に足し、object でない要素も protocol error にする。`RemoteAsset.stack` は「キーが無い＝旧版で `None`」と「キーはあるが形が違う＝protocol error」を分ける |
+
+**確認された「指摘なし」:** `0015` のトリガに `state = 'complete'` を入れない判断、
+部分索引を足す判断そのもの、`UPLOAD_CONCURRENCY` の env / DB / UI からの撤去方針。
+
+**止め時の判断:** レビュー側は「まだ逓減局面ではない。設計と計画を直した次巡は必須」
+と述べている。次巡を回す。
