@@ -642,7 +642,7 @@ describe("デバイスの信頼登録", () => {
   });
 
   it("承認は確認を経てから。ダイアログに信頼の限界を書く", async () => {
-    stubDevices([{ ...base, trusted: false, identity_confidence: "low" }]);
+    stubDevices([{ ...base, trusted: false }]);
     renderDevices();
 
     await userEvent.click(await screen.findByRole("button", { name: "SD_Card を信頼する" }));
@@ -660,7 +660,7 @@ describe("デバイスの信頼登録", () => {
     // **承認すると、いま挿してあるこのカードの中身が次の監視周期で取り込まれる。**
     // watcher は毎 tick、現在 live な presence を候補に組み直すため（§12.1）。
     // 「次に挿したときから」と書くと、同意の対象を取り違えさせる。
-    stubDevices([{ ...base, trusted: false, identity_confidence: "low" }]);
+    stubDevices([{ ...base, trusted: false }]);
     renderDevices();
 
     expect(await screen.findByText(/いま入っている中身も含めて/)).toBeInTheDocument();
@@ -671,7 +671,37 @@ describe("デバイスの信頼登録", () => {
     stubDevices([{ ...base, trusted: true, identity_confidence: "low" }]);
     renderDevices();
 
-    expect(await screen.findByText(/確度が低いため/)).toBeInTheDocument();
+    expect(await screen.findByText(/このカードだと確かめられていない/)).toBeInTheDocument();
+  });
+
+  it("watcher が積まない状態では、承認しても始まらないと書く", async () => {
+    // CANDIDATES は identity_confidence = 'high' かつ provisional = 0 を要求する
+    // （`jobs/watcher.py`）。断言すると、同意の内容が実挙動とずれる。
+    stubDevices([{ ...base, trusted: false, provisional: true }]);
+    renderDevices();
+
+    expect(await screen.findByText(/いまは自動取り込みは始まりません/)).toBeInTheDocument();
+    expect(screen.queryByText(/数秒後から自動で取り込みます/)).toBeNull();
+  });
+
+  it("AUTO_IMPORT が off なら、承認しても始まらないと書く", async () => {
+    stubDevices([{ ...base, trusted: false }], "off");
+    renderDevices();
+
+    expect(await screen.findByText(/いまは自動取り込みは始まりません/)).toBeInTheDocument();
+  });
+
+  it("始まらない状態の確認ダイアログは、いま始まらないことを書く", async () => {
+    stubDevices([{ ...base, trusted: false, provisional: true }]);
+    renderDevices();
+
+    await userEvent.click(await screen.findByRole("button", { name: "SD_Card を信頼する" }));
+
+    const dialog = await screen.findByRole("dialog");
+    // **同意の対象を偽らない。** 信頼は記録するが、いまはコピーが始まらない。
+    expect(dialog).toHaveTextContent(/いまは自動取り込みは始まりません/);
+    expect(dialog).toHaveTextContent(/取り違え/);
+    expect(dialog).not.toHaveTextContent(/いま入っている中身も含めて/);
   });
 
   it("AUTO_IMPORT が off なら、その旨と設定への導線を出す", async () => {

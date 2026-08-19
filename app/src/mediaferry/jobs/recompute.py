@@ -271,6 +271,11 @@ class Recomputer:
         for row in batch:
             resolved.append((row, recompute(ctx, row, profile)))
             if time.monotonic() - last_beat >= lease_pulse.HEARTBEAT_INTERVAL:
+                # **`assert_lease` を先に呼ぶ**（`with_lease_pulse` と同じ理由）。
+                # `extend_lease` は `cancelling` でも延ばすので、`heartbeat` だけだと
+                # キャンセル済みのリースを延ばし続け、**残りの EXIF を最後まで
+                # 読んでから**書き込みの確認でようやく止まる。
+                ctx.assert_lease()
                 ctx.heartbeat()
                 last_beat = time.monotonic()
         skipped = 0

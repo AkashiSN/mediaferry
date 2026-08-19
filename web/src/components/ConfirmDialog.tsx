@@ -13,7 +13,7 @@ export type Confirmation =
   | { kind: "adopt_failed_merge"; groupLabel: string; reason: string }
   | { kind: "approve_datetime"; current: string | null; proposed: string }
   | { kind: "archive_profile"; slug: string }
-  | { kind: "trust_volume"; label: string };
+  | { kind: "trust_volume"; label: string; starts: boolean; blocked: string | null };
 
 export function describe(confirmation: Confirmation): { title: string; body: ReactNode } {
   switch (confirmation.kind) {
@@ -72,13 +72,23 @@ export function describe(confirmation: Confirmation): { title: string; body: Rea
         title: "このカードを信頼しますか",
         body: (
           <>
-            <p>
-              {confirmation.label} を信頼すると、
-              <strong>
-                いま入っている中身も含めて、以後このカードを挿すだけで NAS へコピーされます
-              </strong>
-              （画面の操作は要りません）。取り込みは承認の数秒後に始まります。
-            </p>
+            {confirmation.starts ? (
+              <p>
+                {confirmation.label} を信頼すると、
+                <strong>
+                  いま入っている中身も含めて、以後このカードを挿すだけで NAS へコピーされます
+                </strong>
+                （画面の操作は要りません）。取り込みは承認の数秒後に始まります。
+              </p>
+            ) : (
+              // **始まらないのに「コピーされます」と書かない。** 同意の内容が
+              // 実挙動とずれる（`watcher.py` の CANDIDATES を満たしていない）。
+              <p>
+                {confirmation.label} の信頼を記録します。ただし{confirmation.blocked}ので、
+                <strong>いまは自動取り込みは始まりません</strong>。条件が整うと、挿すだけで
+                NAS へコピーされるようになります。
+              </p>
+            )}
             {/* **信頼の限界を明示する**（§12.1）。指紋は同一性の証明ではない。 */}
             <p>
               見分けはカードの中身の指紋で行うので、

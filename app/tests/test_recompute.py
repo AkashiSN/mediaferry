@@ -768,3 +768,61 @@ def test_many_short_exif_reads_do_not_lose_the_lease(db, data_root, monkeypatch)
     outcome = Recomputer(db, data_root, TOKYO).run(ctx, profile)
 
     assert outcome.changed == 15
+
+
+def test_a_cancel_stops_the_batch_before_reading_the_rest(db, data_root, monkeypatch):
+    """**`heartbeat` だけでは足りない。** `extend_lease` は `cancelling` でも延ばす.
+
+    行をまたぐ pulse が `assert_lease` を欠くと、キャンセル済みのリースを延ばし
+    続け、**残りの EXIF を最後まで読んでから**書き込みの `assert_lease` で
+    ようやく止まる（100 枚なら数十分）。書き込みは防げても、キャンセルの
+    取りこぼしになる（`core/lease_pulse.py` が `assert_lease` を先に呼ぶのと同じ理由）。
+    """
+    import time
+
+    profile = a_user_profile(db, "canon-eos", "my-canon")
+    volume = a_volume(db, (profile.profile_id, profile.revision_id))
+    media = []
+    for index in range(30):
+        rel = f"library/my-canon/DCIM/100CANON/IMG_{index:04d}.JPG"
+        (data_root / rel).parent.mkdir(parents=True, exist_ok=True)
+        (data_root / rel).write_bytes(a_jpeg_with(b"2026:02:03 04:05:06"))
+        media.append(
+            an_original(
+                db,
+                profile,
+                volume,
+                source_rel=f"DCIM/100CANON/IMG_{index:04d}.JPG",
+                rel_path=rel,
+                mtime_ns=ns("2026-08-17T12:00:00"),
+                captured_at="2026-08-17T12:00:00+00:00",
+                captured_at_source="mtime",
+                kind="photo",
+                duration_seconds=None,
+            )
+        )
+
+    store = JobStore(db)
+    store.enqueue("recompute_timestamps", {})
+    ctx = store.claim_next()
+    real = read_datetime_original
+    reads: list[str] = []
+
+    def watched(path):
+        reads.append(str(path))
+        if len(reads) == 1:
+            store.request_cancel(ctx.job_id)
+        # **1 枚は間隔より短い。** `with_lease_pulse` は 1 度も打たないので、
+        # 行をまたぐ側だけがキャンセルに気づける経路になる。
+        time.sleep(0.01)
+        return real(path)
+
+    monkeypatch.setattr("mediaferry.jobs.recompute.read_datetime_original", watched)
+    monkeypatch.setattr("mediaferry.core.lease_pulse.HEARTBEAT_INTERVAL", 0.05)
+
+    outcome = Recomputer(db, data_root, TOKYO).run(ctx, profile)
+
+    # 1 枚目でキャンセルが commit されたら、30 枚を読み切らずに降りる。
+    assert len(reads) < 30, f"キャンセル後も読み続けた: {len(reads)} 枚"
+    assert outcome.changed == 0
+    assert captured(db, media[0])["captured_at"] == "2026-08-17T12:00:00+00:00"

@@ -29,21 +29,42 @@ type Devices = { volumes: Volume[] };
 type Setting = { key: string; value: string | null };
 type Settings = { settings: Setting[] };
 
-/** そのカードで自動取り込みがどうなるか。**3 つの状態を区別して書く**（§12.1）。 */
-export function autoImportState(volume: Volume): string {
-  if (!volume.trusted) {
-    // **承認すると、いま挿してあるこのカードの中身が対象になる。** watcher は
-    // 毎 tick、現在 live な presence から候補を組み直すので、承認の数秒後には
-    // 取り込みが始まる（§12.1）。「次に挿したときから」と書くと、同意の対象を
-    // 取り違えさせる。
-    return (
-      "未承認です。承認すると、いま入っている中身も含めて、数秒後から自動で取り込みます。"
-    );
+/** いま自動取り込みが始まる状態か。**`watcher.py` の `CANDIDATES` と同じ条件。**
+ *
+ * 画面の文言と確認ダイアログの両方がここを見る。片方だけで判定すると、
+ * 同意の内容と実挙動がずれる（それが起きた）。
+ */
+export function autoImportOutlook(
+  volume: Volume,
+  autoImport: string,
+): { starts: boolean; blocked: string | null } {
+  if (autoImport !== "trusted") {
+    return { starts: false, blocked: "AUTO_IMPORT が off な" };
+  }
+  if (volume.provisional) {
+    return { starts: false, blocked: "対象の中身がまだ見つかっていない" };
   }
   if (volume.identity_confidence !== "high") {
-    return "信頼済みですが、確度が低いため自動取り込みはしません。";
+    return { starts: false, blocked: "このカードだと確かめられていない" };
   }
-  return "信頼済み。挿すと自動で取り込みます。";
+  return { starts: true, blocked: null };
+}
+
+/** そのカードで自動取り込みがどうなるか（§12.1）。 */
+export function autoImportState(volume: Volume, autoImport: string): string {
+  const { starts, blocked } = autoImportOutlook(volume, autoImport);
+  if (!volume.trusted) {
+    // **承認すると、いま挿してあるこのカードの中身が対象になる。** watcher は
+    // 毎 tick、現在 live な presence から候補を組み直すので、条件が揃っていれば
+    // 承認の数秒後に取り込みが始まる。「次に挿したときから」と書くと、同意の
+    // 対象を取り違えさせる。**逆に、条件が揃っていないのに断言もしない。**
+    return starts
+      ? "未承認です。承認すると、いま入っている中身も含めて、数秒後から自動で取り込みます。"
+      : `未承認です。承認しても、${blocked}ので、いまは自動取り込みは始まりません。`;
+  }
+  return starts
+    ? "信頼済み。挿すと自動で取り込みます。"
+    : `信頼済みですが、${blocked}ので、いまは自動取り込みは始まりません。`;
 }
 
 export function DevicesScreen() {
@@ -107,9 +128,7 @@ export function DevicesScreen() {
                   {volume.profile_slug} の対象ですが、取り込む中身がまだありません。
                 </p>
               )}
-              {volume.profile_slug !== null && autoImport !== "off" && (
-                <p>{autoImportState(volume)}</p>
-              )}
+              {volume.profile_slug !== null && <p>{autoImportState(volume, autoImport)}</p>}
               <div className="actions">
                 {!volume.trusted && volume.profile_slug !== null && (
                   <button
@@ -117,7 +136,12 @@ export function DevicesScreen() {
                     disabled={busy !== null}
                     onClick={() =>
                       setConfirming({
-                        confirmation: { kind: "trust_volume", label },
+                        confirmation: {
+                          kind: "trust_volume",
+                          label,
+                          // **同意の内容は、いまの条件から作る**（断言しない）。
+                          ...autoImportOutlook(volume, autoImport),
+                        },
                         id: volume.volume_instance_id,
                       })
                     }

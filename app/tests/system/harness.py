@@ -111,6 +111,20 @@ class _Cards(FakeMountManager):
             self._open[handle] = fd
         return handle, fd
 
+    def release(self, handle) -> None:  # noqa: ANN001
+        # **台帳に触るところは全部同じ錠で守る。** mount と重なると、pop の
+        # 取りこぼしで fd が漏れる。
+        with self._ledger:
+            fd = self._open.pop(handle, None)
+        if fd is not None:
+            os.close(fd)
+
+    def release_all(self) -> None:
+        with self._ledger:
+            handles = list(self._open)
+        for handle in handles:
+            self.release(handle)
+
 
 @contextmanager
 def system_app(
