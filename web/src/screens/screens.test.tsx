@@ -649,18 +649,22 @@ describe("デバイスの信頼登録", () => {
 
     const dialog = await screen.findByRole("dialog");
     // 確認を取る理由そのもの（§12.1 のプライバシー）と、信頼の限界の両方を書く。
+    // **同意の対象には、いま挿してあるカードの中身が含まれる。**
     expect(dialog).toHaveTextContent(/NAS へコピー/);
+    expect(dialog).toHaveTextContent(/いま入っている中身/);
     expect(dialog).toHaveTextContent(/取り違え/);
     expect(calls.some((call) => call.path.includes("trust"))).toBe(false);
   });
 
-  it("未承認のカードには、次に挿したときから効くと書く", async () => {
-    // `_identity_confidence` は憶えた指紋が無ければ必ず low を返すので、
-    // **自動取り込みが効くのは 2 度目以降の挿入から**（§12.1）。
+  it("未承認のカードには、いま挿してある中身も対象だと書く", async () => {
+    // **承認すると、いま挿してあるこのカードの中身が次の監視周期で取り込まれる。**
+    // watcher は毎 tick、現在 live な presence を候補に組み直すため（§12.1）。
+    // 「次に挿したときから」と書くと、同意の対象を取り違えさせる。
     stubDevices([{ ...base, trusted: false, identity_confidence: "low" }]);
     renderDevices();
 
-    expect(await screen.findByText(/次にこのカードを挿したときから/)).toBeInTheDocument();
+    expect(await screen.findByText(/いま入っている中身も含めて/)).toBeInTheDocument();
+    expect(screen.queryByText(/次にこのカードを挿したときから/)).toBeNull();
   });
 
   it("信頼済みでも確度が低ければ、自動取り込みしないと書く", async () => {

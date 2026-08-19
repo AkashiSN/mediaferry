@@ -74,8 +74,10 @@ export function describe(confirmation: Confirmation): { title: string; body: Rea
           <>
             <p>
               {confirmation.label} を信頼すると、
-              <strong>以後このカードを挿すだけで NAS へコピーされます</strong>
-              （画面の操作は要りません）。効くのは次に挿したときからです。
+              <strong>
+                いま入っている中身も含めて、以後このカードを挿すだけで NAS へコピーされます
+              </strong>
+              （画面の操作は要りません）。取り込みは承認の数秒後に始まります。
             </p>
             {/* **信頼の限界を明示する**（§12.1）。指紋は同一性の証明ではない。 */}
             <p>

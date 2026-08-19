@@ -32,9 +32,13 @@ type Settings = { settings: Setting[] };
 /** そのカードで自動取り込みがどうなるか。**3 つの状態を区別して書く**（§12.1）。 */
 export function autoImportState(volume: Volume): string {
   if (!volume.trusted) {
-    // `_identity_confidence` は憶えた指紋が無ければ必ず low を返すので、
-    // **効くのは 2 度目以降の挿入から**。「承認すれば今すぐ」と読ませない。
-    return "未承認です。承認すると、次にこのカードを挿したときから自動で取り込みます。";
+    // **承認すると、いま挿してあるこのカードの中身が対象になる。** watcher は
+    // 毎 tick、現在 live な presence から候補を組み直すので、承認の数秒後には
+    // 取り込みが始まる（§12.1）。「次に挿したときから」と書くと、同意の対象を
+    // 取り違えさせる。
+    return (
+      "未承認です。承認すると、いま入っている中身も含めて、数秒後から自動で取り込みます。"
+    );
   }
   if (volume.identity_confidence !== "high") {
     return "信頼済みですが、確度が低いため自動取り込みはしません。";

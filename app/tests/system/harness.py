@@ -88,15 +88,28 @@ def _a_canon_card(root: Path) -> Path:
 
 
 class _Cards(FakeMountManager):
-    """`volume_key` ごとに別のディレクトリを見せる（2 枚同時に挿してある状態）."""
+    """`volume_key` ごとに別のディレクトリを見せる（2 枚同時に挿してある状態）.
+
+    **共有の属性を経由してマウント先を渡さない。** `BrokerServer` は接続ごとに
+    スレッドを作り、アプリは API 用と watcher 用の 2 接続を持つので、片方が
+    `verify` で待っている間にもう片方が書き換えると、**別のカードの dirfd を
+    返す**。開く先はこのメソッドのローカルに閉じ、共有する台帳だけを錠で守る。
+    """
 
     def __init__(self, by_key: dict[str, Path]) -> None:
         super().__init__(next(iter(by_key.values())))
         self._by_key = by_key
+        self._ledger = threading.Lock()
 
     def mount(self, volume, expect, verify):  # noqa: ANN001, ANN201
-        self.target = self._by_key[volume.volume_key]
-        return super().mount(volume, expect, verify)
+        path = self._by_key[volume.volume_key]
+        verify()
+        fd = os.open(path, os.O_RDONLY | os.O_DIRECTORY)
+        with self._ledger:
+            self._n += 1
+            handle = f"h{self._n}"
+            self._open[handle] = fd
+        return handle, fd
 
 
 @contextmanager

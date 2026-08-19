@@ -722,3 +722,49 @@ def test_a_derived_is_skipped_when_its_member_could_not_be_recomputed(dji, db, d
     assert row["captured_at"] == "2026-08-17T14:30:00+09:00"
     assert row["captured_at_revision_id"] == profile.revision_id
     assert outcome.skipped == 3  # orphan と part1 と、その派生物
+
+
+def test_many_short_exif_reads_do_not_lose_the_lease(db, data_root, monkeypatch):
+    """1 件ずつは間隔より短くても、**バッチの中で積もるとリースを越える**.
+
+    `with_lease_pulse` は `thread.join(timeout=間隔)` が先に返るので、
+    **間隔より短く終わる処理では 1 度も打たない**。行をまたいで打たないと、
+    100 枚の EXIF が 1 枚 1 秒でも 100 秒になり、書き込みの `assert_lease` で
+    正常なジョブが落ちる。
+    """
+    import time
+
+    profile = a_user_profile(db, "canon-eos", "my-canon")
+    volume = a_volume(db, (profile.profile_id, profile.revision_id))
+    for index in range(15):
+        rel = f"library/my-canon/DCIM/100CANON/IMG_{index:04d}.JPG"
+        (data_root / rel).parent.mkdir(parents=True, exist_ok=True)
+        (data_root / rel).write_bytes(a_jpeg_with(b"2026:02:03 04:05:06"))
+        an_original(
+            db,
+            profile,
+            volume,
+            source_rel=f"DCIM/100CANON/IMG_{index:04d}.JPG",
+            rel_path=rel,
+            mtime_ns=ns("2026-08-17T12:00:00"),
+            captured_at="2026-08-17T12:00:00+00:00",
+            captured_at_source="mtime",
+            kind="photo",
+            duration_seconds=None,
+        )
+
+    real = read_datetime_original
+
+    def short(path):
+        time.sleep(0.1)  # 間隔 (0.3) より短い。合計 1.5 秒でリース (1 秒) を越える。
+        return real(path)
+
+    monkeypatch.setattr("mediaferry.jobs.recompute.read_datetime_original", short)
+    monkeypatch.setattr("mediaferry.core.lease_pulse.HEARTBEAT_INTERVAL", 0.3)
+    store = JobStore(db, lease_seconds=1)
+    store.enqueue("recompute_timestamps", {})
+    ctx = store.claim_next()
+
+    outcome = Recomputer(db, data_root, TOKYO).run(ctx, profile)
+
+    assert outcome.changed == 15

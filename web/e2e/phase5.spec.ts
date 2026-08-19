@@ -51,7 +51,9 @@ test("汎用化の受け入れが画面から通る", async ({ page }) => {
   await expect(trust).toBeVisible();
   await trust.click();
   const dialog = page.getByRole("dialog");
+  // **同意の対象には、いま挿してあるカードの中身が含まれる**（数秒後に取り込まれる）。
   await expect(dialog).toContainText("NAS へコピー");
+  await expect(dialog).toContainText("いま入っている中身");
   await expect(dialog).toContainText("取り違え");
   await page.getByRole("button", { name: "実行する" }).click();
   await expect(page.getByText("挿すと自動で取り込みます")).toBeVisible({ timeout: 60_000 });

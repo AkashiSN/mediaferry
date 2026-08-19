@@ -21,6 +21,7 @@
 from __future__ import annotations
 
 import sqlite3
+import time
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from datetime import datetime
@@ -29,6 +30,7 @@ from pathlib import Path, PurePosixPath
 from ..adapters.exif import read_datetime_original
 from ..adapters.ffprobe import PHOTO_EXTENSIONS
 from ..clock import now_iso
+from ..core import lease_pulse
 from ..core.lease_pulse import with_lease_pulse
 from ..core.timestamps import CapturedAt, resolve_captured_at
 from ..db.connection import immediate
@@ -256,11 +258,21 @@ class Recomputer:
         """1 バッチを 1 つのトランザクションで書く.
 
         **差し戻しは同じトランザクションに入れる。** 割ると「値は新しいのに
-        `complete` のまま」が残る。EXIF の読み取りは長いので外で済ませる
-        （その間のリースは `_exif_wall` の pulse が守る）。**書き込みの側では
+        `complete` のまま」が残る。EXIF の読み取りは長いので外で済ませ、
+        その間のリースは 2 つの仕掛けで守る（下）。**書き込みの側では
         リースを取り直す** —— 頭の確認から時間が空いている。
         """
-        resolved = [(row, recompute(ctx, row, profile)) for row in batch]
+        # **リースを守る仕掛けが 2 つ要る。** `_exif_wall` の pulse は「1 枚が
+        # 長い」場合を守るが、`with_lease_pulse` は処理が間隔より短く終わると
+        # 1 度も打たない（`thread.join(timeout=間隔)` が先に返る）。1 枚ずつが
+        # 短くても 100 枚で積もるので、行をまたいだ経過時間でも打つ。
+        resolved = []
+        last_beat = time.monotonic()
+        for row in batch:
+            resolved.append((row, recompute(ctx, row, profile)))
+            if time.monotonic() - last_beat >= lease_pulse.HEARTBEAT_INTERVAL:
+                ctx.heartbeat()
+                last_beat = time.monotonic()
         skipped = 0
         with immediate(self._conn):
             # **確認と遷移を 1 つの `BEGIN IMMEDIATE` に入れる**（§9.3 手順 7 と同じ形）。
