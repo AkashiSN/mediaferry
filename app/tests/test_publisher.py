@@ -632,3 +632,117 @@ def test_a_size_that_disagrees_with_the_disk_is_aborted(setup, data_root, db, mo
         publisher.publish_prepared(ctx, a_merge_request(profile, group_id), prepared)
     assert db.execute("SELECT count(*) FROM media_file").fetchone()[0] == 0
     assert db.execute("SELECT state FROM artifact_staging").fetchone()["state"] == "writing"
+
+
+# ----------------------------------------------------------------------
+# 遅延解決（source: exif）—— §9.3 手順 5
+#
+# `Importer` は `captured` を `publish` の**前**に作るので、その時点で staging は
+# 存在しない。ステージ済みのファイルから読むには publisher 側に口が要る。
+
+
+def a_resolver(recorder, at="2026-01-02T03:04:05+09:00"):
+    def resolve(staging_abs):
+        recorder.append(staging_abs)
+        return CapturedAt(at=datetime.fromisoformat(at), source="exif", tz="Asia/Tokyo", note=None)
+
+    return resolve
+
+
+def test_a_request_rejects_having_both_captured_and_a_resolver(setup, db):
+    """**どちらか一方**をコメントではなく構築時に強制する.
+
+    書いておかないと、後から caller（merge 等）を足したときに、どちらかが
+    静かに優先される。
+    """
+    publisher, ctx, profile, volume_id = setup
+    with pytest.raises(ValueError, match="どちらか一方"):
+        a_request(profile, a_source_entry(db, volume_id), resolve_captured=a_resolver([]))
+
+
+def test_a_request_rejects_having_neither(setup, db):
+    publisher, ctx, profile, volume_id = setup
+    with pytest.raises(ValueError, match="どちらか一方"):
+        a_request(profile, a_source_entry(db, volume_id), captured=None)
+
+
+def test_the_resolver_sees_the_staged_file_and_its_value_is_recorded(setup, db, data_root):
+    """解決はステージ済みのファイルに対して行い、結果が `media_file` に載る."""
+    publisher, ctx, profile, volume_id = setup
+    seen: list = []
+    got = publisher.publish(
+        ctx,
+        a_request(
+            profile, a_source_entry(db, volume_id), captured=None, resolve_captured=a_resolver(seen)
+        ),
+        write_payload(b"payload"),
+    )
+    assert len(seen) == 1, "解決が呼ばれていない"
+    assert seen[0].parent.parent == data_root / "staging", f"ステージ以外を読んでいる: {seen[0]}"
+    row = db.execute("SELECT * FROM media_file WHERE id = ?", (got.media_file_id,)).fetchone()
+    assert row["captured_at_source"] == "exif"
+    assert row["captured_at"].startswith("2026-01-02T03:04:05")
+
+
+def test_the_resolver_runs_between_verification_and_metadata(setup, db, monkeypatch):
+    """**手順 4 の後・手順 5 の中。**
+
+    **「完成したファイルを読んでいる」だけでは足りない。** 実体は手順 2〜3 で
+    書き終わっているので、手順 4 の前でも後でも同じサイズが見える。位置を
+    確かめるには、手順の記録そのものと突き合わせる。
+    """
+    from mediaferry.adapters.publisher import STEP_METADATA, STEP_VERIFIED, ArtifactPublisher
+
+    publisher, ctx, profile, volume_id = setup
+    trace: list = []
+    original = ArtifactPublisher._checkpoint
+
+    def recording(self, step):  # noqa: ANN001, ANN202
+        trace.append(step)
+        return original(self, step)
+
+    monkeypatch.setattr(ArtifactPublisher, "_checkpoint", recording)
+
+    def resolve(staging_abs):
+        trace.append("resolve")
+        assert staging_abs.stat().st_size == 10, "書き終わる前に読んでいる"
+        return CapturedAt(
+            at=datetime.fromisoformat("2026-01-02T03:04:05+09:00"),
+            source="exif",
+            tz="Asia/Tokyo",
+            note=None,
+        )
+
+    publisher.publish(
+        ctx,
+        a_request(profile, a_source_entry(db, volume_id), captured=None, resolve_captured=resolve),
+        write_payload(b"0123456789"),
+    )
+    assert trace.count("resolve") == 1
+    at = trace.index("resolve")
+    assert trace.index(STEP_VERIFIED) < at < trace.index(STEP_METADATA), (
+        f"解決の位置が手順 4〜5 の外にある: {trace}"
+    )
+
+
+def test_the_resolved_value_is_persisted_before_the_file_is_published(setup, db):
+    """手順 7 の commit に載る（手順 5 で確定するので載らないほうがおかしい）.
+
+    ここが崩れると、公開済みなのに `captured_at` が既定値のままの行ができる。
+    """
+    publisher, ctx, profile, volume_id = setup
+    got = publisher.publish(
+        ctx,
+        a_request(
+            profile, a_source_entry(db, volume_id), captured=None, resolve_captured=a_resolver([])
+        ),
+        write_payload(b"x"),
+    )
+    row = db.execute(
+        "SELECT metadata_json, state FROM artifact_staging WHERE source_entry_id IS NOT NULL"
+    ).fetchone()
+    assert row is not None and row["state"] == "published"
+    metadata = json.loads(row["metadata_json"])
+    assert metadata["captured_at_source"] == "exif"
+    assert metadata["captured_at"].startswith("2026-01-02T03:04:05")
+    assert got.media_file_id

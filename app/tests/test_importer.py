@@ -4,6 +4,7 @@ import os
 import pytest
 
 from mediaferry.adapters.publisher import ArtifactPublisher, PublishInterrupted
+from mediaferry.core.profiles.model import definition_to_json, parse_definition
 from mediaferry.core.timestamps import TimezoneUnresolved
 from mediaferry.db.jobs import JobStore
 from mediaferry.db.profiles import ProfileRegistry
@@ -214,3 +215,92 @@ def test_the_copy_stops_at_a_chunk_boundary_when_cancelled(importing, db, monkey
     assert db.execute("SELECT count(*) FROM media_file").fetchone()[0] == 0
     # 100 バイトのファイルを 8 バイト刻みで読み切る前に降りている
     assert sum(written) < 100
+
+
+# ----------------------------------------------------------------------
+# source: exif（Task 3）
+
+
+def an_exif_profile(db, source="exif"):
+    """`canon-eos` 相当（`timezone_policy: none`、EXIF から日時）のプロファイル."""
+    from .test_profile_model import a_definition
+
+    registry = ProfileRegistry(db)
+    defn = a_definition(
+        slug="canon-like",
+        timestamp={
+            "source": source,
+            "pattern": None,
+            "format": None,
+            "fallback": "mtime",
+            "timezone_policy": "none",
+            "timezone": None,
+        },
+    )
+    registry._upsert_revision("canon-like", definition_to_json(parse_definition(defn)))
+    return registry.current("canon-like")
+
+
+def test_a_photo_gets_its_time_from_the_exif_of_the_staged_copy(importing, db, tmp_path):
+    """**読むのはステージ済みのコピー。** ソースを 2 度読むと、コピー中に
+    書き換えられた場合に「取り込んだ中身と読んだ EXIF が違う」状態を作れる。
+    """
+    from .exif_fixtures import a_jpeg_with
+
+    importer, ctx, fd, volume_id, profile = importing
+    profile = an_exif_profile(db)
+    card = tmp_path / "card"
+    (card / "PANORAMA" / "PANO_0001.JPG").write_bytes(a_jpeg_with(b"2026:03:04 05:06:07"))
+    db.execute("DELETE FROM source_entry")
+    Scanner(db).scan(ctx, fd, volume_id, profile)
+
+    importer.run(ctx, fd, volume_id, profile)
+    row = db.execute("SELECT * FROM media_file WHERE rel_path LIKE '%PANO_0001%'").fetchone()
+    assert row["captured_at_source"] == "exif"
+    assert row["captured_at"].startswith("2026-03-04T05:06:07")
+
+
+def test_a_video_never_goes_through_exif(importing, db, monkeypatch):
+    """**画像以外では読みに行かない。**
+
+    `exifread` は認識できない入力に対して例外ではなく警告を出す（実測）。
+    Canon は MOV も `source: exif` のプロファイルを通るので、呼べば動画
+    1 本ごとに警告が並ぶ。
+
+    **結果で見てはいけない。** 動画で読みに行っても `None` が返って `fallback`
+    に落ちるので、`captured_at_source` は読んでも読まなくても `mtime` になる。
+    見るべきは「呼んだかどうか」。
+    """
+    from mediaferry.jobs import importer as importer_module
+
+    importer, ctx, fd, volume_id, profile = importing
+    profile = an_exif_profile(db)
+    read: list = []
+
+    def spy(path):
+        # 中身はその場で控える。staging のファイルは公開後に消える。
+        read.append(path.read_bytes())
+        return None
+
+    monkeypatch.setattr(importer_module, "read_datetime_original", spy)
+    db.execute("DELETE FROM source_entry")
+    Scanner(db).scan(ctx, fd, volume_id, profile)
+    importer.run(ctx, fd, volume_id, profile)
+
+    # **渡されるのはステージ済みのパス**（拡張子を持たない UUID）なので、
+    # 名前では見分けられない。カードには動画 1・写真 1 があるので、回数と
+    # 中身で判定する。
+    assert len(read) == 1, f"画像 1 枚のはずが {len(read)} 回読んでいる"
+    assert read[0] == b"jpeg", "読んだのが写真ではない"
+    row = db.execute("SELECT * FROM media_file WHERE rel_path LIKE '%.MP4'").fetchone()
+    assert row["captured_at_source"] == "mtime"
+
+
+def test_a_photo_without_exif_falls_back(importing, db, tmp_path):
+    importer, ctx, fd, volume_id, profile = importing
+    profile = an_exif_profile(db)
+    db.execute("DELETE FROM source_entry")
+    Scanner(db).scan(ctx, fd, volume_id, profile)
+    importer.run(ctx, fd, volume_id, profile)
+    row = db.execute("SELECT * FROM media_file WHERE rel_path LIKE '%PANO_0001%'").fetchone()
+    assert row["captured_at_source"] == "mtime"

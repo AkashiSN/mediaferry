@@ -11,9 +11,12 @@ import errno
 import os
 import sqlite3
 import time
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 
+from ..adapters.exif import read_datetime_original
+from ..adapters.ffprobe import PHOTO_EXTENSIONS
 from ..adapters.fs import open_beneath
 from ..adapters.publisher import (
     ArtifactPublisher,
@@ -24,7 +27,7 @@ from ..adapters.publisher import (
 )
 from ..clock import now_iso
 from ..core.naming import library_rel_path
-from ..core.timestamps import resolve_captured_at
+from ..core.timestamps import CapturedAt, resolve_captured_at
 from ..db.jobs import LEASE_SECONDS, JobContext
 from ..db.profiles import ProfileRef
 
@@ -150,12 +153,42 @@ class Importer:
     def _mark_failed(self, entry_id: str) -> None:
         self._conn.execute("UPDATE source_entry SET state = 'failed' WHERE id = ?", (entry_id,))
 
+    def _captured_for(
+        self, row: sqlite3.Row, profile: ProfileRef
+    ) -> tuple[CapturedAt | None, Callable[[Path], CapturedAt] | None]:
+        """値か、ステージ済みファイルから決める読み方か、どちらか一方を返す.
+
+        **画像以外では EXIF を読まない。** `exifread` は認識できない入力に対して
+        例外ではなく警告を出すので、Canon の MOV のように `source: exif` の
+        プロファイルを通る動画で呼ぶと、1 本ごとに警告が並ぶ。振り分けは
+        `MediaProbe` と同じ拡張子の規則で行う（判定が 2 箇所に散らない）。
+        """
+        extension = PurePosixPath(row["rel_path"]).suffix.lstrip(".").upper()
+        if profile.definition.timestamp.source != "exif" or extension not in PHOTO_EXTENSIONS:
+            return (
+                resolve_captured_at(
+                    profile.definition, row["rel_path"], row["mtime_ns"], self._default_timezone
+                ),
+                None,
+            )
+
+        def resolve(staging_abs: Path) -> CapturedAt:
+            return resolve_captured_at(
+                profile.definition,
+                row["rel_path"],
+                row["mtime_ns"],
+                self._default_timezone,
+                exif_wall=read_datetime_original(staging_abs),
+            )
+
+        return None, resolve
+
     def _publish_one(
         self, ctx: JobContext, dirfd: int, row: sqlite3.Row, profile: ProfileRef
     ) -> None:
-        captured = resolve_captured_at(
-            profile.definition, row["rel_path"], row["mtime_ns"], self._default_timezone
-        )
+        # **EXIF はステージ済みのファイルから読む**（§9.3 手順 5）。ここでは
+        # まだ staging が無いので、値ではなく「読み方」を渡す。
+        captured, resolver = self._captured_for(row, profile)
         request = ArtifactRequest(
             kind="import",
             role="original",
@@ -168,6 +201,7 @@ class Importer:
             mtime_ns=row["mtime_ns"],
             source_entry_id=row["id"],
             merge_group_id=None,
+            resolve_captured=resolver,
         )
         self._conn.execute(
             "UPDATE source_entry SET state = 'importing', observed_at = ? WHERE id = ?",

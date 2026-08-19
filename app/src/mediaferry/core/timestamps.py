@@ -43,8 +43,15 @@ def resolve_captured_at(
     rel_path: str,
     mtime_ns: int,
     default_timezone: str | None,
+    exif_wall: datetime | None = None,
 ) -> CapturedAt:
-    wall, source = _wall_clock(defn, rel_path, mtime_ns)
+    """`exif_wall` は呼び出し側が読んだ EXIF の壁時計.
+
+    **この層はファイルを読まない。** 読むのは `adapters/exif.py` の仕事で、
+    読む対象（ステージ済みのファイル）はここからは見えない（§9.3 手順 5）。
+    値を注入する形にすることで、判断は純粋関数のままにできる。
+    """
+    wall, source = _wall_clock(defn, rel_path, mtime_ns, exif_wall)
     if defn.timestamp.timezone_policy == "none":
         return CapturedAt(at=wall.replace(tzinfo=UTC), source=source, tz=None, note=None)
 
@@ -55,7 +62,12 @@ def resolve_captured_at(
     return CapturedAt(at=at, source=source, tz=name, note=note)
 
 
-def _wall_clock(defn: ProfileDefinition, rel_path: str, mtime_ns: int) -> tuple[datetime, str]:
+def _wall_clock(
+    defn: ProfileDefinition,
+    rel_path: str,
+    mtime_ns: int,
+    exif_wall: datetime | None,
+) -> tuple[datetime, str]:
     rule = defn.timestamp
     if rule.source == "filename" and rule.pattern is not None and rule.format is not None:
         match = re.search(rule.pattern, PurePosixPath(rel_path).name)
@@ -64,7 +76,12 @@ def _wall_clock(defn: ProfileDefinition, rel_path: str, mtime_ns: int) -> tuple[
                 return datetime.strptime(match.group("ts"), rule.format), "filename"  # noqa: DTZ007
             except ValueError:
                 pass
-    # fallback は mtime のみを想定する（exif は Phase 5 の canon-eos で足す）。
+    # **プロファイルが exif を宣言しているときだけ使う。** 宣言していない
+    # プロファイルに値が渡っても無視する（宣言と実際の解釈をずらさない）。
+    if rule.source == "exif" and exif_wall is not None:
+        return exif_wall, "exif"
+    # fallback は mtime のみを想定する。EXIF を持たないファイル（Canon の MOV、
+    # タグの無い JPEG）はここへ落ちる。
     return datetime.fromtimestamp(mtime_ns / 1e9, tz=UTC).replace(tzinfo=None), "mtime"
 
 
