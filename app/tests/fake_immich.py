@@ -39,6 +39,22 @@ class FakeImmich:
         self.tags: dict[str, str] = {}  # name -> id
         self.tagged: dict[str, list[str]] = {}  # tag_id -> asset_ids
         self.datetimes: dict[str, str] = {}
+        # スタック。`stack_id -> {"primary": asset_id, "assets": [asset_id, ...]}`
+        self.stacks: dict[str, dict[str, Any]] = {}
+        # 応答を壊すつまみ（fail-closed の検査用）。
+        self.stack_response_without_assets: bool = False
+        self.drop_one_asset_from_the_stack_response: bool = False
+        self.primary_outside_the_stack: bool = False
+        self.stack_list_is_not_json: bool = False
+        self.stack_list_is_not_even_json: bool = False
+        self.stack_list_ignores_the_primary_filter: bool = False
+        self.duplicate_asset_in_the_stack_response: bool = False
+        # **スタック id だけに鍵を混ぜる。** 資産の集合は正しいままなので、
+        # 全単射の検査では落ちない（識別子の検査だけが守っている経路）。
+        self.key_as_stack_id: bool = False
+        self.empty_assets_in_the_stack_response: bool = False
+        self.stack_list_has_a_scalar: bool = False
+        self.malformed_stack_field: bool = False
         self.uploads: list[dict[str, Any]] = []
         self.requests: list[tuple[str, str]] = []
         self.fail_next: int = 0  # 次の N 回を 503 にする
@@ -112,6 +128,18 @@ class FakeImmich:
             body = {"id": asset_id, "isTrashed": asset_id in self.trashed}
             if asset_id in self.datetimes:
                 body["exifInfo"] = {"dateTimeOriginal": self.datetimes[asset_id]}
+            if self.malformed_stack_field:
+                # キーはあるが object ではない（旧版の「キーが無い」とは別物）。
+                body["stack"] = "stack-1"
+            else:
+                found = self._stack_of(asset_id)
+                if found is not None:
+                    stack_id, stack = found
+                    body["stack"] = {
+                        "id": stack_id,
+                        "primaryAssetId": stack["primary"],
+                        "assetCount": len(stack["assets"]),
+                    }
             return 200, body
         if method == "GET" and path == "/api/tags":
             if self.echo_key_as_ids:
@@ -132,6 +160,17 @@ class FakeImmich:
             ids = json.loads(body)["ids"]
             self.tagged.setdefault(tag_id, []).extend(ids)
             return 200, [{"id": asset_id, "success": True} for asset_id in ids]
+        if method == "POST" and path == "/api/stacks":
+            return self._create_stack(json.loads(body))
+        if method == "GET" and path.startswith("/api/stacks?"):
+            return self._stacks_by_primary(path)
+        if method == "PUT" and path.startswith("/api/stacks/"):
+            stack_id = path.split("/")[3]
+            stack = self.stacks.get(stack_id)
+            if stack is None:
+                return 404, {"message": "no such stack"}
+            stack["primary"] = json.loads(body)["primaryAssetId"]
+            return 200, self._stack_view(stack_id)
         if method == "PUT" and path.startswith("/api/assets/"):
             asset_id = path.split("/")[3]
             self.datetimes[asset_id] = json.loads(body)["dateTimeOriginal"]
@@ -220,6 +259,68 @@ class FakeImmich:
         self.assets[checksum] = asset_id
         return 201, {"id": asset_id, "status": "created"}
 
+    def _stack_of(self, asset_id: str):  # noqa: ANN202
+        for stack_id, stack in self.stacks.items():
+            if asset_id in stack["assets"]:
+                return stack_id, stack
+        return None
+
+    def _stack_view(self, stack_id: str):  # noqa: ANN202
+        stack = self.stacks[stack_id]
+        assets = list(stack["assets"])
+        if self.drop_one_asset_from_the_stack_response:
+            assets = assets[:-1]
+        if self.duplicate_asset_in_the_stack_response:
+            # **要求と件数が違うのに集合は同じ**（[A, B] を送って [A, A, B] が返る）。
+            assets = [assets[0], *assets]
+        if self.empty_assets_in_the_stack_response:
+            assets = []
+        primary = API_KEY if self.echo_key_as_ids else stack["primary"]
+        if self.primary_outside_the_stack:
+            primary = "someone-else"
+        body = {
+            "id": API_KEY if (self.echo_key_as_ids or self.key_as_stack_id) else stack_id,
+            "primaryAssetId": primary,
+            "assets": [{"id": API_KEY if self.echo_key_as_ids else a} for a in assets],
+        }
+        if self.stack_response_without_assets:
+            del body["assets"]
+        return body
+
+    def _create_stack(self, payload):  # noqa: ANN001, ANN202
+        """**実物の地雷を再現する。**
+
+        渡した資産のどれかが既存スタックの primary なら、その既存スタックを
+        新しいスタックへ畳み込む（Immich v3.1.0 の仕様）。
+        """
+        ids = list(payload["assetIds"])
+        absorbed = [stack_id for stack_id, stack in self.stacks.items() if stack["primary"] in ids]
+        for stack_id in absorbed:
+            for asset_id in self.stacks.pop(stack_id)["assets"]:
+                if asset_id not in ids:
+                    ids.append(asset_id)
+        stack_id = f"stack-{len(self.stacks) + 1}"
+        self.stacks[stack_id] = {"primary": ids[0], "assets": ids}
+        return 201, self._stack_view(stack_id)
+
+    def _stacks_by_primary(self, path: str):  # noqa: ANN202
+        if self.stack_list_is_not_even_json:
+            return 200, b"<html>proxy body</html>"
+        if self.stack_list_is_not_json:
+            return 200, "これは JSON の配列ではない"
+        primary = path.split("primaryAssetId=")[1]
+        if self.stack_list_has_a_scalar:
+            return 200, ["scalar"]
+        if self.stack_list_ignores_the_primary_filter:
+            # **絞り込みを無視して全部返す相手。** こちらが primary の一致を
+            # 確かめていなければ、無関係なスタックを掴む。
+            return 200, [self._stack_view(stack_id) for stack_id in self.stacks]
+        return 200, [
+            self._stack_view(stack_id)
+            for stack_id, stack in self.stacks.items()
+            if stack["primary"] == primary
+        ]
+
 
 def _handler_for(fake: FakeImmich):  # noqa: ANN202
     class Handler(BaseHTTPRequestHandler):
@@ -239,7 +340,9 @@ def _handler_for(fake: FakeImmich):  # noqa: ANN202
                 self.send_header("content-length", "0")
                 self.end_headers()
                 return
-            raw = json.dumps(payload).encode()
+            # **本物の非 JSON を返せるようにする。** `json.dumps` を通すと
+            # 「JSON の文字列」になってしまい、`.json()` が成功する。
+            raw = payload if isinstance(payload, bytes) else json.dumps(payload).encode()
             self.send_response(status)
             self.send_header("content-type", "application/json")
             self.send_header("content-length", str(len(raw)))
