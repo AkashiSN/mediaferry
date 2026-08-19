@@ -9,11 +9,12 @@ import json
 from dataclasses import replace
 from typing import Any
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Body, Depends, Query
 
+from ..core.merge.digest import input_digest
 from ..core.merge.output import MergeOutputUndefined, merged_rel_path
 from ..db.jobs import JobStore
-from ..db.merges import GroupNotClaimable, MergeRepository
+from ..db.merges import GroupNotClaimable, GroupNotEditable, MergeRepository
 from ..db.profiles import ProfileRegistry, UnknownProfile
 from ..db.selection import DEFAULT_LIMIT, SelectionService
 from ..jobs.detect_groups import GroupDetector
@@ -123,21 +124,86 @@ def start_merge(group_id: str, conn=Depends(get_conn)) -> dict[str, str]:  # noq
 
 
 @router.patch("/merge-groups/{group_id}")
-def patch_group(group_id: str, action: str, conn=Depends(get_conn)) -> dict[str, str]:  # noqa: ANN001, B008
-    """公開後にできる操作は採用だけ.
+def patch_group(  # noqa: ANN201
+    group_id: str,
+    action: str,
+    body: dict[str, Any] = Body(default={}),  # noqa: B008
+    conn=Depends(get_conn),  # noqa: ANN001, B008
+):
+    """採用・破棄・構成変更（§13）.
 
-    破棄と再結合は公開済みの `media_file` を取り残すので、supersede が入る
-    Phase 4 で足す。
+    **構成変更は「新しいグループを作って旧を supersede」**。公開済みの
+    `media_file` を取り残すので、消さずに向け直す（§3）。
     """
     repo = MergeRepository(conn)
     _found(repo, group_id)
-    if action != ADOPT:
-        raise ApiError(400, ErrorCode.UNKNOWN_ACTION, "知らない操作", {"action": action})
+    if action == ADOPT:
+        try:
+            repo.adopt(group_id)
+        except GroupNotClaimable as exc:
+            raise ApiError(409, ErrorCode.CONFLICT, str(exc)) from exc
+        return {"status": "ok"}
+    if action == "discard":
+        _edited(repo.discard, group_id)
+        return {"status": "ok"}
+    if action == "regroup":
+        media_ids = body.get("media_ids")
+        if not isinstance(media_ids, list) or not media_ids:
+            raise ApiError(400, ErrorCode.MISSING_FIELD, "media_ids が要る")
+        digest = _digest_of(conn, media_ids)
+        new_id = _edited(repo.supersede, group_id, media_ids, digest)
+        return {"status": "ok", "group_id": new_id}
+    raise ApiError(400, ErrorCode.UNKNOWN_ACTION, "知らない操作", {"action": action})
+
+
+@router.post("/merge-groups")
+def create_group(
+    body: dict[str, Any] = Body(default={}),  # noqa: B008
+    conn=Depends(get_conn),  # noqa: ANN001, B008
+) -> dict[str, str]:
+    """手動でグループを作る（検出が拾えなかった並びを人が組む）."""
+    media_ids = body.get("media_ids")
+    if not isinstance(media_ids, list) or len(media_ids) < 2:
+        raise ApiError(400, ErrorCode.MISSING_FIELD, "media_ids は 2 件以上が要る")
+    repo = MergeRepository(conn)
     try:
-        repo.adopt(group_id)
-    except GroupNotClaimable as exc:
+        group_id = repo.create_manual(media_ids, _digest_of(conn, media_ids))
+    except GroupNotEditable as exc:
         raise ApiError(409, ErrorCode.CONFLICT, str(exc)) from exc
-    return {"status": "ok"}
+    return {"status": "ok", "group_id": group_id}
+
+
+def _edited(operation, *args: object):  # noqa: ANN001, ANN202
+    """編集の共通の断り方（**送信中は動かさない**）."""
+    try:
+        return operation(*args)
+    except GroupNotEditable as exc:
+        raise ApiError(409, ErrorCode.CONFLICT, str(exc)) from exc
+
+
+def _digest_of(conn, media_ids: list[str]) -> str:  # noqa: ANN001
+    """構成から入力の指紋を作る（§8 の `input_digest` と同じ定義）.
+
+    **手で組んだグループも同じ digest の定義を使う。** 別の作り方にすると、
+    同じ構成でも検出と手動で違う指紋になり、二重に候補が出る。
+    """
+    placeholders = ",".join("?" * len(media_ids))
+    rows = conn.execute(
+        "SELECT id, sha1, profile_id, profile_revision_id FROM media_file"  # noqa: S608
+        f" WHERE id IN ({placeholders})",
+        media_ids,
+    ).fetchall()
+    found = {row["id"]: row for row in rows}
+    missing = [media_id for media_id in media_ids if media_id not in found]
+    if missing:
+        raise ApiError(404, ErrorCode.NOT_FOUND, "そのメディアは無い", {"media_ids": missing})
+    first = found[media_ids[0]]
+    profile = ProfileRegistry(conn).by_id(first["profile_id"])
+    return input_digest(
+        [(media_id, found[media_id]["sha1"]) for media_id in media_ids],
+        profile.definition.merge,
+        first["profile_revision_id"],
+    )
 
 
 @router.get("/uploads/selectable")

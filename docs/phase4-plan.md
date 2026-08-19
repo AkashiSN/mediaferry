@@ -391,7 +391,7 @@ Rechecker も観測していないので、`routes_uploads.py` を直すだけ�
 
 ---
 
-### Task 10: 結合グループの手動編集と supersede（Phase 3 の先送り）
+### Task 10: 結合グループの手動編集と supersede（Phase 3 の先送り）—— **実装済み**
 
 **Files:** Modify `db/merges.py`, `api/routes_merges.py` / Test `test_merge_supersede.py`
 
@@ -413,12 +413,17 @@ Rechecker も観測していないので、`routes_uploads.py` を直すだけ�
   2 行を許して UNIQUE 違反になる）
 - 公開済みの派生物は消さない（§3 の「孤立ファイルは報告するだけ」と同じ方針）
 
-- [ ] Step 1〜4（変異に「3 つの UPDATE を別トランザクションにする」と「禁止集合から
-      進行中を外す」を必ず含める）
+**実装で分かった順序の制約:** 1 つのファイルが active な member でいられるのは 1 グループ
+だけ（部分索引 `merge_member_one_active_group`）。旧グループの member を外すのは
+`superseded_by_id` を立てた trigger なので、**向け直してから新しい member を入れる**。
+逆にすると UNIQUE 違反になる。
+
+`_invalidate_pending` は `COALESCE` を使わない —— WHERE の `invalidated_at IS NULL` が
+同じことを保証しており、二重にすると「どちらが効いているか」が読めなくなる。変異 8 件を検出。
 
 ---
 
-### Task 11: 転送先の PATCH
+### Task 11: 転送先の PATCH —— **Phase 3 で実装済み**
 
 **Files:** Modify `api/routes_destinations.py` / Test `test_api_destinations.py`
 
@@ -426,7 +431,9 @@ Rechecker も観測していないので、`routes_uploads.py` を直すだけ�
 - `base_url` / `api_key` の変更は新リビジョンを作る（§12.3。既存の POST と同じ経路）
 - 応答に API キーはマスク値も含めない（§11）
 
-- [ ] Step 1〜4
+`PATCH /destinations/{id}` は Phase 3 で入っている（改名・有効無効は新リビジョンを作らず、
+`base_url` / `api_key` の変更は作る。応答に API キーは出ない）。**この Task は確認だけ**で
+足りた（`test_api_destinations.py` が上の 3 点を固定している）。
 
 ---
 

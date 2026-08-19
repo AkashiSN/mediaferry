@@ -450,7 +450,11 @@ export interface paths {
         /** List Groups */
         get: operations["list_groups_api_merge_groups_get"];
         put?: never;
-        post?: never;
+        /**
+         * Create Group
+         * @description 手動でグループを作る（検出が拾えなかった並びを人が組む）.
+         */
+        post: operations["create_group_api_merge_groups_post"];
         delete?: never;
         options?: never;
         head?: never;
@@ -473,10 +477,10 @@ export interface paths {
         head?: never;
         /**
          * Patch Group
-         * @description 公開後にできる操作は採用だけ.
+         * @description 採用・破棄・構成変更（§13）.
          *
-         *     破棄と再結合は公開済みの `media_file` を取り残すので、supersede が入る
-         *     Phase 4 で足す。
+         *     **構成変更は「新しいグループを作って旧を supersede」**。公開済みの
+         *     `media_file` を取り残すので、消さずに向け直す（§3）。
          */
         patch: operations["patch_group_api_merge_groups__group_id__patch"];
         trace?: never;
@@ -1495,6 +1499,43 @@ export interface operations {
             };
         };
     };
+    create_group_api_merge_groups_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: {
+            content: {
+                "application/json": {
+                    [key: string]: unknown;
+                };
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        [key: string]: string;
+                    };
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
     get_group_api_merge_groups__group_id__get: {
         parameters: {
             query?: never;
@@ -1539,7 +1580,13 @@ export interface operations {
             };
             cookie?: never;
         };
-        requestBody?: never;
+        requestBody?: {
+            content: {
+                "application/json": {
+                    [key: string]: unknown;
+                };
+            };
+        };
         responses: {
             /** @description Successful Response */
             200: {
@@ -1547,9 +1594,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": {
-                        [key: string]: string;
-                    };
+                    "application/json": unknown;
                 };
             };
             /** @description Validation Error */

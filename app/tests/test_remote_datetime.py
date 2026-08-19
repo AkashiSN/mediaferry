@@ -107,6 +107,7 @@ def secret_env(monkeypatch):
 
     monkeypatch.setenv("MEDIAFERRY_SECRET_KEY", base64.b64encode(os.urandom(32)).decode())
 
+
 def _awaiting(db, *, proposed_source="2026-08-17T14:30:00+09:00", current=None):
     from mediaferry.db.profiles import ProfileRegistry
 

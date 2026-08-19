@@ -101,11 +101,14 @@ def test_adopting_a_group_without_an_output_is_a_409(client, api_db):
     assert client.patch(f"/api/merge-groups/{group_id}?action=adopt").status_code == 409
 
 
-def test_discarding_is_not_offered_in_this_phase(client, api_db):
-    """破棄は公開済みの media_file を取り残す. supersede が入る Phase 4 で足す."""
+def test_a_group_can_be_discarded(client, api_db):
+    """破棄は**公開済みの media_file を消さない**（選択肢から外れるだけ。§3）."""
     profile = ProfileRegistry(api_db).current("dji-osmo")
     group_id = a_merge_group(api_db, (profile.profile_id, profile.revision_id), "digest-1")
-    assert client.patch(f"/api/merge-groups/{group_id}?action=discard").status_code == 400
+
+    assert client.patch(f"/api/merge-groups/{group_id}?action=discard").status_code == 200
+
+    assert client.get(f"/api/merge-groups/{group_id}").json()["status"] == "skipped"
 
 
 def test_an_unknown_action_is_a_400(client, api_db):
@@ -191,3 +194,67 @@ def test_profiles_that_do_not_merge_are_not_detected(client, api_db):
 
     jobs = client.post("/api/merge-groups/detect").json()["jobs"]
     assert [entry["profile_slug"] for entry in jobs] == ["dji-osmo"]
+
+
+def test_a_group_can_be_regrouped_by_hand(client, api_db):
+    """**再結合は「新しいグループを作って旧を supersede」**（§3）."""
+    from .test_schema_artifacts import a_media_file
+
+    profile = ProfileRegistry(api_db).current("dji-osmo")
+    profile_ref = (profile.profile_id, profile.revision_id)
+    parts = [
+        a_media_file(api_db, profile_ref, rel_path=f"library/regroup/PART_{index}.MP4")
+        for index in range(3)
+    ]
+    group_id = a_merge_group(api_db, profile_ref, "digest-regroup")
+    for position, media in enumerate(parts):
+        api_db.execute(
+            "INSERT INTO merge_member (merge_group_id, media_file_id, position, active)"
+            " VALUES (?, ?, ?, 1)",
+            (group_id, media, position),
+        )
+
+    response = client.patch(
+        f"/api/merge-groups/{group_id}?action=regroup", json={"media_ids": parts[:2]}
+    )
+
+    assert response.status_code == 200
+    new_id = response.json()["group_id"]
+    assert client.get(f"/api/merge-groups/{group_id}").json()["superseded_by_id"] == new_id
+    assert len(client.get(f"/api/merge-groups/{new_id}").json()["members"]) == 2
+
+
+def test_a_group_can_be_created_by_hand(client, api_db):
+    """検出が拾えなかった並びを人が組む."""
+    from .test_schema_artifacts import a_media_file
+
+    profile = ProfileRegistry(api_db).current("dji-osmo")
+    profile_ref = (profile.profile_id, profile.revision_id)
+    parts = [
+        a_media_file(api_db, profile_ref, rel_path=f"library/manual/PART_{index}.MP4")
+        for index in range(2)
+    ]
+
+    response = client.post("/api/merge-groups", json={"media_ids": parts})
+
+    assert response.status_code == 200
+    body = client.get(f"/api/merge-groups/{response.json()['group_id']}").json()
+    assert body["detected_by"] == "manual"
+    assert len(body["members"]) == 2
+
+
+def test_a_media_already_in_a_group_cannot_be_grouped_again(client, api_db):
+    """1 つのファイルが active な member でいられるのは 1 グループだけ."""
+    from .test_schema_artifacts import a_media_file
+
+    profile = ProfileRegistry(api_db).current("dji-osmo")
+    profile_ref = (profile.profile_id, profile.revision_id)
+    parts = [
+        a_media_file(api_db, profile_ref, rel_path=f"library/twice/PART_{index}.MP4")
+        for index in range(2)
+    ]
+    assert client.post("/api/merge-groups", json={"media_ids": parts}).status_code == 200
+
+    again = client.post("/api/merge-groups", json={"media_ids": parts})
+
+    assert again.status_code == 409
