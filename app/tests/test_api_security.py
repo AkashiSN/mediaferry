@@ -226,3 +226,24 @@ def test_an_unauthenticated_exposure_is_reported(data_root, broker, monkeypatch)
     with TestClient(app, base_url="http://127.0.0.1:8080") as client:
         warnings = client.get("/api/settings").json()["warnings"]
     assert [warning["code"] for warning in warnings] == ["unauthenticated_exposure"]
+
+
+def test_the_session_cookie_outlives_the_browser_window(secured):
+    """**閉じて開いてもログインしたまま。**
+
+    DB のセッションは 14 日もつのに Cookie がブラウザセッションだと、窓を閉じた
+    だけでログアウトする（保存している意味が無い）。
+    """
+    from mediaferry.db.sessions import SESSION_TTL_SECONDS
+
+    token = secured.get("/api/auth/session").cookies["XSRF-TOKEN"]
+    login = secured.post(
+        "/api/auth/login", json={"password": "correct horse"}, headers={"X-CSRF-Token": token}
+    )
+
+    [session] = [
+        value
+        for value in login.headers.get_list("set-cookie")
+        if value.startswith("mediaferry_session=")
+    ]
+    assert f"max-age={SESSION_TTL_SECONDS}" in session.lower()

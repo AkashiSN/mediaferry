@@ -193,7 +193,7 @@ def test_the_oldest_frames_are_dropped_when_the_cache_is_full(cache, clip, data_
     # 1 枚だけ残る大きさにする。
     cache.max_bytes = max(first.stat().st_size, second.stat().st_size)
 
-    cache._evict()  # noqa: SLF001 - 掃除そのものを試す
+    cache.evict()
 
     assert not first.exists()
     assert second.exists()
@@ -252,3 +252,40 @@ def test_a_media_whose_file_is_gone_is_reported(client, db, data_root, clip):
 
     assert response.status_code == 422
     assert response.json()["error"]["code"] == "thumbnail_failed"
+
+
+def test_the_cache_is_shared_across_requests(client, db, data_root, clip, monkeypatch):
+    """**要求ごとに作り直さない。**
+
+    要求ごとに `ThumbnailCache` を作ると、キーごとのロックが共有されず
+    single-flight が効かない。並行する要求のぶんだけ ffmpeg が起動して、
+    認証を切った LAN では誰でも CPU と I/O を使い切らせられる。
+    """
+    import threading
+
+    media_id = _a_media(db, data_root, clip)
+    calls: list[int] = []
+    real = ThumbnailCache._extract
+
+    def counted(self, source, at, destination):  # noqa: ANN001, ANN202
+        calls.append(at)
+        return real(self, source, at, destination)
+
+    monkeypatch.setattr(ThumbnailCache, "_extract", counted)
+
+    results: list[int] = []
+    threads = [
+        threading.Thread(
+            target=lambda: results.append(
+                client.get(f"/api/media/{media_id}/thumbnail").status_code
+            )
+        )
+        for _ in range(4)
+    ]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=60)
+
+    assert results == [200, 200, 200, 200]
+    assert len(calls) == 1

@@ -211,6 +211,10 @@ class MergeRepository:
         """
         with immediate(self._conn):
             old = self._assert_editable(group_id)
+            # **無効化は向け直す前に行う。** `superseded_by_id` を立てた trigger が
+            # 旧 member を `active = 0` にするので、後だと「active な member」を
+            # 条件にした無効化が 1 件も当たらない。
+            self._invalidate_pending(group_id, "結合グループを組み直した")
             new_id_value = new_id()
             now = now_iso()
             self._conn.execute(
@@ -237,7 +241,6 @@ class MergeRepository:
                     " VALUES (?, ?, ?, 1)",
                     (new_id_value, media_id, position),
                 )
-            self._invalidate_pending(group_id, "結合グループを組み直した")
         return new_id_value
 
     def _point_at(self, old_id: str, new_id_value: str) -> None:

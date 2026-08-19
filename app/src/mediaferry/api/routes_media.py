@@ -7,7 +7,7 @@ from typing import Any
 from fastapi import APIRouter, Depends, Request, Response
 from fastapi.responses import FileResponse
 
-from ..adapters.thumbnails import ThumbnailCache, ThumbnailFailed, quantise
+from ..adapters.thumbnails import ThumbnailFailed, quantise
 from ..core.listing import DEFAULT_PAGE_SIZE, escape_like, page_bounds
 from .deps import conn as get_conn
 from .deps import state as get_state
@@ -138,9 +138,10 @@ def get_thumbnail(  # noqa: ANN201
     etag = f'"{row["sha1"]}-{position}"'
     if request.headers.get("if-none-match") == etag:
         return Response(status_code=304, headers={"ETag": etag})
-    cache = ThumbnailCache(state.settings.data_root)
     try:
-        path = cache.get_or_create(media_id, state.settings.data_root / row["rel_path"], position)
+        path = state.thumbnails.get_or_create(
+            media_id, state.settings.data_root / row["rel_path"], position
+        )
     except ThumbnailFailed as exc:
         # 元のファイルが消えている・壊れている。**理由の分かる形で返す。**
         raise ApiError(

@@ -12,7 +12,7 @@ from typing import Any
 from fastapi import APIRouter, Depends, Request, Response
 
 from ..core.auth import verify_password
-from ..db.sessions import SessionStore
+from ..db.sessions import SESSION_TTL_SECONDS, SessionStore
 from .deps import conn
 from .errors import ApiError, ErrorCode
 from .security import (
@@ -76,6 +76,9 @@ def login(
         samesite="lax",
         path="/",
         secure=request.url.scheme == "https",
+        # **窓を閉じても消さない。** DB のセッションは 14 日もつので、Cookie を
+        # ブラウザセッションにすると保存している意味が無い（閉じるとログアウト）。
+        max_age=SESSION_TTL_SECONDS,
     )
     issue_csrf(request, response)
     return {"status": "ok", "expires_at": expires_at}

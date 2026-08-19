@@ -33,9 +33,13 @@ type Groups = { groups: Group[] };
 
 export function MergesScreen() {
   const groups = useQuery<Groups>("/merge-groups");
+  const media = useQuery<{ media: { id: string; rel_path: string }[] }>("/media?page_size=200");
+  // 手で組むときの選択（**検出が拾えなかった並びを人が組む**）。
+  const [picked, setPicked] = useState<Set<string>>(new Set());
+  const [regrouping, setRegrouping] = useState<Group | null>(null);
   const [error, setError] = useState<unknown>(null);
-  const { events } = useEvents();
-  useReloadOnEvents(events, groups.reload);
+  const { received } = useEvents();
+  useReloadOnEvents(received, groups.reload);
   const [confirmation, setConfirmation] = useState<{ value: Confirmation; run: () => Promise<void> } | null>(null);
   const [busy, setBusy] = useState(false);
 
@@ -60,6 +64,44 @@ export function MergesScreen() {
       <button type="button" disabled={busy} onClick={() => void act("/merge-groups/detect")}>
         候補を検出する
       </button>
+
+      <details>
+        <summary>手でグループを作る</summary>
+        <p>検出が拾えなかった並びを、2 件以上選んで組みます。</p>
+        <ul className="picker">
+          {(media.data?.media ?? []).map((row) => (
+            <li key={row.id}>
+              <label>
+                <input
+                  type="checkbox"
+                  checked={picked.has(row.id)}
+                  onChange={() =>
+                    setPicked((current) => {
+                      const next = new Set(current);
+                      if (next.has(row.id)) {
+                        next.delete(row.id);
+                      } else {
+                        next.add(row.id);
+                      }
+                      return next;
+                    })
+                  }
+                />
+                {row.rel_path}
+              </label>
+            </li>
+          ))}
+        </ul>
+        <button
+          type="button"
+          disabled={busy || picked.size < 2}
+          onClick={() =>
+            void act("/merge-groups", { media_ids: [...picked] }).then(() => setPicked(new Set()))
+          }
+        >
+          選んだ {picked.size} 件でグループを作る
+        </button>
+      </details>
       <ul>
         {(groups.data?.groups ?? []).map((group) => (
           <li key={group.id}>
@@ -126,6 +168,11 @@ export function MergesScreen() {
                 </button>
               )}
               {group.superseded_by_id === null && group.status !== "skipped" && (
+                <button type="button" disabled={busy} onClick={() => setRegrouping(group)}>
+                  構成を変える
+                </button>
+              )}
+              {group.superseded_by_id === null && group.status !== "skipped" && (
                 <button
                   type="button"
                   disabled={busy}
@@ -147,6 +194,53 @@ export function MergesScreen() {
           </li>
         ))}
       </ul>
+      {regrouping && (
+        <div className="dialog-backdrop" role="presentation">
+          <div className="dialog" role="dialog" aria-modal="true" aria-label="構成を変える">
+            <h2>構成を変える</h2>
+            <p>
+              残すパートを選びます。**新しいグループを作り、いまのグループはそちらへ
+              向け直します**（公開済みのファイルは消えません）。
+            </p>
+            <ul>
+              {regrouping.members.map((member) => (
+                <li key={member.media_file_id}>
+                  <label>
+                    <input
+                      type="checkbox"
+                      defaultChecked
+                      value={member.media_file_id}
+                      name="member"
+                    />
+                    {member.rel_path}
+                  </label>
+                </li>
+              ))}
+            </ul>
+            <div className="dialog-actions">
+              <button type="button" onClick={() => setRegrouping(null)} disabled={busy}>
+                やめる
+              </button>
+              <button
+                type="button"
+                disabled={busy}
+                onClick={() => {
+                  const checked = [
+                    ...document.querySelectorAll<HTMLInputElement>(
+                      'input[name="member"]:checked',
+                    ),
+                  ].map((input) => input.value);
+                  const target = regrouping;
+                  setRegrouping(null);
+                  void act(`/merge-groups/${target.id}?action=regroup`, { media_ids: checked });
+                }}
+              >
+                この構成にする
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
       {confirmation && (
         <ConfirmDialog
           confirmation={confirmation.value}

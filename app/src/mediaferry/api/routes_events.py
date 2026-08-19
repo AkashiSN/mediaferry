@@ -87,7 +87,10 @@ class _Body:
     async def __anext__(self) -> str:
         try:
             return await self._stream.__anext__()
-        except StopAsyncIteration:
+        except BaseException:
+            # **終わり方を選ばない。** 相手が切れると Starlette は `aclose()` を
+            # 呼ばずにタスクを取り消すので、`StopAsyncIteration` だけを見ていると
+            # 切断のたびに資源が残る（8 回で上限に張り付く）。
             self._reservation.release()
             raise
 

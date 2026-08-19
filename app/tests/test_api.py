@@ -213,3 +213,29 @@ def _await_job(client, job_id, timeout=20.0):
             return
         time.sleep(0.05)
     raise AssertionError(f"ジョブ {job_id} が終わらない")
+
+
+def test_a_profile_can_be_tried_against_a_volume(client):
+    """**判定を試せる**（§11 の `POST /profiles/{id}/test`）.
+
+    プロファイルを直す前に「このカードにどう当たるか」を見られないと、
+    編集の結果を確かめる方法が無い（編集そのものは Phase 5）。
+    """
+    volume_id = client.get("/api/devices").json()["volumes"][0]["volume_instance_id"]
+
+    body = client.post(f"/api/profiles/dji-osmo/test?volume_instance_id={volume_id}").json()
+
+    assert body["matched"] is True
+    assert body["profile"] == "dji-osmo"
+    assert body["reason"]
+
+
+def test_trying_an_unknown_profile_is_a_404(client):
+    volume_id = client.get("/api/devices").json()["volumes"][0]["volume_instance_id"]
+    response = client.post(f"/api/profiles/nope/test?volume_instance_id={volume_id}")
+    assert response.status_code == 404
+
+
+def test_trying_against_an_unknown_volume_is_a_404(client):
+    response = client.post("/api/profiles/dji-osmo/test?volume_instance_id=nope")
+    assert response.status_code == 404

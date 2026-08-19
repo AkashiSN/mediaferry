@@ -56,10 +56,17 @@ def _free_port() -> int:
 
 
 def _a_card(root: Path) -> Path:
-    """取り込みの対象になる最小のカード（実 ffmpeg は使わない）."""
+    """取り込みの対象になるカード.
+
+    **2 本入れる。** 1 本だと結合の候補が出ず、画面から結合を試せない
+    （§9.7 の検出は連続した分割録画を探す）。
+    """
     card = root / "card"
     (card / "DCIM" / "DJI_001").mkdir(parents=True)
-    (card / "DCIM" / "DJI_001" / "DJI_20260817143000_0001_D.MP4").write_bytes(b"a" * 100)
+    for index, name in enumerate(
+        ("DJI_20260817143000_0001_D.MP4", "DJI_20260817143100_0002_D.MP4")
+    ):
+        (card / "DCIM" / "DJI_001" / name).write_bytes(bytes([65 + index]) * 100)
     return card
 
 

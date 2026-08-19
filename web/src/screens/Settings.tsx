@@ -17,10 +17,13 @@ type Setting = {
 
 type Settings = { settings: Setting[]; warnings: { code: string; message: string }[] };
 type Profiles = { profiles: { slug: string; name: string; revision: number }[] };
+type Volumes = { volumes: { volume_instance_id: string; fs_label: string | null }[] };
 
 export function SettingsScreen() {
   const settings = useQuery<Settings>("/settings");
   const profiles = useQuery<Profiles>("/profiles");
+  const volumes = useQuery<Volumes>("/devices");
+  const [tried, setTried] = useState<string | null>(null);
   const [error, setError] = useState<unknown>(null);
   const [busy, setBusy] = useState(false);
 
@@ -78,11 +81,34 @@ export function SettingsScreen() {
       </table>
 
       <h2>デバイスプロファイル</h2>
-      <p>編集は次のフェーズで入ります。ここでは判定に使う定義を確認できます。</p>
+      <p>編集は次のフェーズで入ります。ここでは定義の確認と、判定の試行ができます。</p>
+      {tried && <p role="status">{tried}</p>}
       <ul>
         {(profiles.data?.profiles ?? []).map((profile) => (
           <li key={profile.slug}>
             {profile.name}（{profile.slug}） 版 {profile.revision}
+            {(volumes.data?.volumes ?? []).map((volume) => (
+              <button
+                key={volume.volume_instance_id}
+                type="button"
+                disabled={busy}
+                onClick={() =>
+                  void request<{ matched: boolean; reason: string | null }>(
+                    `/profiles/${profile.slug}/test?volume_instance_id=${volume.volume_instance_id}`,
+                    { method: "POST" },
+                  )
+                    .then((result) =>
+                      setTried(
+                        `${profile.slug} × ${volume.fs_label ?? volume.volume_instance_id}: ` +
+                          (result.matched ? "一致" : `一致しない（${result.reason ?? "理由不明"}）`),
+                      ),
+                    )
+                    .catch(setError)
+                }
+              >
+                {volume.fs_label ?? volume.volume_instance_id} で試す
+              </button>
+            ))}
           </li>
         ))}
       </ul>

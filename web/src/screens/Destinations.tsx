@@ -117,6 +117,37 @@ export function DestinationsScreen() {
               <button
                 type="button"
                 disabled={busy}
+                onClick={() => {
+                  const name = window.prompt("新しい名前", destination.name);
+                  if (name !== null && name !== destination.name) {
+                    void request(`/destinations/${destination.id}`, {
+                      method: "PATCH",
+                      body: { name },
+                    })
+                      .then(() => destinations.reload())
+                      .catch(setError);
+                  }
+                }}
+              >
+                名前を変える
+              </button>
+              <button
+                type="button"
+                disabled={busy}
+                onClick={() =>
+                  void request(`/destinations/${destination.id}`, {
+                    method: "PATCH",
+                    body: { enabled: !destination.enabled },
+                  })
+                    .then(() => destinations.reload())
+                    .catch(setError)
+                }
+              >
+                {destination.enabled ? "無効にする" : "有効にする"}
+              </button>
+              <button
+                type="button"
+                disabled={busy}
                 onClick={() =>
                   void request(`/destinations/${destination.id}/verify`, { method: "POST" })
                     .then(() => destinations.reload())

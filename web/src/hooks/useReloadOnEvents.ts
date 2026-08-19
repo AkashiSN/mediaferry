@@ -6,19 +6,29 @@
 
 import { useEffect, useRef } from "react";
 
-import type { JobEvent } from "./useEvents";
-
 export const SETTLE_MS = 400;
 
-export function useReloadOnEvents(events: JobEvent[], reload: () => void): void {
-  const seen = useRef(0);
+/**
+ * `received`（受け取った総数）が増えたら、少し待ってから 1 回だけ取り直す。
+ *
+ * **配列の長さで判定しない。** 保持する件数には上限があるので、上限に達した後は
+ * 中身が変わっても長さは同じ —— 長い取り込みの途中から取り直しが止まる。
+ */
+export function useReloadOnEvents(received: number, reload: () => void): void {
+  // **最初の描画では取り直さない**（画面は既に読み込んでいる）。何件受け取った
+  // 状態で開いたかを基準にする。
+  const seen = useRef<number | null>(null);
   const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   useEffect(() => {
-    if (events.length === seen.current) {
+    if (seen.current === null) {
+      seen.current = received;
       return;
     }
-    seen.current = events.length;
+    if (received === seen.current) {
+      return;
+    }
+    seen.current = received;
     if (timer.current !== null) {
       clearTimeout(timer.current);
     }
@@ -32,5 +42,5 @@ export function useReloadOnEvents(events: JobEvent[], reload: () => void): void 
         timer.current = null;
       }
     };
-  }, [events, reload]);
+  }, [received, reload]);
 }

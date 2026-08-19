@@ -10,7 +10,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { ApprovalsScreen } from "./Approvals";
 import { DestinationsScreen } from "./Destinations";
-import { LibraryScreen } from "./Library";
+import { LibraryScreen, summarise } from "./Library";
 import { MergesScreen } from "./Merges";
 
 type Handler = (path: string, init?: RequestInit) => unknown;
@@ -68,7 +68,22 @@ describe("ライブラリの送信", () => {
   });
 
   it("送信は 2 段階（組を作ってから宛先ごとに開始する）", async () => {
-    stubApi({ "/media": media, "/destinations": destinations, "/uploads": { pairs: [] } });
+    stubApi({
+      "/media": media,
+      "/destinations": destinations,
+      // **組ごとの結果を返す。** 受け付けられた宛先だけ送信を始める。
+      "/uploads": {
+        pairs: [
+          {
+            media_file_id: "m1",
+            destination_id: "d1",
+            result: "created",
+            upload_record_id: "u1",
+            reason: null,
+          },
+        ],
+      },
+    });
     render(
       <MemoryRouter>
         <LibraryScreen />
@@ -176,5 +191,78 @@ describe("日時の承認", () => {
     render(<ApprovalsScreen />);
 
     expect(await screen.findByText("（不明）")).toBeInTheDocument();
+  });
+});
+
+describe("送信の結果を隠さない", () => {
+  it("断られた組と、開始に失敗した宛先を文に出す", () => {
+    expect(summarise(4, [{ reason: "結合中のグループの構成ファイル" }], ["backup"], 1)).toContain(
+      "送れない組が 1 件",
+    );
+    expect(summarise(4, [{ reason: "結合中のグループの構成ファイル" }], ["backup"], 1)).toContain(
+      "backup",
+    );
+  });
+
+  it("何も問題が無ければ、余計なことを言わない", () => {
+    const message = summarise(2, [], [], 2);
+    expect(message).toBe("2 組を作り、2 宛先で送信を始めました。");
+  });
+});
+
+describe("選んだものの合計", () => {
+  it("**絞り込みで隠れても、選択と合計は保つ**", async () => {
+    const first = {
+      media: [
+        { id: "m1", rel_path: "library/big.MP4", kind: "video", captured_at: "2026-08-17", size_bytes: 30 * 1024 ** 3 },
+      ],
+      total: 1,
+      page: 1,
+      page_size: 50,
+    };
+    const second = {
+      media: [
+        { id: "m2", rel_path: "library/small.MP4", kind: "video", captured_at: "2026-08-18", size_bytes: 1024 ** 2 },
+      ],
+      total: 1,
+      page: 1,
+      page_size: 50,
+    };
+    let page = first;
+    stubApi({ "/destinations": { destinations: [{ id: "d1", name: "home", enabled: true }] } });
+    vi.stubGlobal(
+      "fetch",
+      vi.fn((input: string) => {
+        const path = input.replace(/^\/api/, "");
+        if (path.startsWith("/media")) {
+          return Promise.resolve(new Response(JSON.stringify(page), { status: 200 }));
+        }
+        return Promise.resolve(
+          new Response(
+            JSON.stringify({ destinations: [{ id: "d1", name: "home", enabled: true }] }),
+            { status: 200 },
+          ),
+        );
+      }),
+    );
+
+    render(
+      <MemoryRouter>
+        <LibraryScreen />
+      </MemoryRouter>,
+    );
+
+    await userEvent.click(await screen.findByLabelText("library/big.MP4 を選ぶ"));
+    // 絞り込みを変えて、選んだ行を隠す（条件が変わらないと取り直さない）。
+    page = second;
+    await userEvent.type(screen.getByLabelText("名前"), "small");
+    await userEvent.click(screen.getByRole("button", { name: "絞り込む" }));
+    await userEvent.click(await screen.findByLabelText("library/small.MP4 を選ぶ"));
+    await userEvent.click(screen.getByRole("checkbox", { name: "home" }));
+    await userEvent.click(screen.getByRole("button", { name: /送信する/ }));
+
+    // 隠した 30 GiB を数え落とさない。
+    expect(await screen.findByText(/合計 30 GiB/)).toBeInTheDocument();
+    expect(screen.getByText("2 件")).toBeInTheDocument();
   });
 });

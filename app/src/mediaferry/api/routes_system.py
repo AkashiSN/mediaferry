@@ -143,6 +143,37 @@ def list_profiles(conn=Depends(get_conn)) -> dict[str, Any]:  # noqa: ANN001, B0
     }
 
 
+@router.post("/profiles/{profile_slug}/test")
+def try_profile(
+    profile_slug: str,
+    volume_instance_id: str,
+    state=Depends(get_state),  # noqa: ANN001, B008
+    conn=Depends(get_conn),  # noqa: ANN001, B008
+) -> dict[str, Any]:
+    """指定のボリュームに対する判定を試す（§11）.
+
+    **判定そのものはやり直さない。** いまの観測（`refresh` の結果）を読んで、
+    そのプロファイルが選ばれたかどうかと理由を返す。プロファイルを直す前後で
+    同じものを見られるようにするための窓であって、別の判定器ではない。
+    """
+    if profile_slug not in {ref.definition.slug for ref in ProfileRegistry(conn).active()}:
+        raise ApiError(404, ErrorCode.NOT_FOUND, "そのプロファイルは無い", {"slug": profile_slug})
+    views = [
+        view for view in state.volumes.refresh() if view.volume_instance_id == volume_instance_id
+    ]
+    if not views:
+        raise ApiError(404, ErrorCode.NOT_FOUND, "そのボリュームは無い")
+    view = views[0]
+    return {
+        "profile": profile_slug,
+        "volume_instance_id": view.volume_instance_id,
+        "matched": view.profile_slug == profile_slug,
+        "matched_profile": view.profile_slug,
+        "reason": view.reason,
+        "identity_confidence": view.identity_confidence,
+    }
+
+
 @router.get("/jobs")
 def list_jobs(conn=Depends(get_conn)) -> dict[str, Any]:  # noqa: ANN001, B008
     return {"jobs": [_job(row) for row in JobStore(conn).list_jobs()]}

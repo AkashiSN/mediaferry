@@ -269,3 +269,29 @@ def test_events_need_a_session_when_authentication_is_on(secured_app):
     """`EventSource` はヘッダを付けられないが Cookie は送る."""
     client, _ = secured_app
     assert client.get("/api/events").status_code == 401
+
+
+@pytest.mark.anyio
+async def test_the_reservation_is_returned_when_the_reader_is_cancelled(db, data_root, monkeypatch):
+    """**切断は取り消しとして来る。**
+
+    Starlette は本体の `aclose()` を呼ばずにタスクを取り消す。取り消しの経路で
+    返さないと、切断のたびに DB 接続と数えが残り、上限に当たったまま戻らなくなる
+    （8 回切れば `/events` が恒久的に 503）。
+    """
+    monkeypatch.setattr(routes_events, "POLL_SECONDS", 0.05)
+    monkeypatch.setattr(routes_events, "KEEP_ALIVE_SECONDS", 100.0)
+    reader = Database(data_root / "var" / "mediaferry.sqlite3").connect()
+    state = _State()
+    reservation = routes_events._Reservation(state, reader)  # noqa: SLF001
+    body = routes_events._Body(_stream(_Request(), reader), reservation)  # noqa: SLF001
+
+    task = asyncio.create_task(anext(body))
+    await asyncio.sleep(0.01)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert state.event_streams == 0
+    with pytest.raises(Exception, match="closed"):
+        reader.execute("SELECT 1")

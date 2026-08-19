@@ -76,7 +76,7 @@ class ThumbnailCache:
                 work.unlink(missing_ok=True)
                 self._drop_empty(target.parent)
                 raise ThumbnailFailed(str(exc)) from exc
-        self._evict()
+        self.evict()
         return target
 
     # ------------------------------------------------------------------
@@ -115,8 +115,8 @@ class ThumbnailCache:
         with contextlib.suppress(OSError):
             folder.rmdir()
 
-    def _evict(self) -> None:
-        """容量を超えたら古い順に消す."""
+    def evict(self) -> None:
+        """容量を超えたら古い順に消す（起動時と生成のたびに呼ぶ）."""
         files = sorted(self._root.rglob("*.jpg"), key=lambda path: path.stat().st_mtime)
         total = sum(path.stat().st_size for path in files)
         while files and total > self.max_bytes:

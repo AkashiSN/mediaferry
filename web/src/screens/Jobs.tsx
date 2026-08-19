@@ -14,9 +14,9 @@ type Jobs = { jobs: Job[] };
 
 export function JobsScreen() {
   const jobs = useQuery<Jobs>("/jobs");
-  const { events, connected } = useEvents();
+  const { events, received, connected } = useEvents();
   const [error, setError] = useState<unknown>(null);
-  useReloadOnEvents(events, jobs.reload);
+  useReloadOnEvents(received, jobs.reload);
 
   // **画面を再読み込みせずに進む。** 届いたイベントのジョブだけ取り直す。
   const latestByJob = new Map(events.map((event) => [event.job_id, event]));

@@ -26,6 +26,7 @@ from ..adapters.broker_client import BrokerClient
 from ..adapters.ffprobe import MediaProbe
 from ..adapters.fs import assert_same_filesystem
 from ..adapters.publisher import ArtifactPublisher
+from ..adapters.thumbnails import ThumbnailCache
 from ..core.auth import hash_password
 from ..db.connection import Database
 from ..db.jobs import JobStore
@@ -61,6 +62,9 @@ class AppState:
     runner: JobRunner
     # 起動時に解決した設定（`Tier.RESTART` までは起動中に変わらない）。
     settings: Settings
+    # **アプリに 1 つだけ持つ。** 要求ごとに作ると、キーごとのロックが共有されず
+    # single-flight が効かない（同じ絵を人数分だけ ffmpeg で作ることになる）。
+    thumbnails: ThumbnailCache
     last_reconcile: ReconcileReport = field(default_factory=ReconcileReport)
     # 認証が有効なときだけ入る（`AUTH_PASSWORD` の Argon2 ハッシュ）。
     password_hash: str | None = None
@@ -110,6 +114,10 @@ def create_app(
         finally:
             startup.close()
 
+        thumbnails = ThumbnailCache(settings.data_root)
+        # 起動のたびに一度掃除する（前回の実行で溜まった分が残っている）。
+        thumbnails.evict()
+
         client = broker_factory() if broker_factory else BrokerClient(settings.broker_socket)
         # VolumeService は長寿命なので専用の接続を持つ。他とは共有しない。
         volumes_conn = database.connect()
@@ -128,6 +136,7 @@ def create_app(
             volumes=volumes,
             runner=runner,
             settings=settings,
+            thumbnails=thumbnails,
             last_reconcile=report,
             # 平文は持ち回らない。突き合わせに使うのはハッシュだけ（§14）。
             password_hash=(

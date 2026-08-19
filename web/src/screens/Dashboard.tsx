@@ -34,8 +34,8 @@ type Devices = { volumes: { volume_instance_id: string; profile_slug: string | n
 export function DashboardScreen() {
   const dashboard = useQuery<Dashboard>("/dashboard");
   const devices = useQuery<Devices>("/devices");
-  const { events } = useEvents();
-  useReloadOnEvents(events, dashboard.reload);
+  const { received } = useEvents();
+  useReloadOnEvents(received, dashboard.reload);
 
   if (dashboard.error) {
     return <ErrorBanner error={dashboard.error} onDismiss={dashboard.reload} />;

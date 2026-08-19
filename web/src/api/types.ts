@@ -162,6 +162,30 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/profiles/{profile_slug}/test": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Try Profile
+         * @description 指定のボリュームに対する判定を試す（§11）.
+         *
+         *     **判定そのものはやり直さない。** いまの観測（`refresh` の結果）を読んで、
+         *     そのプロファイルが選ばれたかどうかと理由を返す。プロファイルを直す前後で
+         *     同じものを見られるようにするための窓であって、別の判定器ではない。
+         */
+        post: operations["try_profile_api_profiles__profile_slug__test_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/jobs": {
         parameters: {
             query?: never;
@@ -986,6 +1010,41 @@ export interface operations {
                     "application/json": {
                         [key: string]: unknown;
                     };
+                };
+            };
+        };
+    };
+    try_profile_api_profiles__profile_slug__test_post: {
+        parameters: {
+            query: {
+                volume_instance_id: string;
+            };
+            header?: never;
+            path: {
+                profile_slug: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        [key: string]: unknown;
+                    };
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
                 };
             };
         };

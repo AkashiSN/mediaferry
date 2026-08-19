@@ -25,8 +25,8 @@ type Records = { records: Record_[] };
 export function ApprovalsScreen() {
   const records = useQuery<Records>("/uploads?state=awaiting_datetime_approval");
   const [error, setError] = useState<unknown>(null);
-  const { events } = useEvents();
-  useReloadOnEvents(events, records.reload);
+  const { received } = useEvents();
+  useReloadOnEvents(received, records.reload);
   const [busy, setBusy] = useState(false);
   const [approving, setApproving] = useState<Record_ | null>(null);
 

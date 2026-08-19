@@ -191,3 +191,24 @@ def test_an_earlier_reason_for_invalidation_is_kept(db, world):
     row = db.execute("SELECT * FROM upload_record WHERE id = ?", (record,)).fetchone()
     assert row["invalidated_reason"] == "宛先を編集した"
     assert row["invalidated_at"] == "2026-08-01T00:00:00+00:00"
+
+
+def test_pending_records_are_invalidated_when_the_group_is_regrouped(db, world):
+    """**組み直しでも無効化する。**
+
+    `superseded_by_id` を立てた trigger が旧 member を `active = 0` にするので、
+    その後で「active な member」を条件に無効化しても 1 件も当たらない（順序の罠）。
+    残ると、後続の送信ジョブが古い根拠を claim して、遅れて別の理由で失敗する。
+    """
+    repo, group, parts, _, _ = world
+    destination = a_destination(db, name="regroup-pending")
+    _, revision_id, _ = destination
+    record = an_upload(
+        db, destination, parts[2], state="pending", destination_revision_id=revision_id
+    )
+
+    repo.supersede(group, parts[:2], digest="digest-2")
+
+    row = db.execute("SELECT * FROM upload_record WHERE id = ?", (record,)).fetchone()
+    assert row["invalidated_at"] is not None
+    assert "結合" in row["invalidated_reason"]

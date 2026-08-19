@@ -77,15 +77,26 @@ test("空の DB から一連の操作が通る", async ({ page }) => {
   await expect(page.getByRole("dialog")).toBeVisible();
   await expect(page.getByText("宛先:")).toContainText("immich-1");
   await page.getByRole("button", { name: "実行する" }).click();
-  await expect(page.getByRole("status")).toContainText("送信し始めました");
+  await expect(page.getByRole("status")).toContainText("送信を始めました");
 
-  // 6. ジョブの履歴に出る。
+  // 6. 結合の画面が使える（候補の検出と、手で組む導線）。
+  await page.getByRole("navigation").getByRole("link", { name: "結合" }).click();
+  await page.getByRole("button", { name: "候補を検出する" }).click();
+  await expect(page.getByRole("heading", { name: "結合" })).toBeVisible();
+  await page.getByRole("group").first().click(); // 「手でグループを作る」を開く
+  await expect(page.getByText("検出が拾えなかった並びを")).toBeVisible();
+
+  // 7. 承認待ちの画面が開く（この筋書きでは 0 件）。
+  await page.getByRole("navigation").getByRole("link", { name: "承認待ち" }).click();
+  await expect(page.getByRole("heading", { name: "承認待ち" })).toBeVisible();
+
+  // 8. ジョブの履歴に出る。
   await page.getByRole("navigation").getByRole("link", { name: "ジョブ" }).click();
   await expect(page.getByText("upload").first()).toBeVisible({ timeout: 30_000 });
 
   expect(crashes).toEqual([]);
 
-  // 7. **秘密がどこにも出ない**（DOM・ネットワーク応答・コンソール）。
+  // 9. **秘密がどこにも出ない**（DOM・ネットワーク応答・コンソール）。
   const dom = await page.content();
   expect(dom).not.toContain("test-api-key");
   expect(dom).not.toContain("correct horse");
