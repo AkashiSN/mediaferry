@@ -48,6 +48,7 @@ from .routes_system import public_router as system_public_router
 from .routes_system import router as system_router
 from .routes_uploads import router as uploads_router
 from .security import LoginAttempts, SecurityMiddleware, require_session
+from .static import install_web, web_root
 
 logger = logging.getLogger(__name__)
 
@@ -175,6 +176,11 @@ def create_app(
     ]
     for router in guarded:
         app.include_router(router, prefix="/api", dependencies=[Depends(require_session)])
+    # **ビルド済みの画面があれば同じオリジンで配る**（無ければ API だけで動く）。
+    # ルータより後に載せる —— `/{full_path}` が API の経路を飲み込まないように。
+    root = web_root(env)
+    if root is not None:
+        install_web(app, root)
     return app
 
 
