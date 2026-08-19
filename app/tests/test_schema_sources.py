@@ -47,6 +47,25 @@ def a_volume(db, profile=None, **over):
     return row["id"]
 
 
+def a_presence(db, volume_id, **over):
+    row = {
+        "id": new_id(),
+        "volume_instance_id": volume_id,
+        "broker_epoch": "e1",
+        "generation": 1,
+        "device_node": "/dev/sdk",
+        "major": 8,
+        "minor": 160,
+        "sysfs_path": "/sys/x",
+        "attached_at": now_iso(),
+    }
+    row.update(over)
+    cols = ", ".join(row)
+    marks = ", ".join("?" * len(row))
+    db.execute(f"INSERT INTO volume_presence ({cols}) VALUES ({marks})", tuple(row.values()))  # noqa: S608
+    return row["id"]
+
+
 def test_profile_slug_is_unique(db):
     a_profile(db)
     with pytest.raises(sqlite3.IntegrityError):
@@ -143,3 +162,52 @@ def test_presence_rows_survive_independently_of_the_device_node(db):
             (new_id(), volume_id, generation, now_iso()),
         )
     assert db.execute("SELECT count(*) FROM volume_presence").fetchone()[0] == 2
+
+
+def test_a_presence_records_when_auto_import_was_enqueued(db):
+    """自動取り込みの印は接続（presence）に付ける.
+
+    volume_instance に付けると、一度取り込んだカードは二度と自動取り込みされ
+    ない。watcher のメモリに持つと、プロセスが落ちるたびに二重に積む。
+    """
+    profile = a_profile(db)
+    volume = a_volume(db, profile=profile)
+    presence = a_presence(db, volume)
+    assert (
+        db.execute(
+            "SELECT auto_import_at FROM volume_presence WHERE id = ?", (presence,)
+        ).fetchone()["auto_import_at"]
+        is None
+    )
+    db.execute("UPDATE volume_presence SET auto_import_at = ? WHERE id = ?", (now_iso(), presence))
+    assert (
+        db.execute(
+            "SELECT auto_import_at FROM volume_presence WHERE id = ?", (presence,)
+        ).fetchone()["auto_import_at"]
+        is not None
+    )
+
+
+def test_a_volume_records_whether_the_match_was_provisional(db):
+    """暫定マッチかどうかを DB に残す.
+
+    watcher は「積んでよいか」を毎 tick DB の現在値から組み直す。判定材料が
+    1 つでも VolumeView にしか無いと、その組み直しが成立しない。
+    """
+    profile = a_profile(db)
+    volume = a_volume(db, profile=profile)
+    assert (
+        db.execute("SELECT provisional FROM volume_instance WHERE id = ?", (volume,)).fetchone()[
+            "provisional"
+        ]
+        == 0
+    )
+    db.execute("UPDATE volume_instance SET provisional = 1 WHERE id = ?", (volume,))
+    assert (
+        db.execute("SELECT provisional FROM volume_instance WHERE id = ?", (volume,)).fetchone()[
+            "provisional"
+        ]
+        == 1
+    )
+    with pytest.raises(sqlite3.IntegrityError):
+        db.execute("UPDATE volume_instance SET provisional = 2 WHERE id = ?", (volume,))

@@ -209,11 +209,22 @@ class VolumeService:
         if outcome.slug is not None:
             ref = self._registry.current(outcome.slug)
             profile_id, revision_id = ref.profile_id, ref.revision_id
+        # **判定の結果は残らず DB に置く。** watcher は「積んでよいか」を毎 tick
+        # DB の現在値から組み直すので、VolumeView にしか無い値があると
+        # 組み直せない（§12.1）。provisional もその 1 つ。
         self._conn.execute(
             "UPDATE volume_instance SET profile_id = ?, profile_revision_id = ?,"
-            " identity_confidence = ?, content_manifest_digest = ?, last_seen_at = ?"
-            " WHERE id = ?",
-            (profile_id, revision_id, confidence, digest, now_iso(), volume_id),
+            " identity_confidence = ?, provisional = ?, content_manifest_digest = ?,"
+            " last_seen_at = ? WHERE id = ?",
+            (
+                profile_id,
+                revision_id,
+                confidence,
+                1 if outcome.provisional else 0,
+                digest,
+                now_iso(),
+                volume_id,
+            ),
         )
         selection = None
         if profile_id is not None:
