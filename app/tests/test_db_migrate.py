@@ -3,6 +3,7 @@ import stat
 
 import pytest
 
+from mediaferry.clock import now_iso
 from mediaferry.db.connection import Database, immediate
 from mediaferry.db.migrate import MigrationError, apply_migrations
 
@@ -299,6 +300,7 @@ def test_a_database_from_the_previous_release_still_opens(tmp_path):
         "0008_sessions.sql": None,
         "0009_remote_datetime.sql": None,
         "0010_auto_import.sql": None,
+        "0011_captured_at_revision.sql": None,
     }
     shipped = sorted(path.name for path in MIGRATIONS_DIR.glob("*.sql"))
     assert shipped == sorted(frozen), "版を足したら、この一覧にも足す"
@@ -387,4 +389,44 @@ def test_untrusted_remote_state_is_dropped_whatever_its_shape(tmp_path):
     # リビジョンは不変のまま（trigger を戻している）。
     with pytest.raises(sqlite3.IntegrityError):
         conn.execute("UPDATE destination_revision SET remote_user_id = 'x'")
+    conn.close()
+
+
+def test_existing_rows_get_the_revision_they_were_imported_with(tmp_path):
+    """`0011`。既存行の `captured_at` は取り込みに使った版で算出されている.
+
+    **列を分けるのは provenance のため**（§6）。`profile_revision_id` は「その
+    レコードが使用した不変の版」なので、再計算で値だけを新しい定義から作ると
+    嘘になり、版ごと進めると timestamp 以外の新定義も適用したと偽る。
+    """
+    from .test_schema_sources import a_profile
+
+    conn = Database(tmp_path / "old.sqlite3").connect()
+    apply_migrations(conn)
+    profile_id, revision_id = a_profile(conn)
+    _, other_revision = a_profile(conn, slug="canon-eos")
+
+    # 0011 が入る前の DB へ戻す。
+    conn.execute("DELETE FROM schema_migration WHERE version = 11")
+    conn.execute("DROP TRIGGER media_file_captured_revision_insert")
+    conn.execute("DROP TRIGGER media_file_captured_revision_update")
+    conn.execute("ALTER TABLE media_file DROP COLUMN captured_at_revision_id")
+    conn.execute(
+        "INSERT INTO media_file (id, role, profile_id, profile_revision_id, rel_path,"
+        " size_bytes, mtime_ns, sha1, kind, captured_at, captured_at_source, probe_state,"
+        " created_at) VALUES ('m-1', 'original', ?, ?, 'library/dji-osmo/A.JPG', 10, 1,"
+        " '0000000000000000000000000000000000000000', 'photo', ?, 'filename', 'ok', ?)",
+        (profile_id, revision_id, now_iso(), now_iso()),
+    )
+
+    assert apply_migrations(conn) == [11]
+
+    assert (
+        conn.execute("SELECT captured_at_revision_id FROM media_file").fetchone()[0] == revision_id
+    )
+    # 移行で入れた値の上に、trigger の 2 つの契約がそのまま乗る。
+    with pytest.raises(sqlite3.IntegrityError):
+        conn.execute("UPDATE media_file SET captured_at_revision_id = NULL")
+    with pytest.raises(sqlite3.IntegrityError):
+        conn.execute("UPDATE media_file SET captured_at_revision_id = ?", (other_revision,))
     conn.close()

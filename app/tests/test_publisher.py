@@ -91,6 +91,9 @@ def test_publish_puts_the_file_in_the_library_and_records_it(setup, db, data_roo
     assert row["duration_seconds"] == 2.0
     assert row["probe_state"] == "ok"
     assert row["captured_at"].startswith("2026-08-17T14:30:00")
+    # 取り込み時は「算出に使った版」と「取り込みに使った版」が一致する（`0011`）。
+    # ずれるのは再計算を通った後だけで、画面はそれを手がかりにする。
+    assert row["captured_at_revision_id"] == row["profile_revision_id"]
 
 
 def test_the_source_entry_is_linked_and_marked_published(setup, db):

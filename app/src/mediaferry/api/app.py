@@ -141,6 +141,7 @@ def create_app(
         runner.register("detect_groups", world.run_detect_groups)
         runner.register("merge", world.run_merge)
         runner.register("upload", world.run_upload)
+        runner.register("recompute_timestamps", world.run_recompute_timestamps)
 
         state = AppState(
             database=database,

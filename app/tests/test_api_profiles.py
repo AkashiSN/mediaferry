@@ -200,3 +200,57 @@ def test_the_list_still_shows_archived_profiles(client):
     assert "my-camera" in profiles, "archive したら一覧から消えている"
     assert profiles["my-camera"]["archived"] is True
     assert profiles["dji-osmo"]["archived"] is False
+
+
+# ----------------------------------------------------------------------
+# 再計算（Task 6）
+
+
+def _await_job(client, job_id, timeout=20.0):
+    import time
+
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        job = client.get(f"/api/jobs/{job_id}").json()
+        if job["status"] not in {"queued", "running", "cancelling"}:
+            assert job["status"] == "succeeded", job
+            return job
+        time.sleep(0.05)
+    raise AssertionError(f"ジョブ {job_id} が終わらない")
+
+
+def test_recompute_enqueues_a_job_pinned_to_the_current_revision(client, database):
+    """キュー投入時の版を params に固定する.
+
+    実行時に現行を読み直すと、キューで待っている間の編集で、確認した規則とは
+    違う定義で再計算されることになる（`detect_groups` と同じ形）。
+    """
+    a_user_profile(client)
+    profile = client.get("/api/profiles/my-camera").json()
+    job_id = client.post("/api/profiles/my-camera/recompute").json()["job_id"]
+    _await_job(client, job_id)
+
+    conn = database.connect()
+    try:
+        row = conn.execute("SELECT type, params_json FROM job WHERE id = ?", (job_id,)).fetchone()
+    finally:
+        conn.close()
+    assert row["type"] == "recompute_timestamps"
+    assert profile["revision_id"] in row["params_json"]
+
+
+def test_recompute_is_allowed_on_a_builtin(client):
+    """ビルトインは**編集**できないだけで、再計算は要る.
+
+    `DEFAULT_TIMEZONE` を後から設定した場合、既存レコードを直す手段がこれしかない
+    （§12.1）。
+    """
+    response = client.post("/api/profiles/dji-osmo/recompute")
+    assert response.status_code == 200, response.text
+    _await_job(client, response.json()["job_id"])
+
+
+def test_recompute_on_an_unknown_profile_is_404(client):
+    response = client.post("/api/profiles/nope/recompute")
+    assert response.status_code == 404
+    assert response.json()["error"]["code"] == "not_found"

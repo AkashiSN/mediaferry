@@ -237,6 +237,28 @@ def archive_profile(profile_slug: str, conn=Depends(get_conn)) -> dict[str, str]
     return {"status": "ok"}
 
 
+@router.post("/profiles/{profile_slug}/recompute")
+def recompute_timestamps(profile_slug: str, conn=Depends(get_conn)) -> dict[str, str]:  # noqa: ANN001, B008
+    """撮影日時を今の定義で計算し直す（§6）.
+
+    **ビルトインでも受ける。** 編集できないだけで、`DEFAULT_TIMEZONE` を後から
+    設定した場合に既存レコードを直す手段はこれしかない（§12.1）。
+
+    キュー投入時のリビジョンを params に固定する。実行時に現行を読み直すと、
+    キューで待っている間の編集で違う規則の再計算になる。
+    """
+    try:
+        profile = ProfileRegistry(conn).current(profile_slug)
+    except UnknownProfile as exc:
+        raise ApiError(404, ErrorCode.NOT_FOUND, "そのプロファイルは無い") from exc
+    return {
+        "job_id": JobStore(conn).enqueue(
+            "recompute_timestamps",
+            {"profile_id": profile.profile_id, "profile_revision_id": profile.revision_id},
+        )
+    }
+
+
 def _parsed(body: dict):  # noqa: ANN202
     """定義を検証してから返す. **commit の前に落とす。**"""
     if not isinstance(body, dict) or "definition" not in body:

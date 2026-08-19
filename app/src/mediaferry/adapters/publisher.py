@@ -460,8 +460,9 @@ class ArtifactPublisher:
                 self._conn.execute(
                     "INSERT INTO media_file (id, role, profile_id, profile_revision_id, rel_path,"
                     " size_bytes, mtime_ns, sha1, kind, captured_at, captured_at_source,"
-                    " captured_at_tz, captured_at_note, duration_seconds, probe_state, created_at)"
-                    " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    " captured_at_tz, captured_at_note, duration_seconds, probe_state,"
+                    " captured_at_revision_id, created_at)"
+                    " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                     (
                         media_file_id,
                         metadata["role"],
@@ -478,6 +479,9 @@ class ArtifactPublisher:
                         metadata["captured_at_note"],
                         metadata["duration_seconds"],
                         metadata["probe_state"],
+                        # 取り込みでは「算出に使った版」＝「取り込みに使った版」。
+                        # 再計算だけがこの列を進める（`0011`）。
+                        metadata["profile_revision_id"],
                         now_iso(),
                     ),
                 )
