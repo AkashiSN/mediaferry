@@ -714,6 +714,30 @@ class UploadRepository:
                 (asset_id, is_trashed, checked_at, now_iso(), record_id),
             )
 
+    def stamp_remote_datetime(
+        self,
+        record_id: str,
+        date_time_original: str | None,
+        checked_at: str,
+        expect_checked_at: str | None,
+    ) -> bool:
+        """観測したリモートの日時を書く. 書けたら真.
+
+        **観測したときの姿を条件に入れる**（`stamp_many` と同じ形）。別の経路が
+        先に新しい観測を書いていたら、こちらの古い結果で上書きしない。
+
+        **`complete` の行だけ**を対象にする（進行中の行には所有者がいる）。
+        日時と観測時刻は同じ UPDATE で書く —— 分けると「日時は新しいが観測時刻は
+        古い」行ができる。
+        """
+        with immediate(self._conn):
+            updated = self._conn.execute(
+                "UPDATE upload_record SET remote_datetime_original = ?, remote_checked_at = ?,"
+                " updated_at = ? WHERE id = ? AND state = 'complete' AND remote_checked_at IS ?",
+                (date_time_original, checked_at, now_iso(), record_id, expect_checked_at),
+            )
+        return updated.rowcount == 1
+
     def release_interrupted(self) -> int:
         """進行中のまま残ったレコードを `needs_recheck` へ落とす.
 

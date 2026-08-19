@@ -8,6 +8,7 @@ from fastapi import APIRouter, Body, Depends
 
 from ..adapters.immich import ImmichClient
 from ..clock import now_iso
+from ..core.uploads.decisions import datetime_plan
 from ..db.connection import immediate
 from ..db.credentials import CredentialStore
 from ..db.destinations import DestinationRepository
@@ -60,7 +61,7 @@ def list_uploads(
     box=Depends(get_box),  # noqa: ANN001, B008
 ) -> dict[str, Any]:
     rows = _uploads(conn, box).list_records(destination_id, state, limit)
-    return {"records": [_view(row) for row in rows]}
+    return {"records": [_view(row, conn) for row in rows]}
 
 
 @router.post("/uploads/{record_id}/retry")
@@ -194,8 +195,14 @@ def _uploads(conn, box) -> UploadRepository:  # noqa: ANN001
     return UploadRepository(conn, ProfileRegistry(conn), destinations)
 
 
-def _view(row) -> dict[str, Any]:  # noqa: ANN001
-    return {
+def _view(row, conn=None) -> dict[str, Any]:  # noqa: ANN001
+    """記録 1 件の表示. 承認待ちには**差分**を添える（§13）.
+
+    **現在値はその場で取りに行かない。** 一覧の描画で N 件ぶんの HTTP を出すことに
+    なる。保存済みの観測（`remote_checked_at` の時点の値）を返し、画面が
+    「いつ時点か」を示す。最新が要るなら宛先の再確認を回す。
+    """
+    view = {
         "id": row["id"],
         "destination_id": row["destination_id"],
         "media_file_id": row["media_file_id"],
@@ -211,4 +218,32 @@ def _view(row) -> dict[str, Any]:  # noqa: ANN001
         "invalidated_at": row["invalidated_at"],
         "invalidated_reason": row["invalidated_reason"],
         "updated_at": row["updated_at"],
+    }
+    if row["state"] == "awaiting_datetime_approval":
+        view.update(_datetime_diff(row, conn))
+    return view
+
+
+def _datetime_diff(row, conn) -> dict[str, Any]:  # noqa: ANN001
+    """承認待ちの差分（現在値・補正案・同じかどうか）."""
+    proposed = None
+    if conn is not None:
+        media = conn.execute(
+            "SELECT * FROM media_file WHERE id = ?", (row["media_file_id"],)
+        ).fetchone()
+        if media is not None:
+            profile = ProfileRegistry(conn).by_id(media["profile_id"])
+            plan = datetime_plan(
+                profile.definition.immich,
+                profile.definition.timestamp.timezone_policy,
+                media["captured_at"],
+                row["origin"],
+            )
+            proposed = plan.proposed
+    current = row["remote_datetime_original"]
+    return {
+        "remote_current": current,
+        "proposed": proposed,
+        # **読めなかったものを「変更なし」にしない**（承認を飛ばさせない）。
+        "identical": bool(current is not None and proposed is not None and current == proposed),
     }

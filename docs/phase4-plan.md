@@ -326,7 +326,7 @@ fake broker + fake Immich 2 台**を立ち上げる仕掛けが無いと、E2E �
 
 ---
 
-### Task 7: 一覧の絞り込みとページング
+### Task 7: 一覧の絞り込みとページング —— **実装済み**
 
 **Files:** Modify `routes_media.py`, `routes_uploads.py`, `routes_merges.py` / Test `test_api_listing.py`
 
@@ -337,11 +337,13 @@ fake broker + fake Immich 2 台**を立ち上げる仕掛けが無いと、E2E �
 - `status` は**宛先ごとの状態**。`destination_id` と併せて指定する
 - ダッシュボードの集計（宛先ごとの同期状況サマリ）もここで API にする
 
-- [ ] Step 1〜4（境界を厚く: ページの境目、同時刻、`%` を含む検索語、上限超え）
+ダッシュボードの集計は `GET /dashboard` にまとめた（宛先ごとに一覧の API を叩くと、
+そのたびに全件を走査するため）。「未送信」は**この宛先の記録がまだ無いもの**として
+数える。変異 12 件を検出。
 
 ---
 
-### Task 8: リモートの日時を観測して保存する
+### Task 8: リモートの日時を観測して保存する —— **実装済み**
 
 **Files:** Modify `adapters/immich.py`, `db/uploads.py`, `jobs/uploader.py`, `jobs/recheck.py` /
 Create `db/migrations/0009_remote_datetime.sql` / Test `test_remote_datetime.py`
@@ -362,12 +364,18 @@ Rechecker も観測していないので、`routes_uploads.py` を直すだけ�
 - 観測する場所は 2 つ: 初回 `checking` で `reject`（既存資産）だったときと、宛先ごとの
   再確認。**承認画面を開いたときには取りに行かない**（一覧の描画で N 件分の HTTP を出す）
 
-- [ ] Step 1〜4（テスト: 観測が保存される・古い結果で上書きしない・identifier の検査を通る・
-      取得できない相手でも承認待ちの一覧は壊れない）
+`ImmichClient.asset()` と `0009_remote_datetime.sql`、`stamp_remote_datetime`（CAS）。
+**観測する場所は「承認を求める時点」**にした —— そこが画面に出す値の元になる。
+読めなくても送信の結果は変えない（相手が答えられなくても承認待ちにする。ここで
+失敗にすると、送信そのものが失敗として記録される）。変異 7 件を検出。
+
+**`complete` 以外を再確認の対象にはしていない。** 承認待ちの行の「現在値」を後から
+取り直す導線（宛先の再確認に含める）は Phase 5。いまは承認を求めた時点の値と、
+その時刻を画面に出す。
 
 ---
 
-### Task 9: 承認待ちの差分（Phase 3 の先送り）
+### Task 9: 承認待ちの差分（Phase 3 の先送り） —— **実装済み**
 
 **Files:** Modify `routes_uploads.py` / Test `test_api_uploads.py`
 
@@ -377,7 +385,9 @@ Rechecker も観測していないので、`routes_uploads.py` を直すだけ�
   再確認ジョブを回す導線を出す
 - `identical` が真なら画面は「変更なし」と表示し、承認を促さない
 
-- [ ] Step 1〜4
+`GET /uploads?state=awaiting_datetime_approval` が `remote_current` / `proposed` /
+`remote_checked_at` / `identical` を返す。**読めなかった現在値を「変更なし」にしない**
+（承認を飛ばさせない）。変異 4 件を検出。
 
 ---
 

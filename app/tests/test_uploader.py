@@ -691,3 +691,40 @@ def test_a_slow_target_check_does_not_lose_the_lease(world, db, monkeypatch):
 
     assert outcome.sent == 1
     assert record_of(db)["state"] == "complete"
+
+
+def test_the_current_remote_datetime_is_recorded_when_approval_is_needed(world, db, monkeypatch):
+    """**承認を求める時点の「現在値」を控える**（§13 の差分表示）.
+
+    画面を開くたびに N 件ぶんの HTTP を出さないために、ここで 1 度だけ読む。
+    """
+    server, uploader, ctx, _, _, destination_id, _ = world
+    _an_existing_asset(server)  # 既存資産 → origin は pre_existing → 承認待ちになる
+    server.datetimes["asset-existing"] = "2020-01-01T00:00:00+00:00"
+
+    uploader.run(ctx, destination_id)
+
+    row = record_of(db)
+    assert row["state"] == "awaiting_datetime_approval"
+    assert row["remote_datetime_original"] == "2020-01-01T00:00:00+00:00"
+    assert row["remote_checked_at"] is not None
+
+
+def test_a_remote_that_cannot_be_read_still_ends_up_awaiting(world, db, monkeypatch):
+    """**読めなくても送信の結果は変えない。** 画面は「分からない」と出す."""
+    from mediaferry.adapters.immich import ImmichUnavailable
+
+    server, uploader, ctx, _, _, destination_id, _ = world
+    _an_existing_asset(server)
+
+    def unavailable(self, asset_id):  # noqa: ANN001, ANN202
+        raise ImmichUnavailable("読めない")
+
+    monkeypatch.setattr(ImmichClient, "asset", unavailable)
+
+    outcome = uploader.run(ctx, destination_id)
+
+    assert outcome.awaiting == 1
+    row = record_of(db)
+    assert row["state"] == "awaiting_datetime_approval"
+    assert row["remote_datetime_original"] is None

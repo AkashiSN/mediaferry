@@ -316,8 +316,17 @@ class Uploader:
                 f"日時の補正に承認が要る: {plan.reason}",
                 {"upload_record_id": record["id"]},
             )
+            # **承認を求める時点の「現在値」を控える**（§13 の差分表示）。画面を
+            # 開くたびに N 件ぶんの HTTP を出さないために、ここで 1 度だけ読む。
             self._uploads.finish_owned(
-                ctx, record["id"], "awaiting_datetime_approval", expect_state="tagging"
+                ctx,
+                record["id"],
+                "awaiting_datetime_approval",
+                expect_state="tagging",
+                remote_datetime_original=self._observed_datetime(
+                    ctx, client, record, revision_id, progress, row["remote_asset_id"]
+                ),
+                remote_checked_at=now_iso(),
             )
             return "awaiting_datetime_approval"
         self._uploads.advance_owned(ctx, record["id"], "fixing_datetime", expect_state="tagging")
@@ -327,6 +336,26 @@ class Uploader:
         client.set_date_time_original(row["remote_asset_id"], plan.proposed)
         self._uploads.finish_owned(ctx, record["id"], "complete", expect_state="fixing_datetime")
         return "complete"
+
+    def _observed_datetime(  # noqa: PLR0913
+        self,
+        ctx: JobContext,
+        client: ImmichClient,
+        record: sqlite3.Row,
+        revision_id: str,
+        progress: _Progress,
+        asset_id: str,
+    ) -> str | None:
+        """リモートの現在の日時を読む. **読めなくても送信の結果は変えない。**
+
+        承認の画面に出すための値なので、相手が答えられなくても「分からない」まま
+        承認待ちにする（ここで失敗にすると、送信そのものが失敗として記録される）。
+        """
+        try:
+            self._guard(ctx, record, revision_id, "tagging", progress)
+            return client.asset(asset_id).date_time_original
+        except ImmichError:
+            return None
 
     def _send(self, ctx: JobContext, client: ImmichClient, record: sqlite3.Row, media: sqlite3.Row):  # noqa: ANN202
         """**送信中もリースと claim を延ばす。** 28 GiB は 84.5 秒（Phase 0 の実測）."""

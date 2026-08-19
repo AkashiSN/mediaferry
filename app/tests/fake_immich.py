@@ -105,6 +105,14 @@ class FakeImmich:
             return 200, self._bulk_check(json.loads(body))
         if method == "POST" and path == "/api/assets":
             return self._upload(body, headers)
+        if method == "GET" and path.startswith("/api/assets/"):
+            asset_id = path.split("/")[3]
+            if self.echo_key_as_ids:
+                return 200, {"id": API_KEY, "isTrashed": False}
+            body = {"id": asset_id, "isTrashed": asset_id in self.trashed}
+            if asset_id in self.datetimes:
+                body["exifInfo"] = {"dateTimeOriginal": self.datetimes[asset_id]}
+            return 200, body
         if method == "GET" and path == "/api/tags":
             if self.echo_key_as_ids:
                 return 200, [{"id": API_KEY, "name": name} for name in self.tags or ["dji"]]

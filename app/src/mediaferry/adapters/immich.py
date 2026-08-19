@@ -95,6 +95,15 @@ def to_base64_checksum(sha1_hex: str) -> str:
     return base64.b64encode(bytes.fromhex(sha1_hex)).decode("ascii")
 
 
+@dataclass(frozen=True)
+class RemoteAsset:
+    """相手が持っている資産の姿（読み取り）."""
+
+    asset_id: str
+    date_time_original: str | None
+    is_trashed: bool
+
+
 class ImmichClient:
     def __init__(self, base_url: str, api_key: str, timeout_seconds: int = 86400) -> None:
         self._base_url = base_url.rstrip("/")
@@ -251,6 +260,23 @@ class ImmichClient:
         checked = [self._identifier(asset_id, "tag_assets の asset id") for asset_id in asset_ids]
         tag = self._identifier(tag_id, "tag_assets の tag id")
         self._request("PUT", f"/api/tags/{tag}/assets", json={"ids": checked})
+
+    def asset(self, asset_id: str) -> RemoteAsset:
+        """資産の現在の姿を読む（承認の画面に出す「現在値」）.
+
+        **相手が返さない値は埋めない。** 分からないことを 0 や現在時刻で埋めると、
+        画面が「変更なし」と「分からない」を区別できなくなる。
+        """
+        checked = self._identifier(asset_id, "GET /api/assets の asset id")
+        body = _as_object(self._request("GET", f"/api/assets/{checked}"), "GET /api/assets")
+        returned = self._identifier(_required_str(body, "id", "GET /api/assets"), "GET /api/assets")
+        exif = body.get("exifInfo")
+        when = exif.get("dateTimeOriginal") if isinstance(exif, dict) else None
+        return RemoteAsset(
+            asset_id=returned,
+            date_time_original=when if isinstance(when, str) and when else None,
+            is_trashed=bool(body.get("isTrashed")),
+        )
 
     def set_date_time_original(self, asset_id: str, when: str) -> None:
         asset = self._identifier(asset_id, "set_date_time_original の asset id")
