@@ -14,7 +14,7 @@
 実際に使う。
 
 **Tech Stack:** Python 3.12 / uv workspace / SQLite（WAL）/ FastAPI / httpx / exifread /
-pytest / ruff ・ React 19 + TypeScript + Vite / Playwright（受け入れのみ）
+regex / pytest / ruff ・ React 19 + TypeScript + Vite / Playwright（受け入れのみ）
 
 **Spec:** `docs/design.md`（正本。§6 デバイスプロファイル / §9.2 デバイス検出とボリューム判定 /
 §11 API / §12.1 自動取り込みと信頼登録 / §13 画面 / §20 実装フェーズ）。前提は
@@ -135,10 +135,10 @@ Phase 1〜4 と同じ。差分だけ書く。
   `merge.output_name` のパス検証（`..`・絶対パス・シンボリックリンクの禁止）は
   ビルトインだけでなく**編集経路でも同じ検査を通す**（§6）。`ProfileInvalid` を
   API のエラー封筒へ落とす
-- **正規表現はユーザが書く。長さの上限だけでは足りない。** `re.compile` に通して検証し
-  長さの上限も掛けるが、**短い式でも catastrophic backtracking で停止しなくなる**
-  （`(a+)+$` 等）。しかもマッチは `VolumeService` の **`RLock` の中で**最大 2000 件の
-  ファイル名に当たるので、1 本の悪い式で `GET /devices` ごと固まる。対処は Task 4 に書く
+- **正規表現はユーザが書く。長さの上限だけでは足りない。** 短い式でも catastrophic
+  backtracking で停止しなくなり（`(a+)+$` 等）、マッチは `VolumeService` の
+  **`RLock` の中で**最大 2000 件のファイル名に当たるので、1 本の悪い式で
+  `GET /devices` ごと固まる。**マッチ側を `regex` に替えて `timeout` を渡す**（Task 4）
 - **EXIF は信頼できない入力。** 読むのは 1 タグだけ、サムネイルと MakerNote を読まない、
   例外はすべて握って `fallback` へ落とす。**壊れた 1 枚で取り込み全体を止めない**
 - **watcher は「勝手に動く主体」である。** 画面を開いていなくても DB を書く。
@@ -172,11 +172,12 @@ npm --prefix web run test:e2e
 | `app/src/mediaferry/core/profiles/builtin/generic-dcim.yaml` | **新規** |
 | `app/src/mediaferry/core/profiles/builtin/canon-eos.yaml` | **新規** |
 | `app/src/mediaferry/core/profiles/model.py` | **修正**。正規表現の検証と長さの上限 |
+| `app/src/mediaferry/core/profiles/matching.py` | **修正**。マッチを `regex` + `timeout` にする |
 | `app/src/mediaferry/db/profiles.py` | **修正**。ユーザ定義の作成・編集・複製・archive。**ビルトインの直接編集を拒む** |
 | `app/src/mediaferry/db/migrations/0010_auto_import.sql` | **新規**。`volume_presence.auto_import_at` と `volume_instance.provisional` |
 | `app/src/mediaferry/db/migrations/0011_captured_at_revision.sql` | **新規**。`media_file.captured_at_revision_id` |
 | `app/src/mediaferry/adapters/publisher.py` | **修正**。手順 5 で `captured` を遅延解決する口（Task 3） |
-| `app/pyproject.toml` / `uv.lock` | **修正**。`exifread` |
+| `app/pyproject.toml` / `uv.lock` | **修正**。`exifread` と `regex` |
 | `app/src/mediaferry/jobs/watcher.py` | **新規**。`VolumeWatcher`。generation のポーリングと自動取り込み |
 | `app/src/mediaferry/jobs/recompute.py` | **新規**。`recompute_timestamps` ジョブ |
 | `app/src/mediaferry/jobs/importer.py` | **修正**。EXIF の抽出位置（§9.3 手順 5） |
@@ -239,6 +240,25 @@ def _call(self, payload, expect_fd=False):
 延々と粘ると停止要求に応じられなくなる。失敗はそのまま上へ返し、**次の tick で改めて試す**
 （tick そのものがリトライになっている）。
 
+**閉じている最中は再接続しない**（計画レビュー 2 巡目の major）。停止は watcher の socket を
+閉じて `recv` を解く。その `OSError` をこの再接続が拾うと、**「`list_volumes` だから再送可」と
+判断して新しい socket を作り、また待ちに入る** —— 停止が効かない。
+
+```python
+def close(self) -> None:
+    self._closing = True        # 先に立てる。閉じてから立てると隙間で再接続できる
+    with contextlib.suppress(OSError):
+        self._sock.shutdown(socket.SHUT_RDWR)   # 待っている recv を確実に解く
+    self._sock.close()
+```
+
+- **`_closing` を先に立てる。** `_call` は再送の判定より先にこれを見て、立っていれば
+  そのまま例外を上げる
+- **`shutdown` を挟む。** `close` だけでは、別スレッドで blocking している `recv` が
+  即座に解ける保証が弱い。`shutdown(SHUT_RDWR)` は待っている側に EOF を届ける
+- **socket の deadline は保険として残す。** `shutdown` が効かない環境でも、
+  deadline があれば有限時間で降りられる
+
 **開いている handle は再接続で失われる。** 接続が切れた時点で mountd 側の
 `handle_connection` の `finally` が全ハンドルを release しているので、これは新しい損失では
 ない。`VolumeService._open` に残った `VolumeHandle` は無効になるが、**dirfd は受け取り済み
@@ -257,11 +277,17 @@ def _call(self, payload, expect_fd=False):
 - 再接続に失敗した `list_volumes` は例外を上げる（握り潰さない）
 - **`list_volumes` を何度も落として再接続させても、プロセスの fd が増えない**
 - `from_socket` で作った client は再接続を試みず、そのまま例外を上げる
+- **`close()` した client は再接続しない。** `list_volumes` の `recv` を待っている最中に
+  別スレッドから `close()` しても、**新しい接続が復活せず**、待っていた呼び出しが
+  有限時間で例外になる（停止の回帰。major 4）
 
 **変異試験:**
 - `!=` を `==` にする（`list_volumes` 以外を再送する）→ `open_volume` の試験が落ちること
 - 再接続を 2 回以上ループさせる → 停止の試験が落ちること
 - 再接続時に `_open` を空にする → 走っているジョブの試験が落ちること
+- **`_closing` の確認を外す** → 「閉じた client が再接続しない」が落ちること
+- **`_closing` を立てる順を `close()` の後にする** → 同上（隙間で再接続できる）
+- **`shutdown` を外して `close` だけにする** → 停止の試験が落ちること
 
 ---
 
@@ -344,12 +370,17 @@ CANDIDATES = """
            p.device_node, p.sysfs_path, v.fs_uuid, v.fs_type
       FROM volume_presence p
       JOIN volume_instance v ON v.id = p.volume_instance_id
+      -- **プロファイルの現在性も同じ排他区間で確かめる。**
+      JOIN device_profile d ON d.id = v.profile_id
      WHERE p.detached_at IS NULL          -- 抜けた接続に印を付けない
        AND p.auto_import_at IS NULL       -- まだ積んでいない
        AND v.trusted_at IS NOT NULL       -- 信頼登録済み
        AND v.identity_confidence = 'high' -- 同定の確度（§8）
        AND v.provisional = 0              -- 「対象だが中身が無い」は対象外（§12.1）
        AND v.profile_id IS NOT NULL       -- 対象外ボリュームではない
+       AND d.archived_at IS NULL          -- archive されたプロファイルでは積まない
+       -- 判定に使った版が今も現行であること。編集されていたら積まない
+       AND v.profile_revision_id = d.current_revision_id
 """
 
 def _enqueue_ready(self) -> list[str]:
@@ -374,6 +405,11 @@ def _enqueue_ready(self) -> list[str]:
 
 - **判定材料をすべて DB に置く。** そのために `0010` で `volume_instance.provisional` を
   足す（Task 1）。1 つでも view にしか無いと、この組み直しが成立しない
+- **`volume_instance.profile_id` / `profile_revision_id` は「前回の判定の写し」であって
+  現在の真実ではない**（計画レビュー 2 巡目の blocker）。`device_profile` を JOIN して
+  **archive されていないこと**と**その版が今も現行であること**を確かめる。
+  確かめないと、refresh の後・enqueue の前に別接続で archive / `PUT` が commit でき、
+  **archive 済みのプロファイルや編集前の版で取り込みを積む**
 - **条件付き UPDATE（CAS）で印を取る。** SQLite に行ロックは無い（`HANDOFF.md` §3）。
   `SELECT` してから `UPDATE` すると、その隙間に届いた次の tick と競合する
 - **印付けと `enqueue` は同じ `BEGIN IMMEDIATE` の中。** `JobStore.enqueue` は自分で
@@ -405,19 +441,40 @@ def _enqueue_ready(self) -> list[str]:
 **プロトコルは変えない。空集合を専用の番兵として扱う。**
 
 ```python
-def _token(volumes: list[VolumeInfo]) -> tuple[str, int] | None:
+EMPTY = ("", -1)          # 「空集合を観測した」
+UNOBSERVED = None         # 「まだ一度も観測していない」—— EMPTY と必ず区別する
+
+def _token(volumes: list[VolumeInfo]) -> tuple[str, int]:
     # 非空なら (broker_epoch, generation)。全ボリュームに同じ値が刻まれている。
-    # 空集合は None を返す。**None は「未取得」ではなく「空である」を意味する。**
-    return (volumes[0].broker_epoch, volumes[0].generation) if volumes else None
+    return (volumes[0].broker_epoch, volumes[0].generation) if volumes else EMPTY
 ```
 
-- 空 → 非空: `None` から `(e, g)` へ変わる → `refresh()` ✓
-- 非空 → 空: `(e, g)` から `None` へ変わる → `refresh()`（`detach_absent` を走らせる）✓
+- 空 → 非空: `EMPTY` から `(e, g)` へ変わる → `refresh()` ✓
+- 非空 → 空: `(e, g)` から `EMPTY` へ変わる → `refresh()`（`detach_absent` を走らせる）✓
 - 非空 → 非空（変化あり）: `generation` が進む ✓
 - 空 → 空: 変化なし。**やることも無い** ✓
 
+**`UNOBSERVED` を `EMPTY` と同一視してはいけない**（計画レビュー 2 巡目の major）。
+記憶の初期値を「空」にすると、**前回の停止時の live な presence が DB に残ったまま、
+空で起動した最初の tick が「変化なし」と判定して `refresh()` を飛ばす**。
+`detach_absent` が走らないので、**抜けているカードの presence に自動取り込みを積む**。
+**最初に成功した `list_volumes` は、空でも必ず `refresh()` を回す。**
+
 **新しい盲点は増えない。** `broker_epoch` を組に含めるのは、mountd 再起動で
 `generation` が 0 に戻るため。
+
+#### 門はもう 1 つの入力を持つ —— プロファイルの現行版
+
+観測トークンだけを門にすると、**プロファイルを編集しても再判定されない**。
+`require` が変わってカードが一致しなくなっても、mountd の指紋は動かない。
+
+```python
+# 門 = (観測トークン, 現行リビジョンの指紋)。どちらかが変われば refresh。
+profile_token = tuple(sorted((ref.profile_id, ref.revision_id) for ref in registry.active()))
+```
+
+DB の `SELECT` 1 本で取れるので毎 tick 評価してよい。**プロファイルの編集・複製・archive の
+どれでもこの指紋が動く**ので、明示的な wake の仕組みを別に作らなくて済む。
 
 **`GET /devices` が先に新しいトークンを観測しても、watcher は自分の記憶と比べるので
 もう一度 `refresh()` する。** 同じ変化で全 probe が 2 回走る。**許容する代償**として
@@ -517,9 +574,40 @@ volumes.close_all() / volumes_conn.close()
 残っても次回の起動で拾われるので破壊的ではないが、「停止したのにキューが伸びた」状態は
 作らない。
 
-**DB 接続:** ブローカーとは違い、**DB 接続は `VolumeService` のものを共有する。**
-`refresh()` も enqueue も `VolumeService` の `RLock` の下で行う。`GET /devices` と
-同じ接続を使うので「接続はスコープごとに 1 本」が保たれる。
+#### watcher は「一組」を丸ごと持つ
+
+**専用のブローカー接続だけを持たせる案は成立しない**（計画レビュー 2 巡目の blocker）。
+`VolumeService.refresh()` は **`self._client`** と**インスタンス内の `RLock`** を使う。
+watcher が API 側の `VolumeService` を呼べば、refresh は結局**共有の `BrokerClient`** を
+通るので、watcher 専用 socket を閉じても黙り込んだ refresh は止まらない。かといって
+専用 client の `VolumeService` をもう 1 つ作って `volumes_conn` を使い回すと、
+**1 本の接続を 2 つの `RLock` で同時に使う**ことになり、`db/connection.py` の
+「接続を同時共有しない」に反する。handle の map も 2 つに割れる。
+
+**watcher は 1 つのスコープを丸ごと持つ。**
+
+```
+watcher スコープ = 専用 DB 接続 1 本
+                 + その接続の ProfileRegistry
+                 + その接続と専用 BrokerClient で作った VolumeService
+```
+
+- API 側（`GET /devices`）とジョブ側は今までどおり `AppState.volumes` を使う。
+  **watcher のものとは別のインスタンス**
+- **ジョブの handle は API 側の `VolumeService` にしか無い。** watcher 側は probe しか
+  行わないので `_open` は常に空のまま。停止で watcher 一式を閉じても、走っている
+  取り込みの handle には触れない
+- 2 つの `VolumeService` は**別々の接続**なので、競合は SQLite の WAL と
+  `BEGIN IMMEDIATE` で解決する。「接続はスコープごとに 1 本」はこれで守られる
+
+**そのために `VolumeService.refresh()` の書き込みを 1 つの `BEGIN IMMEDIATE` に入れる。**
+現状の `refresh()` は `RLock` は取るが**トランザクションを張っていない**（`upsert_device` /
+`resolve_volume_instance` / `sync_presence` / `detach_absent` / `_probe` の `UPDATE` が
+autocommit で流れる）。**インスタンスが 1 つしか無かったから成立していた**だけで、
+2 つになると pass 1〜3 の途中に相手の書き込みが挟まる。**Task 2 で囲む。**
+
+**停止順:** watcher を止める → watcher の `VolumeService.close_all()` と接続を閉じる →
+runner を止める → API 側の `volumes.close_all()`。
 
 **`AUTO_IMPORT=off` でも watcher は回す。** 一覧を新鮮に保つ役目があるので止めない。
 **積むかどうかだけを設定で決める。**
@@ -623,6 +711,12 @@ class ArtifactRequest:
     ...
     captured: CapturedAt | None            # どちらか一方を必ず与える
     resolve_captured: Callable[[Path], CapturedAt] | None = None
+
+    def __post_init__(self) -> None:
+        # **両方でも両方 None でも拒む。** 「どちらか一方」をコメントで書くだけだと、
+        # 後から caller（merge 等）を足したときに、静かにどちらかが優先される。
+        if (self.captured is None) == (self.resolve_captured is None):
+            raise ValueError("captured と resolve_captured はどちらか一方だけを与える")
 ```
 
 - `ArtifactPublisher` は**手順 4（サイズと SHA-1 の検証）の後、手順 5（メタデータの確定）の
@@ -631,6 +725,8 @@ class ArtifactRequest:
   後だと `metadata_json` に載らないまま手順 7 で commit される
 - **`resolve_captured` は例外を投げない契約**（`adapters/exif.py` が握る）。投げると、
   検証まで済んだファイルが手順 5 で落ちて staging に残る
+- **両方与える／どちらも与えないは `ArtifactRequest` の構築時に弾く。** 既存の caller
+  （`Importer` と `Merger`）も新しい形に合わせる
 - `Importer` は `source: exif` のプロファイルで**画像のときだけ** `resolve_captured` を渡す。
   それ以外は今までどおり `captured` を渡す
 
@@ -667,6 +763,8 @@ def read_datetime_original(path: Path) -> datetime | None:
   無いものは `fallback` の値になる
 - `timezone_policy: none` では壁時計がそのまま（UTC として）記録される
 - **動画では `exifread` が呼ばれない**（logger にレコードが 1 件も出ない）
+- **`captured` と `resolve_captured` を両方与えると `ValueError`、どちらも与えなくても
+  `ValueError`**（minor 1）
 - **手順 5 で解決される**：検証済みの staging を読んでおり、`metadata_json` に載って
   手順 7 で commit される
 - `test_crash_consistency.py` の 11 段を `source: exif` のプロファイルでも通す
@@ -720,23 +818,38 @@ DJI の `min_part_size_gib: 15` に当たる根拠が無い。**誤結合は取�
 - `merge.enabled: false` のとき `sequence_pattern` / `output_name` の必須を外す
   （Canon と generic は持たない）
 
-**catastrophic backtracking への対処**（計画レビュー 1 巡目の major）:
+**catastrophic backtracking への対処 —— マッチ側を `regex` に替える**
 
-長さの上限は効かない。`(a+)+$` は 8 文字で、255 バイトのファイル名に対して事実上停止しない。
+長さの上限は効かない。`(a+)+$` は 8 文字で、41 文字の入力に対して事実上停止しない。
 マッチは `VolumeService` の `RLock` の中で最大 2000 件に当たるので、**1 本の悪い式で
 `GET /devices` も watcher も固まる**。
 
-**保存時に、別プロセスで deadline 付きの試験マッチを行う。**
+1 巡目では「保存時に子プロセスで敵対的標本を試す」案を書いたが、
+**2 巡目で「標本は容易に迂回できる」と指摘され、取り下げた。** `(z+)+$` は `a` の標本を
+素通りする。**固定標本は lint であって、固まらないことの保証にならない。**
 
-- `re.compile` が通った後、**敵対的な標本文字列**（`"a" * 255`、`"A" * 255 + "!"`、
-  実際のファイル名の形をした数本）に対して、**子プロセスで**マッチを試す
-- 壁時計の予算（数百ミリ秒）を超えたらプロセスを殺し、`ProfileInvalid` で拒否する
-- **これは証明ではなく緩和**。標本を通り抜ける悪い式は作れる。だが「うっかり書いた式で
-  アプリが固まる」という現実的な事故は塞げる。**そう明記して記録に残す**
-- 実行時の防御は既存のまま（`NAME_SCAN_LIMIT = 2000`）
+**実測して替える**（2026-08-19、この環境で計測）。
 
-**別プロセスにする理由:** Python の `re` に timeout は無い。同じプロセスで走らせると、
-測ろうとした側も一緒に固まる。
+| 式 | `re` | `regex`（timeout なし） | `regex`（`timeout=0.5`） |
+| --- | --- | --- | --- |
+| `(a+)+$` に `"a"*40+"!"` | **10 秒で打ち切り（破綻）** | **0.000 秒** | 0.000 秒 |
+| `(a*)*b` に同上 | — | **0.000 秒** | 0.000 秒 |
+| `(a|a)+$` に同上 | — | 8 秒で打ち切り（破綻） | **`TimeoutError` を 0.500 秒で送出** |
+| `^DJI_(\d{14})_` に実ファイル名 | — | 0.0001 秒 | 0.0001 秒 |
+
+- **`regex` は代表的な破綻パターンを自前の最適化で潰す**（`(a+)+$` / `(a*)*b`）
+- **潰しきれないもの（`(a|a)+$`）には `timeout=` が実測どおり壁時計の上限として効く**
+- 構文は `re` の上位互換なので、既存のビルトインの式はそのまま動く
+
+**したがって、プロファイルのマッチは `regex` に統一し、必ず `timeout` を渡す。**
+
+- 対象は `matching.py`（`filename_pattern`）と `timestamps.py`（`timestamp.pattern`）と
+  結合の `sequence_pattern`
+- **`TimeoutError` は「一致しなかった」ではなく失敗として扱う。** そのボリュームを
+  「対象外」に落として理由を出す（黙って不一致にすると、原因が画面から分からない）
+- 保存時の検証は `regex.compile` と長さの上限のまま。**固まらないことの保証は実行時の
+  `timeout` が持つ**ので、保存時に敵対的標本を試す必要は無くなった
+- 実行時の件数上限は既存のまま（`NAME_SCAN_LIMIT = 2000`）
 
 **受け入れ:**
 - Canon 風の合成カード（`DCIM/100CANON/IMG_0001.JPG` 等）が `canon-eos` に確定する
@@ -744,16 +857,18 @@ DJI の `min_part_size_gib: 15` に当たる根拠が無い。**誤結合は取�
 - `DCIM` を持たないボリュームが「対象外」になる
 - **DJI のカードが `generic-dcim` に落ちない**（順位付けの回帰）
 - 壊れた正規表現、長すぎる正規表現が `ProfileInvalid` になる
-- **`(a+)+$` のような短い悪性の式が、deadline を超えて `ProfileInvalid` になる**
-- 正常な式は予算内に収まり、拒否されない
+- **`(a|a)+$` のような、`regex` の最適化を抜ける式でも、`timeout` で有限時間で降りる**
+  （そのボリュームは「対象外」になり、理由が出る）
+- 正常な式（ビルトインの 3 つを含む）は timeout に掛からない
+- `regex` に替えた後もビルトインの判定結果が変わらない（回帰）
 
 **変異試験:**
 - `resolve_profile` の tie-break から `generic-dcim` の項を落とす → DJI が generic に落ちる試験が落ちること
 - `merge.enabled` の必須外しを逆にする → Canon の定義が読めなくなること
 - 正規表現の長さ上限を外す → 対応する試験が落ちること
-- **deadline を外す／十分大きくする** → 悪性の式の試験が落ちること（時間で落ちるのではなく
-  `ProfileInvalid` が出ないことで落ちること）
-- **試験マッチを同一プロセスで行う** → 試験が固まる（＝タイムアウトで落ちる）こと
+- **`timeout` を渡さない／十分大きくする** → 悪性の式の試験が落ちること
+- **`regex` を `re` に戻す** → 悪性の式の試験が落ちること
+- **`TimeoutError` を「不一致」として握る** → 「理由が出る」試験が落ちること
 
 ---
 
@@ -844,7 +959,37 @@ ALTER TABLE media_file ADD COLUMN captured_at_revision_id TEXT
 
 -- 既存行は取り込み時の版で算出されている。
 UPDATE media_file SET captured_at_revision_id = profile_revision_id;
+
+-- **単一 FK では「同じプロファイルの版であること」を守れない**（別プロファイルの
+-- 版も指せる）。SQLite の ALTER TABLE では複合 FK も NOT NULL も後から足せないので、
+-- trigger で同じ強さを作る。profile_revision には UNIQUE (profile_id, id) があるので
+-- 突き合わせられる（volume_instance と media_file が使っている複合 FK と同じ根拠）。
+CREATE TRIGGER media_file_captured_revision_insert
+BEFORE INSERT ON media_file
+WHEN NEW.captured_at_revision_id IS NULL
+  OR NOT EXISTS (SELECT 1 FROM profile_revision
+                  WHERE id = NEW.captured_at_revision_id
+                    AND profile_id = NEW.profile_id)
+BEGIN
+    SELECT RAISE(ABORT, 'captured_at_revision_id must be a revision of the same profile');
+END;
+
+CREATE TRIGGER media_file_captured_revision_update
+BEFORE UPDATE OF captured_at_revision_id, profile_id ON media_file
+WHEN NEW.captured_at_revision_id IS NULL
+  OR NOT EXISTS (SELECT 1 FROM profile_revision
+                  WHERE id = NEW.captured_at_revision_id
+                    AND profile_id = NEW.profile_id)
+BEGIN
+    SELECT RAISE(ABORT, 'captured_at_revision_id must be a revision of the same profile');
+END;
 ```
+
+**table rebuild ではなく trigger にする理由:** `media_file` は `upload_record` /
+`artifact_staging` / `merge_group_member` から参照されている。作り直すと参照側の扱いに
+気を遣うことになり、**移行の失敗が最も高くつく表**でそれをやる利は無い。
+trigger なら「必ず値を持ち、同じプロファイルの版である」という 2 つの契約を、
+既存の `UNIQUE (profile_id, id)` を使って同じ強さで守れる。
 
 - 取り込み時は `profile_revision_id` と同じ値が入る
 - `recompute` はこの列**だけ**を新しい版へ進め、`profile_revision_id` は触らない
@@ -858,11 +1003,43 @@ UPDATE media_file SET captured_at_revision_id = profile_revision_id;
 - **対象はプロファイル単位**（`POST /profiles/{slug}/recompute`）。ボリューム単位ではない
 - 直すのは `captured_at` / `captured_at_source` / `captured_at_tz` / `captured_at_note` と
   `captured_at_revision_id` の 5 列だけ
-- **`source: exif` の場合は公開済みファイルを読み直す。** ステージは残っていない
+- **再計算の入力は role ごとに違う**（下記）
 - **リモートは黙って書き換えない。** 送信済みで `captured_at` が変わったレコードは、
   **`needs_recheck` へ戻す**（下記）。**`recompute` 自身は Immich に触らない**
 - キャンセルとリースは他のジョブと同じ作法。件数が多いので、
   **バッチごとにキャンセルとリースの両方を見る**（Phase 3 の Rechecker と同じ形）
+
+#### 再計算の入力（計画レビュー 2 巡目の blocker）
+
+**`media_file` だけでは再計算できない。** 3 つとも実装で確かめた。
+
+1. **`timestamp.source: filename` はカード上の原名に当てる。** `media_file.rel_path` は
+   **公開先の名前**で、衝突時には接尾辞が付いている（§9.3）。原名を当てると外れる
+2. **`ArtifactRequest.source_rel_path` はどこにも保存されていない。** `media_file` にも
+   `metadata_json` にも無く、`desired_rel_path` を組み立てるためだけに使われている
+3. **derived の `captured_at` は算出ではなく継承。** `Merger` は
+   `_captured_of(members[0])` で先頭 member の値をそのまま渡している。
+   「`exif` なら公開済みファイルを読む」を一律に当てると、**結合出力そのものの
+   EXIF / mtime を読むことになり、意味が変わる**
+
+**role ごとに規則を決め、順序を固定する。**
+
+| role | `filename` | `exif` | `mtime` |
+| --- | --- | --- | --- |
+| `original` | **`source_entry.rel_path`**（`source_entry.media_file_id` で JOIN）に当てる | 公開済みファイルを読む | `media_file.mtime_ns` |
+| `derived` | **当てない** | **読まない** | **使わない** |
+
+**`derived` は先頭の active member から再導出する。** 取り込みと同じ形（継承）を保つ。
+したがって**順序が要る**。
+
+```
+1. original を再計算する（source_entry / 公開済みファイル / mtime から）
+2. derived を、その結合グループの先頭の active member の captured_at から derive する
+```
+
+**`source_entry` が無い `original` は再計算しない。** 理由を添えて飛ばし、件数を出す
+（カードを再フォーマットして `source_entry` が消えている行がありうる。**勝手に mtime へ
+落とすと、正しかった値を壊す**）。
 
 #### 送信済みのものをどう知らせるか（計画レビュー 1 巡目の major）
 
@@ -918,7 +1095,13 @@ complete ──(recompute。captured_at が変わり、かつプロファイル�
 - `needs_recheck` になったレコードは、次のアップロードジョブが claim して再実行し、
   **現在値を観測したうえで** `awaiting_datetime_approval` か `complete` に落ち着く
 - キャンセルすると途中で止まり、**処理済みの分は commit されている**
-- `source: exif` のプロファイルで、公開済みファイルの EXIF から再計算される
+- `source: exif` の `original` は、公開済みファイルの EXIF から再計算される
+- **`source: filename` の `original` は `source_entry.rel_path`（カード上の原名）に当たる。
+  衝突接尾辞の付いた `media_file.rel_path` では外れることを、接尾辞のある行で確かめる**
+- **`derived` は先頭の active member の `captured_at` から derive され、
+  結合出力そのものの EXIF / mtime は読まれない**
+- **`original` を全部直してから `derived` を直す**（順序の回帰）
+- `source_entry` が無い `original` は飛ばされ、件数と理由が出る
 - `0011` が既存 DB に適用でき、既存行の `captured_at_revision_id` が
   `profile_revision_id` と等しくなる
 
@@ -928,6 +1111,10 @@ complete ──(recompute。captured_at が変わり、かつプロファイル�
 - リモートも書き換える → 送信済み資産の試験が落ちること
 - **`profile_revision_id` も一緒に進める** → provenance の試験が落ちること
 - **`captured_at_revision_id` を更新しない** → 同上
+- **`filename` の入力を `media_file.rel_path` にする** → 衝突接尾辞の試験が落ちること
+- **`derived` にも `exif` / `filename` を当てる** → derived の試験が落ちること
+- **original と derived の順序を入れ替える** → 順序の試験が落ちること
+- **`source_entry` の無い行を mtime で埋める** → 「飛ばす」試験が落ちること
 - **値が変わっていない送信済みレコードも `needs_recheck` にする** → 「変わらなければ据え置き」が
   落ちること
 - **`fix_datetime_after_upload` の判定を落として全件戻す** → 対応する試験が落ちること
@@ -1030,6 +1217,14 @@ complete ──(recompute。captured_at が変わり、かつプロファイル�
 - [ ] **カードを挿したまま画面で承認しても、次の tick で取り込みが始まる**（観測トークンは
       動かないため。計画レビュー 1 巡目の blocker 1）
 - [ ] **停止要求から有限時間で降りる**（ブローカーが応答しない場合を含む）
+- [ ] **EXIF が読めないファイル（タグ無し・破損・動画）で取り込みが止まらず、`fallback` の
+      値と出所が記録される**
+- [ ] **`source: exif` のプロファイルで §9.3 の 11 段の crash 試験が通る**
+- [ ] **`recompute` の後、`profile_revision_id` は不変で `captured_at_revision_id` だけが
+      進んでいる**
+- [ ] **`recompute` はリモートに触らず、影響を受けた送信済みレコードだけが
+      `needs_recheck` になる**
+- [ ] **ユーザが書いた悪性の正規表現でアプリが固まらない**（`timeout` で降り、理由が出る）
 - [ ] 2 枚のカードを同時に挿して独立に扱える
 - [ ] mountd を再起動してもアプリが復帰する
 - [ ] `uv run pytest` / `-m needs_system` / ruff / npm の lint・typecheck・build・test:e2e が通る
@@ -1135,6 +1330,29 @@ Immich へ問い合わせて控えた値で、ローカルのジョブでは埋�
 **この巡で自分でも 1 件見つけた。** `exifread` は認識できない入力に対して例外ではなく
 WARNING を出す（実測）。Canon は MOV も `source: exif` を通るので、**画像以外では呼ばない**
 振り分けを Task 3 に足した。
+
+### 計画レビュー 2 巡目（2026-08-19、codex `--fresh`。blocker 4 / major 4 / minor 2）
+
+対象は `83d428b`。**1 巡目で作り直した箇所の周りから、また blocker が出た**
+（Phase 3 で 3 巡続いたのと同じ形）。**反論できたものは無い。**
+
+| # | 指摘 | 反映 |
+| --- | --- | --- |
+| blocker 1 | **watcher の所有境界が三すくみ。** `refresh()` は `self._client` を使うので、専用 socket を持たせても API 側の `VolumeService` を呼べば共有 client を通る。別 `VolumeService` を作って `volumes_conn` を使い回せば「接続を同時共有しない」に反する | **watcher に 1 つのスコープを丸ごと持たせた**（専用 DB 接続 + `ProfileRegistry` + `VolumeService` + `BrokerClient`）。あわせて **`refresh()` の書き込みを `BEGIN IMMEDIATE` で囲む**（現状トランザクションが無く、インスタンスが 1 つだから成立していただけ） |
+| blocker 2 | **「毎 tick DB の現在値」がプロファイルの現在性を満たしていない。** `volume_instance` にキャッシュされた `profile_id` / `profile_revision_id` だけを読み、`archived_at` と `current_revision_id` を見ていない | `device_profile` を JOIN し、**archive されていないこと**と**その版が今も現行であること**を条件に足した。さらに**門の入力に「現行リビジョンの指紋」を加えた**ので、プロファイルの編集で再 probe が走る |
+| blocker 3 | **recompute の再計算入力が永続化されていない。** `filename` はカード上の原名に当てるのに `media_file.rel_path` は公開先（衝突接尾辞つき）で、`source_rel_path` はどこにも保存されていない。derived は継承なのに一律で公開済みファイルを読む形になっていた | **role ごとに入力を決め、順序を固定した**。`original` は `source_entry.rel_path` を JOIN、`derived` は先頭 active member から derive、`original` → `derived` の順。`source_entry` の無い行は飛ばして件数を出す |
+| blocker 4 | `complete` → `awaiting_datetime_approval` の直遷移が状態機械を迂回する | **`62b9662` で先に自分でも見つけて直していた**（`needs_recheck` へ）。先方も同じ結論 |
+| major 1 | `0011` の制約が弱い。nullable のままで、単一 FK なので別プロファイルの版も指せる | **trigger で「必ず値を持つ」と「同じプロファイルの版である」を強制**した。`media_file` は参照が多いので table rebuild は採らない |
+| major 2 | **初回観測が空集合のケースが無い。** 記憶の初期値を「空」にすると、前回の live presence が残ったまま最初の tick が「変化なし」になり、stale な presence に自動取り込みを積む | `UNOBSERVED` と `EMPTY` を**別の値**にし、**最初に成功した `list_volumes` は空でも必ず `refresh()` を回す**ことにした |
+| major 3 | **固定標本による ReDoS 緩和は弱すぎる。** `(z+)+$` は `a` の標本を素通りする | **測って作り直した。** `re` は `(a+)+$` で破綻するが `regex` は 0.000 秒で処理し、`regex` でも破綻する `(a|a)+$` では `timeout=` が実測どおり発火する。**マッチを `regex` + `timeout` に替えた**（実行時の保証になる） |
+| major 4 | **`stop()` の close と Task 0 の再接続が衝突する。** close で解けた `recv` の `OSError` を「`list_volumes` だから再送可」と拾い、また待ちに入る | `_closing` を**先に**立て、`shutdown(SHUT_RDWR)` → `close()` の順にした。deadline は保険として残す |
+| minor 1 | `captured` と `resolve_captured` の排他がコメントだけ | `__post_init__` で両方／どちらも無しを弾き、試験を足した |
+| minor 2 | 完了条件に recompute の provenance / remote 状態と EXIF の fallback / crash が無い | 6 件足した |
+
+**依頼した確認点への回答で、通ったもの:** `0010` / `0011` は追加のみで順序も backfill も妥当。
+`resolve_captured` を手順 4 後・手順 5 内で呼ぶ位置は §9.3 の回収境界と両立する
+（手順 7 より前なので、失敗すれば `writing` と staging を破棄できる）。範囲表に対して
+Task 自体が欠けている項目は無い。
 
 ### 実装差分のレビュー
 
