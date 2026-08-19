@@ -190,3 +190,115 @@ def test_merge_still_requires_the_sequence_pattern_when_it_is_enabled():
     }
     with pytest.raises(ProfileInvalid):
         parse_definition(a_definition(merge=merge))
+
+
+# --- stack（Phase 6 / §6） ---------------------------------------------
+
+
+def test_stack_is_optional_so_old_revisions_still_parse():
+    """**既存リビジョンの JSON には `stack` が無い。** 必須にすると DB が開けない。"""
+    defn = parse_definition(a_definition())
+    assert defn.stack.enabled is False
+    assert defn.stack.extensions == ()
+    assert defn.stack.tolerance_seconds == 0
+
+
+def test_stack_extensions_must_be_upper_and_dotless():
+    with pytest.raises(ProfileInvalid, match="ドット無しの大文字"):
+        parse_definition(
+            a_definition(
+                scan={"roots": ["DCIM"], "extensions": ["JPG", "CR2"]},
+                stack={"enabled": True, "extensions": [".jpg", "CR2"], "tolerance_seconds": 0},
+            )
+        )
+
+
+def test_stack_needs_at_least_two_extensions():
+    """1 つでは組にならない（自分としか当たらない）。"""
+    with pytest.raises(ProfileInvalid, match="2 つ以上"):
+        parse_definition(
+            a_definition(
+                scan={"roots": ["DCIM"], "extensions": ["JPG"]},
+                stack={"enabled": True, "extensions": ["JPG"], "tolerance_seconds": 0},
+            )
+        )
+
+
+def test_stack_extensions_must_not_repeat():
+    with pytest.raises(ProfileInvalid, match="重複"):
+        parse_definition(
+            a_definition(
+                scan={"roots": ["DCIM"], "extensions": ["JPG"]},
+                stack={"enabled": True, "extensions": ["JPG", "JPG"], "tolerance_seconds": 0},
+            )
+        )
+
+
+def test_stack_extensions_must_be_scanned():
+    """**取り込まない拡張子は組にならない。** 書き間違いを早く教える。"""
+    with pytest.raises(ProfileInvalid, match="scan.extensions に無い"):
+        parse_definition(
+            a_definition(
+                scan={"roots": ["DCIM"], "extensions": ["JPG"]},
+                stack={"enabled": True, "extensions": ["JPG", "CR2"], "tolerance_seconds": 0},
+            )
+        )
+
+
+def test_the_tolerance_must_not_be_negative():
+    with pytest.raises(ProfileInvalid, match="0 以上"):
+        parse_definition(
+            a_definition(
+                scan={"roots": ["DCIM"], "extensions": ["JPG", "CR2"]},
+                stack={"enabled": True, "extensions": ["JPG", "CR2"], "tolerance_seconds": -1},
+            )
+        )
+
+
+def test_a_disabled_stack_does_not_require_the_rest():
+    """`merge.enabled: false` と同じ扱い（使われない値を発明させない）。"""
+    assert parse_definition(a_definition(stack={"enabled": False})).stack.enabled is False
+
+
+def test_an_unknown_key_in_stack_is_rejected():
+    with pytest.raises(ProfileInvalid, match="stack に未知のキー"):
+        parse_definition(a_definition(stack={"enabled": False, "pattern": "x"}))
+
+
+def test_an_enabled_stack_keeps_the_order_of_the_extensions():
+    """**先頭が primary。** 順序は規則の一部なので落とさない。"""
+    defn = parse_definition(
+        a_definition(
+            scan={"roots": ["DCIM"], "extensions": ["JPG", "CR2"]},
+            stack={"enabled": True, "extensions": ["CR2", "JPG"], "tolerance_seconds": 0},
+        )
+    )
+    assert defn.stack.extensions == ("CR2", "JPG")
+
+
+def test_canon_eos_stacks_jpg_and_cr2():
+    canon = {d.slug: d for d in load_builtin_definitions()}["canon-eos"]
+    assert canon.stack.enabled is True
+    assert canon.stack.extensions == ("JPG", "CR2")
+    assert canon.stack.tolerance_seconds == 0
+
+
+def test_the_other_builtins_do_not_stack():
+    builtins = {d.slug: d for d in load_builtin_definitions()}
+    assert builtins["dji-osmo"].stack.enabled is False
+    assert builtins["generic-dcim"].stack.enabled is False
+
+
+def test_the_stack_rule_is_part_of_the_normal_form():
+    """`definition_to_json` は差分検出に使う。**規則が入っていなければ版が進まない。**"""
+    body = json.loads(
+        definition_to_json(
+            parse_definition(
+                a_definition(
+                    scan={"roots": ["DCIM"], "extensions": ["JPG", "CR2"]},
+                    stack={"enabled": True, "extensions": ["JPG", "CR2"], "tolerance_seconds": 0},
+                )
+            )
+        )
+    )
+    assert body["stack"] == {"enabled": True, "extensions": ["JPG", "CR2"], "tolerance_seconds": 0}

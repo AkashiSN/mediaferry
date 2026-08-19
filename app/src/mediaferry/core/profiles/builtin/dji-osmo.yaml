@@ -37,6 +37,9 @@ merge:
     timecode: true
     # djmd / dbgi は Immich が使わない。落として転送量を減らす。
     data: false
+stack:
+  # RAW を書かない機種なので組が無い。
+  enabled: false
 immich:
   tags: ["DJI Osmo Pocket 4"]
   tag_pre_existing: true

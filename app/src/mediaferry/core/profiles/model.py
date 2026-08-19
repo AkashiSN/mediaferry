@@ -86,6 +86,24 @@ class MergeRule:
 
 
 @dataclass(frozen=True)
+class StackRule:
+    """RAW+JPEG の組の規則（§6）.
+
+    `extensions` は**先頭ほど primary**。`tolerance_seconds` は `captured_at` の
+    許容差で、既定は完全一致。
+    """
+
+    enabled: bool
+    extensions: tuple[str, ...]
+    tolerance_seconds: int
+
+
+# **`stack` は省略できる。** 既存リビジョンの `definition_json` にこのキーは無く、
+# 必須にすると適用済みの DB を開けなくなる。
+STACK_DISABLED = StackRule(enabled=False, extensions=(), tolerance_seconds=0)
+
+
+@dataclass(frozen=True)
 class ImmichRule:
     tags: tuple[str, ...]
     tag_pre_existing: bool
@@ -101,26 +119,29 @@ class ProfileDefinition:
     scan: ScanRule
     timestamp: TimestampRule
     merge: MergeRule
+    stack: StackRule
     immich: ImmichRule
 
 
 def parse_definition(data: Mapping[str, Any]) -> ProfileDefinition:
     _reject_unknown(
         data,
-        {"slug", "name", "hints", "require", "scan", "timestamp", "merge", "immich"},
+        {"slug", "name", "hints", "require", "scan", "timestamp", "merge", "stack", "immich"},
         "profile",
     )
     slug = _string(data, "slug")
     if not _SLUG_RE.match(slug):
         raise ProfileInvalid(f"slug は英小文字・数字・ハイフンのみ: {slug}")
+    scan = _parse_scan(_mapping(data, "scan"))
     return ProfileDefinition(
         slug=slug,
         name=_string(data, "name"),
         hints=_parse_hints(_mapping(data, "hints")),
         require=_parse_require(_mapping(data, "require")),
-        scan=_parse_scan(_mapping(data, "scan")),
+        scan=scan,
         timestamp=_parse_timestamp(_mapping(data, "timestamp")),
         merge=_parse_merge(_mapping(data, "merge")),
+        stack=_parse_stack(_mapping(data, "stack"), scan) if "stack" in data else STACK_DISABLED,
         immich=_parse_immich(_mapping(data, "immich")),
     )
 
@@ -315,6 +336,28 @@ def _parse_merge(data: Mapping[str, Any]) -> MergeRule:
         sequence_pattern=_regex(data, "sequence_pattern"),
         output_name=output_name,
         keep_streams=_parse_keep_streams(_mapping(data, "keep_streams")),
+    )
+
+
+def _parse_stack(data: Mapping[str, Any], scan: ScanRule) -> StackRule:
+    _reject_unknown(data, {"enabled", "extensions", "tolerance_seconds"}, "stack")
+    if not _bool(data, "enabled"):
+        # 無効なら拡張子も許容差も要らない（`merge` と同じ扱い）。
+        return STACK_DISABLED
+    extensions = _strings(data, "extensions")
+    for ext in extensions:
+        if ext != ext.upper() or ext.startswith("."):
+            raise ProfileInvalid(f"stack.extensions はドット無しの大文字で書く: {ext!r}")
+        if ext not in scan.extensions:
+            raise ProfileInvalid(f"stack.extensions が scan.extensions に無い: {ext}")
+    if len(extensions) < 2:
+        raise ProfileInvalid("stack.extensions は 2 つ以上必要（1 つでは組にならない）")
+    if len(set(extensions)) != len(extensions):
+        raise ProfileInvalid(f"stack.extensions に重複がある: {extensions}")
+    return StackRule(
+        enabled=True,
+        extensions=extensions,
+        tolerance_seconds=_positive_int(data, "tolerance_seconds"),
     )
 
 

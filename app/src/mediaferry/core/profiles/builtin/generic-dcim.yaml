@@ -36,6 +36,9 @@ merge:
     audio: all
     timecode: false
     data: false
+stack:
+  # メーカー固有の RAW を拾わないので組が無い（scan.extensions）。
+  enabled: false
 immich:
   tags: []
   tag_pre_existing: false

@@ -61,6 +61,8 @@ const TEMPLATE = {
     output_name: "",
     keep_streams: { video: "primary", audio: "all", timecode: false, data: false },
   },
+  // RAW+JPEG を Immich のスタックとして束ねる規則（§6）。先頭の拡張子が primary。
+  stack: { enabled: false },
   immich: { tags: [], tag_pre_existing: true, fix_datetime_after_upload: false },
 };
 
