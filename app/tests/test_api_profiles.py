@@ -243,7 +243,7 @@ def test_recompute_is_allowed_on_a_builtin(client):
     """ビルトインは**編集**できないだけで、再計算は要る.
 
     `DEFAULT_TIMEZONE` を後から設定した場合、既存レコードを直す手段がこれしかない
-    （§12.1）。
+    （§12.2）。
     """
     response = client.post("/api/profiles/dji-osmo/recompute")
     assert response.status_code == 200, response.text

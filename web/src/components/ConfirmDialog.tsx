@@ -80,7 +80,7 @@ export function describe(confirmation: Confirmation): { title: string; body: Rea
                 </strong>
                 （画面の操作は要りません）。取り込みは
                 {confirmation.state === "pending"
-                  ? `${confirmation.reason}始まります。`
+                  ? `${confirmation.reason}に始まります（確かめられない媒体では始まりません）。`
                   : "承認の数秒後に始まります。"}
               </p>
             ) : (

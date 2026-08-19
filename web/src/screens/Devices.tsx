@@ -38,6 +38,11 @@ type Settings = { settings: Setting[] };
  * `identity_confidence = low` だが、その観測で指紋を憶えるので、一覧を取り直すと
  * 同じ挿入のまま `high` になり次の tick で積まれる（`_identity_confidence`）。
  * 「いまは始まりません」と書くと、**数秒後に始まる経路を否定する**ことになる。
+ *
+ * **ただし `pending` は約束ではない。** `fs_uuid` が無い媒体や、同じ UUID の別
+ * presence が併存している間は、何度観測しても `high` にならない。API は `low` の
+ * 理由を返さないので画面は区別できない。**だから条件形で書く**（「確かめられた
+ * 場合は」）。同意の対象は変わらないので、確認ダイアログはそのまま出す。
  */
 export type Outlook =
   | { state: "starts"; reason: null }
@@ -57,7 +62,7 @@ export function autoImportOutlook(volume: Volume, autoImport: string | null): Ou
     return { state: "blocked", reason: "対象の中身がまだ見つかっていない" };
   }
   if (volume.identity_confidence !== "high") {
-    return { state: "pending", reason: "このカードだと確かめられしだい" };
+    return { state: "pending", reason: "このカードだと確かめられた場合" };
   }
   return { state: "starts", reason: null };
 }
@@ -74,7 +79,7 @@ export function autoImportState(volume: Volume, autoImport: string | null): stri
       case "starts":
         return "未承認です。承認すると、いま入っている中身も含めて、数秒後から自動で取り込みます。";
       case "pending":
-        return `未承認です。承認すると、${outlook.reason}、いま入っている中身も含めて自動で取り込みます。`;
+        return `未承認です。承認すると、${outlook.reason}に、いま入っている中身も含めて自動で取り込みます。`;
       case "blocked":
         return `未承認です。承認しても、${outlook.reason}ので、いまは自動取り込みは始まりません。`;
     }
@@ -83,7 +88,7 @@ export function autoImportState(volume: Volume, autoImport: string | null): stri
     case "starts":
       return "信頼済み。挿すと自動で取り込みます。";
     case "pending":
-      return `信頼済み。${outlook.reason}自動で取り込みます。`;
+      return `信頼済み。${outlook.reason}に自動で取り込みます。`;
     case "blocked":
       return `信頼済みですが、${outlook.reason}ので、いまは自動取り込みは始まりません。`;
   }

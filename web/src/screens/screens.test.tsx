@@ -682,8 +682,20 @@ describe("デバイスの信頼登録", () => {
     stubDevices([{ ...base, trusted: true, identity_confidence: "low" }]);
     renderDevices();
 
-    expect(await screen.findByText(/確かめられしだい/)).toBeInTheDocument();
+    expect(await screen.findByText(/確かめられた場合/)).toBeInTheDocument();
     expect(screen.queryByText(/いまは自動取り込みは始まりません/)).toBeNull();
+  });
+
+  it("確度が低い状態を「始まる」と約束しない", async () => {
+    // **`low` には 2 種類ある。** `fs_uuid` が無い媒体や、同じ UUID の別 presence が
+    // 併存している間は、何度観測しても `high` にならない
+    // （`jobs/volumes.py::_identity_confidence`）。API は理由を返さないので画面は
+    // 区別できない。**だから条件形で書く**（「確かめられた場合は」）。
+    stubDevices([{ ...base, trusted: true, identity_confidence: "low" }]);
+    renderDevices();
+
+    expect(await screen.findByText(/確かめられた場合/)).toBeInTheDocument();
+    expect(screen.queryByText(/確かめられしだい/)).toBeNull();
   });
 
   it("確度が低い未承認カードの確認は、同意の対象を示したまま条件を添える", async () => {
@@ -697,7 +709,7 @@ describe("デバイスの信頼登録", () => {
     // 変わるのは「いつ始まるか」だけ。blocked の文（信頼を記録するだけ）に
     // 落とすと、始まる見込みのカードで同意を取り損ねる。
     expect(dialog).toHaveTextContent(/いま入っている中身も含めて/);
-    expect(dialog).toHaveTextContent(/確かめられしだい/);
+    expect(dialog).toHaveTextContent(/確かめられた場合/);
     expect(dialog).toHaveTextContent(/取り違え/);
     expect(dialog).not.toHaveTextContent(/いまは自動取り込みは始まりません/);
   });
@@ -716,7 +728,7 @@ describe("デバイスの信頼登録", () => {
     stubDevices([{ ...base, trusted: false, identity_confidence: "low" }]);
     renderDevices();
 
-    expect(await screen.findByText(/確かめられしだい/)).toBeInTheDocument();
+    expect(await screen.findByText(/確かめられた場合/)).toBeInTheDocument();
     expect(screen.queryByText(/いまは自動取り込みは始まりません/)).toBeNull();
   });
 
