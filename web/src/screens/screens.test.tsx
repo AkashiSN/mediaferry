@@ -632,6 +632,15 @@ describe("デバイスの信頼登録", () => {
     expect(screen.getByText(/DCIM が無い/)).toBeInTheDocument();
   });
 
+  it("一致したボリュームでも、判定の理由を出す", async () => {
+    // **理由は対象外だけのものではない**（§13）。「なぜこのプロファイルに
+    // 決まったのか」が見えないと、プロファイルを直す手がかりが無い。
+    stubDevices([{ ...base, reason: "DCIM に一致するファイルが 2 件" }]);
+    renderDevices();
+
+    expect(await screen.findByText(/DCIM に一致するファイルが 2 件/)).toBeInTheDocument();
+  });
+
   it("承認は確認を経てから。ダイアログに信頼の限界を書く", async () => {
     stubDevices([{ ...base, trusted: false, identity_confidence: "low" }]);
     renderDevices();

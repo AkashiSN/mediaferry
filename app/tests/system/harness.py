@@ -28,6 +28,7 @@ from mediaferry_protocol.messages import UsbInfo, VolumeInfo
 from mountd.server import BrokerServer
 
 from ..conftest import FakeMountManager
+from ..exif_fixtures import a_jpeg_with
 from ..fake_immich import FakeImmich
 
 # 起動を待つ上限。CI の遅い環境でも足りる長さにする。
@@ -70,12 +71,41 @@ def _a_card(root: Path) -> Path:
     return card
 
 
+def _a_canon_card(root: Path) -> Path:
+    """Canon EOS 風の合成カード.
+
+    **実カードは手元に無い**（§1 の「残っていること」3）ので、仕様と
+    `canon-eos` の `require` から組み立てる。EXIF を持たせるのは、
+    `timestamp.source: exif` が公開済みファイルから読めることを通すため。
+    """
+    card = root / "canon"
+    (card / "DCIM" / "100CANON").mkdir(parents=True)
+    for index, name in enumerate(("IMG_0001.JPG", "IMG_0002.JPG")):
+        (card / "DCIM" / "100CANON" / name).write_bytes(
+            a_jpeg_with(f"2026:02:0{index + 3} 04:05:06".encode())
+        )
+    return card
+
+
+class _Cards(FakeMountManager):
+    """`volume_key` ごとに別のディレクトリを見せる（2 枚同時に挿してある状態）."""
+
+    def __init__(self, by_key: dict[str, Path]) -> None:
+        super().__init__(next(iter(by_key.values())))
+        self._by_key = by_key
+
+    def mount(self, volume, expect, verify):  # noqa: ANN001, ANN201
+        self.target = self._by_key[volume.volume_key]
+        return super().mount(volume, expect, verify)
+
+
 @contextmanager
 def system_app(
     tmp_path: Path,
     *,
     password: str | None = None,
     immich_count: int = 2,
+    default_timezone: str | None = "Asia/Tokyo",
 ) -> Iterator[SystemApp]:
     """一式を立ち上げて、終わったら必ず片付ける."""
     data_root = tmp_path / "data"
@@ -83,18 +113,20 @@ def system_app(
     for name in ("library", "derived", "staging", "work", "var"):
         (data_root / name).mkdir(parents=True)
     card = _a_card(tmp_path)
+    canon = _a_canon_card(tmp_path)
 
     servers = [FakeImmich() for _ in range(immich_count)]
     for server in servers:
         server.start()
 
     socket_path = tmp_path / "run" / "broker.sock"
-    # **カードを 1 枚差してある状態にする。** 列挙が空だと、デバイスの画面から
-    # 先へ進めない（取り込みも結合も送信も始まらない）。
+    # **カードを 2 枚差してある状態にする。** 列挙が空だとデバイスの画面から
+    # 先へ進めず（取り込みも結合も送信も始まらない）、1 枚だと「複数デバイスを
+    # 独立に扱える」（Phase 5 §20）を受け入れの経路に載せられない。
     broker = BrokerServer(
         socket_path=socket_path,
-        mount_manager=FakeMountManager(card),
-        lister=lambda: [_a_volume()],
+        mount_manager=_Cards({"8:160": card, "8:176": canon}),
+        lister=lambda: [_a_volume(), _a_canon_volume()],
         allowed_uids=None,
         idle_timeout=None,
     )
@@ -108,7 +140,6 @@ def system_app(
         "MEDIAFERRY_BROKER_SOCKET": str(socket_path),
         "MEDIAFERRY_BIND_HOST": "127.0.0.1",
         "MEDIAFERRY_HTTP_PORT": str(port),
-        "MEDIAFERRY_DEFAULT_TIMEZONE": "Asia/Tokyo",
         # 転送先を作るのに要る（§12.3）。テスト用の使い捨ての鍵。
         "MEDIAFERRY_SECRET_KEY": "0" * 43 + "=",
     }
@@ -117,6 +148,11 @@ def system_app(
     built = Path(__file__).resolve().parents[3] / "web" / "dist"
     if (built / "index.html").is_file():
         env["MEDIAFERRY_WEB_ROOT"] = str(built)
+    if default_timezone is not None:
+        # **`None` を渡すと env に置かない。** env にあると `locked` になり、
+        # 画面から変えられない —— 再計算の受け入れは「設定を変えてから直す」
+        # 筋書きなので、DB 側の設定として持てる状態が要る（§12.2）。
+        env["MEDIAFERRY_DEFAULT_TIMEZONE"] = default_timezone
     if password is not None:
         env["MEDIAFERRY_AUTH_PASSWORD"] = password
 
@@ -165,6 +201,29 @@ def _a_volume() -> VolumeInfo:
             product_id="0020",
             product="OsmoPocket4-ABC123",
             serial="123456789ABCDEF",
+        ),
+        broker_epoch="",
+        generation=1,
+    )
+
+
+def _a_canon_volume() -> VolumeInfo:
+    """カードリーダー越しの Canon（**USB ID はリーダーのもの**なので手がかりにしない）."""
+    return VolumeInfo(
+        volume_key="8:176",
+        device_node="/dev/sdl",
+        major=8,
+        minor=176,
+        sysfs_path="/sys/y",
+        fs_type="exfat",
+        fs_uuid="1234-ABCD",
+        fs_label="EOS_DIGITAL",
+        size_bytes=32_000_000_000,
+        usb=UsbInfo(
+            vendor_id="05e3",
+            product_id="0749",
+            product="USB Card Reader",
+            serial="0000000000",
         ),
         broker_epoch="",
         generation=1,

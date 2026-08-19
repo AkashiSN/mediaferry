@@ -90,10 +90,13 @@ export function DevicesScreen() {
                 判定: {volume.profile_slug ?? "対象外"}
                 {volume.identity_confidence ? `（確度 ${volume.identity_confidence}）` : ""}
               </p>
-              {/* **対象外も理由付きで出す**（§13）。黙って消えると原因が分からない。 */}
-              {volume.profile_slug === null && (
-                <p role="note">対象外の理由: {volume.reason ?? "不明"}</p>
-              )}
+              {/* **理由は常に出す**（§13）。対象外なら「なぜ外れたか」、一致なら
+                  「なぜそのプロファイルに決まったか」で、どちらもプロファイルを
+                  直す手がかりになる。黙って消えると原因が分からない。 */}
+              <p role="note">
+                {volume.profile_slug === null ? "対象外の理由" : "判定の理由"}:{" "}
+                {volume.reason ?? "不明"}
+              </p>
               {/* **「対象だが中身が無い」は対象外ではない**（§6 / Phase 0 の発見 B）。 */}
               {volume.provisional && (
                 <p role="note">
