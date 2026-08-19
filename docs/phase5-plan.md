@@ -1558,6 +1558,31 @@ WARNING を出す（実測）。Canon は MOV も `source: exif` を通るので
 （手順 7 より前なので、失敗すれば `writing` と staging を破棄できる）。範囲表に対して
 Task 自体が欠けている項目は無い。
 
+### 実装差分のレビュー 1 巡目（2026-08-19、codex `--fresh`。blocker 0 / major 2 / minor 0）
+
+対象は Task 6〜9 の 4 コミット（`4bcda2e..eab6dc2`）。**2 件とも `recompute` の同じ層
+（リースの境界と provenance）に出た。**
+
+| 指摘 | 判定 | 対処 |
+| --- | --- | --- |
+| **major 1**: バッチの頭で `assert_lease` を済ませてから EXIF 読み取りを含む再計算に入り、その後で初めて `BEGIN IMMEDIATE` に入るので、**失効・キャンセル後のバッチを書ける** | **妥当。** §9.3 手順 7 が「確認と遷移を 1 つの `BEGIN IMMEDIATE` に入れる」と決めているのと同型 | 書き込みの側でも `ctx.assert_lease()` を取り直す（`immediate` の冒頭）。EXIF の読み取りは `with_lease_pulse` で囲む。**この 2 つはレビューが来る前に片方を自分で見つけていた**（`_exif_wall` の pulse）が、書き込み側の取り直しは抜けていた |
+| **major 2**: `source_entry` 欠落で `original` を飛ばすと、その member を継ぐ `derived` だけが新しい `captured_at_revision_id` へ進み、**値は旧版由来なのに新版で算出したと記録する** | **妥当。** `0011` で列を分けた意味がそこで消える | `_recomputed_derived` で member の `captured_at_revision_id` も読み、対象の版まで進んでいなければ `derived` も理由付きで飛ばす |
+
+**指摘が無かったもの:** `0011` の埋め戻し・FK・trigger 2 本、YAML → JSON の受け取りと
+`validation_failed` の `detail` を出す変更、2 枚差しの harness。
+
+**環境の差:** レビュー側の sandbox は loopback socket を禁じているので、Playwright の
+E2E は先方では完走できない（こちら側では 2 spec とも通る）。
+
+**この巡で足した回帰試験:**
+
+- 長い EXIF 解決がリースを跨いでも失わない（`with_lease_pulse` の回帰）
+- 確認と書き込みの間にキャンセルが commit されても、そのバッチは書かれない
+- 継承元が旧版のままなら `derived` も飛ばす
+
+**変異試験（レビュー反映後）:** 23 件中 22 件を検出（素通りは既知のマスク 1 件）。
+新しい 2 つの guard を壊す変異 3 件はいずれも検出。
+
 ### 実装差分のレビュー
 
 （実装後にここへ足す。**毎巡 `--fresh`。**）

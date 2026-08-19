@@ -10,6 +10,7 @@ from datetime import UTC, datetime
 
 import pytest
 
+from mediaferry.adapters.exif import read_datetime_original
 from mediaferry.clock import now_iso
 from mediaferry.db.jobs import JobStore, LeaseLost
 from mediaferry.db.profiles import ProfileRegistry
@@ -613,3 +614,111 @@ def test_exif_is_not_read_for_a_video(dji, db, data_root, monkeypatch):
     run(db, data_root, registry.current(profile.definition.slug))
 
     assert calls == []
+
+
+def test_a_slow_exif_pass_does_not_lose_the_lease(db, data_root, monkeypatch):
+    """**EXIF の読み取りはトランザクションの外**で、そこにはリースの確認が無い.
+
+    1 件ずつは短くても、バッチぶん積もると 60 秒を越える。越えると次のバッチの
+    `assert_lease` が落ち、**先のバッチを commit したまま**ジョブが失敗する
+    （公開の `_with_lease_pulse` と同じ形の穴）。
+    """
+    import time
+
+    profile = a_user_profile(db, "canon-eos", "my-canon")
+    volume = a_volume(db, (profile.profile_id, profile.revision_id))
+    for index in range(2):
+        rel = f"library/my-canon/DCIM/100CANON/IMG_000{index}.JPG"
+        (data_root / rel).parent.mkdir(parents=True, exist_ok=True)
+        (data_root / rel).write_bytes(a_jpeg_with(b"2026:02:03 04:05:06"))
+        an_original(
+            db,
+            profile,
+            volume,
+            source_rel=f"DCIM/100CANON/IMG_000{index}.JPG",
+            rel_path=rel,
+            mtime_ns=ns("2026-08-17T12:00:00"),
+            captured_at="2026-08-17T12:00:00+00:00",
+            captured_at_source="mtime",
+            kind="photo",
+            duration_seconds=None,
+        )
+
+    real = read_datetime_original
+
+    def slow(path):
+        time.sleep(1.5)  # リース（1 秒）より長い
+        return real(path)
+
+    monkeypatch.setattr("mediaferry.jobs.recompute.read_datetime_original", slow)
+    monkeypatch.setattr("mediaferry.core.lease_pulse.HEARTBEAT_INTERVAL", 0.2)
+    store = JobStore(db, lease_seconds=1)
+    store.enqueue("recompute_timestamps", {})
+    ctx = store.claim_next()
+
+    outcome = Recomputer(db, data_root, TOKYO, batch_size=1).run(ctx, profile)
+
+    assert outcome.changed == 2
+
+
+def test_a_cancel_between_the_check_and_the_write_leaves_nothing_written(
+    dji, db, data_root, monkeypatch
+):
+    """**確認と書き込みを 1 つの `BEGIN IMMEDIATE` に入れる**（§9.3 手順 7 と同じ形）.
+
+    バッチの頭で `assert_lease` を済ませてから再計算に入るので、その間に
+    キャンセルが commit されうる。書き込みの側でも取り直さないと、
+    **キャンセル済みと表示した後に commit される**。
+    """
+    profile, _, part1, _, _ = dji
+    new_profile = to_berlin(db, profile)
+    store = JobStore(db)
+    store.enqueue("recompute_timestamps", {})
+    ctx = store.claim_next()
+    original = Recomputer._recomputed_original
+
+    def cancelling(self, ctx_, row, prof):  # noqa: ANN001, ANN202
+        # 確認の後・書き込みの前という窓を、決定的に作る。
+        store.request_cancel(ctx.job_id)
+        return original(self, ctx_, row, prof)
+
+    monkeypatch.setattr(Recomputer, "_recomputed_original", cancelling)
+
+    outcome = Recomputer(db, data_root, TOKYO).run(ctx, new_profile)
+
+    assert captured(db, part1)["captured_at"] == "2026-08-17T14:30:00+09:00"
+    assert outcome.changed == 0
+
+
+def test_a_derived_is_skipped_when_its_member_could_not_be_recomputed(dji, db, data_root):
+    """**継承元が旧版のままなら、派生物も進めない。**
+
+    先頭 active member が `source_entry` 欠落で飛ばされると、その `captured_at` は
+    旧版で算出したまま。それを継いだ派生物に新版の
+    `captured_at_revision_id` を書くと、**値は旧版由来なのに新版で算出したと
+    記録する**ことになる（`0011` で列を分けた意味が消える）。
+    """
+    profile, _, part1, part2, _ = dji
+    # カードを再フォーマットしたので、先頭パートの原名が残っていない。
+    db.execute("DELETE FROM source_entry WHERE media_file_id = ?", (part1,))
+    group = a_merge_group(db, (profile.profile_id, profile.revision_id), digest="d1")
+    output = a_media_file(
+        db,
+        (profile.profile_id, profile.revision_id),
+        role="derived",
+        rel_path="derived/my-dji/DCIM/DJI_20260817143000_0001-0002_MERGED.MP4",
+        mtime_ns=ns("2026-08-17T15:00:05"),
+        captured_at="2026-08-17T14:30:00+09:00",
+        captured_at_source="mtime",
+        captured_at_tz=TOKYO,
+    )
+    db.execute("UPDATE merge_group SET output_media_file_id = ? WHERE id = ?", (output, group))
+    db.execute("INSERT INTO merge_member VALUES (?, ?, 0, 1)", (group, part1))
+    db.execute("INSERT INTO merge_member VALUES (?, ?, 1, 1)", (group, part2))
+
+    outcome = run(db, data_root, to_berlin(db, profile))
+
+    row = captured(db, output)
+    assert row["captured_at"] == "2026-08-17T14:30:00+09:00"
+    assert row["captured_at_revision_id"] == profile.revision_id
+    assert outcome.skipped == 3  # orphan と part1 と、その派生物

@@ -29,6 +29,7 @@ from pathlib import Path, PurePosixPath
 from ..adapters.exif import read_datetime_original
 from ..adapters.ffprobe import PHOTO_EXTENSIONS
 from ..clock import now_iso
+from ..core.lease_pulse import with_lease_pulse
 from ..core.timestamps import CapturedAt, resolve_captured_at
 from ..db.connection import immediate
 from ..db.jobs import JobContext, LeaseLost
@@ -91,7 +92,7 @@ class Recomputer:
                 self._derived(profile.profile_id),
                 self._recomputed_derived,
                 tally,
-                "active な member が無い",
+                "先頭の active member が無いか、その member を再計算できていない",
             )
         return tally.outcome()
 
@@ -133,7 +134,9 @@ class Recomputer:
     # ------------------------------------------------------------------
     # 再計算の入力
 
-    def _recomputed_original(self, row: sqlite3.Row, profile: ProfileRef) -> CapturedAt | None:
+    def _recomputed_original(
+        self, ctx: JobContext, row: sqlite3.Row, profile: ProfileRef
+    ) -> CapturedAt | None:
         """`source_entry` が無ければ再計算しない.
 
         **勝手に mtime へ落とすと、正しかった値を壊す**（カードを再フォーマット
@@ -147,34 +150,52 @@ class Recomputer:
             source_rel,
             row["mtime_ns"],
             self._default_timezone,
-            exif_wall=self._exif_wall(row, source_rel, profile),
+            exif_wall=self._exif_wall(ctx, row, source_rel, profile),
         )
 
-    def _exif_wall(self, row: sqlite3.Row, source_rel: str, profile: ProfileRef) -> datetime | None:
+    def _exif_wall(
+        self, ctx: JobContext, row: sqlite3.Row, source_rel: str, profile: ProfileRef
+    ) -> datetime | None:
         """**読むのは公開済みの実体。** カードはもう手元に無い.
 
         取り込みと同じく、画像以外では読みに行かない（`exifread` は認識できない
         入力に例外ではなく WARNING を出す）。
+
+        **読んでいる間はリースを延ばす。** ここはトランザクションの外なので
+        リースの確認が無く、遅いディスクで積もると次のバッチの `assert_lease` が
+        落ちて、**先のバッチを commit したまま**ジョブが失敗する。囲むのは
+        ファイル入出力だけ —— DB へ触る処理を別スレッドへ入れると、1 本の接続を
+        2 つのスレッドが同時に使うことになる。
         """
         extension = PurePosixPath(source_rel).suffix.lstrip(".").upper()
         if profile.definition.timestamp.source != "exif" or extension not in PHOTO_EXTENSIONS:
             return None
-        return read_datetime_original(self._data_root / row["rel_path"])
+        path = self._data_root / row["rel_path"]
+        return with_lease_pulse(ctx, lambda: read_datetime_original(path))
 
-    def _recomputed_derived(self, row: sqlite3.Row, profile: ProfileRef) -> CapturedAt | None:
+    def _recomputed_derived(
+        self, ctx: JobContext, row: sqlite3.Row, profile: ProfileRef
+    ) -> CapturedAt | None:
         """先頭の active member から derive する. **算出しない。**
 
         結合出力そのものの名前・EXIF・mtime を読むと意味が変わる（出力名の
         壁時計は先頭パートのもの、mtime は録画終了時刻）。
+
+        **継承元がこの版で再計算できていなければ、派生物も飛ばす。**
         """
         if row["member_id"] is None:
             return None
         member = self._conn.execute(
-            "SELECT captured_at, captured_at_source, captured_at_tz, captured_at_note"
-            " FROM media_file WHERE id = ?",
+            "SELECT captured_at, captured_at_source, captured_at_tz, captured_at_note,"
+            " captured_at_revision_id FROM media_file WHERE id = ?",
             (row["member_id"],),
         ).fetchone()
         if member is None:
+            return None
+        if member["captured_at_revision_id"] != profile.revision_id:
+            # **継承元が旧版のままなら進めない。** 先頭 member が飛ばされている
+            # （原名が残っていない）ときにここへ来る。値は旧版で算出したままなのに
+            # 新版で算出したと記録すると、`0011` で列を分けた意味が消える。
             return None
         return CapturedAt(
             at=datetime.fromisoformat(member["captured_at"]),
@@ -191,7 +212,7 @@ class Recomputer:
         ctx: JobContext,
         profile: ProfileRef,
         rows: Sequence[sqlite3.Row],
-        recompute: Callable[[sqlite3.Row, ProfileRef], CapturedAt | None],
+        recompute: Callable[[JobContext, sqlite3.Row, ProfileRef], CapturedAt | None],
         tally: _Tally,
         skip_reason: str,
     ) -> bool:
@@ -206,16 +227,18 @@ class Recomputer:
             try:
                 ctx.assert_lease()
                 ctx.heartbeat()
+                skipped += self._apply_batch(
+                    ctx, rows[start : start + self._batch_size], profile, recompute, tally
+                )
             except LeaseLost:
                 # 確認の直後にキャンセルが commit されると、リースを失った形で
                 # 降りてくる。**利用者が押したキャンセルを失敗として記録しない。**
+                # EXIF を読んでいる間の pulse も `assert_lease` を通すので、
+                # バッチの最中のキャンセルはここへ落ちる。
                 if ctx.cancelled():
                     ctx.emit("info", "キャンセルを観測したので再計算を中止した")
                     return False
                 raise
-            skipped += self._apply_batch(
-                ctx, rows[start : start + self._batch_size], profile, recompute, tally
-            )
         if skipped:
             # **黙って飛ばさない。** 件数が実際と食い違うと、直っていない行に
             # 気付けない。
@@ -227,17 +250,25 @@ class Recomputer:
         ctx: JobContext,
         batch: Sequence[sqlite3.Row],
         profile: ProfileRef,
-        recompute: Callable[[sqlite3.Row, ProfileRef], CapturedAt | None],
+        recompute: Callable[[JobContext, sqlite3.Row, ProfileRef], CapturedAt | None],
         tally: _Tally,
     ) -> int:
         """1 バッチを 1 つのトランザクションで書く.
 
         **差し戻しは同じトランザクションに入れる。** 割ると「値は新しいのに
-        `complete` のまま」が残る。EXIF の読み取りは長いので外で済ませる。
+        `complete` のまま」が残る。EXIF の読み取りは長いので外で済ませる
+        （その間のリースは `_exif_wall` の pulse が守る）。**書き込みの側では
+        リースを取り直す** —— 頭の確認から時間が空いている。
         """
-        resolved = [(row, recompute(row, profile)) for row in batch]
+        resolved = [(row, recompute(ctx, row, profile)) for row in batch]
         skipped = 0
         with immediate(self._conn):
+            # **確認と遷移を 1 つの `BEGIN IMMEDIATE` に入れる**（§9.3 手順 7 と同じ形）。
+            # バッチの頭の確認から再計算を挟むので、その間にキャンセルが commit
+            # されうる。ここで取り直さないと、**キャンセル済みと表示した後に
+            # commit される**。書き込みロックを取った状態で確認するので、確認と
+            # 書き込みの間には誰も割り込めない。
+            ctx.assert_lease()
             for row, value in resolved:
                 if value is None:
                     skipped += 1
