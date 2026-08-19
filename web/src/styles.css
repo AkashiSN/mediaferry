@@ -1,0 +1,19 @@
+/* 最小限の見た目。**外部の書体もスクリプトも読まない**（CSP。§14）。 */
+:root {
+  color-scheme: light dark;
+  font-family: system-ui, sans-serif;
+}
+body { margin: 0; }
+.layout { display: flex; gap: 1.5rem; }
+.layout nav ul { list-style: none; padding: 0.5rem; }
+.layout main { flex: 1; padding: 1rem; }
+table { border-collapse: collapse; }
+th, td { border-bottom: 1px solid rgb(128 128 128 / 40%); padding: 0.25rem 0.5rem; text-align: left; }
+.tiles { display: flex; gap: 1rem; }
+.error-banner { background: rgb(200 0 0 / 15%); padding: 0.5rem; margin-bottom: 0.5rem; }
+.warning-banner { background: rgb(200 140 0 / 20%); padding: 0.5rem; margin-bottom: 0.5rem; }
+.dialog-backdrop { position: fixed; inset: 0; background: rgb(0 0 0 / 40%); display: grid; place-items: center; }
+.dialog { background: Canvas; padding: 1rem; max-width: 32rem; }
+.dialog-actions { display: flex; gap: 0.5rem; justify-content: flex-end; }
+.actions { display: flex; gap: 0.5rem; }
+.filters { display: flex; gap: 0.75rem; flex-wrap: wrap; align-items: end; margin-bottom: 0.5rem; }
