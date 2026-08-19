@@ -1,0 +1,113 @@
+// 不可逆な操作の確認（§13）。
+//
+// **操作の種類ごとに、確認に出すものが違う。** アップロードは件数・合計サイズ・
+// 宛先名だが、宛先の退役や結合グループの破棄にそれらは無い。型で取り違えを防ぐ
+// ため、種類ごとの直和にする（計画レビューの指摘）。
+
+import type { ReactNode } from "react";
+
+export type Confirmation =
+  | { kind: "upload"; count: number; totalBytes: number; destinationNames: string[] }
+  | { kind: "archive_destination"; name: string }
+  | { kind: "discard_merge_group"; groupLabel: string; publishedCount: number }
+  | { kind: "adopt_failed_merge"; groupLabel: string; reason: string }
+  | { kind: "approve_datetime"; current: string | null; proposed: string };
+
+export function describe(confirmation: Confirmation): { title: string; body: ReactNode } {
+  switch (confirmation.kind) {
+    case "upload":
+      return {
+        title: "この内容で送信しますか",
+        body: (
+          <ul>
+            <li>{confirmation.count} 件</li>
+            <li>合計 {formatBytes(confirmation.totalBytes)}</li>
+            <li>宛先: {confirmation.destinationNames.join(" / ")}</li>
+          </ul>
+        ),
+      };
+    case "archive_destination":
+      return {
+        title: "この転送先を退役させますか",
+        body: (
+          <p>
+            {confirmation.name} を退役させます。送信済みの記録は残りますが、以後この宛先へは
+            送れなくなります。
+          </p>
+        ),
+      };
+    case "discard_merge_group":
+      return {
+        title: "この結合グループを破棄しますか",
+        body: (
+          <p>
+            {confirmation.groupLabel} を破棄します。公開済みのファイル
+            {confirmation.publishedCount} 件は消えませんが、選択肢には出なくなります。
+          </p>
+        ),
+      };
+    case "adopt_failed_merge":
+      return {
+        title: "検証に通っていない結合物を採用しますか",
+        body: (
+          <p>
+            {confirmation.groupLabel} は「{confirmation.reason}」で不合格です。採用すると
+            送信の選択肢に出ます。
+          </p>
+        ),
+      };
+    case "approve_datetime":
+      return {
+        title: "リモートの日時を書き換えますか",
+        body: (
+          <p>
+            現在 {confirmation.current ?? "（不明）"} → 変更後 {confirmation.proposed}
+          </p>
+        ),
+      };
+  }
+}
+
+export function formatBytes(bytes: number): string {
+  const units = ["B", "KiB", "MiB", "GiB", "TiB"];
+  let value = bytes;
+  let unit = 0;
+  while (value >= 1024 && unit < units.length - 1) {
+    value /= 1024;
+    unit += 1;
+  }
+  // 端数が無ければ小数点を出さない（「3.0 GiB」より「3 GiB」の方が読みやすい）。
+  const shown =
+    value >= 10 || unit === 0 ? String(Math.round(value)) : value.toFixed(1).replace(/\.0$/, "");
+  return `${shown} ${units[unit]}`;
+}
+
+export function ConfirmDialog({
+  confirmation,
+  onConfirm,
+  onCancel,
+  busy = false,
+}: {
+  confirmation: Confirmation;
+  onConfirm: () => void;
+  onCancel: () => void;
+  busy?: boolean;
+}) {
+  const { title, body } = describe(confirmation);
+  return (
+    <div className="dialog-backdrop" role="presentation">
+      <div className="dialog" role="dialog" aria-modal="true" aria-label={title}>
+        <h2>{title}</h2>
+        {body}
+        <div className="dialog-actions">
+          <button type="button" onClick={onCancel} disabled={busy}>
+            やめる
+          </button>
+          <button type="button" onClick={onConfirm} disabled={busy}>
+            実行する
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}

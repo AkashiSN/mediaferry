@@ -51,6 +51,3 @@ def install_web(app: FastAPI, root: Path) -> None:
         # **画面が最初に受け取る場所**（二重送信 Cookie の片割れ。§14）。
         issue_csrf(request, response)
         return response
-
-
-
