@@ -72,18 +72,30 @@ export function describe(confirmation: Confirmation): { title: string; body: Rea
         title: "このカードを信頼しますか",
         body: (
           <>
-            {confirmation.state !== "blocked" ? (
+            {confirmation.state === "starts" && (
               <p>
                 {confirmation.label} を信頼すると、
                 <strong>
                   いま入っている中身も含めて、以後このカードを挿すだけで NAS へコピーされます
                 </strong>
-                （画面の操作は要りません）。取り込みは
-                {confirmation.state === "pending"
-                  ? `${confirmation.reason}に始まります（確かめられない媒体では始まりません）。`
-                  : "承認の数秒後に始まります。"}
+                （画面の操作は要りません）。取り込みは承認の数秒後に始まります。
               </p>
-            ) : (
+            )}
+            {/* **条件は文全体に掛ける。** 約束を先に無条件で置いてから限定を
+                付け足すと、確かめられない媒体（`fs_uuid` が無い等）では前半が
+                成立せず、同じダイアログの中で矛盾する。 */}
+            {confirmation.state === "pending" && (
+              <p>
+                {confirmation.label} を信頼すると、
+                <strong>
+                  {confirmation.reason}に限り、いま入っている中身も含めて、以後このカードを
+                  挿すだけで NAS へコピーされます
+                </strong>
+                （画面の操作は要りません）。確かめられない媒体では、信頼を記録するだけで
+                取り込みは始まりません。
+              </p>
+            )}
+            {confirmation.state === "blocked" && (
               // **始まらないのに「コピーされます」と書かない。** 同意の内容が
               // 実挙動とずれる（`watcher.py` の CANDIDATES を満たしていない）。
               <p>

@@ -1309,8 +1309,17 @@ claim では **(a) を必ず評価し、`selection_rule` に対応する現在�
 | POST | `/jobs/{id}/cancel` | キャンセル |
 | GET | `/events` | SSE。`Last-Event-ID`（または `after_event_id`）で **`job_event.id`** から再開。cursor が無ければ接続時点以後だけを流す |
 | GET/PUT | `/settings` | 設定。値・出所（env / db / default）・ロック状態。env 由来の変更は 409 |
-| GET/POST/PUT/DELETE | `/profiles` | プロファイル。更新は新リビジョンを作る。ビルトインの直接更新は 409 |
-| POST | `/profiles/{id}/test` | 指定ボリュームに対する判定・スキャンの試行 |
+| GET | `/profiles` | 一覧。**archive 済みも返す**（画面が区別して出す） |
+| GET | `/profiles/{slug}` | 1 件。定義（`definition`）付き |
+| POST | `/profiles` | ユーザ定義を新規に作る。`slug` は以後不変 |
+| PUT | `/profiles/{slug}` | **新リビジョンを作る。** ビルトインは 409 |
+| POST | `/profiles/{slug}/duplicate` | ビルトインからユーザ定義を作る。元は変わらない |
+| POST | `/profiles/{slug}/archive` | 候補から外す。**削除ではない。** ビルトインは 409 |
+| POST | `/profiles/{slug}/test` | 指定ボリュームに対する判定・スキャンの試行 |
+| POST | `/profiles/{slug}/recompute` | **`recompute_timestamps` ジョブを積む**（§6）。ビルトインでも受ける |
+
+**`DELETE` は無い。** 使用済みのリビジョンは `media_file` などから参照されており、
+消せない（§6）。候補から外すのは `archive`。
 | GET | `/orphans` | reconciliation で見つかった孤立ファイル・欠損レコード |
 | GET | `/health` | ヘルスチェック |
 | POST | `/auth/login`, `/auth/logout` | 認証が有効な場合のみ |
@@ -1368,12 +1377,16 @@ claim では **(a) を必ず評価し、`selection_rule` に対応する現在�
 出すところで止まり、ユーザの承認を待つ。承認すると `trusted_at` が入り、
 以後そのカードは挿すだけで取り込まれる。
 
-**ただし「以後」には確度の条件が残る。** 自動取り込みの候補は `trusted_at` に加えて
+**ただし「以後」には確度の条件が残る。** 正確には「**このカードだと確かめられた場合に
+限り**、以後は挿すだけで取り込まれる」。自動取り込みの候補は `trusted_at` に加えて
 `identity_confidence = 'high'` を要求する。初回の観測は必ず `low` だが、その観測で
 指紋を憶えるので、次に観測すると（同じ挿入のままでも）`high` になる。一方、
 **`fs_uuid` が無い媒体と、同じ UUID の別 presence が併存している間は、何度観測しても
-`high` にならない** —— そのカードは信頼登録しても自動では取り込まれない。画面の文言は
-これを条件形で書く（「確かめられた場合は」）。
+`high` にならない** —— そのカードは信頼登録しても自動では取り込まれない。
+
+**画面の同意文はこの条件を文全体に掛ける。** 「以後は挿すだけでコピーされます」を先に
+無条件で置いてから限定を付け足すと、確かめられない媒体では前半が成立せず、同じ
+確認ダイアログの中で矛盾する。
 
 この段階を設けるのは、`generic-dcim` フォールバックがあるため
 **`DCIM` を持つ任意の USB ドライブが自動でコピーされてしまう**ため。他人のスマートフォンや

@@ -705,13 +705,24 @@ describe("デバイスの信頼登録", () => {
     await userEvent.click(await screen.findByRole("button", { name: "SD_Card を信頼する" }));
 
     const dialog = await screen.findByRole("dialog");
-    // **同意の対象は変わらない**（いま入っている中身も含めてコピーされる）。
-    // 変わるのは「いつ始まるか」だけ。blocked の文（信頼を記録するだけ）に
-    // 落とすと、始まる見込みのカードで同意を取り損ねる。
+    // **条件は文全体に掛ける。** 「以後このカードを挿すだけでコピーされます」を
+    // 先に無条件で書いてから限定を付け足すと、`fs_uuid` の無い媒体では前半が
+    // 成立せず、同じダイアログの中で矛盾する（§12.1 の同意として曖昧）。
+    expect(dialog).toHaveTextContent(/確かめられた場合に限り/);
     expect(dialog).toHaveTextContent(/いま入っている中身も含めて/);
-    expect(dialog).toHaveTextContent(/確かめられた場合/);
     expect(dialog).toHaveTextContent(/取り違え/);
-    expect(dialog).not.toHaveTextContent(/いまは自動取り込みは始まりません/);
+    expect(dialog).not.toHaveTextContent(/承認の数秒後に始まります/);
+  });
+
+  it("確度が高いカードの確認だけが、条件なしで約束する", async () => {
+    stubDevices([{ ...base, trusted: false }]);
+    renderDevices();
+
+    await userEvent.click(await screen.findByRole("button", { name: "SD_Card を信頼する" }));
+
+    const dialog = await screen.findByRole("dialog");
+    expect(dialog).toHaveTextContent(/承認の数秒後に始まります/);
+    expect(dialog).not.toHaveTextContent(/確かめられた場合に限り/);
   });
 
   it("watcher が積まない状態では、承認しても始まらないと書く", async () => {

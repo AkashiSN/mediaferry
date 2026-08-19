@@ -960,3 +960,22 @@ def test_nothing_can_regroup_between_the_resolve_and_the_write(
         other.close()
 
     assert committed == [], "解決した後・書き込む前に、別接続が supersede を commit できた"
+
+
+def test_a_cancelled_run_is_not_reported_as_finished(dji, db, data_root):
+    """**キャンセルを「完了」と書かない。** ログに「中止」の後で「完了」が並ぶ.
+
+    協調キャンセルは正常 return で表すので、戻り値だけを見る呼び出し側は
+    区別が付かない。`RecomputeOutcome` に完走したかを持たせる。
+    """
+    profile, _, _, _, _ = dji
+    new_profile = to_berlin(db, profile)
+    store = JobStore(db)
+    store.enqueue("recompute_timestamps", {})
+    ctx = store.claim_next()
+    store.request_cancel(ctx.job_id)
+
+    outcome = Recomputer(db, data_root, TOKYO).run(ctx, new_profile)
+
+    assert outcome.finished is False
+    assert run(db, data_root, to_berlin(db, ProfileRegistry(db).current("my-dji"))).finished is True

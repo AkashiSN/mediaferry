@@ -46,6 +46,9 @@ class RecomputeOutcome:
     unchanged: int
     skipped: int
     requeued: int
+    # **キャンセルを「完了」と書かせない。** 協調キャンセルは正常 return で表すので、
+    # 戻り値だけを見る呼び出し側にはここでしか区別が付かない。
+    finished: bool = True
 
 
 @dataclass
@@ -55,8 +58,8 @@ class _Tally:
     skipped: int = 0
     requeued: int = 0
 
-    def outcome(self) -> RecomputeOutcome:
-        return RecomputeOutcome(self.changed, self.unchanged, self.skipped, self.requeued)
+    def outcome(self, *, finished: bool) -> RecomputeOutcome:
+        return RecomputeOutcome(self.changed, self.unchanged, self.skipped, self.requeued, finished)
 
 
 class Recomputer:
@@ -88,7 +91,7 @@ class Recomputer:
             "カード上の原名（source_entry）が残っていない",
         )
         if finished:
-            self._pass(
+            finished = self._pass(
                 ctx,
                 profile,
                 self._fetch_derived,
@@ -97,7 +100,7 @@ class Recomputer:
                 "先頭の active member が無いか、その member を再計算できていない",
                 resolve_inside=True,
             )
-        return tally.outcome()
+        return tally.outcome(finished=finished)
 
     # ------------------------------------------------------------------
     # 対象の抽出
