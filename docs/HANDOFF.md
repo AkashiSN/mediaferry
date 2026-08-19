@@ -1,8 +1,8 @@
 # mediaferry 引き継ぎ資料
 
 最終更新: 2026-08-19
-ブランチ: **`phase5-generalization`**（`main` から 11 コミット。単独リポジトリ、計 145 コミット）
-先頭は Phase 5 の Task 9（受け入れとドキュメント）。**`main` へはまだマージしていない。**
+ブランチ: **`phase5-generalization`**（`main` から 18 コミット。単独リポジトリ、計 152 コミット）
+先頭は実装差分レビュー 6 巡目の反映。**`main` へはまだマージしていない。**
 
 このファイルは、別セッションが作業を引き継ぐための出発点。
 **まずここを読み、次に `design.md` §20 と該当フェーズの計画を読む。**
@@ -13,7 +13,7 @@
 
 **Phase 0〜4 は実装・検証とも完了。** 実 Immich での確認も済んでいる
 （2026-08-19、v3.1.0）。**Phase 5 は計画（レビュー 2 巡）と実装の Task 0〜9 が完了。**
-**実装差分の codex レビューは 5 巡回した（`--fresh`、blocker 0）。次は `main` へのマージ。**
+**実装差分の codex レビューは 6 巡回した（`--fresh`、blocker 0）。次は `main` へのマージ。**
 
 | Phase | 内容 | 状態 |
 | --- | --- | --- |
@@ -22,7 +22,7 @@
 | 2 | 結合。検出 / ffmpeg / 検証 / 公開 / 回収 / 選択肢 / API | **完了**（`phase2-plan.md` の 14 タスク） |
 | 3 | Immich 同期（転送先プロファイル、状態機械、タグ、日時補正、複数宛先） | **完了**（`phase3-plan.md` の 14 タスク。レビュー 7 巡。**実 Immich でも確認済み**） |
 | 4 | Web UI（認証・CSRF・SSE・サムネイル・8 画面・E2E） | **完了**（`phase4-plan.md` の 19 タスク。計画レビュー 1 巡 + 実装差分レビュー 1 巡） |
-| 5 | 汎用化（Canon、プロファイル編集 UI、複数デバイス） | **完了**（10 タスク。計画レビュー 2 巡と実装差分レビュー 5 巡を反映済み） |
+| 5 | 汎用化（Canon、プロファイル編集 UI、複数デバイス） | **完了**（10 タスク。計画レビュー 2 巡と実装差分レビュー 6 巡を反映済み） |
 | 6 | `UPLOAD_CONCURRENCY` の多重化、RAW/JPEG のスタッキング | **未着手**（Phase 5 から送った） |
 
 ### Phase 5 の進捗（`docs/phase5-plan.md`）
@@ -78,15 +78,15 @@ blocker が 2 件ずつ出た。**巡を重ねても止まらない。** Phase 5
 ### 検証状態
 
 ```
-uv run pytest                  1134 passed, 4 deselected   ← Phase 5 Task 0〜9 を含む
+uv run pytest                  1149 passed, 4 deselected   ← Phase 5 Task 0〜9 とレビュー反映
 uv run pytest -m needs_root      1 passed   ← detached mount の実証
 uv run pytest -m needs_immich    3 passed   ← 実 Immich v3.1.0 で確認済み（2026-08-19。
                                               環境変数が無いと skip される）
-uv run pytest -m needs_system    8 passed   ← 実プロセスを起動する E2E の土台
+uv run pytest -m needs_system    9 passed   ← 実プロセスを起動する E2E の土台
                                               （SSE の線上の挙動と、2 枚差しの判定）
 uv run ruff check .            All checks passed
 uv run ruff format --check .   182 files already formatted
-npm --prefix web test          52 passed
+npm --prefix web test          57 passed
 npm --prefix web run lint / typecheck / build   通る
 npm --prefix web run test:e2e  2 passed（journey と phase5）
 ```
@@ -155,7 +155,7 @@ assert している。
 | `docs/phase2-plan.md` | Phase 2（結合）の実装計画。**実行済み**。codex のレビュー 2 巡を反映し、実装で外れた判断と検出できなかった変異を書き戻してある | ✅ |
 | `docs/phase3-plan.md` | Phase 3（Immich 同期）の実装計画。**実行済み**。codex のレビュー 7 巡を反映し、実装で外れた判断と検出できなかった変異を書き戻してある | ✅ |
 | `docs/phase4-plan.md` | Phase 4（Web UI）の実装計画。**実行済み**（19 タスク）。計画レビュー 1 巡と実装差分レビュー 1 巡を反映し、「実装を終えて」に**実装で初めて分かったこと**を書き戻してある | ✅ |
-| `docs/phase5-plan.md` | Phase 5（汎用化）の実装計画。**実行済み**（10 タスク）。計画レビュー 2 巡と実装差分レビュー 5 巡を反映し、実施した変異試験の結果と「実装で分かったこと」を書き戻してある | ✅ |
+| `docs/phase5-plan.md` | Phase 5（汎用化）の実装計画。**実行済み**（10 タスク）。計画レビュー 2 巡と実装差分レビュー 6 巡を反映し、実施した変異試験の結果と「実装で分かったこと」を書き戻してある | ✅ |
 | `docs/phase1-backup.md` | バックアップとリストア、再構築できる範囲（§18-4） | ✅ |
 | `docs/phase1-manual-checklist.md` | 実 USB での確認手順 | ✅ |
 | `docs/phase0-findings.md` | Phase 0 の実測結果と設計への反映 | ✅ |
@@ -439,12 +439,13 @@ blocker として指摘されたもの**で、理屈で戻すと同じ穴に落�
 
 **Phase 5 の実装は Task 0〜9 まで終わっている。** 残りは次の 2 つ。
 
-1. **実装差分のレビューは 5 巡回した**（`--fresh`、blocker 0 / major 11 / minor 6）。
+1. **実装差分のレビューは 6 巡回した**（`--fresh`、blocker 0 / major 12 / minor 7）。
    記録は `phase5-plan.md` 末尾。**major はどの巡でも 2〜3 件出続けており、止まって
    いない。** 1〜3 巡目は「直前の巡で直した箇所が作った境界」、4 巡目は 3 巡かけて
    誰も見ていなかった層（対象の抽出そのもの、設定が未解決のときの画面）、5 巡目は
    その 4 巡目の対処が縛り切れていなかった次元（探索行数、解決と書き込みの間の窓）。
-   もう 1 巡回すかはその時点の判断で決める
+   6 巡目は `0013` が一覧の実行計画を退行させていた（**索引を足すと、別の
+   問い合わせの駆動索引が変わる**）。もう 1 巡回すかはその時点の判断で決める
 2. `main` へマージする（`superpowers:finishing-a-development-branch`）
 
 その先は **Phase 6**（`UPLOAD_CONCURRENCY` の多重化、RAW/JPEG のスタッキング）。
@@ -772,8 +773,9 @@ uv run pytest -m needs_immich
 | **`0011`（`captured_at_revision_id`）** | **入れた**（Task 6）。既存 DB へは `profile_revision_id` の写しで埋め戻る。trigger 2 本が「必ず値を持つ」「同じプロファイルの版である」を守る |
 | **`0012`（再計算の抽出用の索引）** | **入れた**（実装差分レビュー 4 巡目）。`source_entry (media_file_id, observed_at, id)` と `merge_group (output_media_file_id)`。無いと `media_file` 1 行ごとに `SCAN` が走り、**最初の `assert_lease` に届く前にリースが切れる** |
 | **`0013`（ページ送りの駆動索引）** | **入れた**（実装差分レビュー 5 巡目）。`media_file (profile_id, role, rel_path)`。`LIMIT` は**返す件数しか縛らない** —— 無いと別プロファイルの全行を走査しうる。**`0012` を書き換えずに版を足した**（§7 の `0005` の教訓） |
+| **`0014`（一覧の索引）と `IN` → `=`** | **入れた**（実装差分レビュー 6 巡目）。`0013` を足したら、プロファイルで絞った一覧が `media_file_captured_at` を辿る経路から外れ、**全行を拾ってから並べ替える**ようになった。`media_file (profile_id, captured_at DESC, id DESC)` を足し、`_filters` の `IN (SELECT ...)` を `= (SELECT ...)` へ変えた（`IN` だと複数の値を取りうると見なされ、索引があっても並べ替えを外せない）。**索引を足したら、他の問い合わせの EXPLAIN も見る** |
 | **`js-yaml` を web の依存に足した** | プロファイル編集の YAML テキストエリア（Task 7）。**v5 は自前の型を持つ**ので `@types/js-yaml` は入れない（入れると衝突する） |
-| **`main` へのマージ** | `phase5-generalization` は 11 コミット。**実装差分のレビューを 1 巡以上回してからマージする** |
+| **`main` へのマージ** | `phase5-generalization` は 18 コミット（Task 0〜9 とレビュー反映 6 巡）。**次はマージ** |
 | 認証を既定 off のままにするか | ユーザの判断で off。`BIND_HOST` の既定を loopback にし、認証無効で非 loopback にバインドしていたら警告する緩和のみ |
 | Phase 1〜3 を配布可能リリースにしない | 認証と CSRF が入る Phase 4 より前に LAN へ公開しない |
 | SSE（`GET /events`） | Phase 4 の Web UI と一緒に入れる。Phase 1 は `GET /api/jobs/{id}/events?after_seq=` のポーリング |

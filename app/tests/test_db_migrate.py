@@ -303,6 +303,7 @@ def test_a_database_from_the_previous_release_still_opens(tmp_path):
         "0011_captured_at_revision.sql": None,
         "0012_recompute_lookups.sql": None,
         "0013_media_file_by_profile.sql": None,
+        "0014_media_file_listing.sql": None,
     }
     shipped = sorted(path.name for path in MIGRATIONS_DIR.glob("*.sql"))
     assert shipped == sorted(frozen), "版を足したら、この一覧にも足す"
@@ -518,3 +519,32 @@ def test_the_recompute_keyset_is_bounded_by_the_profile(tmp_path):
     for plan in plans:
         assert "media_file_by_profile" in plan, plan
         assert "TEMP B-TREE" not in plan, plan
+
+
+def test_a_profile_filtered_listing_does_not_sort_the_whole_profile(tmp_path):
+    """`0014`。`0013` は一覧の実行計画を退行させる.
+
+    一覧は `captured_at DESC, id DESC` 固定で、ページは 50 件（§11）。
+    `media_file_captured_at` を辿れば先頭ページで止まれるのに、`0013` の
+    `(profile_id, role, rel_path)` が選ばれると**そのプロファイルの全行を拾って
+    から並べ替える**。プロファイルが大半を占める通常の構成ほど悪化する。
+    """
+    # **一覧が実際に組み立てる WHERE を使う。** 問い合わせを手で書き写すと、
+    # 絞り込みの形（`IN` か `=` か）を変えても試験が落ちない。
+    from mediaferry.api.routes_media import _filters
+
+    where, params = _filters(None, "x", None, None, None, None, None)
+    conn = Database(tmp_path / "db.sqlite3").connect()
+    apply_migrations(conn)
+    plan = " | ".join(
+        row[3]
+        for row in conn.execute(
+            "EXPLAIN QUERY PLAN"  # noqa: S608 - 値は params で渡す
+            f" SELECT m.* FROM media_file m {where}"
+            " ORDER BY m.captured_at DESC, m.id DESC LIMIT ? OFFSET ?",
+            (*params, 50, 0),
+        )
+    )
+    conn.close()
+
+    assert "TEMP B-TREE" not in plan, plan

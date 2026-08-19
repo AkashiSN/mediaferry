@@ -68,7 +68,11 @@ def _filters(  # noqa: PLR0913
         clauses.append("m.kind = ?")
         params.append(kind)
     if profile is not None:
-        clauses.append("m.profile_id IN (SELECT id FROM device_profile WHERE slug = ?)")
+        # **`IN` ではなく `=` で書く。** `IN` だと SQLite は複数の値を取りうると
+        # 見なして、索引があっても並べ替えを外せない（`0014` が効かず、その
+        # プロファイルの全行を拾ってから並べ替える）。slug は UNIQUE なので
+        # 値は高々 1 つで、意味は変わらない（無ければ NULL 比較で 0 件）。
+        clauses.append("m.profile_id = (SELECT id FROM device_profile WHERE slug = ?)")
         params.append(profile)
     if captured_from is not None:
         clauses.append("m.captured_at >= ?")
