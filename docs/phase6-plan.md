@@ -694,8 +694,9 @@ git commit -m "feat(immich): スタックの作成・取得・primary 差し替�
     `.sources_of(media_file_id)` / `.siblings_on_card(volume_instance_id, prefix)` /
     `.record_for(destination_id, target_epoch, media_file_id)` /
     `.guard_stack_group(ctx, members, destination_id, target_epoch, profile_revision_id)` /
-    `.mark_stacked(ctx, members, target_epoch, remote_stack_id)` /
-    `.mark_skipped(ctx, record, target_epoch, reason)`
+    `.mark_stacked(ctx, members, destination_id, target_epoch, profile_revision_id, remote_stack_id)` /
+    `.mark_skipped(ctx, record, destination_id, target_epoch, profile_revision_id, reason)`
+    —— **3 つとも同じ `_assert_current` を通す**（片方だけ弱くすると抜け道になる）
 
 - [ ] **Step 1: 失敗するテストを書く**
 
@@ -844,6 +845,7 @@ def test_the_stem_prefix_keeps_the_directory():
 
 ```python
 EPOCH = 1
+REVISION = "revision-1"
 
 
 def test_the_batch_is_a_keyset_so_a_left_over_row_does_not_loop(repo):
@@ -899,8 +901,8 @@ def test_records_that_are_not_complete_are_not_extracted(repo, db):
 
 def test_marking_stacked_upgrades_a_previously_skipped_partner(repo, db, ctx):
     """相方が後から完了したときに、**見送りの側も stacked へ上がる**（§9.11）."""
-    repo.mark_skipped(ctx, repo.get(record_id), EPOCH, "相方が見つからない")
-    repo.mark_stacked(ctx, [repo.get(record_id)], EPOCH, "stack-1")
+    repo.mark_skipped(ctx, repo.get(record_id), "dest-1", EPOCH, REVISION, "相方が見つからない")
+    repo.mark_stacked(ctx, [repo.get(record_id)], "dest-1", EPOCH, REVISION, "stack-1")
     assert repo.get(record_id)["stack_state"] == "stacked"
 
 
@@ -909,8 +911,46 @@ def test_nothing_is_written_when_one_member_cannot_be_marked(repo, db, ctx):
     members = [repo.get(record_id), repo.get(partner_id)]
     db.execute("UPDATE upload_record SET invalidated_at = ? WHERE id = ?", (now_iso(), partner_id))
     with pytest.raises(StackGroupChanged):
-        repo.mark_stacked(ctx, members, EPOCH, "stack-1")
+        repo.mark_stacked(ctx, members, "dest-1", EPOCH, REVISION, "stack-1")
     assert repo.get(record_id)["stack_state"] is None
+
+
+def test_a_profile_edit_before_the_skip_is_written_refuses_it(repo, db, ctx):
+    """**旧規則の判断を新しい版の世界へ残さない。**
+
+    1. こちらが旧版の規則で「見送り」と判断する
+    2. 別の接続が新しい版を出し、既存の見送りを未評価へ戻して commit
+    3. こちらが書く → 戻す対象に入っていないので、二度と評価されない
+    """
+    record = repo.get(record_id)
+    _edit_the_profile(db)
+    with pytest.raises(StackGroupChanged):
+        repo.mark_skipped(ctx, record, "dest-1", EPOCH, REVISION, "相方が見つからない")
+    assert repo.get(record_id)["stack_state"] is None
+
+
+def test_a_repoint_before_the_skip_is_written_refuses_it(repo, db, ctx):
+    record = repo.get(record_id)
+    _repoint_to_another_library(db)
+    with pytest.raises(StackGroupChanged):
+        repo.mark_skipped(ctx, record, "dest-1", EPOCH, REVISION, "相方が見つからない")
+
+
+def test_a_profile_edit_after_the_post_refuses_the_record(repo, db, ctx):
+    """外部副作用は済んでいる。**書かずに、次の送信の回収経路へ渡す**（§9.11）."""
+    members = [repo.get(record_id), repo.get(partner_id)]
+    _edit_the_profile(db)
+    with pytest.raises(StackGroupChanged):
+        repo.mark_stacked(ctx, members, "dest-1", EPOCH, REVISION, "stack-1")
+    assert repo.get(record_id)["stack_state"] is None
+
+
+def test_a_changed_remote_asset_id_refuses_the_record(repo, db, ctx):
+    """送った相手と、記録する相手が同じであることまで見る."""
+    members = [repo.get(record_id), repo.get(partner_id)]
+    db.execute("UPDATE upload_record SET remote_asset_id = 'other' WHERE id = ?", (record_id,))
+    with pytest.raises(StackGroupChanged):
+        repo.mark_stacked(ctx, members, "dest-1", EPOCH, REVISION, "stack-1")
 
 
 def test_marking_skipped_needs_the_lease(repo, db, ctx):
@@ -918,7 +958,7 @@ def test_marking_skipped_needs_the_lease(repo, db, ctx):
     record = repo.get(record_id)
     _expire_the_lease(db)
     with pytest.raises(LeaseLost):
-        repo.mark_skipped(ctx, record, EPOCH, "相方が見つからない")
+        repo.mark_skipped(ctx, record, "dest-1", EPOCH, REVISION, "相方が見つからない")
 ```
 
 - [ ] **Step 2: 失敗を確認する**
@@ -1012,9 +1052,12 @@ def resolve_group(
         and extension_of(c.rel_path) in rule.extensions
     ]
     # **同じ資産を 2 回送らない。** 1 つの media_file が複数の観測で候補に入る。
+    # 集合を 1 つだけ持って O(n) にする（観測の数に上限は無い）。
     partners: list[Candidate] = []
+    seen: set[str] = set()
     for candidate in matched:
-        if candidate.media_file_id not in {p.media_file_id for p in partners}:
+        if candidate.media_file_id not in seen:
+            seen.add(candidate.media_file_id)
             partners.append(candidate)
     if not partners:
         return Refusal("相方が見つからない")
@@ -1132,23 +1175,7 @@ def _within(left: str, right: str, tolerance_seconds: int) -> bool:
         するので、**そこで止められない。**
         """
         with immediate(self._conn):
-            ctx.assert_lease()
-            current = self._conn.execute(
-                "SELECT r.target_epoch AS epoch FROM upload_destination d"
-                " JOIN destination_revision r ON r.id = d.current_revision_id"
-                " WHERE d.id = ?",
-                (destination_id,),
-            ).fetchone()
-            if current is None or current["epoch"] != target_epoch:
-                raise StackGroupChanged("宛先の向き先が変わった")
-            profile = self._conn.execute(
-                "SELECT 1 FROM device_profile WHERE id ="
-                " (SELECT profile_id FROM profile_revision WHERE id = ?)"
-                "   AND current_revision_id = ?",
-                (profile_revision_id, profile_revision_id),
-            ).fetchone()
-            if profile is None:
-                raise StackGroupChanged("プロファイルの版が変わった")
+            self._assert_current(ctx, destination_id, target_epoch, profile_revision_id)
             for member in members:
                 row = self._conn.execute(
                     "SELECT 1 FROM upload_record WHERE id = ? AND target_epoch = ?"
@@ -1159,8 +1186,44 @@ def _within(left: str, right: str, tolerance_seconds: int) -> bool:
                 if row is None:
                     raise StackGroupChanged(f"レコード {member['id']} が変わった")
 
+    def _assert_current(
+        self,
+        ctx: JobContext,
+        destination_id: str,
+        target_epoch: int,
+        profile_revision_id: str,
+    ) -> None:
+        """リース・宛先の現行 epoch・プロファイルの現行版をまとめて見る.
+
+        **呼び出し側が開いた `BEGIN IMMEDIATE` の中で使う**（確認と書き込みの間に
+        誰も割り込めない）。guard と記録の両方から同じものを見る —— 片方だけ
+        弱くすると、そこが抜け道になる。
+        """
+        ctx.assert_lease()
+        current = self._conn.execute(
+            "SELECT r.target_epoch AS epoch FROM upload_destination d"
+            " JOIN destination_revision r ON r.id = d.current_revision_id"
+            " WHERE d.id = ?",
+            (destination_id,),
+        ).fetchone()
+        if current is None or current["epoch"] != target_epoch:
+            raise StackGroupChanged("宛先の向き先が変わった")
+        profile = self._conn.execute(
+            "SELECT 1 FROM device_profile"
+            " WHERE id = (SELECT profile_id FROM profile_revision WHERE id = ?)"
+            "   AND current_revision_id = ?",
+            (profile_revision_id, profile_revision_id),
+        ).fetchone()
+        if profile is None:
+            raise StackGroupChanged("プロファイルの版が変わった")
+
     def mark_stacked(
-        self, ctx: JobContext, members: Sequence[sqlite3.Row], target_epoch: int,
+        self,
+        ctx: JobContext,
+        members: Sequence[sqlite3.Row],
+        destination_id: str,
+        target_epoch: int,
+        profile_revision_id: str,
         remote_stack_id: str,
     ) -> None:
         """組の全員を 1 つのトランザクションで記録する.
@@ -1172,40 +1235,62 @@ def _within(left: str, right: str, tolerance_seconds: int) -> bool:
         永久の拒否ではない（§9.11）。
         """
         with immediate(self._conn):
-            # 記録もリースの下で行う（相手を待っている間にキャンセルされうる）。
-            ctx.assert_lease()
+            # **guard と同じ現行値を見る。** 相手を待っている間に向き替えや
+            # プロファイル編集が commit されうる。外部副作用は済んでいるので、
+            # 落ちたら DB を書かずに次の送信の「既存スタックの回収」へ渡す。
+            self._assert_current(ctx, destination_id, target_epoch, profile_revision_id)
             for member in members:
                 updated = self._conn.execute(
                     "UPDATE upload_record SET stack_state = 'stacked', remote_stack_id = ?,"
                     " stack_reason = NULL, updated_at = ?"
                     " WHERE id = ? AND target_epoch = ? AND state = 'complete'"
-                    "   AND invalidated_at IS NULL"
+                    "   AND invalidated_at IS NULL AND remote_asset_id = ?"
                     "   AND (stack_state IS NULL OR stack_state = 'skipped')",
-                    (remote_stack_id, now_iso(), member["id"], target_epoch),
+                    (remote_stack_id, now_iso(), member["id"], target_epoch,
+                     member["remote_asset_id"]),
                 )
                 if updated.rowcount != 1:
                     # ロールバックさせる（`immediate` の外へ出す）。
                     raise StackGroupChanged(f"レコード {member['id']} を記録できない")
 
     def mark_skipped(
-        self, ctx: JobContext, record: sqlite3.Row, target_epoch: int, reason: str
+        self,
+        ctx: JobContext,
+        record: sqlite3.Row,
+        destination_id: str,
+        target_epoch: int,
+        profile_revision_id: str,
+        reason: str,
     ) -> None:
-        """見送りを記録する. **相手に触らない経路でもリースの下で書く。**
+        """見送りを記録する. **相手に触らない経路でも、記録の条件は同じにする。**
 
-        規則が無効・観測が無い・相方が居ない、といった見送りが大量にあると、
-        書いている間にリース（60 秒）が切れうる。`finish_claimed` は token と
-        status しか見ないので、**失効した後の書き込みが `succeeded` として
-        残せてしまう。**
+        規則が無効・観測が無い・相方が居ない、といった見送りは相手に触らないので
+        guard を通らない。だが**書く条件を緩めてはいけない** —— 規則を読んだ直後に
+        プロファイルが編集されると、次の interleaving で**旧規則の判断が新しい版の
+        世界へ残る**。
+
+        1. こちらが旧版 R1 の規則で「見送り」と判断する
+        2. 別の接続が R2 を発行し、既存の見送りを未評価へ戻して commit
+           （この行はまだ未評価なので対象外）
+        3. こちらが R1 の判断を書く → **R2 では二度と評価されない**
+
+        リースも同じ理由で要る。見送りが大量にあると書いている間に切れうるし、
+        `finish_claimed` は token と status しか見ないので、失効した後の書き込みが
+        `succeeded` として残せてしまう。
         """
         with immediate(self._conn):
-            ctx.assert_lease()
-            self._conn.execute(
+            self._assert_current(ctx, destination_id, target_epoch, profile_revision_id)
+            updated = self._conn.execute(
                 "UPDATE upload_record SET stack_state = 'skipped', stack_reason = ?,"
                 " remote_stack_id = NULL, updated_at = ?"
                 " WHERE id = ? AND target_epoch = ? AND state = 'complete'"
-                "   AND invalidated_at IS NULL AND stack_state IS NULL",
-                (reason, now_iso(), record["id"], target_epoch),
+                "   AND invalidated_at IS NULL AND remote_asset_id IS ?"
+                "   AND stack_state IS NULL",
+                (reason, now_iso(), record["id"], target_epoch, record["remote_asset_id"]),
             )
+            if updated.rowcount != 1:
+                # **成功として数えない。** 数えると StackOutcome が嘘になる。
+                raise StackGroupChanged(f"レコード {record['id']} を記録できない")
 ```
 
 - [ ] **Step 4: 通ることを確認する**
@@ -1416,6 +1501,17 @@ def test_a_slow_peer_does_not_lose_the_lease(world):
     assert world.stacker().run(world.ctx, "dest-1").stacked == 1
 
 
+def test_many_short_local_skips_do_not_lose_the_lease(world):
+    """**行をまたいだ経過時間でも心拍を打つ。**
+
+    1 件が短く終わると `with_lease_pulse` は 1 度も打たない
+    （`thread.join(timeout=間隔)` が先に返る）。相手に触らない見送りが続くと積もる。
+    """
+    world.with_unpairable_records(500)
+    world.with_lease_seconds(1)
+    assert world.stacker().run(world.ctx, "dest-1").skipped == 500
+
+
 def test_a_cancel_committed_between_the_post_and_the_put_stops_the_put(world):
     world.cancel_after_the_post()
     world.stacker().run(world.ctx, "dest-1")
@@ -1588,7 +1684,10 @@ class Stacker:
             raise DestinationUnusable(str(exc)) from exc
         except (ImmichRejected, ImmichProtocolError) as exc:
             # 再試行しても直らない。**理由を残して画面に出す。**
-            self._uploads.mark_skipped(row["id"], f"相手が受け付けない: {exc}")
+            self._uploads.mark_skipped(
+                ctx, row, destination_id, epoch, profile_revision_id,
+                f"相手が受け付けない: {exc}",
+            )
             return "skipped"
 ```
 
@@ -1618,7 +1717,9 @@ Expected: PASS
 `with_lease_pulse` を外す、`ctx.cancelled()` の確認を消す、`cursor = row["id"]` を消す、
 既存スタックの集合一致を `>=` に緩める、回収の経路から primary の検査を消す、
 `unstacked_batch` から `epoch` を落とす、`DestinationUnusable` を `continue` に変える、
-例外の 2 分岐を入れ替える、`mark_stacked` の `rowcount != 1` の検査を消す。
+例外の 2 分岐を入れ替える、`mark_stacked` の `rowcount != 1` の検査を消す、
+`_assert_current` から宛先の epoch の確認を外す／プロファイルの版の確認を外す、
+`mark_skipped` を `_assert_current` の外で書く、`remote_asset_id` の比較を外す。
 
 `BATCH_SIZE` を 1 にする変異は**検出できなくてよい**（挙動が同じ）。検出できないなら
 その旨を記録する。
@@ -1632,11 +1733,18 @@ git commit -m "feat(uploads): アップロードの第 2 パスでスタック�
 
 ---
 
-## Task 6: 再計算が見送りを未評価へ戻す
+## Task 6: 見送りを未評価へ戻す 2 つの経路
+
+**見送りは「今は組めない」の記録であって、永久の拒否ではない。** 前提が変われば
+未評価へ戻す。前提は 2 つある —— **`captured_at`**（4 条件の 1 つ）と、
+**プロファイルの `stack` 節**（規則そのもの）。戻す経路が無ければ「現行版を使う」は
+初回の評価にしか効かず、規則を有効にしても既に見送った行は二度と評価されない。
 
 **Files:**
 - Modify: `app/src/mediaferry/jobs/recompute.py:278-345`
-- Test: `app/tests/test_recompute.py`
+- Modify: `app/src/mediaferry/db/profiles.py:73-112,220-232`
+  （`_upsert_revision` と `_insert_revision` を共通の helper へまとめる）
+- Test: `app/tests/test_recompute.py`、`app/tests/test_profile_registry.py`
 
 - [ ] **Step 1: 失敗するテストを書く**
 
@@ -1660,6 +1768,72 @@ def test_an_existing_stack_is_not_reopened(world):
     world.record_stacked("stack-1")
     world.recompute()
     assert world.record()["stack_state"] == "stacked"
+```
+
+プロファイル側（`app/tests/test_profile_registry.py`）:
+
+```python
+def test_a_new_revision_that_changes_the_stack_rule_reopens_the_skips(registry, db):
+    """**規則そのものが変わったら組み直す。**
+
+    `stack` を無効から有効にしても、拡張子や許容差を変えても、既に見送った行は
+    未評価へ戻らなければ二度と評価されない。
+    """
+    record = _a_skipped_record(db, profile="my-camera")
+    registry.update("my-camera", _definition(stack={"enabled": True,
+                                                    "extensions": ["JPG", "CR2"],
+                                                    "tolerance_seconds": 0}))
+    assert _row(db, record)["stack_state"] is None
+    assert _row(db, record)["stack_reason"] is None
+
+
+def test_a_revision_that_leaves_the_stack_rule_alone_does_not_reopen(registry, db):
+    """**名前やタグだけの編集で全件を再評価しない**（大きいライブラリでは重い）."""
+    record = _a_skipped_record(db, profile="my-camera")
+    registry.update("my-camera", _definition(name="別の名前"))
+    assert _row(db, record)["stack_state"] == "skipped"
+
+
+def test_a_builtin_sync_that_changes_the_stack_rule_reopens_the_skips(registry, db):
+    """**ビルトインは `_insert_revision` を通らない**（`_upsert_revision` が直に書く）.
+
+    共通の helper にまとめないと、この経路だけ戻らない。
+    """
+    record = _a_skipped_record(db, profile="canon-eos")
+    _install_a_builtin_with_a_different_stack_rule()
+    registry.sync_builtins()
+    assert _row(db, record)["stack_state"] is None
+
+
+def test_a_sync_without_a_definition_change_does_not_reopen(registry, db):
+    record = _a_skipped_record(db, profile="canon-eos")
+    registry.sync_builtins()
+    assert _row(db, record)["stack_state"] == "skipped"
+
+
+def test_a_stacked_record_is_never_reopened(registry, db):
+    record = _a_stacked_record(db, profile="my-camera")
+    registry.update("my-camera", _definition(stack={"enabled": False}))
+    assert _row(db, record)["stack_state"] == "stacked"
+
+
+def test_another_profile_is_untouched(registry, db):
+    record = _a_skipped_record(db, profile="other-camera")
+    registry.update("my-camera", _definition(stack={"enabled": False}))
+    assert _row(db, record)["stack_state"] == "skipped"
+
+
+def test_the_revision_and_the_reopen_are_one_transaction(registry, db):
+    """**版だけ進んで見送りが残る窓を作らない。**
+
+    reopen で落ちたら、新しいリビジョンごと巻き戻る。
+    """
+    with _reopen_raises():
+        with pytest.raises(sqlite3.OperationalError):
+            registry.update("my-camera", _definition(stack={"enabled": True,
+                                                            "extensions": ["JPG", "CR2"],
+                                                            "tolerance_seconds": 0}))
+    assert registry.current("my-camera").revision == 1
 ```
 
 - [ ] **Step 2: 失敗を確認する**
@@ -1692,6 +1866,64 @@ Expected: FAIL
 
 `RecomputeOutcome` に `reopened` を足し、ジョブの `emit` にも出す。
 
+プロファイル側は、**2 つある版の発行経路を 1 つの helper にまとめてから**戻す。
+`sync_builtins` は `_upsert_revision` の中で INSERT と `current_revision_id` の更新を
+直に書いており、**`_insert_revision` を通らない**。まとめないと、ビルトインの版が
+進んだときだけ戻らない。
+
+```python
+    def _publish_revision(
+        self,
+        profile_id: str,
+        revision_id: str,
+        revision: int,
+        definition_json: str,
+        previous_json: str | None,
+    ) -> None:
+        """新しいリビジョンを現行にする. **呼び出し側の取引の中で使う。**
+
+        `stack` 節が変わったときは、そのプロファイルのメディアの**見送りを未評価へ
+        戻す**（規則そのものが変わったので、前の判断は根拠を失っている）。
+        **`stacked` は戻さない**（相手側に既にあるものを作り直さない）。
+
+        **戻す範囲を `stack` の変化に限る。** 名前やタグだけの編集で全件を再評価
+        すると、見送りの理由が foreign stack や 4xx の行まで相手へ問い合わせ直す
+        ことになる。
+        """
+        self._conn.execute(
+            "INSERT INTO profile_revision"
+            " (id, profile_id, revision, definition_json, schema_version, created_at)"
+            " VALUES (?, ?, ?, ?, ?, ?)",
+            (revision_id, profile_id, revision, definition_json, PROFILE_SCHEMA_VERSION,
+             now_iso()),
+        )
+        self._conn.execute(
+            "UPDATE device_profile SET current_revision_id = ? WHERE id = ?",
+            (revision_id, profile_id),
+        )
+        if _stack_rule_of(previous_json) != _stack_rule_of(definition_json):
+            self._conn.execute(
+                "UPDATE upload_record SET stack_state = NULL, stack_reason = NULL,"
+                " updated_at = ?"
+                " WHERE stack_state = 'skipped' AND media_file_id IN ("
+                "     SELECT id FROM media_file WHERE profile_id = ?)",
+                (now_iso(), profile_id),
+            )
+
+
+def _stack_rule_of(definition_json: str | None) -> object:
+    """定義から `stack` 節だけを取り出す（無ければ None）."""
+    if definition_json is None:
+        return None
+    return json.loads(definition_json).get("stack")
+```
+
+`_upsert_revision` と `update` / `create` の両方から `_publish_revision` を呼ぶ。
+**どちらも既存の `immediate(self._conn)` の中にある**ので、helper は新しい
+`BEGIN IMMEDIATE` を開かない（開くとネストになる）。索引は既存の
+`media_file (profile_id, ...)`（`0013`）と `upload_record (media_file_id)` が使える形に
+書く。
+
 - [ ] **Step 4: 通ることを確認する**
 
 Run: `uv run pytest app/tests/test_recompute.py app/tests/test_profile_registry.py -q`
@@ -1701,8 +1933,10 @@ Expected: PASS
 
 `stack_state = 'skipped'` の条件を外す（`stacked` も戻る）、`_reopen_stack` を
 `_same` の側（変化なし）でも呼ぶ、トランザクションの外へ出す、
-`_reopen_stack_skips` の `profile_id` の絞りを外す（他のプロファイルまで戻る）、
-`_insert_revision` の外へ出す（版だけ進んで見送りが残る窓ができる）。
+`_publish_revision` の `profile_id` の絞りを外す（他のプロファイルまで戻る）、
+`_stack_rule_of` の比較を常に真にする（`stack` 以外の編集でも全件戻る）／常に偽にする
+（規則を変えても戻らない）、`_upsert_revision` を helper から外す
+（ビルトインの経路だけ戻らない）。
 
 - [ ] **Step 6: コミット**
 
@@ -2029,3 +2263,31 @@ git commit -m "docs(mediaferry): Phase 6 の実測と引き継ぎを書き戻す
 **止め時の判断:** レビュー側は「前巡の指摘はかなり収束した。上記を直した後は、
 実装前レビューとしては逓減局面に入る見込み」と述べている。**3 巡目を回してから
 実装に入る。**
+
+### 計画レビュー 3 巡目（2026-08-19、codex `--fresh`。blocker 0 / major 3 / minor 3）
+
+**blocker は消えた。6 件すべて妥当。** 3 件は「2 巡目で採用した『現行版を使う』の
+成立条件が、計画に落ち切っていなかった」もの。
+
+**major 3 は、こちらの作業事故を捕まえた指摘だった。** 2 巡目の Task 6 の書き換えは
+**保存されていなかった**（パッチの script が最後の置換で assert に失敗し、書き出す前に
+中断していた）。レビュー記録だけが「作り直した」と述べ、本文には無い状態になっていた。
+**文書の整合はレビューに頼らず、反映のたびに `grep` で確かめる。**
+
+| # | 指摘 | 判定 | 反映 |
+| --- | --- | --- | --- |
+| major 1 | **`mark_skipped` が現行プロファイル版を CAS しない。** ローカルで決着する見送りは guard を通らないので、規則を読んだ後・書く前に版が進むと**旧規則の判断が新しい版の世界に残り、二度と評価されない**。`rowcount` も見ていない | **妥当。** 「規則を読む → 別接続が新版を出して見送りを戻す → こちらが書く」で成立する | `mark_skipped` に `destination_id` / `profile_revision_id` / 期待する `remote_asset_id` を渡し、guard と同じ `_assert_current` を通す。`rowcount != 1` は `StackGroupChanged`。編集と repoint の競合試験を追加 |
+| major 2 | **`mark_stacked` の signature と SQL が、文書の約束（最終 CAS で現行版を確認）を実装できない形** | **妥当。** 散文にだけ書いて signature に落としていなかった | 同じく `_assert_current` を通し、member ごとの `remote_asset_id` も CAS に含める。外部副作用の後で落ちた場合は**書かずに次の送信の回収経路へ渡す** |
+| major 3 | **2 巡目で採用した「プロファイル改版で見送りを戻す」実装・試験が Task 6 に無い。** かつ `sync_builtins` は `_upsert_revision` の中で直に書いており `_insert_revision` を通らないので、「同じ経路」は成立しない | **妥当。** 前者はこちらの保存事故、後者は実装を読んで確認した | Task 6 を「戻す 2 つの経路」に作り直し、**`_publish_revision` という共通 helper**（INSERT + `current_revision_id` の更新 + 戻し）を両経路から呼ぶ形にした。`test_profile_registry.py` の試験も具体化した |
+| minor 1 | **「どの改版でも全 skipped を戻す」は範囲が広すぎる。** 名前やタグだけの編集で、相手側の事情で見送った行まで再評価する | **妥当** | 戻すのは**`stack` 節が変わったときだけ**にした（`_stack_rule_of` で比べる）。「`stack` 不変の編集では戻らない」試験も足した |
+| minor 2 | 例外処理の提示コードが `mark_skipped` の新 signature に追随していない | **妥当**（これも保存事故の巻き添え） | 一本化した |
+| minor 3 | `media_file_id` の一意化が O(n²)。観測の数に設計上の上限は無い | **妥当** | `seen` の集合を 1 つ持つ形にした。あわせて「短い見送りが多数続いてリースを跨ぐ」試験を足し、行をまたいだ heartbeat が実装漏れにならないようにした |
+
+**確認された「異論なし」:** 2 巡目の epoch guard・通信中の pulse・観測単位の
+`Candidate`・`POST` の redirect 禁止、TOCTOU と複製媒体の受容、プロファイル編集の
+取引が `upload_record` を触ること（SQLite の単一 writer と同じ接続の取引の中で行い、
+helper が別の `BEGIN IMMEDIATE` を開かなければデッドロックは生じない）。
+
+**止め時の判断:** レビュー側は「blocker は消え、指摘は逓減局面。上記を反映したら
+短くもう 1 巡し、新しい major が無ければ実装へ進んでよい」と述べている。
+**4 巡目を短く回す。**
