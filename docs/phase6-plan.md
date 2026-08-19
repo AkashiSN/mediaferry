@@ -72,6 +72,7 @@
 | `app/src/mediaferry/db/uploads.py` | `unstacked_batch` / `source_of` / `siblings_on_card` / `record_for` / `mark_stacked` / `mark_skipped` |
 | `app/src/mediaferry/api/jobs_wiring.py` | 3 つの mode すべてのあとで第 2 パスを回す |
 | `app/src/mediaferry/jobs/recompute.py` | `captured_at` を動かしたら `skipped` を未評価へ戻す |
+| `app/src/mediaferry/db/profiles.py` | 新しいリビジョンを作る取引の中で `skipped` を未評価へ戻す（規則が変わったので前の判断は根拠を失う） |
 | `app/src/mediaferry/settings.py` | `UPLOAD_CONCURRENCY` の撤去 |
 | `app/src/mediaferry/api/routes_uploads.py` | `_view` に 3 列、`GET /uploads` に `stack_state` フィルタ |
 | `app/src/mediaferry/api/routes_system.py` | 宛先サマリに `stacked` / `stack_skipped` |
@@ -289,22 +290,14 @@ def test_the_extraction_uses_the_partial_index(db):
         " ORDER BY id LIMIT 50",
         ("d", 1, ""),
     ).fetchall()
-    assert any("upload_record_unstacked" in row["detail"] for row in plan)
-
-
-def test_the_index_is_not_used_without_the_epoch(db):
-    """**epoch を落とした問い合わせが「たまたま動く」ことを許さない。**
-
-    部分索引が使われないことを見て、条件の抜けを試験で捕まえる。
-    """
-    plan = db.execute(
-        "EXPLAIN QUERY PLAN SELECT * FROM upload_record"
-        " WHERE destination_id = ? AND state = 'complete' AND stack_state IS NULL"
-        "   AND invalidated_at IS NULL AND id > ? ORDER BY id LIMIT 50",
-        ("d", ""),
-    ).fetchall()
-    assert not any("upload_record_unstacked (destination_id=? AND target_epoch=?" in row["detail"]
-                   for row in plan)
+    # **鍵が 2 本とも search key に入っていることまで見る。** 索引名だけの一致では、
+    # 先頭 prefix（destination_id だけ）で使われている場合と区別できない。
+    assert any(
+        "upload_record_unstacked (destination_id=? AND target_epoch=?" in row["detail"]
+        for row in plan
+    )
+    # 並べ替えが消えていること（`id` は索引の第 3 列）。
+    assert not any("USE TEMP B-TREE FOR ORDER BY" in row["detail"] for row in plan)
 
 
 def test_the_dead_setting_row_is_removed(db):
@@ -509,6 +502,25 @@ def test_a_broken_stack_response_is_a_protocol_error(fake):
     fake.stack_response_without_assets = True
     with pytest.raises(ImmichProtocolError):
         _client(fake).create_stack(["asset-1", "asset-2"])
+
+
+def test_a_response_with_a_different_set_is_a_protocol_error(fake):
+    fake.drop_one_asset_from_the_stack_response = True
+    with pytest.raises(ImmichProtocolError):
+        _client(fake).create_stack(["asset-1", "asset-2"])
+
+
+def test_duplicate_inputs_are_refused_before_sending(fake):
+    with pytest.raises(ValueError):
+        _client(fake).create_stack(["asset-1", "asset-1"])
+    assert fake.requests == []
+
+
+def test_the_create_does_not_follow_a_redirect(fake):
+    """**非冪等で吸収する要求を自動 replay させない**（303 でも method は変わらない）."""
+    fake.redirect_to = "/api/stacks"
+    with pytest.raises(ImmichRedirected):
+        _client(fake).create_stack(["asset-1", "asset-2"])
 ```
 
 - [ ] **Step 2: 失敗を確認する**
@@ -536,13 +548,24 @@ class RemoteStack:
     def create_stack(self, asset_ids: Sequence[str]) -> RemoteStack:
         """**既存スタックを吸収しうる。** 呼ぶ前に全員の `stack` を見ること（§9.11）."""
         checked = [self._identifier(a, "POST /api/stacks の asset id") for a in asset_ids]
+        if len(set(checked)) != len(checked):
+            # **入力の重複を先に閉じる。** 重複したまま送ると、応答が畳んで返しても
+            # 集合の比較が通ってしまう（[A, A, B] を送って [A, B] が返る）。
+            raise ValueError("create_stack に同じ asset id が複数ある")
         body = _as_object(
-            self._request("POST", "/api/stacks", json={"assetIds": checked}), "POST /api/stacks"
+            self._request(
+                "POST",
+                "/api/stacks",
+                # **非冪等で既存スタックを吸収するので、redirect を追わない。**
+                allow_redirect=False,
+                json={"assetIds": checked},
+            ),
+            "POST /api/stacks",
         )
         created = self._stack_from(body, "POST /api/stacks")
         # **要求した集合と全単射であることを確かめる。** 吸収の仕様がある以上、
         # 返ってきた集合が違えば「別のものを作った」ので、その id を確定させない。
-        if set(created.asset_ids) != set(checked):
+        if len(created.asset_ids) != len(checked) or set(created.asset_ids) != set(checked):
             raise ImmichProtocolError("POST /api/stacks が要求と違う集合を返した")
         return created
 
@@ -612,10 +635,12 @@ def _as_array(response: httpx.Response, label: str) -> list[dict[str, Any]]:
 `RemoteAsset.stack` の読み方も 2 つに分ける。**キーが無いのは旧版として `None`、
 キーがあって object でない・必須の値が無いのは protocol error。**
 
-**`allow_redirect=False` は付けない**（`tag_assets` / `set_date_time_original` と同じ
-扱い）。§21 の「本文を伴う要求では追わない」は**ストリームが 1 回で EOF に達する**
-`POST /api/assets` の話で、JSON 本文は再送できる。別 origin への redirect は
-`_same_origin_target` が必ず拒むので、鍵が外へ出る経路はここでも閉じている。
+**`POST /api/stacks` は `allow_redirect=False` にする。`PUT /api/stacks/{id}` は
+既定のまま。** `_request` は 303 でも method を変えずに同じ本文で再送するので、
+**非冪等で既存スタックを吸収する `POST` を自動で replay させてはいけない**
+（安全でない理由はストリームの EOF だけではない）。`PUT` は冪等なので、
+`tag_assets` / `set_date_time_original` と同じ扱いでよい。別 origin への redirect は
+どちらも `_same_origin_target` が必ず拒む。
 
 fake 側（`fake_immich.py`）:
 
@@ -659,11 +684,18 @@ git commit -m "feat(immich): スタックの作成・取得・primary 差し替�
 - Consumes: `StackRule`（Task 0）
 - Produces:
   - `stem_prefix(rel_path: str) -> str`（`"DCIM/100CANON/IMG_1234."`）
-  - `Candidate(record_id, media_file_id, rel_path, captured_at, captured_at_source, origin, state, remote_asset_id, invalidated)`
+  - `Candidate(record_id, media_file_id, profile_id, volume_instance_id, rel_path,
+    captured_at, captured_at_source, origin, state, remote_asset_id, invalidated)`
+    —— **観測 1 つぶん**。`source_key` は `(volume_instance_id, stem_prefix)`
   - `Group(members: tuple[Candidate, ...])` / `Refusal(reason: str)`
   - `resolve_group(primary: Candidate, candidates: Sequence[Candidate], rule: StackRule) -> Group | Refusal`
-  - `UploadRepository.unstacked_batch` / `.source_of` / `.siblings_on_card` / `.record_for` /
-    `.mark_stacked` / `.mark_skipped`
+  - `StackGroupChanged`（前提が変わった。その組は諦める）
+  - `UploadRepository.unstacked_batch(destination_id, target_epoch, after_id, limit)` /
+    `.sources_of(media_file_id)` / `.siblings_on_card(volume_instance_id, prefix)` /
+    `.record_for(destination_id, target_epoch, media_file_id)` /
+    `.guard_stack_group(ctx, members, destination_id, target_epoch, profile_revision_id)` /
+    `.mark_stacked(ctx, members, target_epoch, remote_stack_id)` /
+    `.mark_skipped(ctx, record, target_epoch, reason)`
 
 - [ ] **Step 1: 失敗するテストを書く**
 
@@ -680,6 +712,8 @@ def _candidate(rel_path: str, **overrides) -> Candidate:
     base = {
         "record_id": f"rec-{rel_path}",
         "media_file_id": f"media-{rel_path}",
+        "profile_id": "profile-1",
+        "volume_instance_id": "volume-1",
         "rel_path": rel_path,
         "captured_at": "2026-08-19T10:30:00+09:00",
         "captured_at_source": "exif",
@@ -764,8 +798,35 @@ def test_an_extension_outside_the_rule_is_ignored():
 
 def test_a_partner_observed_only_on_another_card_is_refused():
     """連番が一周した別カードとの誤結合を閉じる（§6）."""
-    other_card = _cr2(volume_instance_ids=frozenset({"volume-2"}))
+    other_card = _cr2(volume_instance_id="volume-2")
     assert isinstance(resolve_group(_jpg(), [_jpg(), other_card], RULE), Refusal)
+
+
+def test_the_volume_and_the_stem_must_match_in_the_same_observation():
+    """**平坦化した集合では通ってしまう組を閉じる。**
+
+    JPG は (volume-1, A.) と (volume-2, B.)、CR2 は (volume-1, C.) と (volume-2, B.)。
+    ボリュームの集合も stem の集合も交わるが、**同じ観測では一度も一致しない**。
+    """
+    jpg = [
+        _candidate("DCIM/100CANON/A.JPG", media_file_id="m-jpg", volume_instance_id="volume-1"),
+        _candidate("DCIM/100CANON/B.JPG", media_file_id="m-jpg", volume_instance_id="volume-2"),
+    ]
+    cr2 = [
+        _candidate("DCIM/100CANON/C.CR2", media_file_id="m-cr2", volume_instance_id="volume-1"),
+        _candidate("DCIM/100CANON/B.CR2", media_file_id="m-cr2", volume_instance_id="volume-2"),
+    ]
+    assert isinstance(resolve_group(jpg[0], [*jpg, *cr2], RULE), Refusal)
+
+
+def test_a_media_observed_twice_appears_once_in_the_group():
+    """**同じ資産を 2 回送らない**（2 回記録もしない）."""
+    cr2_twice = [
+        _cr2(volume_instance_id="volume-1"),
+        _cr2(volume_instance_id="volume-1", record_id="rec-dup"),
+    ]
+    group = resolve_group(_jpg(), [_jpg(), *cr2_twice], RULE)
+    assert len(group.members) == 2
 
 
 def test_a_partner_of_another_profile_is_refused():
@@ -782,11 +843,40 @@ def test_the_stem_prefix_keeps_the_directory():
 リポジトリ側（`app/tests/test_upload_repository.py` の隣）:
 
 ```python
+EPOCH = 1
+
+
 def test_the_batch_is_a_keyset_so_a_left_over_row_does_not_loop(repo):
     """5xx で未評価のまま残した行があっても、次のバッチは前へ進む."""
-    first = repo.unstacked_batch("dest-1", "", 1)
-    second = repo.unstacked_batch("dest-1", first[0]["id"], 1)
+    first = repo.unstacked_batch("dest-1", EPOCH, "", 1)
+    second = repo.unstacked_batch("dest-1", EPOCH, first[0]["id"], 1)
     assert second[0]["id"] > first[0]["id"]
+
+
+def test_records_of_an_old_epoch_are_not_extracted(repo, db):
+    """旧 epoch の `complete` は無効化されずに残る（§8）が、別ライブラリの履歴."""
+    assert [r["id"] for r in repo.unstacked_batch("dest-1", EPOCH + 1, "", 50)] == []
+
+
+def test_the_guard_refuses_when_the_destination_was_repointed(repo, db, ctx):
+    """**開始後に向き替えられたら止める。** 進行中の無効化はここには効かない."""
+    members = repo.unstacked_batch("dest-1", EPOCH, "", 50)
+    _repoint_to_another_library(db)                     # epoch が進む
+    with pytest.raises(StackGroupChanged):
+        repo.guard_stack_group(ctx, members, "dest-1", EPOCH, "revision-1")
+
+
+def test_the_guard_refuses_when_the_profile_revision_moved(repo, db, ctx):
+    members = repo.unstacked_batch("dest-1", EPOCH, "", 50)
+    _edit_the_profile(db)
+    with pytest.raises(StackGroupChanged):
+        repo.guard_stack_group(ctx, members, "dest-1", EPOCH, "revision-1")
+
+
+def test_a_lost_lease_refuses_the_guard(repo, db, ctx):
+    _expire_the_lease(db)
+    with pytest.raises(LeaseLost):
+        repo.guard_stack_group(ctx, [], "dest-1", EPOCH, "revision-1")
 
 
 def test_invalidated_records_are_not_extracted(repo, db):
@@ -795,34 +885,40 @@ def test_invalidated_records_are_not_extracted(repo, db):
         " WHERE id = ?",
         (now_iso(), record_id),
     )
-    assert [r["id"] for r in repo.unstacked_batch("dest-1", "", 50)] == []
+    assert [r["id"] for r in repo.unstacked_batch("dest-1", EPOCH, "", 50)] == []
 
 
 def test_records_of_another_destination_are_not_extracted(repo, db):
-    assert [r["id"] for r in repo.unstacked_batch("dest-2", "", 50)] == []
+    assert [r["id"] for r in repo.unstacked_batch("dest-2", EPOCH, "", 50)] == []
 
 
 def test_records_that_are_not_complete_are_not_extracted(repo, db):
     db.execute("UPDATE upload_record SET state = 'pending' WHERE id = ?", (record_id,))
-    assert [r["id"] for r in repo.unstacked_batch("dest-1", "", 50)] == []
+    assert [r["id"] for r in repo.unstacked_batch("dest-1", EPOCH, "", 50)] == []
 
 
-def test_marking_stacked_upgrades_a_previously_skipped_partner(repo, db):
+def test_marking_stacked_upgrades_a_previously_skipped_partner(repo, db, ctx):
     """相方が後から完了したときに、**見送りの側も stacked へ上がる**（§9.11）."""
-    repo.mark_skipped(record_id, "相方が見つからない")
-    repo.mark_stacked([record_id], "stack-1")
+    repo.mark_skipped(ctx, repo.get(record_id), EPOCH, "相方が見つからない")
+    repo.mark_stacked(ctx, [repo.get(record_id)], EPOCH, "stack-1")
     assert repo.get(record_id)["stack_state"] == "stacked"
 
 
-def test_marking_does_not_touch_an_invalidated_record(repo, db):
-    """無効化は状態機械と直交するフラグ（§8）。**後から結果を書き込まない。**"""
-    db.execute(
-        "UPDATE upload_record SET invalidated_at = ?, invalidated_reason = '編集された'"
-        " WHERE id = ?",
-        (now_iso(), record_id),
-    )
-    repo.mark_stacked([record_id], "stack-1")
+def test_nothing_is_written_when_one_member_cannot_be_marked(repo, db, ctx):
+    """**一部だけ書かない。** 例外で取引ごと巻き戻す."""
+    members = [repo.get(record_id), repo.get(partner_id)]
+    db.execute("UPDATE upload_record SET invalidated_at = ? WHERE id = ?", (now_iso(), partner_id))
+    with pytest.raises(StackGroupChanged):
+        repo.mark_stacked(ctx, members, EPOCH, "stack-1")
     assert repo.get(record_id)["stack_state"] is None
+
+
+def test_marking_skipped_needs_the_lease(repo, db, ctx):
+    """相手に触らない見送りも、リースの下で書く（大量にあると失効しうる）."""
+    record = repo.get(record_id)
+    _expire_the_lease(db)
+    with pytest.raises(LeaseLost):
+        repo.mark_skipped(ctx, record, EPOCH, "相方が見つからない")
 ```
 
 - [ ] **Step 2: 失敗を確認する**
@@ -853,19 +949,30 @@ HIGH_SENTINEL = "\U0010ffff"
 
 @dataclass(frozen=True)
 class Candidate:
+    """**観測 1 つぶん**の候補.
+
+    同じ `media_file` が複数の `source_entry` を持つときは、この値が複数できる。
+    **1 つに絞らない**（`observed_at` は再スキャンで動くので、順序で選ぶと同じ組が
+    実行のたびに変わる）。**平坦化もしない** —— 「ボリュームの集合」と「1 つの
+    stem」に潰すと、*別々の観測*でそれぞれが一致するだけの組が通る。
+    """
+
     record_id: str
     media_file_id: str
     profile_id: str
+    volume_instance_id: str
     rel_path: str            # **カード上の原名**（`source_entry.rel_path`）
-    # その観測が乗っていたボリューム。**集合で持つ**（1 つに絞ると、再スキャンで
-    # `observed_at` が動くたびに同じ組が変わりうる）。
-    volume_instance_ids: frozenset[str]
     captured_at: str
     captured_at_source: str
     origin: str
     state: str
     remote_asset_id: str | None
     invalidated: bool
+
+    @property
+    def source_key(self) -> tuple[str, str]:
+        """組の鍵。**ボリュームと stem は必ず組で持つ。**"""
+        return (self.volume_instance_id, stem_prefix(self.rel_path))
 
 
 @dataclass(frozen=True)
@@ -895,16 +1002,20 @@ def resolve_group(
         return Refusal("プロファイルがスタックを使わない")
     if extension_of(primary.rel_path) not in rule.extensions:
         return Refusal("この拡張子は組の対象ではない")
-    prefix = stem_prefix(primary.rel_path)
-    partners = [
+    keys = {c.source_key for c in candidates if c.media_file_id == primary.media_file_id}
+    matched = [
         c
         for c in candidates
         if c.media_file_id != primary.media_file_id
-        and stem_prefix(c.rel_path) == prefix
+        # **鍵は組で比べる**（同じカードの、同じディレクトリの、同じ stem）。
+        and c.source_key in keys
         and extension_of(c.rel_path) in rule.extensions
-        # **同じカードで観測が重なること。** 順序に依らない条件にする。
-        and c.volume_instance_ids & primary.volume_instance_ids
     ]
+    # **同じ資産を 2 回送らない。** 1 つの media_file が複数の観測で候補に入る。
+    partners: list[Candidate] = []
+    for candidate in matched:
+        if candidate.media_file_id not in {p.media_file_id for p in partners}:
+            partners.append(candidate)
     if not partners:
         return Refusal("相方が見つからない")
     for partner in partners:
@@ -999,17 +1110,45 @@ def _within(left: str, right: str, tolerance_seconds: int) -> bool:
         ).fetchone()
 
     def guard_stack_group(
-        self, ctx: JobContext, members: Sequence[sqlite3.Row], target_epoch: int
+        self,
+        ctx: JobContext,
+        members: Sequence[sqlite3.Row],
+        destination_id: str,
+        target_epoch: int,
+        profile_revision_id: str,
     ) -> None:
         """**外部へ触る直前に通す。** `_guard`（§9.10）のスタック版.
 
         `complete` のレコードは claim を持たないので `prepare_side_effect` は
-        流用できない。**ジョブのリースと、組の全員の現在値を 1 つの
-        `BEGIN IMMEDIATE` で照合する。** 1 件でも合わなければ `StackGroupChanged` を
-        送出して、その組を諦める（相手には触らない）。
+        流用できない。**ジョブのリース・組の全員の現在値・宛先の現行 epoch・
+        プロファイルの現行版を 1 つの `BEGIN IMMEDIATE` で照合する。**
+        1 件でも合わなければ `StackGroupChanged` を送出して、その組を諦める
+        （相手には触らない）。
+
+        **宛先の現行 epoch を見るのが要点。** epoch を進める編集は
+        `state <> 'complete'` の行しか無効化しないので（§8）、`complete` を扱う
+        この経路だけが既存の停止境界から外れる。開始後に別ライブラリへ向き替え
+        られても、固定した旧リビジョンの preflight は旧向き先が生きていれば成功
+        するので、**そこで止められない。**
         """
         with immediate(self._conn):
             ctx.assert_lease()
+            current = self._conn.execute(
+                "SELECT r.target_epoch AS epoch FROM upload_destination d"
+                " JOIN destination_revision r ON r.id = d.current_revision_id"
+                " WHERE d.id = ?",
+                (destination_id,),
+            ).fetchone()
+            if current is None or current["epoch"] != target_epoch:
+                raise StackGroupChanged("宛先の向き先が変わった")
+            profile = self._conn.execute(
+                "SELECT 1 FROM device_profile WHERE id ="
+                " (SELECT profile_id FROM profile_revision WHERE id = ?)"
+                "   AND current_revision_id = ?",
+                (profile_revision_id, profile_revision_id),
+            ).fetchone()
+            if profile is None:
+                raise StackGroupChanged("プロファイルの版が変わった")
             for member in members:
                 row = self._conn.execute(
                     "SELECT 1 FROM upload_record WHERE id = ? AND target_epoch = ?"
@@ -1048,13 +1187,25 @@ def _within(left: str, right: str, tolerance_seconds: int) -> bool:
                     # ロールバックさせる（`immediate` の外へ出す）。
                     raise StackGroupChanged(f"レコード {member['id']} を記録できない")
 
-    def mark_skipped(self, record_id: str, reason: str) -> None:
-        self._conn.execute(
-            "UPDATE upload_record SET stack_state = 'skipped', stack_reason = ?,"
-            " remote_stack_id = NULL, updated_at = ?"
-            " WHERE id = ? AND invalidated_at IS NULL AND stack_state IS NULL",
-            (reason, now_iso(), record_id),
-        )
+    def mark_skipped(
+        self, ctx: JobContext, record: sqlite3.Row, target_epoch: int, reason: str
+    ) -> None:
+        """見送りを記録する. **相手に触らない経路でもリースの下で書く。**
+
+        規則が無効・観測が無い・相方が居ない、といった見送りが大量にあると、
+        書いている間にリース（60 秒）が切れうる。`finish_claimed` は token と
+        status しか見ないので、**失効した後の書き込みが `succeeded` として
+        残せてしまう。**
+        """
+        with immediate(self._conn):
+            ctx.assert_lease()
+            self._conn.execute(
+                "UPDATE upload_record SET stack_state = 'skipped', stack_reason = ?,"
+                " remote_stack_id = NULL, updated_at = ?"
+                " WHERE id = ? AND target_epoch = ? AND state = 'complete'"
+                "   AND invalidated_at IS NULL AND stack_state IS NULL",
+                (reason, now_iso(), record["id"], target_epoch),
+            )
 ```
 
 - [ ] **Step 4: 通ることを確認する**
@@ -1229,10 +1380,40 @@ def test_a_lost_lease_stops_before_touching_the_peer(world):
 
 
 def test_a_cancel_committed_during_the_get_stops_before_the_post(world):
-    """**`POST` の直前に取り直す。** GET を待っている間にキャンセルは commit される."""
+    """**`POST` の直前に取り直す。** GET を待っている間にキャンセルは commit される.
+
+    利用者のキャンセルなので、**例外ではなく正常な中止**として返る（§9.9）。
+    """
     world.cancel_during_first_get()
+    outcome = world.stacker().run(world.ctx, "dest-1")
+    assert outcome.stacked == 0
+    assert ("POST", "/api/stacks") not in world.immich.requests
+
+
+def test_a_repoint_during_the_get_stops_before_the_post(world):
+    """**開始後に別ライブラリへ向き替えられたら、そこで止まる。**
+
+    旧 epoch の `complete` は無効化されないので、進行中レコードの無効化では
+    止まらない。preflight も固定した旧リビジョンを見るので、旧向き先が生きて
+    いれば成功してしまう。
+    """
+    world.repoint_during_first_get()
     world.stacker().run(world.ctx, "dest-1")
     assert ("POST", "/api/stacks") not in world.immich.requests
+    assert all(r["stack_state"] is None for r in world.records())
+
+
+def test_a_profile_edit_during_the_get_stops_before_the_post(world):
+    world.edit_the_profile_during_first_get()
+    world.stacker().run(world.ctx, "dest-1")
+    assert ("POST", "/api/stacks") not in world.immich.requests
+
+
+def test_a_slow_peer_does_not_lose_the_lease(world):
+    """**相手待ちはすべて心拍で守る**（timeout は既定 86400 秒）."""
+    world.immich.delay_seconds = 2
+    world.with_lease_seconds(1)
+    assert world.stacker().run(world.ctx, "dest-1").stacked == 1
 
 
 def test_a_cancel_committed_between_the_post_and_the_put_stops_the_put(world):
@@ -1323,6 +1504,13 @@ class Stacker:
                         # 前提が変わった。**記録もしない**（次の送信で組み直す）。
                         ctx.emit("info", f"組が変わったのでスタックを見送った: {exc}")
                         continue
+                    except LeaseLost:
+                        # **利用者が押したキャンセルを失敗として記録しない**（§9.9）。
+                        # `uploader.run` と同じ受け口にする。失効なら外へ出す。
+                        if ctx.cancelled():
+                            ctx.emit("info", "キャンセルを観測してスタックを中止した")
+                            return StackOutcome(stacked, skipped, deferred)
+                        raise
                     stacked += result == "stacked"
                     skipped += result == "skipped"
         return StackOutcome(stacked, skipped, deferred)
@@ -1332,7 +1520,9 @@ class Stacker:
 
 1. 対象の `media_file` と、**そのプロファイルの現行リビジョン**
    （`registry.by_id(media["profile_id"])`）を読む。`immich.tags` と同じ層の判断で、
-   取り込み時の版に固定しない（§9.11）
+   取り込み時の版に固定しない（§9.11）。**読んだ `revision_id` は組ごとに固定し、
+   guard と最終 CAS で「まだ現行か」を確かめる**（プロファイルの編集は同期の API で
+   行えるので、組を決めた後・送る前に規則が変わりうる）
 2. `rule.enabled` が偽なら `mark_skipped("プロファイルがスタックを使わない")`
 3. `sources_of` でカード上の観測を**すべて**得る。空なら
    `mark_skipped("カード上の観測が残っていない")`
@@ -1355,19 +1545,39 @@ class Stacker:
 持たないので `prepare_side_effect` は使えない**（Task 4 の `guard_stack_group`）。
 
 ```python
-    def _guard(self, ctx, members, epoch, revision_id) -> None:
+    def _guard(self, ctx, members, destination_id, epoch, revision_id, profile_revision_id):
         """**外部へ触る直前に必ず通す**（§9.10 の `_guard` と同じ作法）.
 
         prepare → preflight（相手待ちなので `with_lease_pulse` で囲む）→ prepare。
         前だけに置くと、向き先の再確認を待っている間に commit されたキャンセルを
         見落とす。**`POST` と `PUT` のそれぞれの直前で通す。**
         """
-        self._uploads.guard_stack_group(ctx, members, epoch)
+        self._uploads.guard_stack_group(
+            ctx, members, destination_id, epoch, profile_revision_id
+        )
         self._preflight.assert_target(
             revision_id, wait=lambda work: with_lease_pulse(ctx, work)
         )
-        self._uploads.guard_stack_group(ctx, members, epoch)
+        self._uploads.guard_stack_group(
+            ctx, members, destination_id, epoch, profile_revision_id
+        )
 ```
+
+**相手待ちはすべて `with_lease_pulse` で囲む。** preflight だけでは足りない ——
+`UPLOAD_TIMEOUT_SECONDS` は既定 86400 秒なので、`client.asset` も `create_stack` も
+60 秒のリースを跨ぎうる。囲まないと、**`POST` が成功した直後の記録でリースを失って
+正常なジョブが失敗になる。**
+
+```python
+    def _remote(self, ctx, work):
+        """相手待ちを心拍で守る（`uploader` の送信と同じ形）."""
+        return with_lease_pulse(ctx, work)
+```
+
+**行をまたいだ heartbeat も要る。** 1 件が短く終わると `with_lease_pulse` は 1 度も
+打たない（`thread.join(timeout=間隔)` が先に返る）ので、相手に触らない見送りが
+続くと積もる。`recompute._apply_batch` と同じく、**経過時間でも打つ。どちらも
+`assert_lease` を先に呼ぶ**（`extend_lease` は `cancelling` でも延ばす）。
 
 例外の対応:
 
@@ -1484,19 +1694,21 @@ Expected: FAIL
 
 - [ ] **Step 4: 通ることを確認する**
 
-Run: `uv run pytest app/tests/test_recompute.py -q`
+Run: `uv run pytest app/tests/test_recompute.py app/tests/test_profile_registry.py -q`
 Expected: PASS
 
 - [ ] **Step 5: 変異試験**
 
 `stack_state = 'skipped'` の条件を外す（`stacked` も戻る）、`_reopen_stack` を
-`_same` の側（変化なし）でも呼ぶ、トランザクションの外へ出す。
+`_same` の側（変化なし）でも呼ぶ、トランザクションの外へ出す、
+`_reopen_stack_skips` の `profile_id` の絞りを外す（他のプロファイルまで戻る）、
+`_insert_revision` の外へ出す（版だけ進んで見送りが残る窓ができる）。
 
 - [ ] **Step 6: コミット**
 
 ```bash
-git add app/src/mediaferry/jobs/recompute.py app/tests/test_recompute.py
-git commit -m "feat(recompute): 時刻が動いたらスタックの見送りを未評価へ戻す"
+git add app/src/mediaferry/jobs/recompute.py app/src/mediaferry/db/profiles.py app/tests
+git commit -m "feat(uploads): 前提が変わったらスタックの見送りを未評価へ戻す"
 ```
 
 ---
@@ -1761,7 +1973,9 @@ git commit -m "docs(mediaferry): Phase 6 の実測と引き継ぎを書き戻す
 | 宛先の障害 | **最初の `deferred` で第 2 パスを打ち切る** | 認証失敗・redirect・5xx は組ではなく宛先の障害。次の組へ進むと未評価の全件ぶん要求を投げ続ける（timeout は既定 86400 秒） |
 | `BATCH_SIZE` | **50** | 再計算（Phase 5 Task 6）と同じ桁。1 件あたり相手への往復が 1〜3 回あるので、これ以上増やしてもリースの窓が伸びるだけ |
 | 保留（5xx）の上限 | **持たない** | 未評価のまま残すだけで、相手にも DB にも痕跡が増えない。宛先が直れば次の送信で解決する |
-| 手動の再スタック | **作らない** | 再評価の経路は「再送」と「再計算」の 2 つで足りる（YAGNI） |
+| 手動の再スタック | **作らない** | 再評価の経路は「再計算」と「プロファイルの新リビジョン」の 2 つで足りる（YAGNI）。どちらも見送りを未評価へ戻す |
+| 規則の版の固定 | **組ごとに読んだ `revision_id` を固定し、guard と最終 CAS で「まだ現行か」を見る** | プロファイルの編集は同期 API で行えるので、組を決めた後・送る前に規則が変わりうる |
+| 宛先の epoch の固定 | 開始時に固定し、**guard で「宛先の現行 epoch と同じか」も見る** | epoch を進める編集は `complete` を無効化しないので、第 2 パスだけが既存の停止境界から外れる |
 | 動画の組 | **作らない** | `MVI_*.MOV` は 1 ファイルで完結する。組にする根拠が無い |
 
 ## レビュー記録
@@ -1791,3 +2005,27 @@ git commit -m "docs(mediaferry): Phase 6 の実測と引き継ぎを書き戻す
 
 **止め時の判断:** レビュー側は「まだ逓減局面ではない。設計と計画を直した次巡は必須」
 と述べている。次巡を回す。
+
+### 計画レビュー 2 巡目（2026-08-19、codex `--fresh`。blocker 1 / major 4 / minor 2）
+
+**8 件すべて妥当。反論できたものは無い。** 1 巡目の対処が作った境界から出た
+（epoch の固定、guard の 2 段化、規則を現行版から読むこと、観測の集合化）。
+**1 巡目で退けた `allow_redirect` は、こちらの根拠が誤っていた。**
+
+| # | 指摘 | 判定 | 反映 |
+| --- | --- | --- | --- |
+| blocker 1 | **固定した epoch が「いまも現行か」を見ていない。** 実行中に別ライブラリへ向き替えられても、旧 epoch の `complete` は無効化されず、preflight は固定した旧リビジョンを見るので、**旧ライブラリへ副作用を続ける** | **妥当。** epoch を進める編集は `state <> 'complete'` しか無効化しない（`_invalidate_old_epoch_locked`）ので、**第 2 パスだけが既存の停止境界から外れていた** | `guard_stack_group` に `destination_id` を渡し、同じ `BEGIN IMMEDIATE` で「宛先の現行リビジョンの `target_epoch` = 固定した epoch」を確かめる。**最初の GET の最中に向き替える**競合試験を追加（前巡の試験は開始前に変えるだけで、この穴を通らない） |
+| major 1 | **リース対策が preflight にしか掛かっていない。** 実通信（`asset` / `create_stack` / `PUT`）もローカルの見送りも守られていない。`cancel_during_first_get` の試験は `LeaseLost` の受け口を書いていない | **妥当。** timeout は既定 86400 秒なので、正常な 1 回の通信が 60 秒のリースを跨ぐ。**`POST` が成功した直後の記録で失敗する**経路が実在する | 相手待ちをすべて `with_lease_pulse` で囲む。`mark_skipped` も `ctx` と epoch を受けて `assert_lease` + CAS を 1 トランザクションで行う。行をまたいだ heartbeat も足す（`recompute._apply_batch` と同じ 2 つの仕掛け）。`run` に `LeaseLost` の受け口を書く（キャンセルなら正常に中止、失効なら外へ） |
+| major 2 | **現行リビジョンを使う設計に、版の固定・競合検査・再評価の経路が無い。** 組を決めた後に編集されても guard は見ず、一度見送った行は規則を変えても戻らない | **妥当。** プロファイルの編集は同期 API（`routes_system`）で行える。**「現行版を使う」が初回の評価にしか効いていなかった** | 組ごとに `revision_id` を固定し、guard と最終 CAS で「まだ現行か」を確かめる。**新しいリビジョンを作る取引の中で、そのプロファイルのメディアの見送りを未評価へ戻す**（`sync_builtins` も同じ経路）。Task 6 を「戻す 2 つの経路」に作り直した |
+| major 3 | **観測の集合化で、ボリュームと stem の相関が消えた。** 別々の観測でそれぞれが一致するだけの組が通る。同じ `media_file` が重複 member にもなりうる | **妥当。** 1 巡目の対処（集合化）が作った境界そのもの | `Candidate` を**観測 1 つぶん**にし、鍵を `(volume_instance_id, stem_prefix)` の**組**で持つ。member は `media_file_id` で一意化する。相関が消える筋書きと、同じ media が 2 つの観測を持つ筋書きを試験に追加 |
+| major 4 | **`allow_redirect=False` を退けた根拠が `POST /stacks` には当たらない。** `_request` は 303 でも method を変えずに再送するので、**非冪等で吸収する要求を自動 replay する**。全単射の検査も入力側の重複を閉じていない | **妥当。こちらの誤り。** 根拠を「本文が再送できるか」だけで見ていた。非冪等性と吸収の仕様を合わせると replay は安全でない | `create_stack` の `POST` を `allow_redirect=False` にする（`PUT` は冪等なので既定のまま）。入力の重複も送る前に拒み、全単射は件数も見る |
+| minor 1 | **epoch を落とした問い合わせの EXPLAIN 試験が、コメントどおりの検査になっていない。** 複合索引は先頭 prefix でも使われるので、索引名の不一致では捕まらない | **妥当** | 否定形の試験を消し、**正しい問い合わせが 2 本とも search key に入っていること**と、並べ替えが消えていることを見る形にした。epoch 抜けは旧 epoch の挙動試験で閉じる |
+| minor 2 | Task 4 の提示テストと Interfaces が、更新後の signature に追随していない | **妥当** | `_candidate` の既定値、Interfaces、リポジトリの試験をすべて新しい形へそろえた |
+
+**確認された「異論なし」:** TOCTOU の残余を明記して受容する判断、複製媒体の残余
+リスクを受容する判断、`immediate` の例外で取引ごと巻き戻るなら「一部だけ commit」は
+閉じられるという読み。
+
+**止め時の判断:** レビュー側は「前巡の指摘はかなり収束した。上記を直した後は、
+実装前レビューとしては逓減局面に入る見込み」と述べている。**3 巡目を回してから
+実装に入る。**
