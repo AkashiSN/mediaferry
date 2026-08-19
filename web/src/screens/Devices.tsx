@@ -36,8 +36,13 @@ type Settings = { settings: Setting[] };
  */
 export function autoImportOutlook(
   volume: Volume,
-  autoImport: string,
+  autoImport: string | null,
 ): { starts: boolean; blocked: string | null } {
+  if (autoImport === null) {
+    // **読めていない値を `trusted` と仮定しない。** 実設定が off でも
+    // 「いまの中身を数秒後にコピー」と誤って同意を取ることになる。
+    return { starts: false, blocked: "設定をまだ読めていない" };
+  }
   if (autoImport !== "trusted") {
     return { starts: false, blocked: "AUTO_IMPORT が off な" };
   }
@@ -51,7 +56,7 @@ export function autoImportOutlook(
 }
 
 /** そのカードで自動取り込みがどうなるか（§12.1）。 */
-export function autoImportState(volume: Volume, autoImport: string): string {
+export function autoImportState(volume: Volume, autoImport: string | null): string {
   const { starts, blocked } = autoImportOutlook(volume, autoImport);
   if (!volume.trusted) {
     // **承認すると、いま挿してあるこのカードの中身が対象になる。** watcher は
@@ -76,9 +81,12 @@ export function DevicesScreen() {
     null,
   );
 
+  // **未解決・失敗は `null` のまま持つ。** 既定値へ倒すと、同意の内容が実挙動と
+  // ずれる（`watcher.py` は積まないのに「コピーされます」と書く）。
   const autoImport =
-    (settings.data?.settings ?? []).find((setting) => setting.key === "AUTO_IMPORT")?.value ??
-    "trusted";
+    settings.data === null
+      ? null
+      : (settings.data.settings.find((setting) => setting.key === "AUTO_IMPORT")?.value ?? null);
 
   async function act(volumeId: string, action: "trust" | "scan" | "import" | "close") {
     setBusy(`${volumeId}:${action}`);
@@ -97,7 +105,10 @@ export function DevicesScreen() {
   return (
     <section aria-label="デバイス">
       <h1>デバイス</h1>
-      <ErrorBanner error={error ?? devices.error} onDismiss={() => setError(null)} />
+      <ErrorBanner
+        error={error ?? devices.error ?? settings.error}
+        onDismiss={() => setError(null)}
+      />
       {autoImport === "off" && (
         <p role="note">
           自動取り込みは無効です（AUTO_IMPORT = off）。信頼済みのカードを挿しても
@@ -133,7 +144,8 @@ export function DevicesScreen() {
                 {!volume.trusted && volume.profile_slug !== null && (
                   <button
                     type="button"
-                    disabled={busy !== null}
+                    // 設定を読めていない間は押させない（同意の内容を作れない）。
+                    disabled={busy !== null || autoImport === null}
                     onClick={() =>
                       setConfirming({
                         confirmation: {

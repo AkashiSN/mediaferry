@@ -826,3 +826,30 @@ def test_a_cancel_stops_the_batch_before_reading_the_rest(db, data_root, monkeyp
     assert len(reads) < 30, f"キャンセル後も読み続けた: {len(reads)} 枚"
     assert outcome.changed == 0
     assert captured(db, media[0])["captured_at"] == "2026-08-17T12:00:00+00:00"
+
+
+def test_the_targets_are_read_in_pages_under_the_lease(dji, db, data_root, monkeypatch):
+    """**対象の抽出もリースとキャンセルの内側で行う。**
+
+    全件を先に materialize すると、`media_file` 1 行ごとの相関副問い合わせが
+    最初の `assert_lease` より前に 60 秒を超えうる（正常なジョブがリース切れで
+    落ち、その間キャンセルも観測されない）。`BATCH_SIZE` は書き込みだけでなく
+    **読み出しにも効かせる**。
+    """
+    profile, _, _, _, _ = dji
+    new_profile = to_berlin(db, profile)
+    pages: list[int] = []
+    original = Recomputer._fetch_originals
+
+    def counting(self, profile_id, cursor, limit):  # noqa: ANN001, ANN202
+        rows = original(self, profile_id, cursor, limit)
+        pages.append(len(rows))
+        return rows
+
+    monkeypatch.setattr(Recomputer, "_fetch_originals", counting)
+    outcome = run(db, data_root, new_profile, batch_size=1)
+
+    # 3 件を 1 件ずつ読み、最後に空を読んで終わる。
+    assert pages == [1, 1, 1, 0]
+    assert outcome.changed == 2
+    assert outcome.skipped == 1

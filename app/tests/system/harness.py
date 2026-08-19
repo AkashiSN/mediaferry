@@ -103,27 +103,31 @@ class _Cards(FakeMountManager):
 
     def mount(self, volume, expect, verify):  # noqa: ANN001, ANN201
         path = self._by_key[volume.volume_key]
+        # `verify` は相手を待ちうるので錠の外で呼ぶ（錠の中で待つと詰まる）。
         verify()
-        fd = os.open(path, os.O_RDONLY | os.O_DIRECTORY)
+        # **open と台帳への登録を同じ排他に入れる。** 割ると、開いた直後・登録の
+        # 前に `release_all` が走ったときに fd を取り逃がす。
         with self._ledger:
+            fd = os.open(path, os.O_RDONLY | os.O_DIRECTORY)
             self._n += 1
             handle = f"h{self._n}"
             self._open[handle] = fd
         return handle, fd
 
     def release(self, handle) -> None:  # noqa: ANN001
-        # **台帳に触るところは全部同じ錠で守る。** mount と重なると、pop の
-        # 取りこぼしで fd が漏れる。
         with self._ledger:
             fd = self._open.pop(handle, None)
         if fd is not None:
             os.close(fd)
 
     def release_all(self) -> None:
+        # **台帳を 1 度に空にする。** 走査して 1 件ずつ pop すると、その合間の
+        # `mount` が登録した fd が残る。
         with self._ledger:
-            handles = list(self._open)
-        for handle in handles:
-            self.release(handle)
+            fds = list(self._open.values())
+            self._open.clear()
+        for fd in fds:
+            os.close(fd)
 
 
 @contextmanager

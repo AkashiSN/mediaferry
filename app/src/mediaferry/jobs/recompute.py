@@ -82,7 +82,7 @@ class Recomputer:
         finished = self._pass(
             ctx,
             profile,
-            self._originals(profile.profile_id),
+            self._fetch_originals,
             self._recomputed_original,
             tally,
             "カード上の原名（source_entry）が残っていない",
@@ -91,7 +91,7 @@ class Recomputer:
             self._pass(
                 ctx,
                 profile,
-                self._derived(profile.profile_id),
+                self._fetch_derived,
                 self._recomputed_derived,
                 tally,
                 "先頭の active member が無いか、その member を再計算できていない",
@@ -101,9 +101,13 @@ class Recomputer:
     # ------------------------------------------------------------------
     # 対象の抽出
 
-    def _originals(self, profile_id: str) -> list[sqlite3.Row]:
+    def _fetch_originals(self, profile_id: str, cursor: str, limit: int) -> list[sqlite3.Row]:
         """**`filename` はカード上の原名に当てる。** `media_file.rel_path` は
         公開先の名前で、衝突時には接尾辞が付いている（§9.3）。
+
+        `rel_path` は `media_file` で UNIQUE なので keyset の鍵に使える。
+        **再計算は `rel_path` を動かさない**（直すのは日時の 5 列だけ）ので、
+        巡っている最中に行が前後へ動くことはない。
         """
         return list(
             self._conn.execute(
@@ -113,12 +117,13 @@ class Recomputer:
                 "   WHERE s.media_file_id = m.id AND s.state = 'published'"
                 "   ORDER BY s.observed_at, s.id LIMIT 1) AS source_rel_path"
                 " FROM media_file m WHERE m.profile_id = ? AND m.role = 'original'"
-                " ORDER BY m.rel_path",
-                (profile_id,),
+                "   AND m.rel_path > ?"
+                " ORDER BY m.rel_path LIMIT ?",
+                (profile_id, cursor, limit),
             )
         )
 
-    def _derived(self, profile_id: str) -> list[sqlite3.Row]:
+    def _fetch_derived(self, profile_id: str, cursor: str, limit: int) -> list[sqlite3.Row]:
         return list(
             self._conn.execute(
                 "SELECT m.id, m.rel_path, m.mtime_ns, m.captured_at, m.captured_at_source,"
@@ -128,8 +133,9 @@ class Recomputer:
                 "   WHERE g.output_media_file_id = m.id"
                 "   ORDER BY mm.position LIMIT 1) AS member_id"
                 " FROM media_file m WHERE m.profile_id = ? AND m.role = 'derived'"
-                " ORDER BY m.rel_path",
-                (profile_id,),
+                "   AND m.rel_path > ?"
+                " ORDER BY m.rel_path LIMIT ?",
+                (profile_id, cursor, limit),
             )
         )
 
@@ -213,25 +219,33 @@ class Recomputer:
         self,
         ctx: JobContext,
         profile: ProfileRef,
-        rows: Sequence[sqlite3.Row],
+        fetch: Callable[[str, str, int], list[sqlite3.Row]],
         recompute: Callable[[JobContext, sqlite3.Row, ProfileRef], CapturedAt | None],
         tally: _Tally,
         skip_reason: str,
     ) -> bool:
-        """1 巡ぶん. 最後まで回れたら True. 件数が多いのでバッチで区切る."""
+        """1 巡ぶん. 最後まで回れたら True.
+
+        **抽出もリースとキャンセルの内側で行う。** 全件を先に読むと、
+        `media_file` 1 行ごとの相関副問い合わせが最初の `assert_lease` より前に
+        60 秒を超えうる（正常なジョブがリース切れで落ち、その間キャンセルも
+        観測されない）。`batch_size` は書き込みだけでなく読み出しにも効かせる。
+        """
         skipped = 0
-        for start in range(0, len(rows), self._batch_size):
-            # **バッチごとに、キャンセルとリースの両方を見る。** ここまでの
-            # バッチは commit 済みで、残りは手つかずのまま降りる。
+        cursor = ""
+        while True:
+            # **1 ページごとに、キャンセルとリースの両方を見る。** ここまでの
+            # ページは commit 済みで、残りは手つかずのまま降りる。
             if ctx.cancelled():
                 ctx.emit("info", "キャンセルを観測したので再計算を中止した")
                 return False
             try:
                 ctx.assert_lease()
                 ctx.heartbeat()
-                skipped += self._apply_batch(
-                    ctx, rows[start : start + self._batch_size], profile, recompute, tally
-                )
+                batch = fetch(profile.profile_id, cursor, self._batch_size)
+                if not batch:
+                    break
+                skipped += self._apply_batch(ctx, batch, profile, recompute, tally)
             except LeaseLost:
                 # 確認の直後にキャンセルが commit されると、リースを失った形で
                 # 降りてくる。**利用者が押したキャンセルを失敗として記録しない。**
@@ -241,6 +255,7 @@ class Recomputer:
                     ctx.emit("info", "キャンセルを観測したので再計算を中止した")
                     return False
                 raise
+            cursor = batch[-1]["rel_path"]
         if skipped:
             # **黙って飛ばさない。** 件数が実際と食い違うと、直っていない行に
             # 気付けない。

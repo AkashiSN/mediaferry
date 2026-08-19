@@ -561,13 +561,20 @@ describe("デバイスの信頼登録", () => {
     reason: null,
   };
 
-  function stubDevices(volumes: unknown[], autoImport = "trusted") {
+  function stubDevices(volumes: unknown[], autoImport = "trusted", settingsStatus = 200) {
     calls = [];
     vi.stubGlobal(
       "fetch",
       vi.fn((input: string, init?: RequestInit) => {
         const path = input.replace(/^\/api/, "");
         calls.push({ path, method: init?.method ?? "GET" });
+        if (path === "/settings" && settingsStatus !== 200) {
+          return Promise.resolve(
+            new Response(JSON.stringify({ error: { code: "internal", detail: "" } }), {
+              status: settingsStatus,
+            }),
+          );
+        }
         const body =
           path === "/settings"
             ? {
@@ -710,6 +717,23 @@ describe("デバイスの信頼登録", () => {
 
     expect(await screen.findByText(/自動取り込みは無効/)).toBeInTheDocument();
     expect(screen.getByRole("link", { name: /設定/ })).toBeInTheDocument();
+  });
+
+  it("設定を読めていない間は、始まると断言せず信頼も押させない", async () => {
+    // **`/settings` が未解決・失敗のときに `trusted` と仮定しない。** 実設定が
+    // off でも「いまの中身を数秒後にコピー」と誤って同意を取ることになる。
+    stubDevices([{ ...base, trusted: false }], "trusted", 500);
+    renderDevices();
+
+    expect(await screen.findByText(/設定をまだ読めていない/)).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "SD_Card を信頼する" })).toBeDisabled();
+  });
+
+  it("設定の取得に失敗したら、その失敗も画面に出す", async () => {
+    stubDevices([base], "trusted", 500);
+    renderDevices();
+
+    expect(await screen.findByRole("alert")).toBeInTheDocument();
   });
 
   it("AUTO_IMPORT が有効なら、無効の案内は出さない", async () => {

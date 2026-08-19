@@ -1565,6 +1565,37 @@ WARNING を出す（実測）。Canon は MOV も `source: exif` を通るので
 （手順 7 より前なので、失敗すれば `writing` と staging を破棄できる）。範囲表に対して
 Task 自体が欠けている項目は無い。
 
+### 実装差分のレビュー 4 巡目（2026-08-19、codex `--fresh`。blocker 0 / major 2 / minor 1）
+
+**今回は「直した箇所の周り」ではなく、3 巡かけて誰も見ていなかった層から出た**
+（対象の抽出そのものと、設定が未解決のときの画面）。
+
+| 指摘 | 判定 | 対処 |
+| --- | --- | --- |
+| **major 1**: 対象の抽出（`_originals` / `_derived`）が**リースとキャンセルの外**にあり、全件を先に materialize する。`source_entry.media_file_id` に索引が無く、`EXPLAIN QUERY PLAN` は `media_file` 1 行ごとに `SCAN s` + 一時 B-tree。大きなライブラリでは**最初の `assert_lease` に届く前に 60 秒を超えて**正常なジョブが落ち、その間キャンセルも観測されない | **妥当。** `BATCH_SIZE` が書き込みにしか効いていなかった。EXPLAIN の実測も添えられていた | **読み出しも `batch_size` で区切る**（keyset。`rel_path` は `media_file` で UNIQUE、再計算はその列を動かさないので巡回中に行が前後しない）。`0012` で `source_entry (media_file_id, observed_at, id)` と `merge_group (output_media_file_id)` の索引を足した |
+| **major 2**: `/settings` が未解決・失敗の間、`?? "trusted"` で既定へ倒すので、**実設定が off でも「いまの中身を数秒後にコピー」と同意を取れる**。`settings.error` もバナーに出ていない | **妥当。3 巡目で 1 か所に集めた条件に、`null` の場合が無かった** | 未解決は `null` のまま持ち、`autoImportOutlook` が「設定をまだ読めていない」を返す。**信頼ボタンも押させない**（同意の内容が作れない）。`settings.error` もバナーへ |
+| **minor 1**: `_Cards` の `os.open` が錠の外なので、open 後・登録前に `release_all` が走ると fd を取り逃がす。`release_all` も走査中の `mount` を残せる | **妥当** | open と登録を同じ排他に入れ、`release_all` は台帳を 1 度に空にする（`verify` は相手を待ちうるので錠の外のまま） |
+
+**`CANDIDATES` の残り 3 条件について**（4 巡目で明示的に確認された）: `detached_at` は
+`GET /devices` の `refresh` が現存 snapshot だけを返すため、`archived_at` と
+`current_revision_id` は `VolumeService._probe` が `registry.active` / `current` から
+解決して DB へ書くため、**応答時点では画面の 3 条件から落としてよい**。
+応答後の archive / 編集 / detach はどのクライアント値も stale にしうるが、
+実行を守るのは watcher 側の全条件。
+
+**この巡で足した回帰試験:**
+
+- 対象が `batch_size` ごとにページングされて読まれる
+- `EXPLAIN QUERY PLAN` に `SCAN s` と一時 B-tree が出ない（`0012`）
+- 設定が未解決・失敗の間は「始まる」と断言せず、信頼ボタンも押せない
+- 設定の失敗もバナーに出る
+
+**変異試験で 1 件素通り → テストの当て方を直した。** 「派生物の抽出で `SCAN g` が
+出ない」は、索引を落とすと SQLite が `merge_member` 側から回すので `SCAN mm` に
+変わるだけで、`SCAN g` はどちらでも出ない。**`SCAN mm` も出ないことを足して**
+初めて検出できた（§8 の「素通りはまずテストの当て方を疑う」）。最終的に
+6 件中 6 件を検出。
+
 ### 実装差分のレビュー 3 巡目（2026-08-19、codex `--fresh`。blocker 0 / major 2 / minor 2）
 
 **また 2 巡目の対処が作った境界から出た**（この案件で 5 度目）。

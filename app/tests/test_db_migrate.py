@@ -301,6 +301,7 @@ def test_a_database_from_the_previous_release_still_opens(tmp_path):
         "0009_remote_datetime.sql": None,
         "0010_auto_import.sql": None,
         "0011_captured_at_revision.sql": None,
+        "0012_recompute_lookups.sql": None,
     }
     shipped = sorted(path.name for path in MIGRATIONS_DIR.glob("*.sql"))
     assert shipped == sorted(frozen), "版を足したら、この一覧にも足す"
@@ -430,3 +431,60 @@ def test_existing_rows_get_the_revision_they_were_imported_with(tmp_path):
     with pytest.raises(sqlite3.IntegrityError):
         conn.execute("UPDATE media_file SET captured_at_revision_id = ?", (other_revision,))
     conn.close()
+
+
+def test_the_recompute_lookups_do_not_scan_per_row(tmp_path):
+    """`0012`。再計算の対象抽出は `media_file` 1 行ごとに相関副問い合わせを回す.
+
+    索引が無いと `source_entry` を毎行 SCAN し、並べ替えに一時 B-tree を作る。
+    数万件のライブラリでは**最初の `assert_lease` に届く前に 60 秒を超え**、
+    正常なジョブがリース切れで落ちる（`jobs/recompute.py`）。
+    """
+    conn = Database(tmp_path / "db.sqlite3").connect()
+    apply_migrations(conn)
+    plan = " | ".join(
+        row[3]
+        for row in conn.execute(
+            "EXPLAIN QUERY PLAN"
+            " SELECT m.id,"
+            " (SELECT s.rel_path FROM source_entry s"
+            "   WHERE s.media_file_id = m.id AND s.state = 'published'"
+            "   ORDER BY s.observed_at, s.id LIMIT 1) AS source_rel_path"
+            " FROM media_file m WHERE m.profile_id = ? AND m.role = 'original'"
+            " ORDER BY m.rel_path",
+            ("x",),
+        )
+    )
+    conn.close()
+
+    assert "SCAN s" not in plan, plan
+    assert "TEMP B-TREE" not in plan, plan
+
+
+def test_the_derived_lookup_does_not_scan_members_per_row(tmp_path):
+    """派生物の抽出も同じ形（`merge_group.output_media_file_id` は FK だが索引が無い）.
+
+    **`SCAN g` が出ないことでは確かめられない。** 索引を落とすと SQLite は
+    `merge_member` の側から回すので `SCAN mm` に変わるだけで、`SCAN g` は
+    どちらでも出ない（そう書いた最初の版は変異試験を素通りした）。
+    """
+    conn = Database(tmp_path / "db.sqlite3").connect()
+    apply_migrations(conn)
+    plan = " | ".join(
+        row[3]
+        for row in conn.execute(
+            "EXPLAIN QUERY PLAN"
+            " SELECT m.id,"
+            " (SELECT mm.media_file_id FROM merge_group g"
+            "   JOIN merge_member mm ON mm.merge_group_id = g.id AND mm.active = 1"
+            "   WHERE g.output_media_file_id = m.id"
+            "   ORDER BY mm.position LIMIT 1) AS member_id"
+            " FROM media_file m WHERE m.profile_id = ? AND m.role = 'derived'"
+            " ORDER BY m.rel_path",
+            ("x",),
+        )
+    )
+    conn.close()
+
+    assert "SCAN g" not in plan, plan
+    assert "SCAN mm" not in plan, plan
