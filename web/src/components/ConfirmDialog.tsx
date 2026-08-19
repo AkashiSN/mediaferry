@@ -12,7 +12,8 @@ export type Confirmation =
   | { kind: "discard_merge_group"; groupLabel: string; publishedCount: number }
   | { kind: "adopt_failed_merge"; groupLabel: string; reason: string }
   | { kind: "approve_datetime"; current: string | null; proposed: string }
-  | { kind: "archive_profile"; slug: string };
+  | { kind: "archive_profile"; slug: string }
+  | { kind: "trust_volume"; label: string };
 
 export function describe(confirmation: Confirmation): { title: string; body: ReactNode } {
   switch (confirmation.kind) {
@@ -64,6 +65,24 @@ export function describe(confirmation: Confirmation): { title: string; body: Rea
           <p>
             現在 {confirmation.current ?? "（不明）"} → 変更後 {confirmation.proposed}
           </p>
+        ),
+      };
+    case "trust_volume":
+      return {
+        title: "このカードを信頼しますか",
+        body: (
+          <>
+            <p>
+              {confirmation.label} を信頼すると、
+              <strong>以後このカードを挿すだけで NAS へコピーされます</strong>
+              （画面の操作は要りません）。効くのは次に挿したときからです。
+            </p>
+            {/* **信頼の限界を明示する**（§12.1）。指紋は同一性の証明ではない。 */}
+            <p>
+              見分けはカードの中身の指紋で行うので、
+              <strong>同じ UUID の別のカードや、復元したカードを取り違えることがあります。</strong>
+            </p>
+          </>
         ),
       };
     case "archive_profile":

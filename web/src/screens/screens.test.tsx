@@ -10,6 +10,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { ApprovalsScreen } from "./Approvals";
 import { DestinationsScreen } from "./Destinations";
+import { DevicesScreen } from "./Devices";
 import { LibraryScreen, summarise } from "./Library";
 import { MergesScreen } from "./Merges";
 import { SettingsScreen } from "./Settings";
@@ -546,5 +547,133 @@ describe("プロファイルの編集", () => {
 
     expect(await screen.findByText(/版 2/)).toBeInTheDocument();
     expect(screen.queryByText(/自動では直りません/)).toBeNull();
+  });
+});
+
+describe("デバイスの信頼登録", () => {
+  const base = {
+    volume_instance_id: "v1",
+    fs_label: "SD_Card",
+    profile_slug: "dji-osmo",
+    identity_confidence: "high",
+    provisional: false,
+    trusted: true,
+    reason: null,
+  };
+
+  function stubDevices(volumes: unknown[], autoImport = "trusted") {
+    calls = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn((input: string, init?: RequestInit) => {
+        const path = input.replace(/^\/api/, "");
+        calls.push({ path, method: init?.method ?? "GET" });
+        const body =
+          path === "/settings"
+            ? {
+                warnings: [],
+                settings: [
+                  {
+                    key: "AUTO_IMPORT",
+                    value: autoImport,
+                    source: "default",
+                    locked: false,
+                    tier: "runtime",
+                    writable: true,
+                  },
+                ],
+              }
+            : path === "/devices"
+              ? { volumes }
+              : {};
+        return Promise.resolve(new Response(JSON.stringify(body), { status: 200 }));
+      }),
+    );
+  }
+
+  function renderDevices() {
+    render(
+      <MemoryRouter>
+        <DevicesScreen />
+      </MemoryRouter>,
+    );
+  }
+
+  it("2 枚を並べ、それぞれ独立に操作できる", async () => {
+    // Osmo は内蔵ストレージと SD の 2 つが同時に見える。
+    stubDevices([
+      base,
+      { ...base, volume_instance_id: "v2", fs_label: "Pocket4", profile_slug: "canon-eos" },
+    ]);
+    renderDevices();
+
+    await userEvent.click(await screen.findByRole("button", { name: "Pocket4 をスキャン" }));
+
+    await waitFor(() => {
+      expect(calls.some((call) => call.path === "/volumes/v2/scan")).toBe(true);
+    });
+    expect(calls.some((call) => call.path === "/volumes/v1/scan")).toBe(false);
+  });
+
+  it("「対象だが中身が無い」と「対象外」を区別して出す", async () => {
+    stubDevices([
+      { ...base, provisional: true },
+      {
+        ...base,
+        volume_instance_id: "v2",
+        fs_label: "USB_STICK",
+        profile_slug: null,
+        reason: "DCIM が無い",
+      },
+    ]);
+    renderDevices();
+
+    expect(await screen.findByText(/取り込む中身がまだありません/)).toBeInTheDocument();
+    expect(screen.getByText(/DCIM が無い/)).toBeInTheDocument();
+  });
+
+  it("承認は確認を経てから。ダイアログに信頼の限界を書く", async () => {
+    stubDevices([{ ...base, trusted: false, identity_confidence: "low" }]);
+    renderDevices();
+
+    await userEvent.click(await screen.findByRole("button", { name: "SD_Card を信頼する" }));
+
+    const dialog = await screen.findByRole("dialog");
+    // 確認を取る理由そのもの（§12.1 のプライバシー）と、信頼の限界の両方を書く。
+    expect(dialog).toHaveTextContent(/NAS へコピー/);
+    expect(dialog).toHaveTextContent(/取り違え/);
+    expect(calls.some((call) => call.path.includes("trust"))).toBe(false);
+  });
+
+  it("未承認のカードには、次に挿したときから効くと書く", async () => {
+    // `_identity_confidence` は憶えた指紋が無ければ必ず low を返すので、
+    // **自動取り込みが効くのは 2 度目以降の挿入から**（§12.1）。
+    stubDevices([{ ...base, trusted: false, identity_confidence: "low" }]);
+    renderDevices();
+
+    expect(await screen.findByText(/次にこのカードを挿したときから/)).toBeInTheDocument();
+  });
+
+  it("信頼済みでも確度が低ければ、自動取り込みしないと書く", async () => {
+    stubDevices([{ ...base, trusted: true, identity_confidence: "low" }]);
+    renderDevices();
+
+    expect(await screen.findByText(/確度が低いため/)).toBeInTheDocument();
+  });
+
+  it("AUTO_IMPORT が off なら、その旨と設定への導線を出す", async () => {
+    stubDevices([base], "off");
+    renderDevices();
+
+    expect(await screen.findByText(/自動取り込みは無効/)).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: /設定/ })).toBeInTheDocument();
+  });
+
+  it("AUTO_IMPORT が有効なら、無効の案内は出さない", async () => {
+    stubDevices([base]);
+    renderDevices();
+
+    expect(await screen.findByText(/挿すと自動で取り込みます/)).toBeInTheDocument();
+    expect(screen.queryByText(/自動取り込みは無効/)).toBeNull();
   });
 });
