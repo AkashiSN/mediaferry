@@ -10,7 +10,7 @@
 
 ## 1. 現在地
 
-**Phase 1〜3 は実装・検証とも完了。Phase 4 に着手した**（計画と Task 1・2）。 Phase 3 は計画のレビューを 2 巡してから
+**Phase 1〜4 は実装・検証とも完了。** Phase 3 は計画のレビューを 2 巡してから
 14 タスクを実行し、**実装差分のレビューを 5 巡（3〜7 巡目）回して全件反映済み**。
 **実 Immich での確認も済んだ**（2026-08-19、v3.1.0）。次のフェーズは 4（Web UI）。
 
@@ -41,7 +41,7 @@
 | 1 | 基盤 + 取り込み。`ArtifactPublisher` / `Reconciler` / DB スキーマ / scan / import / API | **完了**（実 USB の確認だけ残り） |
 | 2 | 結合。検出 / ffmpeg / 検証 / 公開 / 回収 / 選択肢 / API | **完了**（`phase2-plan.md` の 14 タスク。実装との差分は書き戻し済み） |
 | 3 | Immich 同期（転送先プロファイル、状態機械、タグ、日時補正、複数宛先） | **完了**（`phase3-plan.md` の 14 タスク。codex レビュー 7 巡を反映。実装との差分は書き戻し済み。**実 Immich でも確認済み**） |
-| 4 | Web UI | 未着手 |
+| 4 | Web UI（認証・CSRF・SSE・サムネイル・8 画面・E2E） | **完了**（`phase4-plan.md` の 19 タスク。計画レビュー 1 巡を反映） |
 | 5 | 汎用化（Canon、プロファイル編集 UI、複数デバイス） | 未着手 |
 
 ### 検証状態
@@ -57,6 +57,16 @@ uv run ruff format --check .   165 files already formatted
 
 **結合のテストは実 ffmpeg を使う**（`shutil.which("ffmpeg")` が無いときだけ skip）。
 開発コンテナには `~/.local/bin/ffmpeg` が入っている。
+
+フロントは `web/` にある。
+
+```
+npm --prefix web ci        # 依存
+npm --prefix web test      # vitest（24 件）
+npm --prefix web run lint / typecheck / build
+npm --prefix web run test:e2e   # Playwright。実プロセス + fake broker + fake Immich 2 台
+npm --prefix web run typegen    # OpenAPI から型を作り直す（API を変えたら回す）
+```
 
 `ruff format` の件数がソースの本数より多いのは、`docs/` を `extend-exclude` で
 外していても**ルート直下の `CLAUDE.md` は対象に入る**ため（Markdown 内の
@@ -91,7 +101,7 @@ assert している。
 | `docs/phase1-plan.md` | Phase 1 の実装計画。**実行済み**。実装との差分は都度書き戻してある | ✅ |
 | `docs/phase2-plan.md` | Phase 2（結合）の実装計画。**実行済み**。codex のレビュー 2 巡を反映し、実装で外れた判断と検出できなかった変異を書き戻してある | ✅ |
 | `docs/phase3-plan.md` | Phase 3（Immich 同期）の実装計画。**実行済み**。codex のレビュー 7 巡を反映し、実装で外れた判断と検出できなかった変異を書き戻してある | ✅ |
-| `docs/phase4-plan.md` | Phase 4（Web UI）の実装計画。**Task 0〜6 が実装済み**（残り 12）。計画レビュー 1 巡（blocker 4 / major 8 / minor 2）を全件反映済み | ✅ |
+| `docs/phase4-plan.md` | Phase 4（Web UI）の実装計画。**全 19 タスク実装済み**。計画レビュー 1 巡（blocker 4 / major 8 / minor 2）を全件反映済み | ✅ |
 | `docs/phase1-backup.md` | バックアップとリストア、再構築できる範囲（§18-4） | ✅ |
 | `docs/phase1-manual-checklist.md` | 実 USB での確認手順 | ✅ |
 | `docs/phase0-findings.md` | Phase 0 の実測結果と設計への反映 | ✅ |

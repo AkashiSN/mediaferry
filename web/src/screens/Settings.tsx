@@ -16,7 +16,7 @@ type Setting = {
 };
 
 type Settings = { settings: Setting[]; warnings: { code: string; message: string }[] };
-type Profiles = { profiles: { id: string; slug: string; name: string; builtin: boolean }[] };
+type Profiles = { profiles: { slug: string; name: string; revision: number }[] };
 
 export function SettingsScreen() {
   const settings = useQuery<Settings>("/settings");
@@ -81,8 +81,8 @@ export function SettingsScreen() {
       <p>編集は次のフェーズで入ります。ここでは判定に使う定義を確認できます。</p>
       <ul>
         {(profiles.data?.profiles ?? []).map((profile) => (
-          <li key={profile.id}>
-            {profile.name}（{profile.slug}）{profile.builtin ? " — ビルトイン" : ""}
+          <li key={profile.slug}>
+            {profile.name}（{profile.slug}） 版 {profile.revision}
           </li>
         ))}
       </ul>

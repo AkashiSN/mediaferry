@@ -8,11 +8,11 @@ import { ErrorBanner } from "../components/ErrorBanner";
 
 type Volume = {
   volume_instance_id: string;
-  label: string | null;
+  fs_label: string | null;
   profile_slug: string | null;
-  confidence: string | null;
+  identity_confidence: string | null;
+  provisional: boolean;
   trusted: boolean;
-  eligible: boolean;
   reason: string | null;
 };
 
@@ -44,15 +44,17 @@ export function DevicesScreen() {
       <ul>
         {(devices.data?.volumes ?? []).map((volume) => (
           <li key={volume.volume_instance_id}>
-            <h2>{volume.label ?? volume.volume_instance_id}</h2>
+            <h2>{volume.fs_label ?? volume.volume_instance_id}</h2>
             <p>
               判定: {volume.profile_slug ?? "対象外"}
-              {volume.confidence ? `（確度 ${volume.confidence}）` : ""}
+              {volume.identity_confidence ? `（確度 ${volume.identity_confidence}）` : ""}
             </p>
             {/* **対象外も理由付きで出す**（§13）。黙って消えると原因が分からない。 */}
-            {!volume.eligible && <p role="note">対象外の理由: {volume.reason ?? "不明"}</p>}
+            {volume.profile_slug === null && (
+              <p role="note">対象外の理由: {volume.reason ?? "不明"}</p>
+            )}
             <div className="actions">
-              {!volume.trusted && volume.eligible && (
+              {!volume.trusted && volume.profile_slug !== null && (
                 <button
                   type="button"
                   disabled={busy !== null}
@@ -61,7 +63,7 @@ export function DevicesScreen() {
                   このカードを信頼する
                 </button>
               )}
-              {volume.eligible && (
+              {volume.profile_slug !== null && (
                 <>
                   <button
                     type="button"

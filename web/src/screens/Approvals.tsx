@@ -6,6 +6,8 @@ import { request } from "../api/client";
 import { useQuery } from "../api/hooks";
 import { ConfirmDialog } from "../components/ConfirmDialog";
 import { ErrorBanner } from "../components/ErrorBanner";
+import { useEvents } from "../hooks/useEvents";
+import { useReloadOnEvents } from "../hooks/useReloadOnEvents";
 
 type Record_ = {
   id: string;
@@ -23,6 +25,8 @@ type Records = { records: Record_[] };
 export function ApprovalsScreen() {
   const records = useQuery<Records>("/uploads?state=awaiting_datetime_approval");
   const [error, setError] = useState<unknown>(null);
+  const { events } = useEvents();
+  useReloadOnEvents(events, records.reload);
   const [busy, setBusy] = useState(false);
   const [approving, setApproving] = useState<Record_ | null>(null);
 

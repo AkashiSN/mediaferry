@@ -7,15 +7,24 @@ import { useQuery } from "../api/hooks";
 import { ConfirmDialog } from "../components/ConfirmDialog";
 import type { Confirmation } from "../components/ConfirmDialog";
 import { ErrorBanner } from "../components/ErrorBanner";
+import { useEvents } from "../hooks/useEvents";
+import { useReloadOnEvents } from "../hooks/useReloadOnEvents";
 import { formatBytes } from "../components/ConfirmDialog";
 
-type Member = { media_file_id: string; rel_path: string; size_bytes: number; gap_seconds: number | null };
+type Member = {
+  position: number;
+  media_file_id: string;
+  rel_path: string;
+  size_bytes: number;
+  duration_seconds: number | null;
+  captured_at: string;
+};
 type Group = {
   id: string;
   status: string;
   detected_by: string;
   input_digest: string;
-  verification: { verdict: string; reason: string | null } | null;
+  verification: { verdict?: string; reason?: string | null } | null;
   superseded_by_id: string | null;
   members: Member[];
 };
@@ -25,6 +34,8 @@ type Groups = { groups: Group[] };
 export function MergesScreen() {
   const groups = useQuery<Groups>("/merge-groups");
   const [error, setError] = useState<unknown>(null);
+  const { events } = useEvents();
+  useReloadOnEvents(events, groups.reload);
   const [confirmation, setConfirmation] = useState<{ value: Confirmation; run: () => Promise<void> } | null>(null);
   const [busy, setBusy] = useState(false);
 
@@ -62,7 +73,8 @@ export function MergesScreen() {
                 <tr>
                   <th>ファイル</th>
                   <th>大きさ</th>
-                  <th>前との間隔</th>
+                  <th>撮影日時</th>
+                  <th>長さ</th>
                 </tr>
               </thead>
               <tbody>
@@ -70,7 +82,10 @@ export function MergesScreen() {
                   <tr key={member.media_file_id}>
                     <td>{member.rel_path}</td>
                     <td>{formatBytes(member.size_bytes)}</td>
-                    <td>{member.gap_seconds === null ? "—" : `${member.gap_seconds} 秒`}</td>
+                    <td>{member.captured_at}</td>
+                    <td>
+                      {member.duration_seconds === null ? "—" : `${Math.round(member.duration_seconds)} 秒`}
+                    </td>
                   </tr>
                 ))}
               </tbody>

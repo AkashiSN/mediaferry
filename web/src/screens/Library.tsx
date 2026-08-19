@@ -7,6 +7,8 @@ import { request } from "../api/client";
 import { useQuery } from "../api/hooks";
 import { ConfirmDialog } from "../components/ConfirmDialog";
 import { ErrorBanner } from "../components/ErrorBanner";
+import { useEvents } from "../hooks/useEvents";
+import { useReloadOnEvents } from "../hooks/useReloadOnEvents";
 
 type Media = {
   id: string;
@@ -31,6 +33,9 @@ export function LibraryScreen() {
   const query = params.toString();
   const media = useQuery<MediaPage>(`/media${query ? `?${query}` : ""}`, [query]);
   const destinations = useQuery<Destinations>("/destinations");
+  // 取り込みや送信が進んだら取り直す（**画面を再読み込みせずに進む**。§13）。
+  const { events } = useEvents();
+  useReloadOnEvents(events, media.reload);
 
   const rows = useMemo(() => media.data?.media ?? [], [media.data]);
   const totalBytes = useMemo(

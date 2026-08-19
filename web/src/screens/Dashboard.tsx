@@ -5,6 +5,8 @@ import { Link } from "react-router-dom";
 
 import { useQuery } from "../api/hooks";
 import { ErrorBanner } from "../components/ErrorBanner";
+import { useEvents } from "../hooks/useEvents";
+import { useReloadOnEvents } from "../hooks/useReloadOnEvents";
 
 type DestinationSummary = {
   destination_id: string;
@@ -32,6 +34,8 @@ type Devices = { volumes: { volume_instance_id: string; profile_slug: string | n
 export function DashboardScreen() {
   const dashboard = useQuery<Dashboard>("/dashboard");
   const devices = useQuery<Devices>("/devices");
+  const { events } = useEvents();
+  useReloadOnEvents(events, dashboard.reload);
 
   if (dashboard.error) {
     return <ErrorBanner error={dashboard.error} onDismiss={dashboard.reload} />;

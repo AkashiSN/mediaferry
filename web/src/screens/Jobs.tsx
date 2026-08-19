@@ -8,6 +8,7 @@ import { ErrorBanner } from "../components/ErrorBanner";
 import { statusLabel } from "../components/JobProgress";
 import type { Job } from "../components/JobProgress";
 import { useEvents } from "../hooks/useEvents";
+import { useReloadOnEvents } from "../hooks/useReloadOnEvents";
 
 type Jobs = { jobs: Job[] };
 
@@ -15,6 +16,7 @@ export function JobsScreen() {
   const jobs = useQuery<Jobs>("/jobs");
   const { events, connected } = useEvents();
   const [error, setError] = useState<unknown>(null);
+  useReloadOnEvents(events, jobs.reload);
 
   // **画面を再読み込みせずに進む。** 届いたイベントのジョブだけ取り直す。
   const latestByJob = new Map(events.map((event) => [event.job_id, event]));

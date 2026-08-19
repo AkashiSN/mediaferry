@@ -24,6 +24,7 @@ from pathlib import Path
 
 import httpx
 
+from mediaferry_protocol.messages import UsbInfo, VolumeInfo
 from mountd.server import BrokerServer
 
 from ..conftest import FakeMountManager
@@ -81,10 +82,12 @@ def system_app(
         server.start()
 
     socket_path = tmp_path / "run" / "broker.sock"
+    # **カードを 1 枚差してある状態にする。** 列挙が空だと、デバイスの画面から
+    # 先へ進めない（取り込みも結合も送信も始まらない）。
     broker = BrokerServer(
         socket_path=socket_path,
         mount_manager=FakeMountManager(card),
-        lister=lambda: [],
+        lister=lambda: [_a_volume()],
         allowed_uids=None,
         idle_timeout=None,
     )
@@ -102,6 +105,11 @@ def system_app(
         # 転送先を作るのに要る（§12.3）。テスト用の使い捨ての鍵。
         "MEDIAFERRY_SECRET_KEY": "0" * 43 + "=",
     }
+    # **ビルド済みの画面があれば一緒に配る。** E2E はブラウザから操作するので、
+    # 資産が無いと画面が出ない（API だけのテストでは無くても困らない）。
+    built = Path(__file__).resolve().parents[3] / "web" / "dist"
+    if (built / "index.html").is_file():
+        env["MEDIAFERRY_WEB_ROOT"] = str(built)
     if password is not None:
         env["MEDIAFERRY_AUTH_PASSWORD"] = password
 
@@ -131,6 +139,29 @@ def system_app(
             process.wait(timeout=10)
         for server in servers:
             server.stop()
+
+
+def _a_volume() -> VolumeInfo:
+    """DJI のカードに見えるボリューム（判定はプロファイルが行う）."""
+    return VolumeInfo(
+        volume_key="8:160",
+        device_node="/dev/sdk",
+        major=8,
+        minor=160,
+        sysfs_path="/sys/x",
+        fs_type="exfat",
+        fs_uuid="26B1-2FD6",
+        fs_label="SD_Card",
+        size_bytes=512_000_000_000,
+        usb=UsbInfo(
+            vendor_id="2ca3",
+            product_id="0020",
+            product="OsmoPocket4-ABC123",
+            serial="123456789ABCDEF",
+        ),
+        broker_epoch="",
+        generation=1,
+    )
 
 
 def _wait_until_ready(url: str, process: subprocess.Popen) -> None:

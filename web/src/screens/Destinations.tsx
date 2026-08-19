@@ -13,10 +13,21 @@ type Destination = {
   enabled: boolean;
   base_url: string;
   public_url: string | null;
-  same_library_as: string[];
+  // 同じ向き先を指す宛先の指紋（§12.3）。同値のものが他にあれば画面で知らせる。
+  remote_user_id: string | null;
 };
 
 type Destinations = { destinations: Destination[] };
+
+/** 同じ向き先を指す宛先が他にあるか（§12.3。UNIQUE は置かず警告だけ）。 */
+export function sharesLibrary(all: Destination[], one: Destination): boolean {
+  if (one.remote_user_id === null) {
+    return false;
+  }
+  return all.some(
+    (other) => other.id !== one.id && other.remote_user_id === one.remote_user_id,
+  );
+}
 
 export function DestinationsScreen() {
   const destinations = useQuery<Destinations>("/destinations");
@@ -26,7 +37,10 @@ export function DestinationsScreen() {
 
   async function submit(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    const form = new FormData(event.currentTarget);
+    // **待つ前に掴んでおく。** `await` の後の `currentTarget` は null になる
+    // （React の合成イベントは処理が終わると要素への参照を落とす）。
+    const element = event.currentTarget;
+    const form = new FormData(element);
     setBusy(true);
     setError(null);
     try {
@@ -39,7 +53,7 @@ export function DestinationsScreen() {
           api_key: String(form.get("api_key") ?? ""),
         },
       });
-      event.currentTarget.reset();
+      element.reset();
       destinations.reload();
     } catch (caught) {
       setError(caught);
@@ -96,7 +110,7 @@ export function DestinationsScreen() {
           <li key={destination.id}>
             <strong>{destination.name}</strong>（{destination.base_url}）
             {!destination.enabled && <span>（無効）</span>}
-            {destination.same_library_as.length > 0 && (
+            {sharesLibrary(destinations.data?.destinations ?? [], destination) && (
               <p role="note">同じライブラリを指している宛先があります。</p>
             )}
             <div className="actions">
