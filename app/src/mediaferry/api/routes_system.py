@@ -24,6 +24,77 @@ def health(conn=Depends(get_conn)) -> dict[str, Any]:  # noqa: ANN001, B008
     return {"status": "ok", "schema_version": version}
 
 
+@router.get("/dashboard")
+def dashboard(state=Depends(get_state), conn=Depends(get_conn)) -> dict[str, Any]:  # noqa: ANN001, B008
+    """ダッシュボードの集計（§13）.
+
+    **画面ごとに数えさせない。** 宛先が 3 つあると一覧の API を 3 回叩くことになり、
+    そのたびに全件を走査する。ここで 1 度にまとめる。
+    """
+    media_total = conn.execute("SELECT count(*) AS n FROM media_file").fetchone()["n"]
+    settings = SettingsService(conn, state.env).snapshot()
+    return {
+        "media_total": media_total,
+        "destinations": [_destination_summary(conn, row) for row in _destinations(conn)],
+        "running_jobs": conn.execute(
+            "SELECT count(*) AS n FROM job WHERE status IN ('running', 'cancelling')"
+        ).fetchone()["n"],
+        "recent_imports": [
+            {"id": row["id"], "rel_path": row["rel_path"], "captured_at": row["captured_at"]}
+            for row in conn.execute(
+                "SELECT id, rel_path, captured_at FROM media_file"
+                " ORDER BY created_at DESC, id DESC LIMIT 10"
+            )
+        ],
+        "orphans": len(state.last_reconcile.orphans),
+        "missing": conn.execute(
+            "SELECT count(*) AS n FROM media_file WHERE missing_at IS NOT NULL"
+        ).fetchone()["n"],
+        "warnings": [
+            {"code": warning.code, "message": warning.message}
+            for warning in startup_warnings(settings)
+        ],
+    }
+
+
+def _destinations(conn) -> list:  # noqa: ANN001
+    return list(
+        conn.execute(
+            "SELECT id, name, enabled FROM upload_destination WHERE archived_at IS NULL"
+            " ORDER BY name"
+        )
+    )
+
+
+def _destination_summary(conn, row) -> dict[str, Any]:  # noqa: ANN001
+    """宛先 1 つぶんの内訳. **無効化された記録は数えない**（§10）."""
+    counts = {
+        state: conn.execute(
+            "SELECT count(*) AS n FROM upload_record"
+            " WHERE destination_id = ? AND state = ? AND invalidated_at IS NULL",
+            (row["id"], state),
+        ).fetchone()["n"]
+        for state in ("complete", "failed", "awaiting_datetime_approval", "pending")
+    }
+    return {
+        "destination_id": row["id"],
+        "name": row["name"],
+        "enabled": bool(row["enabled"]),
+        "complete": counts["complete"],
+        "failed": counts["failed"],
+        "awaiting_approval": counts["awaiting_datetime_approval"],
+        "pending": counts["pending"],
+        # **「まだ送っていない」＝ この宛先の記録がまだ無いもの。** 失敗や承認待ちは
+        # 既に記録があるので別に数える（画面はそれぞれ違う操作を出す）。
+        "unsent": conn.execute(
+            "SELECT count(*) AS n FROM media_file m WHERE NOT EXISTS ("
+            " SELECT 1 FROM upload_record u WHERE u.media_file_id = m.id"
+            "  AND u.destination_id = ? AND u.invalidated_at IS NULL)",
+            (row["id"],),
+        ).fetchone()["n"],
+    }
+
+
 @router.get("/settings")
 def list_settings(state=Depends(get_state), conn=Depends(get_conn)) -> dict[str, Any]:  # noqa: ANN001, B008
     settings = SettingsService(conn, state.env).snapshot()

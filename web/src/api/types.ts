@@ -104,6 +104,29 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/dashboard": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Dashboard
+         * @description ダッシュボードの集計（§13）.
+         *
+         *     **画面ごとに数えさせない。** 宛先が 3 つあると一覧の API を 3 回叩くことになり、
+         *     そのたびに全件を走査する。ここで 1 度にまとめる。
+         */
+        get: operations["dashboard_api_dashboard_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/settings": {
         parameters: {
             query?: never;
@@ -299,7 +322,15 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /** List Media */
+        /**
+         * List Media
+         * @description ライブラリの一覧（§11）.
+         *
+         *     **並びは `captured_at DESC, id DESC` で固定する。** 同じ撮影日時の行があるので、
+         *     tie-break を入れないとページの境目で重複・欠落する。
+         *
+         *     `status` は**宛先ごとの状態**なので、`destination_id` と併せて指定する。
+         */
         get: operations["list_media_api_media_get"];
         put?: never;
         post?: never;
@@ -852,6 +883,28 @@ export interface operations {
             };
         };
     };
+    dashboard_api_dashboard_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        [key: string]: unknown;
+                    };
+                };
+            };
+        };
+    };
     list_settings_api_settings_get: {
         parameters: {
             query?: never;
@@ -1213,8 +1266,15 @@ export interface operations {
     list_media_api_media_get: {
         parameters: {
             query?: {
-                limit?: number;
-                offset?: number;
+                page?: number;
+                page_size?: number;
+                kind?: string | null;
+                profile?: string | null;
+                captured_from?: string | null;
+                captured_to?: string | null;
+                q?: string | null;
+                destination_id?: string | null;
+                status?: string | null;
             };
             header?: never;
             path?: never;

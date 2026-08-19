@@ -1,0 +1,216 @@
+"""一覧の絞り込みとページング（§11 / §13）.
+
+**並びを固定する。** 撮影日時だけで並べると、同じ時刻の行がページの境目で
+重複したり欠けたりする（`id` で tie-break する）。
+"""
+
+from __future__ import annotations
+
+import pytest
+
+from mediaferry.core.listing import escape_like, page_bounds
+
+from .test_schema_artifacts import a_media_file
+from .test_schema_sources import a_profile
+from .test_schema_uploads import a_destination, an_upload
+
+
+@pytest.fixture
+def library(db):
+    """撮影日時が同じ行を含むライブラリ."""
+    profile = a_profile(db, slug="listing-test")
+    ids = []
+    for index in range(5):
+        ids.append(
+            a_media_file(
+                db,
+                profile,
+                rel_path=f"library/listing/CLIP_{index}.MP4",
+                captured_at=(
+                    "2026-08-17T14:30:00+09:00" if index < 3 else "2026-08-18T09:00:00+09:00"
+                ),
+                kind="video" if index % 2 == 0 else "photo",
+                duration_seconds=1.5,
+            )
+        )
+    return ids
+
+
+# ---------------------------------------------------------------- 純粋な判断
+@pytest.mark.parametrize(
+    ("page", "size", "expected"),
+    [(1, 50, (50, 0)), (2, 50, (50, 50)), (3, 10, (10, 20))],
+)
+def test_pages_are_translated_to_limit_and_offset(page, size, expected):
+    assert page_bounds(page, size) == expected
+
+
+def test_a_page_size_is_capped():
+    """**上限を置く。** 1 回の要求で全件を引かせない."""
+    limit, _ = page_bounds(1, 100_000)
+    assert limit == 200
+
+
+def test_a_page_below_one_is_the_first_page():
+    assert page_bounds(0, 50) == (50, 0)
+    assert page_bounds(-3, 50) == (50, 0)
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [("clip", "clip"), ("50%", "50\\%"), ("a_b", "a\\_b"), ("100\\%", "100\\\\\\%")],
+)
+def test_search_wildcards_are_escaped(raw, expected):
+    """`%` を打った利用者に全件を返さない（LIKE の記号として効かせない）."""
+    assert escape_like(raw) == expected
+
+
+# ---------------------------------------------------------------- 一覧
+def test_the_order_is_stable_across_pages(client, library):
+    first = client.get("/api/media?page=1&page_size=2").json()
+    second = client.get("/api/media?page=2&page_size=2").json()
+
+    assert first["total"] == 5
+    assert len(first["media"]) == 2
+    ids = [row["id"] for row in first["media"] + second["media"]]
+    # **同じ時刻の行があってもページの境目で重複・欠落しない。**
+    assert len(set(ids)) == 4
+
+
+def test_rows_with_the_same_time_have_a_defined_order(client, library):
+    """**同じ撮影日時の中の並びも決める。** 決めないと、実行計画が変わった日に
+    ページの境目で行が重複・欠落する（`id` の降順を約束する）."""
+    body = client.get(
+        "/api/media?page=1&page_size=5&captured_to=2026-08-17T23:59:59%2B09:00"
+    ).json()
+
+    ids = [row["id"] for row in body["media"]]
+    assert ids == sorted(ids, reverse=True)
+
+
+def test_an_invalidated_record_does_not_count_as_sent(client, db, library):
+    """無効化された記録は「送った」ではない（§10）."""
+    destination = a_destination(db, name="invalidated-dest")
+    destination_id, revision_id, _ = destination
+    an_upload(
+        db,
+        destination,
+        library[0],
+        state="complete",
+        destination_revision_id=revision_id,
+        remote_asset_id="asset-1",
+        invalidated_at="2026-08-18T00:00:00+00:00",
+        invalidated_reason="宛先を編集した",
+    )
+
+    sent = client.get(f"/api/media?destination_id={destination_id}&status=sent").json()
+    unsent = client.get(f"/api/media?destination_id={destination_id}&status=unsent").json()
+
+    assert sent["total"] == 0
+    assert unsent["total"] == 5
+
+
+def test_the_total_is_reported_for_the_progress_line(client, library):
+    """画面は「12 / 87 件」と出す（§13）."""
+    body = client.get("/api/media?page=1&page_size=2").json()
+    assert body["total"] == 5
+    assert body["page"] == 1
+    assert body["page_size"] == 2
+
+
+def test_media_can_be_filtered_by_kind(client, library):
+    body = client.get("/api/media?kind=photo").json()
+    assert body["total"] == 2
+    assert all(row["kind"] == "photo" for row in body["media"])
+
+
+def test_media_can_be_filtered_by_capture_date(client, library):
+    body = client.get("/api/media?captured_from=2026-08-18").json()
+    assert body["total"] == 2
+
+
+def test_media_can_be_searched_by_name(client, library):
+    body = client.get("/api/media?q=CLIP_1").json()
+    assert body["total"] == 1
+    assert body["media"][0]["rel_path"].endswith("CLIP_1.MP4")
+
+
+def test_a_search_for_a_wildcard_finds_nothing(client, library):
+    """`%` は文字として扱う（打った人に全件を返さない）."""
+    assert client.get("/api/media?q=%").json()["total"] == 0
+
+
+def test_media_can_be_filtered_by_what_a_destination_has(client, db, library):
+    """**「宛先 D に未送信」**（§13）."""
+    destination = a_destination(db, name="dashboard-dest")
+    destination_id, revision_id, _ = destination
+    an_upload(
+        db,
+        destination,
+        library[0],
+        state="complete",
+        destination_revision_id=revision_id,
+        remote_asset_id="asset-1",
+    )
+
+    sent = client.get(f"/api/media?destination_id={destination_id}&status=sent").json()
+    unsent = client.get(f"/api/media?destination_id={destination_id}&status=unsent").json()
+
+    assert [row["id"] for row in sent["media"]] == [library[0]]
+    assert sent["total"] == 1
+    assert unsent["total"] == 4
+    assert library[0] not in [row["id"] for row in unsent["media"]]
+
+
+def test_a_status_filter_needs_a_destination(client, library):
+    """どの宛先での状態かが決まらない要求は断る（黙って全件を返さない）."""
+    response = client.get("/api/media?status=sent")
+    assert response.status_code == 400
+    assert response.json()["error"]["code"] == "bad_request"
+
+
+# ---------------------------------------------------------------- ダッシュボード
+def test_the_dashboard_summarises_each_destination(client, db, library):
+    destination = a_destination(db, name="summary-dest")
+    destination_id, revision_id, _ = destination
+    an_upload(
+        db,
+        destination,
+        library[0],
+        state="complete",
+        destination_revision_id=revision_id,
+        remote_asset_id="asset-1",
+    )
+    an_upload(
+        db,
+        destination,
+        library[1],
+        state="failed",
+        destination_revision_id=revision_id,
+        last_error="だめだった",
+    )
+    an_upload(
+        db,
+        destination,
+        library[2],
+        state="awaiting_datetime_approval",
+        destination_revision_id=revision_id,
+        remote_asset_id="asset-2",
+    )
+
+    body = client.get("/api/dashboard").json()
+
+    [summary] = [row for row in body["destinations"] if row["destination_id"] == destination_id]
+    assert summary["complete"] == 1
+    assert summary["failed"] == 1
+    assert summary["awaiting_approval"] == 1
+    # 送っていないもの（記録が無い）も数える —— 画面の「未送信」バッジの元になる。
+    assert summary["unsent"] == 2
+    assert body["media_total"] == 5
+
+
+def test_the_dashboard_reports_what_needs_attention(client, db, library):
+    body = client.get("/api/dashboard").json()
+    assert body["warnings"] == []
+    assert body["running_jobs"] == 0
+    assert "orphans" in body

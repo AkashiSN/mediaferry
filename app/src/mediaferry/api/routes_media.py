@@ -8,6 +8,7 @@ from fastapi import APIRouter, Depends, Request, Response
 from fastapi.responses import FileResponse
 
 from ..adapters.thumbnails import ThumbnailCache, ThumbnailFailed, quantise
+from ..core.listing import DEFAULT_PAGE_SIZE, escape_like, page_bounds
 from .deps import conn as get_conn
 from .deps import state as get_state
 from .errors import ApiError, ErrorCode
@@ -16,11 +17,97 @@ router = APIRouter()
 
 
 @router.get("/media")
-def list_media(limit: int = 200, offset: int = 0, conn=Depends(get_conn)) -> dict[str, Any]:  # noqa: ANN001, B008
+def list_media(  # noqa: PLR0913
+    page: int = 1,
+    page_size: int = DEFAULT_PAGE_SIZE,
+    kind: str | None = None,
+    profile: str | None = None,
+    captured_from: str | None = None,
+    captured_to: str | None = None,
+    q: str | None = None,
+    destination_id: str | None = None,
+    status: str | None = None,
+    conn=Depends(get_conn),  # noqa: ANN001, B008
+) -> dict[str, Any]:
+    """ライブラリの一覧（§11）.
+
+    **並びは `captured_at DESC, id DESC` で固定する。** 同じ撮影日時の行があるので、
+    tie-break を入れないとページの境目で重複・欠落する。
+
+    `status` は**宛先ごとの状態**なので、`destination_id` と併せて指定する。
+    """
+    where, params = _filters(kind, profile, captured_from, captured_to, q, destination_id, status)
+    limit, offset = page_bounds(page, page_size)
+    total = conn.execute(f"SELECT count(*) AS n FROM media_file m {where}", params).fetchone()["n"]  # noqa: S608
     rows = conn.execute(
-        "SELECT * FROM media_file ORDER BY captured_at DESC LIMIT ? OFFSET ?", (limit, offset)
+        f"SELECT m.* FROM media_file m {where}"  # noqa: S608
+        " ORDER BY m.captured_at DESC, m.id DESC LIMIT ? OFFSET ?",
+        (*params, limit, offset),
     )
-    return {"media": [_media(row) for row in rows]}
+    return {
+        "media": [_media(row) for row in rows],
+        "total": total,
+        "page": max(1, page),
+        "page_size": limit,
+    }
+
+
+def _filters(  # noqa: PLR0913
+    kind: str | None,
+    profile: str | None,
+    captured_from: str | None,
+    captured_to: str | None,
+    q: str | None,
+    destination_id: str | None,
+    status: str | None,
+) -> tuple[str, tuple[Any, ...]]:
+    """WHERE 節と引数を組み立てる. **文字列を連結して値を埋めない。**"""
+    clauses: list[str] = []
+    params: list[Any] = []
+    if kind is not None:
+        clauses.append("m.kind = ?")
+        params.append(kind)
+    if profile is not None:
+        clauses.append("m.profile_id IN (SELECT id FROM device_profile WHERE slug = ?)")
+        params.append(profile)
+    if captured_from is not None:
+        clauses.append("m.captured_at >= ?")
+        params.append(captured_from)
+    if captured_to is not None:
+        clauses.append("m.captured_at <= ?")
+        params.append(captured_to)
+    if q is not None:
+        # 保存先の名前で探す（カード上の原名は列に持っていない）。
+        clauses.append("m.rel_path LIKE ? ESCAPE '\\'")
+        params.append(f"%{escape_like(q)}%")
+    if status is not None:
+        if destination_id is None:
+            raise ApiError(400, ErrorCode.BAD_REQUEST, "status は destination_id と一緒に指定する")
+        clauses.append(_status_clause(status))
+        params.append(destination_id)
+    elif destination_id is not None:
+        clauses.append("1 = 1 AND ? IS NOT NULL")
+        params.append(destination_id)
+    return ("WHERE " + " AND ".join(clauses)) if clauses else "", tuple(params)
+
+
+def _status_clause(status: str) -> str:
+    """宛先ごとの状態。**無効化された記録は数えない**（§10）."""
+    existing = (
+        "SELECT 1 FROM upload_record u WHERE u.media_file_id = m.id"
+        " AND u.destination_id = ? AND u.invalidated_at IS NULL"
+    )
+    if status == "unsent":
+        return f"NOT EXISTS ({existing} AND u.state = 'complete')"
+    known = {
+        "sent": "complete",
+        "failed": "failed",
+        "awaiting": "awaiting_datetime_approval",
+        "pending": "pending",
+    }
+    if status not in known:
+        raise ApiError(400, ErrorCode.BAD_REQUEST, "知らない status", {"status": status})
+    return f"EXISTS ({existing} AND u.state = '{known[status]}')"  # noqa: S608 - 語彙は上で固定
 
 
 @router.get("/media/{media_id}")

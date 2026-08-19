@@ -28,12 +28,12 @@ def test_a_missing_record_carries_a_code(client):
 
 def test_a_malformed_query_does_not_echo_what_was_sent(client):
     """**受け取った値を応答に反射させない。** 反射は XSS と情報漏れの経路."""
-    response = client.get("/api/media?limit=not-a-number")
+    response = client.get("/api/media?page=not-a-number")
     assert response.status_code == 422
     error = _error(response)
     assert error["code"] == ErrorCode.VALIDATION_FAILED
     assert "not-a-number" not in str(error)
-    assert error["meta"]["fields"] == ["limit"]
+    assert error["meta"]["fields"] == ["page"]
 
 
 def test_an_unhandled_exception_does_not_leak_its_message(client, monkeypatch):
