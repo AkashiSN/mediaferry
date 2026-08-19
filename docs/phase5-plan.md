@@ -860,7 +860,7 @@ UPDATE media_file SET captured_at_revision_id = profile_revision_id;
   `captured_at_revision_id` の 5 列だけ
 - **`source: exif` の場合は公開済みファイルを読み直す。** ステージは残っていない
 - **リモートは黙って書き換えない。** 送信済みで `captured_at` が変わったレコードは、
-  **`upload_record` を `awaiting_datetime_approval` へ戻して承認画面に出す**（下記）
+  **`needs_recheck` へ戻す**（下記）。**`recompute` 自身は Immich に触らない**
 - キャンセルとリースは他のジョブと同じ作法。件数が多いので、
   **バッチごとにキャンセルとリースの両方を見る**（Phase 3 の Rechecker と同じ形）
 
@@ -869,17 +869,41 @@ UPDATE media_file SET captured_at_revision_id = profile_revision_id;
 「一覧に出して知らせる」だけでは配送先も完了条件も無い（Phase 4 と同型の欠け）。
 **既にある経路に載せる。**
 
-送信済み（`complete`）で `captured_at` が変わったレコードは、`recompute` と同じ
-トランザクションで **`awaiting_datetime_approval` へ戻す**。承認画面（Phase 4）は
-「現在のリモートの日時 vs 補正案」を出す仕組みを既に持っているので、新しい画面は要らない。
+**`awaiting_datetime_approval` へ直接戻してはいけない。** 一度そう書いたが、実装を読んで
+取り下げた。理由は 3 つとも構造的なもの:
 
-**`origin` が `created_by_us` でも承認待ちにする。** §9.6 は自分が作った資産の日時補正を
-自動で行うと決めているが、それは**取り込みの流れの中**での話。ここでの起点は
-**利用者がプロファイルを編集したこと**で、その副作用としてリモートを黙って書き換えるのは
-別の話になる。**利用者が起こした変更ほど、確認して適用する。**
+1. **その状態は `tagging` からしか入れない。** `Uploader` が
+   `finish_owned(..., expect_state="tagging")` で CAS しており、外から `complete` を
+   直接そこへ動かすと、誰も通っていない遷移を新設することになる
+2. **「現在値」を埋められない。** 承認画面が出す `remote_datetime_original` は、
+   承認待ちにするその瞬間に Immich へ 1 度問い合わせて控えた値
+   （`Uploader._observed_datetime`）。`recompute` はローカルのジョブで Immich の
+   クライアントを持たない。**空のまま承認待ちにすると、Phase 4 の「読めなかった値を
+   『変更なし』にしない」に反する**
+3. クライアントを持たせれば、preflight・リース・キャンセル・向き先の再確認という
+   **Phase 3 が 7 巡かけて固めた契約を丸ごと持ち込む**ことになる
 
-**承認を求めた時点の「現在値」は、承認画面の既存の規則で観測して保存する**（Phase 4 の
-「承認の現在値は承認を求めた時点で観測して保存する」）。
+**代わりに `needs_recheck` へ戻す。**
+
+```
+complete ──(recompute。captured_at が変わり、かつプロファイルが日時を書き戻す)──> needs_recheck
+```
+
+- `needs_recheck` は **`CLAIMABLE_STATES` に入っている**ので、その宛先の次の
+  アップロードジョブが普通に claim して、`checking` から**パイプラインを再実行する**
+- 再実行は**リースと preflight と guard の下**で走り、`tagging` の後で日時の判断を
+  新しい `captured_at` でやり直す。承認が要るなら、そこで**現在値を観測したうえで**
+  `awaiting_datetime_approval` に入る。要らなければ `complete` に戻る
+- **`recompute` は Immich に触らない**という性質が保たれる
+
+**戻すのは「プロファイルが日時を書き戻す」ものだけ。** `immich.fix_datetime_after_upload`
+が偽のプロファイル（`canon-eos` と `generic-dcim` はどちらも偽）では、こちらがリモートの
+日時を書いたことが無いので、ローカルの `captured_at` が変わってもリモートに差は生じない。
+**戻すと、何も変わらない再送を全件に強いる。**
+
+遷移は `recompute` の当該 `media_file` の更新と**同じトランザクション**で、
+`state = 'complete'` を条件にした CAS で行う。割ると「値は新しいのに `complete` のまま」が
+残る。
 
 **受け入れ:**
 - プロファイルの `timezone` を変えて実行すると、そのプロファイルの `media_file` の
@@ -887,10 +911,12 @@ UPDATE media_file SET captured_at_revision_id = profile_revision_id;
 - **他のプロファイルの行は変わらない**
 - ファイルが 1 つも動かない（`final_rel_path` が不変）
 - **`profile_revision_id` は変わらず、`captured_at_revision_id` だけが進む**
-- 送信済みの資産のリモート日時は**この時点では変わらない**
-- **送信済みで値が変わったレコードが `awaiting_datetime_approval` になり、承認画面に出る**
-- **値が変わらなかった送信済みレコードは `complete` のまま**（承認待ちを増やさない）
-- 承認すると、既存の承認の経路でリモートが更新される
+- 送信済みの資産のリモート日時は**この時点では変わらない**（`recompute` は Immich に触らない）
+- **送信済みで値が変わったレコードが `needs_recheck` になる**
+- **値が変わらなかった送信済みレコードは `complete` のまま**
+- **`fix_datetime_after_upload` が偽のプロファイルでは、値が変わっても `complete` のまま**
+- `needs_recheck` になったレコードは、次のアップロードジョブが claim して再実行し、
+  **現在値を観測したうえで** `awaiting_datetime_approval` か `complete` に落ち着く
 - キャンセルすると途中で止まり、**処理済みの分は commit されている**
 - `source: exif` のプロファイルで、公開済みファイルの EXIF から再計算される
 - `0011` が既存 DB に適用でき、既存行の `captured_at_revision_id` が
@@ -902,9 +928,12 @@ UPDATE media_file SET captured_at_revision_id = profile_revision_id;
 - リモートも書き換える → 送信済み資産の試験が落ちること
 - **`profile_revision_id` も一緒に進める** → provenance の試験が落ちること
 - **`captured_at_revision_id` を更新しない** → 同上
-- **値が変わっていない送信済みレコードも承認待ちにする** → 「増やさない」試験が落ちること
-- **承認待ちへの差し戻しを別トランザクションにする** → 途中で落ちたときに
-  「値は新しいのに `complete` のまま」が残る筋書きが落ちること
+- **値が変わっていない送信済みレコードも `needs_recheck` にする** → 「変わらなければ据え置き」が
+  落ちること
+- **`fix_datetime_after_upload` の判定を落として全件戻す** → 対応する試験が落ちること
+- **差し戻しを別トランザクションにする** → 途中で落ちたときに「値は新しいのに `complete` の
+  まま」が残る筋書きが落ちること
+- **CAS の `state = 'complete'` 条件を外す** → 進行中のレコードを踏む筋書きが落ちること
 
 ---
 
@@ -1087,7 +1116,18 @@ UPDATE media_file SET captured_at_revision_id = profile_revision_id;
 | major 2 | **空集合には `generation` が無い。** `_do_list` は `volumes` を返すだけで、トークンは `VolumeInfo` の中にしかない | **空集合を番兵として扱う仕様**を明記（プロトコルは変えない）。`GET /devices` が先に観測した場合に全 probe が 2 回走ることも許容コストとして記録 |
 | major 3 | ビルトイン保護が `PUT` だけ。`sync_builtins` は `archived_at` を戻さないので、archive されると復活しない | **`duplicate` 以外の全 mutation を 1 つのガードに集約**し、archive の受け入れ試験を追加 |
 | major 4 | 正規表現の長さ上限では catastrophic backtracking を防げない。しかも `RLock` の中で 2000 件に当たる | **保存時に子プロセスで deadline 付きの試験マッチ**を行う。緩和であって証明ではないと明記 |
-| major 5 | `recompute` の「送信済みを知らせる」に配送先・完了条件が無い（Phase 4 と同型） | **`awaiting_datetime_approval` へ戻して既存の承認画面に載せる**。`created_by_us` でも承認待ちにする理由を書いた |
+| major 5 | `recompute` の「送信済みを知らせる」に配送先・完了条件が無い（Phase 4 と同型） | **`needs_recheck` へ戻し、既存のアップロードのパイプラインに再実行させる**。当初は `awaiting_datetime_approval` へ直接戻す案を書いたが、実装を読んで取り下げた（下記） |
+
+**major 5 の反映は、書いた後に自分で作り直した。** 最初は `complete` を
+`awaiting_datetime_approval` へ直接戻す案にしたが、実装を読むと成立しない。
+(1) その状態は `Uploader` が `expect_state="tagging"` で CAS しており、外から入る遷移が無い。
+(2) 承認画面が出す「現在値」（`remote_datetime_original`）は、承認待ちにするその瞬間に
+Immich へ問い合わせて控えた値で、ローカルのジョブでは埋められない —— 空のまま承認待ちに
+すると Phase 4 の「読めなかった値を『変更なし』にしない」に反する。
+(3) クライアントを持たせると preflight・リース・キャンセルという Phase 3 の契約を丸ごと
+持ち込むことになる。**`needs_recheck` は `CLAIMABLE_STATES` に入っている**ので、
+そこへ戻せば既存のパイプラインがリースと guard の下で再実行し、現在値を観測したうえで
+承認待ちか `complete` に落ち着く。`recompute` が Immich に触らない性質も保たれる。
 | minor 1 | `_reconnect` の契約と fd が増えない試験が未記載 | Task 0 に契約と受け入れを追加 |
 | minor 2 | lockfile が Files に無い。Task 7 の vitest が操作を覆っていない | 両方追加 |
 | 補足 | 「印を先に取れば crash 時に 1 回ぶんで済む」は**同一トランザクションでは誤り**（両方 rollback される） | **要点は順序ではなく原子性**と書き直した |
