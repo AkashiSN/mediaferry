@@ -70,7 +70,6 @@ class Settings:
     http_port: int
     auth_password: str | None
     secret_key: bytes | None
-    upload_concurrency: int
     upload_timeout_seconds: int
     upload_max_attempts: int
     auto_import: str
@@ -149,7 +148,6 @@ SETTING_SPECS: dict[str, SettingSpec] = {
         # rebinding の経路を閉じる（§14）。
         SettingSpec("TRUSTED_HOSTS", "", str, Tier.RESTART),
         SettingSpec("HTTP_PORT", "8080", _port, Tier.RESTART),
-        SettingSpec("UPLOAD_CONCURRENCY", "2", _positive_int, Tier.RUNTIME),
         SettingSpec("UPLOAD_TIMEOUT_SECONDS", "86400", _positive_int, Tier.RUNTIME),
         SettingSpec("UPLOAD_MAX_ATTEMPTS", "3", _positive_int, Tier.RUNTIME),
         SettingSpec("AUTO_IMPORT", "trusted", _choice("trusted", "off"), Tier.RUNTIME),
@@ -236,7 +234,6 @@ class SettingsService:
             http_port=parsed["HTTP_PORT"],
             auth_password=parsed["AUTH_PASSWORD"],
             secret_key=parsed["SECRET_KEY"],
-            upload_concurrency=parsed["UPLOAD_CONCURRENCY"],
             upload_timeout_seconds=parsed["UPLOAD_TIMEOUT_SECONDS"],
             upload_max_attempts=parsed["UPLOAD_MAX_ATTEMPTS"],
             auto_import=parsed["AUTO_IMPORT"],
