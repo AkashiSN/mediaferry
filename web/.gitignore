@@ -1,3 +1,5 @@
 node_modules/
 dist/
 openapi.json
+test-results/
+playwright-report/
