@@ -2,20 +2,32 @@
 
 from __future__ import annotations
 
+from dataclasses import asdict
 from typing import Any
 
 from fastapi import APIRouter, Depends
 
+from ..core.profiles.model import ProfileInvalid, parse_definition
 from ..db.jobs import JobStore
-from ..db.profiles import ProfileRegistry
+from ..db.profiles import (
+    ProfileAlreadyArchived,
+    ProfileExists,
+    ProfileIsBuiltin,
+    ProfileRegistry,
+    UnknownProfile,
+)
 from ..settings import SettingInvalid, SettingLocked, SettingsService, startup_warnings
 from .deps import conn as get_conn
 from .deps import state as get_state
 from .errors import ApiError, ErrorCode
 
 router = APIRouter()
+
+_BUILTIN_MESSAGE = "ビルトインは編集できない。複製してから編集する"
 # **`/health` だけは認証を掛けない**（監視と compose の healthcheck が叩く）。
 public_router = APIRouter()
+
+_BUILTIN_MESSAGE = "ビルトインは編集できない。複製してから編集する"
 
 
 @public_router.get("/health")
@@ -133,14 +145,108 @@ def write_setting(
     return {"status": "ok", "applies": tier.value}
 
 
+def _profile_view(ref, *, with_definition: bool = False) -> dict[str, Any]:  # noqa: ANN001
+    view = {
+        "slug": ref.definition.slug,
+        "name": ref.definition.name,
+        "revision": ref.revision,
+        "revision_id": ref.revision_id,
+        # 画面はビルトインに錠前を出し、編集の代わりに「複製して編集」を出す。
+        "builtin": ref.builtin,
+        "archived": ref.archived,
+    }
+    if with_definition:
+        view["definition"] = asdict(ref.definition)
+    return view
+
+
 @router.get("/profiles")
 def list_profiles(conn=Depends(get_conn)) -> dict[str, Any]:  # noqa: ANN001, B008
-    return {
-        "profiles": [
-            {"slug": ref.definition.slug, "name": ref.definition.name, "revision": ref.revision}
-            for ref in ProfileRegistry(conn).active()
-        ]
-    }
+    # archive 済みも返す。画面は区別して出す（消えたのか外したのか分かるように）。
+    return {"profiles": [_profile_view(ref) for ref in ProfileRegistry(conn).all()]}
+
+
+@router.get("/profiles/{profile_slug}")
+def get_profile(profile_slug: str, conn=Depends(get_conn)) -> dict[str, Any]:  # noqa: ANN001, B008
+    try:
+        ref = ProfileRegistry(conn).current(profile_slug)
+    except UnknownProfile as exc:
+        raise ApiError(404, ErrorCode.NOT_FOUND, "そのプロファイルは無い") from exc
+    return _profile_view(ref, with_definition=True)
+
+
+@router.post("/profiles")
+def create_profile(body: dict, conn=Depends(get_conn)) -> dict[str, Any]:  # noqa: ANN001, B008
+    defn = _parsed(body)
+    try:
+        ref = ProfileRegistry(conn).create(defn)
+    except ProfileExists as exc:
+        raise ApiError(409, ErrorCode.CONFLICT, "その slug はもう使われている") from exc
+    return _profile_view(ref, with_definition=True)
+
+
+@router.put("/profiles/{profile_slug}")
+def update_profile(
+    profile_slug: str,
+    body: dict,
+    conn=Depends(get_conn),  # noqa: ANN001, B008
+) -> dict[str, Any]:
+    defn = _parsed(body)
+    if defn.slug != profile_slug:
+        # slug はライブラリのパス（library/<slug>/）に使う。変えると過去の
+        # 取り込みが宙に浮く（§6）。
+        raise ApiError(400, ErrorCode.BAD_REQUEST, "slug は作成後に変更できない")
+    try:
+        ref = ProfileRegistry(conn).update(profile_slug, defn)
+    except UnknownProfile as exc:
+        raise ApiError(404, ErrorCode.NOT_FOUND, "そのプロファイルは無い") from exc
+    except ProfileIsBuiltin as exc:
+        raise ApiError(409, ErrorCode.CONFLICT, _BUILTIN_MESSAGE) from exc
+    return _profile_view(ref, with_definition=True)
+
+
+@router.post("/profiles/{profile_slug}/duplicate")
+def duplicate_profile(
+    profile_slug: str,
+    body: dict,
+    conn=Depends(get_conn),  # noqa: ANN001, B008
+) -> dict[str, Any]:
+    """ビルトインからユーザ定義を作る（§6）. **元は変わらない。**"""
+    registry = ProfileRegistry(conn)
+    try:
+        ref = registry.duplicate(profile_slug, str(body.get("slug", "")), str(body.get("name", "")))
+    except UnknownProfile as exc:
+        raise ApiError(404, ErrorCode.NOT_FOUND, "そのプロファイルは無い") from exc
+    except ProfileExists as exc:
+        raise ApiError(409, ErrorCode.CONFLICT, "その slug はもう使われている") from exc
+    except ProfileInvalid as exc:
+        raise ApiError(400, ErrorCode.VALIDATION_FAILED, str(exc)) from exc
+    return _profile_view(ref, with_definition=True)
+
+
+@router.post("/profiles/{profile_slug}/archive")
+def archive_profile(profile_slug: str, conn=Depends(get_conn)) -> dict[str, str]:  # noqa: ANN001, B008
+    try:
+        ProfileRegistry(conn).archive(profile_slug)
+    except UnknownProfile as exc:
+        raise ApiError(404, ErrorCode.NOT_FOUND, "そのプロファイルは無い") from exc
+    except ProfileIsBuiltin as exc:
+        raise ApiError(409, ErrorCode.CONFLICT, _BUILTIN_MESSAGE) from exc
+    except ProfileAlreadyArchived as exc:
+        raise ApiError(409, ErrorCode.CONFLICT, "そのプロファイルはもう外してある") from exc
+    return {"status": "ok"}
+
+
+def _parsed(body: dict):  # noqa: ANN202
+    """定義を検証してから返す. **commit の前に落とす。**"""
+    if not isinstance(body, dict) or "definition" not in body:
+        raise ApiError(400, ErrorCode.MISSING_FIELD, "definition が要る")
+    try:
+        return parse_definition(body["definition"])
+    except ProfileInvalid as exc:
+        raise ApiError(400, ErrorCode.VALIDATION_FAILED, str(exc)) from exc
+    except (TypeError, AttributeError) as exc:
+        raise ApiError(400, ErrorCode.BAD_REQUEST, "definition の形が違う") from exc
 
 
 @router.post("/profiles/{profile_slug}/test")
