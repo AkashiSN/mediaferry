@@ -302,6 +302,7 @@ def test_a_database_from_the_previous_release_still_opens(tmp_path):
         "0010_auto_import.sql": None,
         "0011_captured_at_revision.sql": None,
         "0012_recompute_lookups.sql": None,
+        "0013_media_file_by_profile.sql": None,
     }
     shipped = sorted(path.name for path in MIGRATIONS_DIR.glob("*.sql"))
     assert shipped == sorted(frozen), "版を足したら、この一覧にも足す"
@@ -474,13 +475,11 @@ def test_the_derived_lookup_does_not_scan_members_per_row(tmp_path):
         row[3]
         for row in conn.execute(
             "EXPLAIN QUERY PLAN"
-            " SELECT m.id,"
-            " (SELECT mm.media_file_id FROM merge_group g"
-            "   JOIN merge_member mm ON mm.merge_group_id = g.id AND mm.active = 1"
-            "   WHERE g.output_media_file_id = m.id"
-            "   ORDER BY mm.position LIMIT 1) AS member_id"
-            " FROM media_file m WHERE m.profile_id = ? AND m.role = 'derived'"
-            " ORDER BY m.rel_path",
+            " SELECT f.captured_at FROM merge_group g"
+            " JOIN merge_member mm ON mm.merge_group_id = g.id AND mm.active = 1"
+            " JOIN media_file f ON f.id = mm.media_file_id"
+            " WHERE g.output_media_file_id = ?"
+            " ORDER BY mm.position LIMIT 1",
             ("x",),
         )
     )
@@ -488,3 +487,34 @@ def test_the_derived_lookup_does_not_scan_members_per_row(tmp_path):
 
     assert "SCAN g" not in plan, plan
     assert "SCAN mm" not in plan, plan
+
+
+def test_the_recompute_keyset_is_bounded_by_the_profile(tmp_path):
+    """`0013`。ページの**返却件数**だけでなく、**探索する行数**も抑える.
+
+    `rel_path` の UNIQUE 索引だけだと、`LIMIT` は返す件数しか縛らない。
+    別プロファイルの大きなライブラリがあると、1 ページ読むだけでその全行を
+    走査しうる（`original` は `rel_path` の並び上、`derived/` も先に通る）。
+    **`fetch` の最中は heartbeat もキャンセル観測も無い**ので、そこでリース窓を
+    超える（`jobs/recompute.py` の `_pass`）。
+    """
+    conn = Database(tmp_path / "db.sqlite3").connect()
+    apply_migrations(conn)
+    plans = [
+        " | ".join(
+            row[3]
+            for row in conn.execute(
+                "EXPLAIN QUERY PLAN"
+                " SELECT m.id, m.rel_path FROM media_file m"
+                " WHERE m.profile_id = ? AND m.role = ? AND m.rel_path > ?"
+                " ORDER BY m.rel_path LIMIT ?",
+                ("x", role, "", 10),
+            )
+        )
+        for role in ("original", "derived")
+    ]
+    conn.close()
+
+    for plan in plans:
+        assert "media_file_by_profile" in plan, plan
+        assert "TEMP B-TREE" not in plan, plan

@@ -95,6 +95,7 @@ class Recomputer:
                 self._recomputed_derived,
                 tally,
                 "先頭の active member が無いか、その member を再計算できていない",
+                resolve_inside=True,
             )
         return tally.outcome()
 
@@ -124,14 +125,16 @@ class Recomputer:
         )
 
     def _fetch_derived(self, profile_id: str, cursor: str, limit: int) -> list[sqlite3.Row]:
+        """**継承元はここでは引かない。** 解決は排他区間の中で行う（`_apply_batch`）.
+
+        読んでから書くまでの間に、API 側の別接続で結合をやり直せる
+        （`merges.py` の supersede は trigger で旧 member を非 active にする）。
+        読んだときの member を持ち回ると、退役した出力に新しい値を書く。
+        """
         return list(
             self._conn.execute(
                 "SELECT m.id, m.rel_path, m.mtime_ns, m.captured_at, m.captured_at_source,"
-                " m.captured_at_tz, m.captured_at_note,"
-                " (SELECT mm.media_file_id FROM merge_group g"
-                "   JOIN merge_member mm ON mm.merge_group_id = g.id AND mm.active = 1"
-                "   WHERE g.output_media_file_id = m.id"
-                "   ORDER BY mm.position LIMIT 1) AS member_id"
+                " m.captured_at_tz, m.captured_at_note"
                 " FROM media_file m WHERE m.profile_id = ? AND m.role = 'derived'"
                 "   AND m.rel_path > ?"
                 " ORDER BY m.rel_path LIMIT ?",
@@ -191,12 +194,15 @@ class Recomputer:
 
         **継承元がこの版で再計算できていなければ、派生物も飛ばす。**
         """
-        if row["member_id"] is None:
-            return None
         member = self._conn.execute(
-            "SELECT captured_at, captured_at_source, captured_at_tz, captured_at_note,"
-            " captured_at_revision_id FROM media_file WHERE id = ?",
-            (row["member_id"],),
+            "SELECT f.captured_at, f.captured_at_source, f.captured_at_tz, f.captured_at_note,"
+            " f.captured_at_revision_id"
+            " FROM merge_group g"
+            " JOIN merge_member mm ON mm.merge_group_id = g.id AND mm.active = 1"
+            " JOIN media_file f ON f.id = mm.media_file_id"
+            " WHERE g.output_media_file_id = ?"
+            " ORDER BY mm.position LIMIT 1",
+            (row["id"],),
         ).fetchone()
         if member is None:
             return None
@@ -223,6 +229,8 @@ class Recomputer:
         recompute: Callable[[JobContext, sqlite3.Row, ProfileRef], CapturedAt | None],
         tally: _Tally,
         skip_reason: str,
+        *,
+        resolve_inside: bool = False,
     ) -> bool:
         """1 巡ぶん. 最後まで回れたら True.
 
@@ -245,7 +253,9 @@ class Recomputer:
                 batch = fetch(profile.profile_id, cursor, self._batch_size)
                 if not batch:
                     break
-                skipped += self._apply_batch(ctx, batch, profile, recompute, tally)
+                skipped += self._apply_batch(
+                    ctx, batch, profile, recompute, tally, resolve_inside=resolve_inside
+                )
             except LeaseLost:
                 # 確認の直後にキャンセルが commit されると、リースを失った形で
                 # 降りてくる。**利用者が押したキャンセルを失敗として記録しない。**
@@ -269,6 +279,8 @@ class Recomputer:
         profile: ProfileRef,
         recompute: Callable[[JobContext, sqlite3.Row, ProfileRef], CapturedAt | None],
         tally: _Tally,
+        *,
+        resolve_inside: bool,
     ) -> int:
         """1 バッチを 1 つのトランザクションで書く.
 
@@ -281,18 +293,19 @@ class Recomputer:
         # 長い」場合を守るが、`with_lease_pulse` は処理が間隔より短く終わると
         # 1 度も打たない（`thread.join(timeout=間隔)` が先に返る）。1 枚ずつが
         # 短くても 100 枚で積もるので、行をまたいだ経過時間でも打つ。
-        resolved = []
-        last_beat = time.monotonic()
-        for row in batch:
-            resolved.append((row, recompute(ctx, row, profile)))
-            if time.monotonic() - last_beat >= lease_pulse.HEARTBEAT_INTERVAL:
-                # **`assert_lease` を先に呼ぶ**（`with_lease_pulse` と同じ理由）。
-                # `extend_lease` は `cancelling` でも延ばすので、`heartbeat` だけだと
-                # キャンセル済みのリースを延ばし続け、**残りの EXIF を最後まで
-                # 読んでから**書き込みの確認でようやく止まる。
-                ctx.assert_lease()
-                ctx.heartbeat()
-                last_beat = time.monotonic()
+        resolved: list[tuple[sqlite3.Row, CapturedAt | None]] = []
+        if not resolve_inside:
+            last_beat = time.monotonic()
+            for row in batch:
+                resolved.append((row, recompute(ctx, row, profile)))
+                if time.monotonic() - last_beat >= lease_pulse.HEARTBEAT_INTERVAL:
+                    # **`assert_lease` を先に呼ぶ**（`with_lease_pulse` と同じ理由）。
+                    # `extend_lease` は `cancelling` でも延ばすので、`heartbeat` だけだと
+                    # キャンセル済みのリースを延ばし続け、**残りの EXIF を最後まで
+                    # 読んでから**書き込みの確認でようやく止まる。
+                    ctx.assert_lease()
+                    ctx.heartbeat()
+                    last_beat = time.monotonic()
         skipped = 0
         with immediate(self._conn):
             # **確認と遷移を 1 つの `BEGIN IMMEDIATE` に入れる**（§9.3 手順 7 と同じ形）。
@@ -301,6 +314,12 @@ class Recomputer:
             # commit される**。書き込みロックを取った状態で確認するので、確認と
             # 書き込みの間には誰も割り込めない。
             ctx.assert_lease()
+            if resolve_inside:
+                # **派生物は排他区間の中で解決する。** 継承元（先頭 active member）は
+                # 読み出した後・書き込む前に別接続の supersede で変わりうる。DB を
+                # 読むだけなので排他の中でも長くならない（EXIF を伴う `original` は
+                # 外で済ませる）。
+                resolved = [(row, recompute(ctx, row, profile)) for row in batch]
             for row, value in resolved:
                 if value is None:
                     skipped += 1

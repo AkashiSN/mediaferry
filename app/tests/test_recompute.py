@@ -853,3 +853,110 @@ def test_the_targets_are_read_in_pages_under_the_lease(dji, db, data_root, monke
     assert pages == [1, 1, 1, 0]
     assert outcome.changed == 2
     assert outcome.skipped == 1
+
+
+def test_a_regroup_between_the_read_and_the_write_stops_the_derived(
+    dji, db, database, data_root, monkeypatch
+):
+    """**継承元は排他区間の中で解決する。**
+
+    ページへ読み出してから書くまでの間に、API 側の別接続で結合をやり直せる
+    （`merges.py` の supersede は trigger で旧 member を非 active にする）。
+    読んだときの member を持ち回ると、**退役した出力に新しい値と新しい版を書く**
+    ことになり、「supersede した結合の出力は再導出しない」に反する。
+    """
+    profile, _, part1, part2, _ = dji
+    group = a_merge_group(db, (profile.profile_id, profile.revision_id), digest="d1")
+    later = a_merge_group(db, (profile.profile_id, profile.revision_id), digest="d2")
+    output = a_media_file(
+        db,
+        (profile.profile_id, profile.revision_id),
+        role="derived",
+        rel_path="derived/my-dji/DCIM/DJI_20260817143000_0001-0002_MERGED.MP4",
+        mtime_ns=ns("2026-08-17T15:00:05"),
+        captured_at="2026-08-17T14:30:00+09:00",
+        captured_at_source="mtime",
+        captured_at_tz=TOKYO,
+    )
+    db.execute("UPDATE merge_group SET output_media_file_id = ? WHERE id = ?", (output, group))
+    db.execute("INSERT INTO merge_member VALUES (?, ?, 0, 1)", (group, part1))
+    db.execute("INSERT INTO merge_member VALUES (?, ?, 1, 1)", (group, part2))
+    new_profile = to_berlin(db, profile)
+
+    other = database.connect()
+    original = Recomputer._fetch_derived
+
+    def regrouping(self, profile_id, cursor, limit):  # noqa: ANN001, ANN202
+        rows = original(self, profile_id, cursor, limit)
+        if rows:
+            # 読んだ直後・書く前に、別接続で結合をやり直す。
+            other.execute(
+                "UPDATE merge_group SET superseded_by_id = ? WHERE id = ?", (later, group)
+            )
+        return rows
+
+    monkeypatch.setattr(Recomputer, "_fetch_derived", regrouping)
+    try:
+        run(db, data_root, new_profile)
+    finally:
+        other.close()
+
+    row = captured(db, output)
+    assert row["captured_at"] == "2026-08-17T14:30:00+09:00"
+    assert row["captured_at_revision_id"] == profile.revision_id
+
+
+def test_nothing_can_regroup_between_the_resolve_and_the_write(
+    dji, db, database, data_root, monkeypatch
+):
+    """**解決と書き込みの間に、別接続が割り込めない。**
+
+    継承元を排他区間の外で解決すると、再取得していても「解決した後・書く前」の
+    窓が残る。ここで確かめるのはその窓が**無い**ことなので、割り込もうとした側が
+    書き込みロックで弾かれることを見る（`busy_timeout = 0` で待たずに失敗させる）。
+    値そのものを見ても区別が付かない —— 割り込めた世界と割り込めなかった世界の
+    どちらでも「正しい値」は違うものになる。
+    """
+    import sqlite3 as _sqlite3
+
+    profile, _, part1, part2, _ = dji
+    group = a_merge_group(db, (profile.profile_id, profile.revision_id), digest="d1")
+    later = a_merge_group(db, (profile.profile_id, profile.revision_id), digest="d2")
+    output = a_media_file(
+        db,
+        (profile.profile_id, profile.revision_id),
+        role="derived",
+        rel_path="derived/my-dji/DCIM/DJI_20260817143000_0001-0002_MERGED.MP4",
+        mtime_ns=ns("2026-08-17T15:00:05"),
+        captured_at="2026-08-17T14:30:00+09:00",
+        captured_at_source="mtime",
+        captured_at_tz=TOKYO,
+    )
+    db.execute("UPDATE merge_group SET output_media_file_id = ? WHERE id = ?", (output, group))
+    db.execute("INSERT INTO merge_member VALUES (?, ?, 0, 1)", (group, part1))
+    db.execute("INSERT INTO merge_member VALUES (?, ?, 1, 1)", (group, part2))
+    new_profile = to_berlin(db, profile)
+
+    other = database.connect()
+    other.execute("PRAGMA busy_timeout = 0")
+    committed: list[bool] = []
+    original = Recomputer._recomputed_derived
+
+    def resolving(self, ctx_, row, prof):  # noqa: ANN001, ANN202
+        value = original(self, ctx_, row, prof)
+        try:
+            other.execute(
+                "UPDATE merge_group SET superseded_by_id = ? WHERE id = ?", (later, group)
+            )
+            committed.append(True)
+        except _sqlite3.OperationalError:
+            pass  # 書き込みロックに弾かれた＝窓が無い
+        return value
+
+    monkeypatch.setattr(Recomputer, "_recomputed_derived", resolving)
+    try:
+        run(db, data_root, new_profile)
+    finally:
+        other.close()
+
+    assert committed == [], "解決した後・書き込む前に、別接続が supersede を commit できた"
