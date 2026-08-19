@@ -1,0 +1,1506 @@
+# Phase 6 実装計画 — RAW / JPEG のスタッキング
+
+> **エージェントで実行する場合:** `superpowers:subagent-driven-development`
+> または `superpowers:executing-plans` を使い、タスク単位で進める。
+> 手順はチェックボックス（`- [ ]`）で追跡する。
+
+**目標:** 同じシャッターで出た RAW と JPEG を、Immich 上で 1 つのスタックに束ねる。
+あわせて、効かないまま 3 フェーズ持ち越された `UPLOAD_CONCURRENCY` を撤去する。
+
+**方式:** スタックはアップロードの**後始末**として、同じ upload ジョブの**第 2 パス**で
+回す。`upload_record` の状態機械には状態を足さず、3 列（`stack_state` /
+`remote_stack_id` / `stack_reason`）で結果を持つ。組の同一性は**カード上の原名**
+（`source_entry`）と `captured_at` で取る。
+
+**技術:** Python 3.12 / SQLite / httpx / FastAPI / React + TypeScript / Playwright。
+
+**仕様の正本:** [`docs/design.md`](design.md) §6「スタッキング（`stack`）」、§8、
+§9.10、§9.11、§12、§20、§21「Phase 6 の設計で確定した事項」。**この計画は仕様から
+論を進めるので、実行者は両方を読む。**
+
+## 全体の制約（すべてのタスクに掛かる）
+
+- Python は `>=3.12`。すべてのモジュールは `from __future__ import annotations` で始める
+- ruff: `line-length = 100`、`select = ["E", "F", "I", "UP", "B", "SIM", "ANN", "S"]`。
+  `docs/` は対象外
+- **コメントと docstring は日本語**で、**現在形**で書く。過去の経緯は `docs/` へ
+- **環境固有の値をリポジトリに含めない**（IP、ホスト名、データセットのパス、API キー、
+  タイムゾーンの実値）
+- **DB に絶対パスを保存しない。** `DATA_ROOT` からの相対パスだけが正規形
+- **秘密をログ・`job.params_json`・`job_event`・API 応答・例外メッセージに出さない**
+- システム時刻は **UTC の ISO-8601 文字列**で DB に入れ、生成は `mediaferry.clock` の
+  関数だけを使う。**例外は `media_file.captured_at`**（解決したオフセット付き）
+- **DB 接続はスコープごとに 1 本。** トランザクションは接続に属する
+- 各タスクは「失敗するテストを書く → 失敗を確認 → 最小実装 → 通ることを確認 →
+  変異試験 → コミット」で完結させる
+- **変異試験は `PYTHONDONTWRITEBYTECODE=1` を付ける。** ドライバはリポジトリに無い
+  （`docs/HANDOFF.md` §5 の仕様どおり scratchpad に置いて使い捨てる）
+- コミットは Conventional Commits + 日本語の本文。**なぜそうしたか**を本文に残す
+
+## 範囲
+
+| 入れるもの | 入れないもの |
+| --- | --- |
+| プロファイルの `stack` 節（§6） | 組を GUI で組み立てる仕組み（YAML のテキストエリアのまま） |
+| `0015`（3 列・トリガ・部分索引・設定行の掃除） | `media_file` への `stack_key` の実体化（§21 の判断） |
+| upload ジョブの第 2 パス（§9.11） | スタックの手動作成・解除の操作（YAGNI。再評価は再送と再計算で足りる） |
+| Immich クライアントのスタック経路 + fake への実装 | 動画とサムネイルの組（`MVI_*.MOV` は組にしない） |
+| `UPLOAD_CONCURRENCY` の撤去 | **ワーカーの多重化そのもの**（やらないと決めた。§21） |
+| 見送りの理由を出す画面と E2E | Immich 側のスタックをこちらへ取り込む同期 |
+
+## ファイル構成
+
+**作る:**
+
+| ファイル | 責務 |
+| --- | --- |
+| `app/src/mediaferry/db/migrations/0015_stacking.sql` | 3 列・トリガ 2 本・部分索引・`app_setting` の掃除 |
+| `app/src/mediaferry/core/uploads/stacking.py` | **純関数**。原名から stem を取る、4 条件で組を決める、primary を選ぶ |
+| `app/src/mediaferry/jobs/stacker.py` | 第 2 パス本体（抽出・リース・相手との往復・記録） |
+| `app/tests/test_stacking_rules.py` | `stacking.py` の単体 |
+| `app/tests/test_stacker.py` | 第 2 パスの単体（fake Immich） |
+| `app/tests/test_stack_migration.py` | `0015` のトリガと索引 |
+
+**触る:**
+
+| ファイル | 変更 |
+| --- | --- |
+| `app/src/mediaferry/core/profiles/model.py` | `StackRule` と `_parse_stack`。**省略時は無効**（既存リビジョンとの互換） |
+| `app/src/mediaferry/core/profiles/builtin/canon-eos.yaml` | `stack` を有効に（`[JPG, CR2]`、`tolerance_seconds: 0`） |
+| `app/src/mediaferry/core/profiles/builtin/dji-osmo.yaml` / `generic-dcim.yaml` | `stack.enabled: false` |
+| `app/src/mediaferry/adapters/immich.py` | `RemoteAsset.stack_id` / `stack_primary_asset_id`、`RemoteStack`、`create_stack` / `stack_by_primary` / `set_stack_primary` |
+| `app/src/mediaferry/db/uploads.py` | `unstacked_batch` / `source_of` / `siblings_on_card` / `record_for` / `mark_stacked` / `mark_skipped` |
+| `app/src/mediaferry/api/jobs_wiring.py` | 3 つの mode すべてのあとで第 2 パスを回す |
+| `app/src/mediaferry/jobs/recompute.py` | `captured_at` を動かしたら `skipped` を未評価へ戻す |
+| `app/src/mediaferry/settings.py` | `UPLOAD_CONCURRENCY` の撤去 |
+| `app/src/mediaferry/api/routes_uploads.py` | `_view` に 3 列、`GET /uploads` に `stack_state` フィルタ |
+| `app/src/mediaferry/api/routes_system.py` | 宛先サマリに `stacked` / `stack_skipped` |
+| `app/tests/fake_immich.py` | `/api/stacks` の 3 経路と、既存スタックの状態 |
+| `app/tests/exif_fixtures.py` | `a_tiff_with()`（合成 CR2 の中身） |
+| `app/tests/system/harness.py` | Canon カードに RAW+JPEG の対を足す |
+| `web/src/screens/Destinations.tsx` | 宛先ごとの「スタック」節（見送りの理由） |
+| `web/src/screens/Dashboard.tsx` | サマリに 2 つのカウント |
+| `web/src/screens/Settings.tsx` | 新規プロファイルの雛形に `stack` |
+| `web/src/api/types.ts` | `npm --prefix web run typegen` で再生成 |
+| `web/e2e/phase6.spec.ts` | 受け入れ（新規） |
+| `app/tests/test_immich_live.py` | 実機のスタック経路 |
+| `app/tests/test_crash_consistency.py` | 第 2 パスの途中で `os._exit` |
+| `docs/HANDOFF.md` | 現在地・残件・「送ったもの」の書き換え |
+
+---
+
+## Task 0: プロファイルの `stack` 節
+
+**Files:**
+- Modify: `app/src/mediaferry/core/profiles/model.py`
+- Modify: `app/src/mediaferry/core/profiles/builtin/{canon-eos,dji-osmo,generic-dcim}.yaml`
+- Modify: `web/src/screens/Settings.tsx`（雛形 `TEMPLATE`）
+- Test: `app/tests/test_profile_definition.py`（既存。無ければ `test_profile_matching.py` の隣に作る）
+
+**Interfaces:**
+- Produces: `StackRule(enabled: bool, extensions: tuple[str, ...], tolerance_seconds: int)`、
+  `ProfileDefinition.stack`
+
+- [ ] **Step 1: 失敗するテストを書く**
+
+```python
+def test_stack_is_optional_so_old_revisions_still_parse():
+    """**既存リビジョンの JSON には `stack` が無い。** 必須にすると DB が開けない。"""
+    defn = parse_definition(_a_definition())          # stack を含まない
+    assert defn.stack.enabled is False
+    assert defn.stack.extensions == ()
+
+
+def test_stack_extensions_must_be_upper_and_dotless():
+    with pytest.raises(ProfileInvalid, match="ドット無しの大文字"):
+        parse_definition(_a_definition(stack={"enabled": True, "extensions": [".jpg", "CR2"],
+                                              "tolerance_seconds": 0}))
+
+
+def test_stack_needs_at_least_two_extensions():
+    """1 つでは組にならない（自分としか当たらない）."""
+    with pytest.raises(ProfileInvalid, match="2 つ以上"):
+        parse_definition(_a_definition(stack={"enabled": True, "extensions": ["JPG"],
+                                              "tolerance_seconds": 0}))
+
+
+def test_stack_extensions_must_be_scanned():
+    """**取り込まない拡張子は組にならない。** 書き間違いを早く教える."""
+    with pytest.raises(ProfileInvalid, match="scan.extensions に無い"):
+        parse_definition(_a_definition(
+            scan={"roots": ["DCIM"], "extensions": ["JPG"]},
+            stack={"enabled": True, "extensions": ["JPG", "CR2"], "tolerance_seconds": 0},
+        ))
+
+
+def test_tolerance_seconds_must_not_be_negative():
+    with pytest.raises(ProfileInvalid, match="0 以上"):
+        parse_definition(_a_definition(stack={"enabled": True, "extensions": ["JPG", "CR2"],
+                                              "tolerance_seconds": -1}))
+
+
+def test_disabled_stack_does_not_require_the_rest():
+    """`merge.enabled: false` と同じ扱い（使われない値を発明させない）."""
+    defn = parse_definition(_a_definition(stack={"enabled": False}))
+    assert defn.stack.enabled is False
+
+
+def test_canon_eos_stacks_jpg_and_cr2():
+    canon = {d.slug: d for d in load_builtin_definitions()}["canon-eos"]
+    assert canon.stack.enabled is True
+    assert canon.stack.extensions == ("JPG", "CR2")     # 先頭が primary
+    assert canon.stack.tolerance_seconds == 0
+```
+
+- [ ] **Step 2: 失敗を確認する**
+
+Run: `uv run pytest app/tests/test_profile_definition.py -q`
+Expected: FAIL（`ProfileDefinition` に `stack` が無い）
+
+- [ ] **Step 3: 最小実装**
+
+```python
+@dataclass(frozen=True)
+class StackRule:
+    """RAW+JPEG の組の規則（§6）.
+
+    `extensions` は**先頭ほど primary**。`tolerance_seconds` は `captured_at` の
+    許容差で、既定は完全一致。
+    """
+
+    enabled: bool
+    extensions: tuple[str, ...]
+    tolerance_seconds: int
+
+
+# **省略できる。** 既存リビジョンの `definition_json` にこのキーは無く、必須に
+# すると適用済みの DB が開けなくなる。
+STACK_DISABLED = StackRule(enabled=False, extensions=(), tolerance_seconds=0)
+```
+
+`parse_definition` の `_reject_unknown` の集合に `"stack"` を足し、
+
+```python
+        stack=_parse_stack(_mapping(data, "stack"), scan) if "stack" in data else STACK_DISABLED,
+```
+
+```python
+def _parse_stack(data: Mapping[str, Any], scan: ScanRule) -> StackRule:
+    _reject_unknown(data, {"enabled", "extensions", "tolerance_seconds"}, "stack")
+    if not _bool(data, "enabled"):
+        # 無効なら拡張子も許容差も要らない（merge と同じ扱い）。
+        return STACK_DISABLED
+    extensions = _strings(data, "extensions")
+    for ext in extensions:
+        if ext != ext.upper() or ext.startswith("."):
+            raise ProfileInvalid(f"stack.extensions はドット無しの大文字で書く: {ext!r}")
+        if ext not in scan.extensions:
+            raise ProfileInvalid(f"stack.extensions が scan.extensions に無い: {ext}")
+    if len(extensions) < 2:
+        raise ProfileInvalid("stack.extensions は 2 つ以上必要（1 つでは組にならない）")
+    if len(set(extensions)) != len(extensions):
+        raise ProfileInvalid(f"stack.extensions に重複がある: {extensions}")
+    return StackRule(
+        enabled=True, extensions=extensions, tolerance_seconds=_positive_int(data, "tolerance_seconds")
+    )
+```
+
+`canon-eos.yaml` に足す:
+
+```yaml
+stack:
+  # RAW+JPEG の同時記録。**先頭が primary**（Immich の一覧で代表になる方）。
+  enabled: true
+  extensions: ["JPG", "CR2"]
+  # **実カードを見ていないので緩めない**（merge.enabled: false と同じ理由）。
+  tolerance_seconds: 0
+```
+
+`dji-osmo.yaml` と `generic-dcim.yaml` には `stack: {enabled: false}` を足す
+（DJI は RAW を書かず、汎用はメーカー固有 RAW を拾わない）。
+
+`web/src/screens/Settings.tsx` の `TEMPLATE` にも `stack: { enabled: false }` を足す。
+
+- [ ] **Step 4: 通ることを確認する**
+
+Run: `uv run pytest app/tests/test_profile_definition.py app/tests/test_profile_matching.py -q`
+Expected: PASS
+
+**注意:** `definition_to_json` の出力が変わるので、`sync_builtins` は起動時に
+ビルトイン 3 つの**新しいリビジョン**を作る。これは設計どおりの経路（§6）。
+既存のレコードは古いリビジョンを指したままで正しい。この挙動を確かめるテストが
+既にあるなら、期待リビジョン番号の更新が要る。
+
+- [ ] **Step 5: 変異試験**
+
+対象: `model.py`。変異例（すべて検出されること）:
+`ext not in scan.extensions` → `in`、`len(extensions) < 2` → `< 1`、
+`if "stack" in data` → 常に `_parse_stack` を呼ぶ、`STACK_DISABLED` の `enabled` を `True`。
+
+- [ ] **Step 6: コミット**
+
+```bash
+git add -A app/src/mediaferry/core/profiles app/tests web/src/screens/Settings.tsx
+git commit -m "feat(profiles): stack 節を足す"
+```
+
+---
+
+## Task 1: `0015` マイグレーション
+
+**Files:**
+- Create: `app/src/mediaferry/db/migrations/0015_stacking.sql`
+- Test: `app/tests/test_stack_migration.py`
+
+**Interfaces:**
+- Produces: `upload_record.stack_state` / `.remote_stack_id` / `.stack_reason`、
+  索引 `upload_record_unstacked`
+
+- [ ] **Step 1: 失敗するテストを書く**
+
+```python
+def test_stacked_requires_a_stack_id(db):
+    record = _a_complete_record(db)
+    with pytest.raises(sqlite3.IntegrityError, match="stack"):
+        db.execute("UPDATE upload_record SET stack_state = 'stacked' WHERE id = ?", (record,))
+
+
+def test_skipped_requires_a_reason(db):
+    record = _a_complete_record(db)
+    with pytest.raises(sqlite3.IntegrityError, match="stack"):
+        db.execute("UPDATE upload_record SET stack_state = 'skipped' WHERE id = ?", (record,))
+
+
+def test_unevaluated_must_not_carry_leftovers(db):
+    """未評価に戻すときは理由も消す（消し忘れると画面に古い理由が残る）."""
+    record = _a_complete_record(db)
+    db.execute("UPDATE upload_record SET stack_state = 'skipped', stack_reason = 'x'"
+               " WHERE id = ?", (record,))
+    with pytest.raises(sqlite3.IntegrityError, match="stack"):
+        db.execute("UPDATE upload_record SET stack_state = NULL WHERE id = ?", (record,))
+
+
+def test_the_extraction_uses_the_partial_index(db):
+    """**索引を足したら EXPLAIN で駆動を確かめる**（Phase 5 の 5・6 巡目の教訓）."""
+    plan = db.execute(
+        "EXPLAIN QUERY PLAN SELECT * FROM upload_record"
+        " WHERE destination_id = ? AND state = 'complete' AND stack_state IS NULL"
+        "   AND invalidated_at IS NULL AND id > ? ORDER BY id LIMIT 50",
+        ("d", ""),
+    ).fetchall()
+    assert any("upload_record_unstacked" in row["detail"] for row in plan)
+
+
+def test_the_dead_setting_row_is_removed(db):
+    assert db.execute(
+        "SELECT count(*) AS n FROM app_setting WHERE key = 'UPLOAD_CONCURRENCY'"
+    ).fetchone()["n"] == 0
+```
+
+（最後のテストは、`0014` までを適用した DB に `UPLOAD_CONCURRENCY` の行を入れてから
+`0015` を適用する形で書く。`test_db_migrate.py` の既存の作法に合わせる。）
+
+- [ ] **Step 2: 失敗を確認する**
+
+Run: `uv run pytest app/tests/test_stack_migration.py -q`
+Expected: FAIL（列が無い）
+
+- [ ] **Step 3: 最小実装**
+
+```sql
+-- Phase 6: RAW/JPEG のスタッキング（§9.11）。
+-- **状態機械には状態を足さない。** スタックは「その宛先へその資産を送った結果」
+-- なので、`remote_asset_id` と同じ層に置く。
+
+ALTER TABLE upload_record ADD COLUMN stack_state TEXT
+    CHECK (stack_state IN ('stacked', 'skipped'));
+ALTER TABLE upload_record ADD COLUMN remote_stack_id TEXT;
+ALTER TABLE upload_record ADD COLUMN stack_reason TEXT;
+
+-- `ALTER TABLE` では表制約を足せないので、3 列の組み合わせは trigger で守る
+-- （`0011` の `captured_at_revision_id` と同じ形）。
+--
+-- **`state = 'complete'` は条件に入れない。** 再計算の差し戻し（`_requeue`）が
+-- `complete` → `needs_recheck` を動かすので、入れると正当な差し戻しが ABORT する。
+-- スタック済みという事実は、レコードが再確認へ戻っても真のままである。
+CREATE TRIGGER upload_record_stack_shape_insert
+AFTER INSERT ON upload_record
+WHEN NOT (
+       (NEW.stack_state IS NULL AND NEW.remote_stack_id IS NULL AND NEW.stack_reason IS NULL)
+    OR (NEW.stack_state = 'stacked' AND NEW.remote_stack_id IS NOT NULL
+        AND NEW.stack_reason IS NULL)
+    OR (NEW.stack_state = 'skipped' AND NEW.stack_reason IS NOT NULL
+        AND NEW.remote_stack_id IS NULL))
+BEGIN
+    SELECT RAISE(ABORT, 'stack_state と remote_stack_id / stack_reason の組が不正');
+END;
+
+CREATE TRIGGER upload_record_stack_shape_update
+AFTER UPDATE OF stack_state, remote_stack_id, stack_reason ON upload_record
+WHEN NOT (
+       (NEW.stack_state IS NULL AND NEW.remote_stack_id IS NULL AND NEW.stack_reason IS NULL)
+    OR (NEW.stack_state = 'stacked' AND NEW.remote_stack_id IS NOT NULL
+        AND NEW.stack_reason IS NULL)
+    OR (NEW.stack_state = 'skipped' AND NEW.stack_reason IS NOT NULL
+        AND NEW.remote_stack_id IS NULL))
+BEGIN
+    SELECT RAISE(ABORT, 'stack_state と remote_stack_id / stack_reason の組が不正');
+END;
+
+-- 第 2 パスの抽出の駆動索引。**述語は問い合わせ側と一字一句そろえる**
+-- （部分索引は述語が一致しないと使われない）。
+CREATE INDEX upload_record_unstacked ON upload_record (destination_id, id)
+    WHERE stack_state IS NULL AND state = 'complete' AND invalidated_at IS NULL;
+
+-- 効かないまま残っていた設定行を消す（§21）。env に残っていても未知のキーは
+-- 読まれないので、起動は壊れない。
+DELETE FROM app_setting WHERE key = 'UPLOAD_CONCURRENCY';
+```
+
+- [ ] **Step 4: 通ることを確認する**
+
+Run: `uv run pytest app/tests/test_stack_migration.py app/tests/test_db_migrate.py -q`
+Expected: PASS
+
+- [ ] **Step 5: 変異試験**
+
+トリガの各枝（3 つの OR）を 1 つずつ壊し、対応するテストが落ちること。
+**部分索引の述語から `invalidated_at IS NULL` を外す**変異が EXPLAIN のテストで
+落ちること（落ちなければテストの当て方が悪い）。
+
+- [ ] **Step 6: コミット**
+
+```bash
+git add app/src/mediaferry/db/migrations/0015_stacking.sql app/tests/test_stack_migration.py
+git commit -m "feat(db): 0015 でスタックの 3 列と部分索引を足す"
+```
+
+---
+
+## Task 2: `UPLOAD_CONCURRENCY` の撤去
+
+**Files:**
+- Modify: `app/src/mediaferry/settings.py:73,152,239`
+- Test: `app/tests/test_settings.py:25`
+
+- [ ] **Step 1: 失敗するテストを書く**
+
+```python
+def test_the_concurrency_setting_is_gone():
+    """**効かない設定を画面に並べない**（§9.10 は当初から直列と決めている）."""
+    assert "UPLOAD_CONCURRENCY" not in SETTING_SPECS
+
+
+def test_an_unknown_env_var_does_not_break_startup(tmp_path):
+    """撤去後も、古い env が残っている環境が起動できる."""
+    service = SettingsService(_a_db(), {"MEDIAFERRY_UPLOAD_CONCURRENCY": "4"})
+    assert service.snapshot().upload_max_attempts == 3
+
+
+def test_setting_it_through_the_api_is_refused():
+    with pytest.raises(SettingInvalid, match="未知の設定キー"):
+        SettingsService(_a_db(), {}).set("UPLOAD_CONCURRENCY", "4")
+```
+
+- [ ] **Step 2: 失敗を確認する**
+
+Run: `uv run pytest app/tests/test_settings.py -q`
+Expected: FAIL（まだ spec に在る）
+
+- [ ] **Step 3: 最小実装**
+
+`SETTING_SPECS` の該当行、`Settings.upload_concurrency`、`snapshot()` の代入を削る。
+既存テスト `test_settings.py:25` の `assert snapshot.upload_concurrency == 2` も消す。
+
+- [ ] **Step 4: 通ることを確認する**
+
+Run: `uv run pytest -q && grep -rn "upload_concurrency\|UPLOAD_CONCURRENCY" app web --include='*.py' --include='*.ts' --include='*.tsx'`
+Expected: PASS、grep は**何も出ない**
+
+- [ ] **Step 5: コミット**
+
+```bash
+git add -A app
+git commit -m "refactor(settings): UPLOAD_CONCURRENCY を撤去する"
+```
+
+---
+
+## Task 3: Immich クライアントのスタック経路と fake
+
+**Files:**
+- Modify: `app/src/mediaferry/adapters/immich.py`
+- Modify: `app/tests/fake_immich.py`
+- Test: `app/tests/test_adapter_immich.py`
+
+**Interfaces:**
+- Produces:
+  - `RemoteAsset.stack_id: str | None`、`RemoteAsset.stack_primary_asset_id: str | None`
+  - `RemoteStack(stack_id: str, primary_asset_id: str, asset_ids: tuple[str, ...])`
+  - `ImmichClient.create_stack(asset_ids: Sequence[str]) -> RemoteStack`
+  - `ImmichClient.stack_by_primary(primary_asset_id: str) -> RemoteStack | None`
+  - `ImmichClient.set_stack_primary(stack_id: str, asset_id: str) -> None`
+
+- [ ] **Step 1: 失敗するテストを書く**
+
+```python
+def test_an_asset_reports_its_stack(fake):
+    fake.stacks["stack-1"] = {"primary": "asset-1", "assets": ["asset-1", "asset-2"]}
+    asset = _client(fake).asset("asset-2")
+    assert asset.stack_id == "stack-1"
+    assert asset.stack_primary_asset_id == "asset-1"
+
+
+def test_an_asset_without_a_stack_reports_none(fake):
+    assert _client(fake).asset("asset-1").stack_id is None
+
+
+def test_creating_a_stack_returns_its_members(fake):
+    stack = _client(fake).create_stack(["asset-1", "asset-2"])
+    assert set(stack.asset_ids) == {"asset-1", "asset-2"}
+    assert stack.primary_asset_id in stack.asset_ids
+
+
+def test_a_stack_can_be_read_back_by_its_primary(fake):
+    created = _client(fake).create_stack(["asset-1", "asset-2"])
+    found = _client(fake).stack_by_primary(created.primary_asset_id)
+    assert found is not None and found.stack_id == created.stack_id
+
+
+def test_an_unknown_primary_has_no_stack(fake):
+    assert _client(fake).stack_by_primary("asset-9") is None
+
+
+def test_the_primary_can_be_moved(fake):
+    created = _client(fake).create_stack(["asset-1", "asset-2"])
+    other = next(a for a in created.asset_ids if a != created.primary_asset_id)
+    _client(fake).set_stack_primary(created.stack_id, other)
+    assert _client(fake).stack_by_primary(other).stack_id == created.stack_id
+
+
+def test_identifiers_from_the_peer_are_validated(fake):
+    """**相手が選べる値を経路へ組み立てない**（§14。既存の `_identifier` と同じ扱い）."""
+    fake.echo_key_as_ids = True
+    with pytest.raises(ImmichProtocolError):
+        _client(fake).create_stack(["asset-1", "asset-2"])
+
+
+def test_a_broken_stack_response_is_a_protocol_error(fake):
+    fake.stack_response_without_assets = True
+    with pytest.raises(ImmichProtocolError):
+        _client(fake).create_stack(["asset-1", "asset-2"])
+```
+
+- [ ] **Step 2: 失敗を確認する**
+
+Run: `uv run pytest app/tests/test_adapter_immich.py -q`
+Expected: FAIL（`create_stack` が無い）
+
+- [ ] **Step 3: 最小実装**
+
+```python
+@dataclass(frozen=True)
+class RemoteStack:
+    """相手が持っているスタック（読み取り）."""
+
+    stack_id: str
+    primary_asset_id: str
+    asset_ids: tuple[str, ...]
+```
+
+`RemoteAsset` に 2 つ足し、`asset()` で `body.get("stack")` を読む
+（**object でなければ `None` として扱い、例外にしない** —— 相手が古い版なら
+このキーごと無い）。
+
+```python
+    def create_stack(self, asset_ids: Sequence[str]) -> RemoteStack:
+        """**既存スタックを吸収しうる。** 呼ぶ前に全員の `stack` を見ること（§9.11）."""
+        checked = [self._identifier(a, "POST /api/stacks の asset id") for a in asset_ids]
+        body = _as_object(
+            self._request("POST", "/api/stacks", json={"assetIds": checked}), "POST /api/stacks"
+        )
+        return self._stack_from(body, "POST /api/stacks")
+
+    def stack_by_primary(self, primary_asset_id: str) -> RemoteStack | None:
+        checked = self._identifier(primary_asset_id, "GET /api/stacks の primary asset id")
+        response = self._request("GET", "/api/stacks", params={"primaryAssetId": checked})
+        body = response.json()
+        if not isinstance(body, list):
+            raise ImmichProtocolError("GET /api/stacks の応答が配列ではない")
+        for item in body:
+            if isinstance(item, dict):
+                stack = self._stack_from(item, "GET /api/stacks")
+                if stack.primary_asset_id == checked:
+                    return stack
+        return None
+
+    def set_stack_primary(self, stack_id: str, asset_id: str) -> None:
+        stack = self._identifier(stack_id, "PUT /api/stacks の stack id")
+        asset = self._identifier(asset_id, "PUT /api/stacks の primary asset id")
+        self._request("PUT", f"/api/stacks/{stack}", json={"primaryAssetId": asset})
+
+    def _stack_from(self, body: dict[str, Any], label: str) -> RemoteStack:
+        assets = body.get("assets")
+        if not isinstance(assets, list) or not assets:
+            raise ImmichProtocolError(f"{label} の応答に assets が無い")
+        ids = tuple(
+            self._identifier(_required_str(a, "id", label), label)
+            for a in assets
+            if isinstance(a, dict)
+        )
+        if len(ids) != len(assets):
+            raise ImmichProtocolError(f"{label} の assets に object でない要素がある")
+        return RemoteStack(
+            stack_id=self._identifier(_required_str(body, "id", label), label),
+            primary_asset_id=self._identifier(
+                _required_str(body, "primaryAssetId", label), label
+            ),
+            asset_ids=ids,
+        )
+```
+
+fake 側（`fake_immich.py`）:
+
+```python
+        # スタック。`stack_id -> {"primary": asset_id, "assets": [asset_id, ...]}`
+        self.stacks: dict[str, dict[str, Any]] = {}
+        self.stack_response_without_assets: bool = False
+```
+
+`route` に 3 経路を足す。**実物の地雷（既存スタックの吸収）も再現する** ——
+`POST /api/stacks` は、渡された資産のどれかが既存スタックの primary なら
+その既存スタックを畳み込む。`GET /api/assets/{id}` の応答にも `stack` を載せる。
+
+- [ ] **Step 4: 通ることを確認する**
+
+Run: `uv run pytest app/tests/test_adapter_immich.py -q`
+Expected: PASS
+
+- [ ] **Step 5: 変異試験**
+
+`_stack_from` の `_identifier` を素通しに、`stack_by_primary` の
+`stack.primary_asset_id == checked` を常に真に、`assets` の空検査を外す。
+
+- [ ] **Step 6: コミット**
+
+```bash
+git add app/src/mediaferry/adapters/immich.py app/tests/fake_immich.py app/tests/test_adapter_immich.py
+git commit -m "feat(immich): スタックの作成・取得・primary 差し替えを足す"
+```
+
+---
+
+## Task 4: 組の解決（純関数）とリポジトリの問い合わせ
+
+**Files:**
+- Create: `app/src/mediaferry/core/uploads/stacking.py`
+- Modify: `app/src/mediaferry/db/uploads.py`
+- Test: `app/tests/test_stacking_rules.py`
+
+**Interfaces:**
+- Consumes: `StackRule`（Task 0）
+- Produces:
+  - `stem_prefix(rel_path: str) -> str`（`"DCIM/100CANON/IMG_1234."`）
+  - `Candidate(record_id, media_file_id, rel_path, captured_at, captured_at_source, origin, state, remote_asset_id, invalidated)`
+  - `Group(members: tuple[Candidate, ...])` / `Refusal(reason: str)`
+  - `resolve_group(primary: Candidate, candidates: Sequence[Candidate], rule: StackRule) -> Group | Refusal`
+  - `UploadRepository.unstacked_batch` / `.source_of` / `.siblings_on_card` / `.record_for` /
+    `.mark_stacked` / `.mark_skipped`
+
+- [ ] **Step 1: 失敗するテストを書く**
+
+```python
+RULE = StackRule(enabled=True, extensions=("JPG", "CR2"), tolerance_seconds=0)
+
+
+def _candidate(rel_path: str, **overrides) -> Candidate:
+    """既定は「送り終わった、自分が上げた、同じ時刻」の相方.
+
+    **既定と一致するだけで通るテストを書かない**（Phase 5 の教訓）。壊す条件を
+    1 つずつ `overrides` で与える。
+    """
+    base = {
+        "record_id": f"rec-{rel_path}",
+        "media_file_id": f"media-{rel_path}",
+        "rel_path": rel_path,
+        "captured_at": "2026-08-19T10:30:00+09:00",
+        "captured_at_source": "exif",
+        "origin": "created_by_us",
+        "state": "complete",
+        "remote_asset_id": f"asset-{rel_path}",
+        "invalidated": False,
+    }
+    return Candidate(**{**base, **overrides})
+
+
+def _jpg(**overrides) -> Candidate:
+    return _candidate("DCIM/100CANON/IMG_1234.JPG", **overrides)
+
+
+def _cr2(**overrides) -> Candidate:
+    rel_path = overrides.pop("rel_path", "DCIM/100CANON/IMG_1234.CR2")
+    return _candidate(rel_path, **overrides)
+
+
+def test_a_pair_on_the_same_card_forms_a_group():
+    group = resolve_group(_jpg(), [_jpg(), _cr2()], RULE)
+    assert [m.rel_path for m in group.members] == [
+        "DCIM/100CANON/IMG_1234.JPG",     # **先頭の拡張子が primary**
+        "DCIM/100CANON/IMG_1234.CR2",
+    ]
+
+
+def test_a_lonely_file_is_refused():
+    assert resolve_group(_jpg(), [_jpg()], RULE).reason == "相方が見つからない"
+
+
+def test_a_different_stem_is_not_a_partner():
+    other = _cr2(rel_path="DCIM/100CANON/IMG_9999.CR2")
+    assert isinstance(resolve_group(_jpg(), [_jpg(), other], RULE), Refusal)
+
+
+def test_a_different_capture_time_is_not_a_partner():
+    """**同じシャッターであることの直接の証拠**（§6）."""
+    late = _cr2(captured_at="2026-08-19T10:30:01+09:00")
+    assert "撮影時刻" in resolve_group(_jpg(), [_jpg(), late], RULE).reason
+
+
+def test_the_tolerance_is_honoured():
+    late = _cr2(captured_at="2026-08-19T10:30:01+09:00")
+    rule = replace(RULE, tolerance_seconds=2)
+    assert isinstance(resolve_group(_jpg(), [_jpg(), late], rule), Group)
+
+
+def test_a_different_time_source_is_not_a_partner():
+    """EXIF の時刻と mtime の時刻という**別々の時計**を突き合わせない（§6）."""
+    fallen_back = _cr2(captured_at_source="mtime")
+    assert "時刻の根拠" in resolve_group(_jpg(), [_jpg(), fallen_back], RULE).reason
+
+
+def test_offsets_are_compared_as_instants_not_strings():
+    """`captured_at` はオフセット付きで保存される（§8 の唯一の例外）."""
+    same_instant = _cr2(captured_at="2026-08-19T01:30:00+00:00")
+    assert isinstance(resolve_group(_jpg(), [_jpg(), same_instant], RULE), Group)
+
+
+def test_a_partner_that_is_not_ours_refuses_the_group():
+    """`POST /stacks` は既存スタックを吸収する。**証明できない相手には触らない**."""
+    theirs = _cr2(origin="pre_existing")
+    assert "自分が上げたと証明" in resolve_group(_jpg(), [_jpg(), theirs], RULE).reason
+
+
+def test_a_partner_that_is_not_complete_refuses_the_group():
+    assert "まだ送信が終わっていない" in resolve_group(
+        _jpg(), [_jpg(), _cr2(state="pending")], RULE
+    ).reason
+
+
+def test_an_invalidated_partner_refuses_the_group():
+    assert isinstance(resolve_group(_jpg(), [_jpg(), _cr2(invalidated=True)], RULE), Refusal)
+
+
+def test_an_extension_outside_the_rule_is_ignored():
+    movie = _cr2(rel_path="DCIM/100CANON/IMG_1234.MOV")
+    assert isinstance(resolve_group(_jpg(), [_jpg(), movie], RULE), Refusal)
+
+
+def test_the_stem_prefix_keeps_the_directory():
+    assert stem_prefix("DCIM/100CANON/IMG_1234.JPG") == "DCIM/100CANON/IMG_1234."
+```
+
+リポジトリ側（`app/tests/test_upload_repository.py` の隣）:
+
+```python
+def test_the_batch_is_a_keyset_so_a_left_over_row_does_not_loop(repo):
+    """5xx で未評価のまま残した行があっても、次のバッチは前へ進む."""
+    first = repo.unstacked_batch("dest-1", "", 1)
+    second = repo.unstacked_batch("dest-1", first[0]["id"], 1)
+    assert second[0]["id"] > first[0]["id"]
+
+
+def test_invalidated_records_are_not_extracted(repo, db):
+    db.execute(
+        "UPDATE upload_record SET invalidated_at = ?, invalidated_reason = '編集された'"
+        " WHERE id = ?",
+        (now_iso(), record_id),
+    )
+    assert [r["id"] for r in repo.unstacked_batch("dest-1", "", 50)] == []
+
+
+def test_records_of_another_destination_are_not_extracted(repo, db):
+    assert [r["id"] for r in repo.unstacked_batch("dest-2", "", 50)] == []
+
+
+def test_records_that_are_not_complete_are_not_extracted(repo, db):
+    db.execute("UPDATE upload_record SET state = 'pending' WHERE id = ?", (record_id,))
+    assert [r["id"] for r in repo.unstacked_batch("dest-1", "", 50)] == []
+
+
+def test_marking_stacked_upgrades_a_previously_skipped_partner(repo, db):
+    """相方が後から完了したときに、**見送りの側も stacked へ上がる**（§9.11）."""
+    repo.mark_skipped(record_id, "相方が見つからない")
+    repo.mark_stacked([record_id], "stack-1")
+    assert repo.get(record_id)["stack_state"] == "stacked"
+
+
+def test_marking_does_not_touch_an_invalidated_record(repo, db):
+    """無効化は状態機械と直交するフラグ（§8）。**後から結果を書き込まない。**"""
+    db.execute(
+        "UPDATE upload_record SET invalidated_at = ?, invalidated_reason = '編集された'"
+        " WHERE id = ?",
+        (now_iso(), record_id),
+    )
+    repo.mark_stacked([record_id], "stack-1")
+    assert repo.get(record_id)["stack_state"] is None
+```
+
+- [ ] **Step 2: 失敗を確認する**
+
+Run: `uv run pytest app/tests/test_stacking_rules.py -q`
+Expected: FAIL（モジュールが無い）
+
+- [ ] **Step 3: 最小実装**
+
+```python
+"""RAW/JPEG の組を決める規則（§6・§9.11）.
+
+**判断だけを持つ。** DB も相手も触らないので、4 条件を 1 つずつ壊す試験が書ける。
+"""
+
+from __future__ import annotations
+
+from collections.abc import Sequence
+from dataclasses import dataclass
+from datetime import datetime
+from posixpath import splitext
+
+from ..profiles.model import StackRule
+
+# 範囲引きの上端。UTF-8 で最も大きい符号位置。
+HIGH_SENTINEL = "\U0010ffff"
+
+
+@dataclass(frozen=True)
+class Candidate:
+    record_id: str
+    media_file_id: str
+    rel_path: str            # **カード上の原名**（`source_entry.rel_path`）
+    captured_at: str
+    captured_at_source: str
+    origin: str
+    state: str
+    remote_asset_id: str | None
+    invalidated: bool
+
+
+@dataclass(frozen=True)
+class Group:
+    members: tuple[Candidate, ...]      # **先頭が primary**
+
+
+@dataclass(frozen=True)
+class Refusal:
+    reason: str
+
+
+def stem_prefix(rel_path: str) -> str:
+    """`DCIM/100CANON/IMG_1234.JPG` → `DCIM/100CANON/IMG_1234.`"""
+    return splitext(rel_path)[0] + "."
+
+
+def extension_of(rel_path: str) -> str:
+    return splitext(rel_path)[1].lstrip(".").upper()
+
+
+def resolve_group(
+    primary: Candidate, candidates: Sequence[Candidate], rule: StackRule
+) -> Group | Refusal:
+    """4 条件（§6）で組を決める. 同じ組はどの member から呼んでも同じになる."""
+    if not rule.enabled:
+        return Refusal("プロファイルがスタックを使わない")
+    if extension_of(primary.rel_path) not in rule.extensions:
+        return Refusal("この拡張子は組の対象ではない")
+    prefix = stem_prefix(primary.rel_path)
+    partners = [
+        c
+        for c in candidates
+        if c.media_file_id != primary.media_file_id
+        and stem_prefix(c.rel_path) == prefix
+        and extension_of(c.rel_path) in rule.extensions
+    ]
+    if not partners:
+        return Refusal("相方が見つからない")
+    for partner in partners:
+        if partner.invalidated or partner.state != "complete":
+            return Refusal("相方はまだ送信が終わっていない")
+        if partner.captured_at_source != primary.captured_at_source:
+            return Refusal("相方と時刻の根拠が違う（EXIF と mtime を突き合わせない）")
+        if not _within(primary.captured_at, partner.captured_at, rule.tolerance_seconds):
+            return Refusal("相方と撮影時刻が一致しない")
+        if partner.origin != "created_by_us" or primary.origin != "created_by_us":
+            return Refusal("自分が上げたと証明できない資産が含まれる")
+        if partner.remote_asset_id is None:
+            return Refusal("相方の資産 ID が分からない")
+    members = sorted(
+        [primary, *partners], key=lambda c: rule.extensions.index(extension_of(c.rel_path))
+    )
+    return Group(members=tuple(members))
+
+
+def _within(left: str, right: str, tolerance_seconds: int) -> bool:
+    """**文字列ではなく瞬間で比べる**（オフセットが違っても同じ時刻でありうる）."""
+    delta = datetime.fromisoformat(left) - datetime.fromisoformat(right)
+    return abs(delta.total_seconds()) <= tolerance_seconds
+```
+
+`db/uploads.py` に足す問い合わせ（**述語の順序は部分索引と一字一句そろえる**）。
+`HIGH_SENTINEL` は `..core.uploads.stacking` から import する（範囲の上端は
+組の規則と同じ場所に置く）:
+
+```python
+    def unstacked_batch(
+        self, destination_id: str, after_id: str, limit: int
+    ) -> list[sqlite3.Row]:
+        """スタック未評価の完了レコードを id の昇順で取る（keyset）.
+
+        **`LIMIT` を繰り返すだけでは足りない。** 相手が落ちていて未評価のまま
+        残した行は次の周回でも条件を満たすので、同じ行を読み直して進まなくなる。
+        """
+        return list(
+            self._conn.execute(
+                "SELECT * FROM upload_record"
+                " WHERE destination_id = ? AND state = 'complete' AND stack_state IS NULL"
+                "   AND invalidated_at IS NULL AND id > ?"
+                " ORDER BY id LIMIT ?",
+                (destination_id, after_id, limit),
+            )
+        )
+
+    def source_of(self, media_file_id: str) -> sqlite3.Row | None:
+        """公開の元になったカード上の観測（最初のもの）.
+
+        **公開名では組を作れない**（衝突時に改名される。§6）。
+        """
+        return self._conn.execute(
+            "SELECT volume_instance_id, rel_path FROM source_entry"
+            " WHERE media_file_id = ? AND state = 'published'"
+            " ORDER BY observed_at, id LIMIT 1",
+            (media_file_id,),
+        ).fetchone()
+
+    def siblings_on_card(self, volume_instance_id: str, prefix: str) -> list[sqlite3.Row]:
+        """同じカードで `<dir>/<stem>.` から始まる観測（UNIQUE 索引の範囲引き）."""
+        return list(
+            self._conn.execute(
+                "SELECT rel_path, media_file_id FROM source_entry"
+                " WHERE volume_instance_id = ? AND rel_path > ? AND rel_path < ?"
+                "   AND media_file_id IS NOT NULL AND state = 'published'",
+                (volume_instance_id, prefix, prefix + HIGH_SENTINEL),
+            )
+        )
+
+    def record_for(
+        self, destination_id: str, target_epoch: int, media_file_id: str
+    ) -> sqlite3.Row | None:
+        return self._conn.execute(
+            "SELECT * FROM upload_record"
+            " WHERE destination_id = ? AND target_epoch = ? AND media_file_id = ?",
+            (destination_id, target_epoch, media_file_id),
+        ).fetchone()
+
+    def mark_stacked(self, record_ids: Sequence[str], remote_stack_id: str) -> None:
+        """組の全員を 1 つのトランザクションで記録する.
+
+        **見送り済みの相方も引き上げる。** 見送りは「今は組めない」の記録であって
+        永久の拒否ではない（§9.11）。
+        """
+        with immediate(self._conn):
+            for record_id in record_ids:
+                self._conn.execute(
+                    "UPDATE upload_record SET stack_state = 'stacked', remote_stack_id = ?,"
+                    " stack_reason = NULL, updated_at = ?"
+                    " WHERE id = ? AND invalidated_at IS NULL"
+                    "   AND (stack_state IS NULL OR stack_state = 'skipped')",
+                    (remote_stack_id, now_iso(), record_id),
+                )
+
+    def mark_skipped(self, record_id: str, reason: str) -> None:
+        self._conn.execute(
+            "UPDATE upload_record SET stack_state = 'skipped', stack_reason = ?,"
+            " remote_stack_id = NULL, updated_at = ?"
+            " WHERE id = ? AND invalidated_at IS NULL AND stack_state IS NULL",
+            (reason, now_iso(), record_id),
+        )
+```
+
+- [ ] **Step 4: 通ることを確認する**
+
+Run: `uv run pytest app/tests/test_stacking_rules.py app/tests/test_upload_repository.py -q`
+Expected: PASS
+
+- [ ] **Step 5: 変異試験**
+
+対象: `stacking.py` と `uploads.py` の新規部分。最低限この 8 つ:
+`captured_at_source` の比較を外す、`tolerance_seconds` を `<` から `<=` へ、
+`origin` の検査を primary だけにする、`extensions.index` を逆順に、
+`c.media_file_id != primary.media_file_id` を外す（自分を相方に数える）、
+`stem_prefix` の比較を「前方一致」に緩める、`unstacked_batch` の `id > ?` を外す、
+`mark_stacked` の `OR stack_state = 'skipped'` を外す。
+
+**素通りを見たら、まず「その変異は狙いの判断を壊しているか」を疑う**
+（`docs/HANDOFF.md` §5 の型の表）。
+
+- [ ] **Step 6: コミット**
+
+```bash
+git add app/src/mediaferry/core/uploads/stacking.py app/src/mediaferry/db/uploads.py app/tests
+git commit -m "feat(uploads): 組の解決と抽出の問い合わせを足す"
+```
+
+---
+
+## Task 5: 第 2 パス（`Stacker`）
+
+**Files:**
+- Create: `app/src/mediaferry/jobs/stacker.py`
+- Modify: `app/src/mediaferry/api/jobs_wiring.py:130-180`
+- Test: `app/tests/test_stacker.py`
+
+**Interfaces:**
+- Consumes: Task 3 の client、Task 4 の `resolve_group` とリポジトリ
+- Produces: `Stacker.run(ctx: JobContext, destination_id: str) -> StackOutcome`、
+  `StackOutcome(stacked: int, skipped: int, deferred: int)`
+
+- [ ] **Step 1: 失敗するテストを書く**
+
+`world` は fake Immich・DB・`JobContext` を束ねた fixture で、`world.stacker()` は
+次を組み立てて返す（`test_uploader.py` の組み立てと同じ形）。
+
+```python
+Stacker(conn, uploads, destinations, ProfileRegistry(conn), open_client, preflight)
+```
+
+```python
+def test_a_pair_is_stacked_with_the_jpeg_as_primary(world):
+    outcome = world.stacker().run(world.ctx, "dest-1")
+    assert outcome.stacked == 1
+    stack = world.immich.only_stack()
+    assert stack["primary"] == world.asset_of("IMG_1234.JPG")
+
+
+def test_both_records_are_marked(world):
+    world.stacker().run(world.ctx, "dest-1")
+    assert {r["stack_state"] for r in world.records()} == {"stacked"}
+    assert len({r["remote_stack_id"] for r in world.records()}) == 1
+
+
+def test_the_primary_is_not_moved_when_it_is_already_right(world):
+    """**相手を無駄に変えない**（§9.11）."""
+    world.stacker().run(world.ctx, "dest-1")
+    assert ("PUT", "/api/stacks") not in [(m, p.split("?")[0]) for m, p in world.immich.requests]
+
+
+def test_an_existing_stack_with_the_same_members_is_adopted(world):
+    """**中断からの回収**。送信直後に落ちた世界を作って、次の実行で拾わせる."""
+    world.immich.stacks["stack-9"] = {"primary": world.asset("JPG"), "assets": [...]}
+    world.stacker().run(world.ctx, "dest-1")
+    assert world.records()[0]["remote_stack_id"] == "stack-9"
+    assert ("POST", "/api/stacks") not in world.immich.requests    # 作り直さない
+
+
+def test_a_foreign_stack_is_left_alone(world):
+    """利用者が手で作った組を作り直さない."""
+    world.immich.stacks["stack-9"] = {"primary": "someone-else", "assets": [...]}
+    world.stacker().run(world.ctx, "dest-1")
+    assert world.records()[0]["stack_state"] == "skipped"
+    assert ("POST", "/api/stacks") not in world.immich.requests
+
+
+def test_a_5xx_leaves_the_record_unevaluated(world):
+    """宛先が落ちているだけなら、次の送信で再試行するのが正しい（§9.11）."""
+    world.immich.fail_next = 99
+    world.stacker().run(world.ctx, "dest-1")
+    assert world.records()[0]["stack_state"] is None
+
+
+def test_a_4xx_is_recorded_as_skipped(world):
+    world.immich.reject_stacks = True
+    world.stacker().run(world.ctx, "dest-1")
+    assert world.records()[0]["stack_state"] == "skipped"
+
+
+def test_a_cancelled_job_stops_before_the_next_group(world):
+    world.cancel_after_first_group()
+    outcome = world.stacker().run(world.ctx, "dest-1")
+    assert outcome.stacked == 1 and world.immich.stack_count() == 1
+
+
+def test_a_lost_lease_stops_before_touching_the_peer(world):
+    """外部への副作用の**直前**にリースを確認する（§9.3 と同じ作法）."""
+    world.expire_lease()
+    with pytest.raises(LeaseLost):
+        world.stacker().run(world.ctx, "dest-1")
+    assert world.immich.stack_count() == 0
+
+
+def test_the_second_pass_runs_after_an_approval(world):
+    """承認で complete になった行も対象（§9.11）."""
+    ...
+```
+
+- [ ] **Step 2: 失敗を確認する**
+
+Run: `uv run pytest app/tests/test_stacker.py -q`
+Expected: FAIL（`Stacker` が無い）
+
+- [ ] **Step 3: 最小実装**
+
+```python
+"""アップロードの第 2 パス —— RAW/JPEG のスタッキング（§9.11）.
+
+**状態機械には状態を足さない。** 送り終わったレコードのうち未評価のものを
+拾い、組が成立すれば相手のスタックを作る。組めない場合も見送りとして決着
+させる（未評価のまま残すと、送信のたびにライブラリ全体を舐めることになる）。
+"""
+
+from __future__ import annotations
+
+BATCH_SIZE = 50
+
+
+@dataclass(frozen=True)
+class StackOutcome:
+    stacked: int
+    skipped: int
+    deferred: int      # 相手が落ちていて未評価のまま残した数
+
+
+class Stacker:
+    def __init__(self, conn, uploads, destinations, registry, open_client, preflight) -> None:
+        ...
+
+    def run(self, ctx: JobContext, destination_id: str) -> StackOutcome:
+        cursor, stacked = "", 0
+        skipped = deferred = 0
+        while True:
+            if ctx.cancelled():
+                break
+            batch = self._uploads.unstacked_batch(destination_id, cursor, BATCH_SIZE)
+            if not batch:
+                break
+            for row in batch:
+                cursor = row["id"]
+                if ctx.cancelled():
+                    return StackOutcome(stacked, skipped, deferred)
+                result = self._one(ctx, row)
+                ...
+        return StackOutcome(stacked, skipped, deferred)
+```
+
+`_one` の骨子:
+
+1. 対象の `media_file` とプロファイル（**その `media_file` の `profile_revision_id` の
+   定義**を使う。レコードは使った版で解釈する、が本案件の作法）を読む
+2. `rule.enabled` が偽なら `mark_skipped("プロファイルがスタックを使わない")`
+3. `source_of` でカード上の原名を得る。無ければ
+   `mark_skipped("カード上の観測が残っていない")`
+4. `siblings_on_card` で相方候補を引き、`record_for` で宛先側のレコードを付ける
+5. `resolve_group`。`Refusal` なら `mark_skipped(reason)`
+6. **ここから相手に触る。** `ctx.assert_lease()` を呼んでから、各 member の
+   `client.asset(remote_asset_id)` を読む
+7. 全員 `stack_id is None` なら `create_stack` → 応答の primary が先頭 member で
+   なければ `set_stack_primary` → `mark_stacked`
+8. 全員が同じ `stack_id` を持ち、その primary が組の中に居るなら
+   `stack_by_primary` でメンバーを引き、集合が一致すれば `mark_stacked`（回収）、
+   一致しなければ `mark_skipped("相手側に別のスタックがある")`
+9. それ以外の形（一部だけスタック済み、別々のスタック）は
+   `mark_skipped("相手側に別のスタックがある")`
+
+例外の対応:
+
+```python
+        except (ImmichUnavailable, ImmichAuthFailed, ImmichRedirected) as exc:
+            # **未評価のまま残す。** 宛先が落ちている・鍵が失効しただけなら、
+            # 直したあとの送信で自然に再試行される。
+            ctx.emit("warning", f"スタックを保留した: {exc}")
+            return "deferred"
+        except (ImmichRejected, ImmichProtocolError) as exc:
+            # 再試行しても直らない。**理由を残して画面に出す。**
+            self._uploads.mark_skipped(row["id"], f"相手が受け付けない: {exc}")
+            return "skipped"
+```
+
+`jobs_wiring.run_upload` は、3 つの mode すべての**あとで**第 2 パスを回す
+（`approve` と `recheck` の早期 return を、共通の後処理へ落ちる形に直す）。
+
+```python
+        outcome = Stacker(
+            conn, uploads, destinations, ProfileRegistry(conn), open_client, preflight
+        ).run(ctx, destination_id)
+        if outcome.stacked or outcome.skipped or outcome.deferred:
+            ctx.emit(
+                "info",
+                f"スタック: {outcome.stacked} 組 / 見送り {outcome.skipped} 件"
+                f" / 保留 {outcome.deferred} 件",
+            )
+```
+
+- [ ] **Step 4: 通ることを確認する**
+
+Run: `uv run pytest app/tests/test_stacker.py app/tests/test_uploader.py app/tests/test_upload_e2e.py -q`
+Expected: PASS
+
+- [ ] **Step 5: 変異試験**
+
+`assert_lease` の呼び出しを消す、`ctx.cancelled()` の確認を消す、
+`cursor = row["id"]` を消す、既存スタックの集合一致を `>=` に緩める、
+`set_stack_primary` を無条件に呼ぶ、例外の 2 分岐を入れ替える、
+`BATCH_SIZE` を 1 にする（**これは検出できなくてよい変異** —— 検出できないなら
+その旨を記録する）。
+
+- [ ] **Step 6: コミット**
+
+```bash
+git add app/src/mediaferry/jobs/stacker.py app/src/mediaferry/api/jobs_wiring.py app/tests/test_stacker.py
+git commit -m "feat(uploads): アップロードの第 2 パスでスタックを作る"
+```
+
+---
+
+## Task 6: 再計算が見送りを未評価へ戻す
+
+**Files:**
+- Modify: `app/src/mediaferry/jobs/recompute.py:278-345`
+- Test: `app/tests/test_recompute.py`
+
+- [ ] **Step 1: 失敗するテストを書く**
+
+```python
+def test_a_changed_capture_time_reopens_a_skipped_stack(world):
+    """時刻がずれていて見送った組は、再計算で成立しうる（§6）."""
+    world.record_skipped("相方と撮影時刻が一致しない")
+    world.recompute()
+    assert world.record()["stack_state"] is None
+    assert world.record()["stack_reason"] is None
+
+
+def test_an_unchanged_capture_time_leaves_the_skip_alone(world):
+    world.record_skipped("相方が見つからない")
+    world.recompute_without_change()
+    assert world.record()["stack_state"] == "skipped"
+
+
+def test_an_existing_stack_is_not_reopened(world):
+    """**相手側に既にあるものを作り直さない**（§6）."""
+    world.record_stacked("stack-1")
+    world.recompute()
+    assert world.record()["stack_state"] == "stacked"
+```
+
+- [ ] **Step 2: 失敗を確認する**
+
+Run: `uv run pytest app/tests/test_recompute.py -q`
+Expected: FAIL
+
+- [ ] **Step 3: 最小実装**
+
+`_apply_batch` の `tally.changed += 1` の隣（**同じトランザクションの中**）で:
+
+```python
+                tally.reopened += self._reopen_stack(row)
+```
+
+```python
+    def _reopen_stack(self, row: sqlite3.Row) -> int:
+        """見送りを未評価へ戻す（§6）.
+
+        時刻が動くと、成立していなかった組が成立しうる。抽出は未評価しか拾わない
+        ので、戻さないと二度と再評価されない。**`stacked` は戻さない**
+        （相手側に既にあるものを作り直さない）。
+        """
+        return self._conn.execute(
+            "UPDATE upload_record SET stack_state = NULL, stack_reason = NULL, updated_at = ?"
+            " WHERE media_file_id = ? AND stack_state = 'skipped'",
+            (now_iso(), row["id"]),
+        ).rowcount
+```
+
+`RecomputeOutcome` に `reopened` を足し、ジョブの `emit` にも出す。
+
+- [ ] **Step 4: 通ることを確認する**
+
+Run: `uv run pytest app/tests/test_recompute.py -q`
+Expected: PASS
+
+- [ ] **Step 5: 変異試験**
+
+`stack_state = 'skipped'` の条件を外す（`stacked` も戻る）、`_reopen_stack` を
+`_same` の側（変化なし）でも呼ぶ、トランザクションの外へ出す。
+
+- [ ] **Step 6: コミット**
+
+```bash
+git add app/src/mediaferry/jobs/recompute.py app/tests/test_recompute.py
+git commit -m "feat(recompute): 時刻が動いたらスタックの見送りを未評価へ戻す"
+```
+
+---
+
+## Task 7: API（一覧・フィルタ・サマリ）
+
+**Files:**
+- Modify: `app/src/mediaferry/api/routes_uploads.py:56-64,198-224`
+- Modify: `app/src/mediaferry/api/routes_system.py:81-107`
+- Modify: `app/src/mediaferry/db/uploads.py`（`list_records` に `stack_state`）
+- Test: `app/tests/test_api_uploads.py`、`app/tests/test_api.py`
+
+- [ ] **Step 1: 失敗するテストを書く**
+
+```python
+def test_a_record_shows_its_stack_state(client, world):
+    body = client.get("/api/uploads").json()["records"][0]
+    assert body["stack_state"] == "skipped"
+    assert body["stack_reason"] == "相方が見つからない"
+    assert body["remote_stack_id"] is None
+
+
+def test_records_can_be_filtered_by_stack_state(client, world):
+    body = client.get("/api/uploads?stack_state=skipped").json()
+    assert [r["id"] for r in body["records"]] == [world.skipped_id]
+
+
+def test_an_unknown_stack_state_is_refused(client):
+    assert client.get("/api/uploads?stack_state=nonsense").status_code == 400
+
+
+def test_the_dashboard_counts_stacks_per_destination(client, world):
+    summary = client.get("/api/dashboard").json()["destinations"][0]
+    assert summary["stacked"] == 2 and summary["stack_skipped"] == 1
+```
+
+- [ ] **Step 2: 失敗を確認する**
+
+Run: `uv run pytest app/tests/test_api_uploads.py -q`
+Expected: FAIL
+
+- [ ] **Step 3: 最小実装**
+
+`_view` に 3 列を足し、`list_records` に `stack_state: str | None` を足す
+（`'stacked'` / `'skipped'` / `'unevaluated'` を受け、`unevaluated` は `IS NULL`。
+**未知の値は 400** ——「絞ったつもりで全件が出る」を作らない）。
+`_destination_summary` に 2 つのカウントを足す（**無効化された記録は数えない**）。
+
+- [ ] **Step 4: 通ることを確認する**
+
+Run: `uv run pytest app/tests/test_api_uploads.py app/tests/test_api.py -q && npm --prefix web run typegen && uv run pytest app/tests/test_api_types_are_current.py -q`
+Expected: PASS（型の再生成を忘れると最後のテストが落ちる）
+
+- [ ] **Step 5: 変異試験**
+
+未知の `stack_state` を素通しにする、`unevaluated` を `= 'unevaluated'` にする、
+サマリの `invalidated_at IS NULL` を外す。
+
+- [ ] **Step 6: コミット**
+
+```bash
+git add app/src/mediaferry/api app/src/mediaferry/db/uploads.py app/tests web/src/api/types.ts
+git commit -m "feat(api): スタックの状態を一覧とサマリに出す"
+```
+
+---
+
+## Task 8: 画面
+
+**Files:**
+- Modify: `web/src/screens/Destinations.tsx`
+- Modify: `web/src/screens/Dashboard.tsx`
+- Test: `web/src/screens/screens.test.tsx`
+
+**注意:** **API はあるが画面から呼べない機能は、無いのと同じ**（Phase 4 の教訓）。
+見送りの理由は「対象外のときだけ出す」形にしない —— 出ていないことが仕様に
+見える（Phase 5 Task 8 の教訓）。
+
+- [ ] **Step 1: 失敗するテストを書く**
+
+```tsx
+it("宛先ごとにスタックの見送りと理由を出す", async () => {
+  stubApi({
+    "/destinations": destinations,
+    "/uploads?destination_id=d1&stack_state=skipped": {
+      records: [{ id: "u1", media_file_id: "m1", stack_reason: "相方が見つからない" }],
+    },
+  });
+  render(<DestinationsScreen />);
+  expect(await screen.findByText(/相方が見つからない/)).toBeInTheDocument();
+});
+
+it("見送りが無いときは、無いと書く", async () => {
+  stubApi({ "/uploads?destination_id=d1&stack_state=skipped": { records: [] } });
+  render(<DestinationsScreen />);
+  expect(await screen.findByText(/見送りはありません/)).toBeInTheDocument();
+});
+
+it("ダッシュボードがスタックの件数を出す", async () => { ... });
+```
+
+- [ ] **Step 2: 失敗を確認する**
+
+Run: `npm --prefix web test`
+Expected: FAIL
+
+- [ ] **Step 3: 最小実装** — `Destinations.tsx` に「スタック」節、`Dashboard.tsx` の
+`DestinationSummary` 型に 2 つのフィールドと表示を足す。
+
+- [ ] **Step 4: 通ることを確認する**
+
+Run: `npm --prefix web test && npm --prefix web run lint && npm --prefix web run typecheck && npm --prefix web run build`
+Expected: すべて PASS
+
+- [ ] **Step 5: コミット**
+
+```bash
+git add web/src
+git commit -m "feat(web): スタックの結果と見送りの理由を画面に出す"
+```
+
+---
+
+## Task 9: 受け入れ（E2E）と crash consistency
+
+**Files:**
+- Modify: `app/tests/exif_fixtures.py`（`a_tiff_with`）
+- Modify: `app/tests/system/harness.py:74-88`（Canon カードに対を足す）
+- Create: `web/e2e/phase6.spec.ts`
+- Modify: `app/tests/test_crash_consistency.py`
+
+- [ ] **Step 1: 合成 CR2 が EXIF を返すことを先に測る**
+
+**推測で進めない。** `exifread` が TIFF ヘッダだけの `.CR2` を読めるかは、
+実際に読ませて確かめる。
+
+```python
+def test_a_synthetic_cr2_yields_its_capture_time(tmp_path):
+    path = tmp_path / "IMG_1234.CR2"
+    path.write_bytes(a_tiff_with(b"2026:08:19 10:30:00"))
+    assert read_datetime_original(path) == "2026:08:19 10:30:00"
+```
+
+Run: `uv run pytest app/tests/test_exif.py -q`
+読めなければ、CR2 の形（TIFF マジックの後に `CR\x02\x00`）まで足して測り直す。
+**読めないまま E2E を組むと、組が成立しない筋書きを「仕様どおり」と誤読する。**
+
+- [ ] **Step 2: E2E の失敗を確認する**
+
+`harness.py` の `_a_canon_card` に、**同じ EXIF 時刻を持つ** `IMG_0003.JPG` と
+`IMG_0003.CR2` を足す。`web/e2e/phase6.spec.ts` を書く:
+
+1. Canon カードを取り込む
+2. 宛先を作り、ライブラリから 2 枚を送る
+3. 送信後、**Immich（fake）側で 1 スタックになっている**
+4. 画面（宛先）に「スタック済み」が出る
+5. `pre_existing` の相方を混ぜた組では**理由の文言**が読める
+
+Run: `npm --prefix web run test:e2e`
+Expected: FAIL
+
+- [ ] **Step 3: 通るまで直す**
+
+Run: `npm --prefix web run test:e2e`
+Expected: 3 spec すべて PASS（journey / phase5 / phase6）
+
+- [ ] **Step 4: crash consistency**
+
+`test_crash_consistency.py` に、**第 2 パスの `POST /stacks` の直後に
+`os._exit` する**筋書きを足し、次の送信で「既存スタックの集合一致」経路が
+回収することを確かめる。
+
+Run: `uv run pytest app/tests/test_crash_consistency.py -q`
+Expected: PASS
+
+- [ ] **Step 5: コミット**
+
+```bash
+git add app/tests web/e2e
+git commit -m "test: スタッキングの受け入れと中断からの回収を通す"
+```
+
+---
+
+## Task 10: 実 Immich とドキュメント
+
+**Files:**
+- Modify: `app/tests/test_immich_live.py`
+- Modify: `docs/HANDOFF.md`
+- Modify: `docs/phase6-plan.md`（この計画に「実装で分かったこと」を書き戻す）
+
+- [ ] **Step 1: 実機のテストを書く**
+
+既存の `test_the_whole_upload_path_works_against_a_real_server` と同じ作法で
+（**作った資産とスタックは必ず後片付けし、消せなければ送出する**）:
+
+```python
+@pytest.mark.needs_immich
+def test_the_stack_path_works_against_a_real_server(client, tmp_path):
+    """作成 → 取得 → primary 差し替え → 削除まで実機で通す.
+
+    **「既存スタックを吸収する」挙動そのものも測る。** こちらが触らないと決めた
+    判断の前提なので、前提の側を確かめる（§9.11）。
+    """
+```
+
+- [ ] **Step 2: 実機で流す**
+
+```bash
+set -a; . ~/.config/mediaferry/test-immich.env; set +a
+uv run pytest -m needs_immich -q
+```
+
+Expected: PASS。**吸収の挙動が仕様と違ったら、`docs/design.md` §9.11 と
+この計画へ実測を書き戻してから実装を直す。**
+
+- [ ] **Step 3: 全体を流す**
+
+```bash
+uv run pytest && uv run pytest -m needs_system && uv run ruff check . && uv run ruff format --check .
+npm --prefix web test && npm --prefix web run lint && npm --prefix web run typecheck && npm --prefix web run build && npm --prefix web run test:e2e
+```
+
+**テストの実行中にソースやテストを書き換えない**（`docs/HANDOFF.md` §1）。
+
+- [ ] **Step 4: ドキュメント**
+
+`docs/HANDOFF.md` を更新する。**数値は実測で取り直す**
+（`git rev-list --count HEAD`、各テストの件数）。
+
+- 現在地の表に Phase 6 を足す
+- 「Phase 5 から Phase 6 へ送ったもの」を、**多重化はやらないと決めた**記録へ
+  書き換える（3 度目の先送りにしない）
+- 残件に「Canon の実カードで RAW+JPEG の組が成立するか」を足す
+  （`phase1-manual-checklist.md` の 13〜16 番の隣）
+
+- [ ] **Step 5: コミット**
+
+```bash
+git add -A docs app/tests
+git commit -m "docs(mediaferry): Phase 6 の実測と引き継ぎを書き戻す"
+```
+
+---
+
+## 実装の前に決めてあること
+
+**いずれも既定を置いてある。異論は計画レビューで出す。**
+
+| 項目 | 決め | 理由 |
+| --- | --- | --- |
+| 組の規則の版 | **対象レコードの `media_file.profile_revision_id` の定義**を使う | 「レコードは使った版で解釈する」が本案件の作法（§8）。相方が別の版で取り込まれていても、判断の根拠は 1 つに決まる |
+| 相方の探索範囲 | **同じ `volume_instance`** | 同じカードの同じシャッターだけを組にする。別カードから来た同名ファイルは組にしない |
+| `BATCH_SIZE` | **50** | 再計算（Phase 5 Task 6）と同じ桁。1 件あたり相手への往復が 1〜3 回あるので、これ以上増やしてもリースの窓が伸びるだけ |
+| 保留（5xx）の上限 | **持たない** | 未評価のまま残すだけで、相手にも DB にも痕跡が増えない。宛先が直れば次の送信で解決する |
+| 手動の再スタック | **作らない** | 再評価の経路は「再送」と「再計算」の 2 つで足りる（YAGNI） |
+| 動画の組 | **作らない** | `MVI_*.MOV` は 1 ファイルで完結する。組にする根拠が無い |
+
+## レビュー記録
+
+（計画レビューと実装差分レビューの記録をここへ書き足す。**`--fresh` で回すこと**
+—— 継ぎ足すと、自分が提案した対処の周りが盲点になる。`docs/HANDOFF.md` §5）
