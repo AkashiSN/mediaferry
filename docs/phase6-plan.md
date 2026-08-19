@@ -1207,7 +1207,8 @@ def _within(left: str, right: str, tolerance_seconds: int) -> bool:
             (destination_id,),
         ).fetchone()
         if current is None or current["epoch"] != target_epoch:
-            raise StackGroupChanged("宛先の向き先が変わった")
+            # **組ごとではなく、固定した epoch 全体が無効。** run が打ち切る。
+            raise DestinationChanged("宛先の向き先が変わった")
         profile = self._conn.execute(
             "SELECT 1 FROM device_profile"
             " WHERE id = (SELECT profile_id FROM profile_revision WHERE id = ?)"
@@ -1475,6 +1476,15 @@ def test_a_cancel_committed_during_the_get_stops_before_the_post(world):
     assert ("POST", "/api/stacks") not in world.immich.requests
 
 
+def test_a_repoint_stops_the_pass_instead_of_scanning_the_rest(world):
+    """**固定した epoch 全体が無効なので、続けても同じ失敗を繰り返すだけ。**"""
+    world.with_pairs(200)
+    world.repoint_during_first_group()
+    world.stacker().run(world.ctx, "dest-1")
+    assert ("POST", "/api/stacks") not in world.immich.requests
+    assert world.rows_examined() <= 2
+
+
 def test_a_repoint_during_the_get_stops_before_the_post(world):
     """**開始後に別ライブラリへ向き替えられたら、そこで止まる。**
 
@@ -1564,6 +1574,14 @@ class StackGroupChanged(RuntimeError):
     """組の前提が、相手を待っている間に変わった. その組は諦める."""
 
 
+class DestinationChanged(StackGroupChanged):
+    """**宛先の向き先が変わった。** 固定した epoch 全体が無効なので打ち切る.
+
+    組ごとの事情ではないので `continue` しても同じ失敗を繰り返すだけになる
+    （旧 epoch の未評価行を末尾まで keyset 走査することになる）。
+    """
+
+
 class DestinationUnusable(RuntimeError):
     """組ではなく宛先の障害. **第 2 パスごと打ち切る.**"""
 
@@ -1596,8 +1614,14 @@ class Stacker:
                         # 全件ぶん要求を投げ続けることになる。残りは次の送信へ渡す。
                         ctx.emit("warning", f"宛先の障害でスタックを中断した: {exc}")
                         return StackOutcome(stacked, skipped, deferred + 1)
+                    except DestinationChanged as exc:
+                        # **打ち切る。** 続けても旧 epoch の未評価行を末尾まで
+                        # 走査して、同じ失敗を繰り返すだけになる。
+                        ctx.emit("info", f"宛先の向き先が変わったのでスタックを中断した: {exc}")
+                        return StackOutcome(stacked, skipped, deferred)
                     except StackGroupChanged as exc:
                         # 前提が変わった。**記録もしない**（次の送信で組み直す）。
+                        # 次の行では現行のプロファイル版を読み直すので、進んでよい。
                         ctx.emit("info", f"組が変わったのでスタックを見送った: {exc}")
                         continue
                     except LeaseLost:
@@ -1811,6 +1835,27 @@ def test_a_sync_without_a_definition_change_does_not_reopen(registry, db):
     assert _row(db, record)["stack_state"] == "skipped"
 
 
+def test_an_omitted_stack_equals_an_explicit_disabled_one(registry, db):
+    """**Phase 6 より前の定義は `stack` キーを持たない。**
+
+    正規化せずに生の JSON で比べると、名前だけ変えた版で「省略 → 明示的な
+    disabled」になり、規則は実質同じなのに全件を戻すことになる。
+    """
+    _install_a_revision_without_a_stack_section(db, profile="my-camera")
+    record = _a_skipped_record(db, profile="my-camera")
+    registry.update("my-camera", _definition(name="別の名前"))     # stack は disabled のまま
+    assert _row(db, record)["stack_state"] == "skipped"
+
+
+def test_going_from_omitted_to_enabled_reopens(registry, db):
+    _install_a_revision_without_a_stack_section(db, profile="my-camera")
+    record = _a_skipped_record(db, profile="my-camera")
+    registry.update("my-camera", _definition(stack={"enabled": True,
+                                                    "extensions": ["JPG", "CR2"],
+                                                    "tolerance_seconds": 0}))
+    assert _row(db, record)["stack_state"] is None
+
+
 def test_a_stacked_record_is_never_reopened(registry, db):
     record = _a_stacked_record(db, profile="my-camera")
     registry.update("my-camera", _definition(stack={"enabled": False}))
@@ -1901,7 +1946,9 @@ Expected: FAIL
             "UPDATE device_profile SET current_revision_id = ? WHERE id = ?",
             (revision_id, profile_id),
         )
-        if _stack_rule_of(previous_json) != _stack_rule_of(definition_json):
+        if previous_json is not None and _stack_rule_of(previous_json) != _stack_rule_of(
+            definition_json
+        ):
             self._conn.execute(
                 "UPDATE upload_record SET stack_state = NULL, stack_reason = NULL,"
                 " updated_at = ?"
@@ -1911,12 +1958,19 @@ Expected: FAIL
             )
 
 
-def _stack_rule_of(definition_json: str | None) -> object:
-    """定義から `stack` 節だけを取り出す（無ければ None）."""
-    if definition_json is None:
-        return None
-    return json.loads(definition_json).get("stack")
+def _stack_rule_of(definition_json: str) -> StackRule:
+    """定義から `stack` 節を**正規化して**取り出す.
+
+    **生の dict で比べてはいけない。** 旧リビジョンの JSON には `stack` キーが無く
+    （Task 0 の契約で `STACK_DISABLED` として読む）、新しい JSON は
+    `definition_to_json` の正規形で `{"enabled": false, ...}` を持つ。生で比べると
+    **規則が実質変わっていないのに全件を戻す**ことになる。
+    """
+    return parse_definition(json.loads(definition_json)).stack
 ```
+
+`previous_json is None`（新規作成）では比べない。新しいプロファイルにはメディアが
+無いので戻す対象も無く、「旧 JSON の `stack` 省略」と混ぜないほうが読みやすい。
 
 `_upsert_revision` と `update` / `create` の両方から `_publish_revision` を呼ぶ。
 **どちらも既存の `immediate(self._conn)` の中にある**ので、helper は新しい
@@ -2291,3 +2345,25 @@ helper が別の `BEGIN IMMEDIATE` を開かなければデッドロックは生
 **止め時の判断:** レビュー側は「blocker は消え、指摘は逓減局面。上記を反映したら
 短くもう 1 巡し、新しい major が無ければ実装へ進んでよい」と述べている。
 **4 巡目を短く回す。**
+
+### 計画レビュー 4 巡目（2026-08-19、codex `--fresh`。blocker 0 / major 0 / minor 2）
+
+**新しい major は無し。「実装に着手してよい」との判定。** 計画レビューはここで
+打ち切り、以後は実装差分を見せる側へ移す。
+
+| # | 指摘 | 判定 | 反映 |
+| --- | --- | --- | --- |
+| minor 1 | **`_stack_rule_of` が「省略」と「明示的な disabled」を同一視していない。** Phase 6 より前の定義は `stack` キーを持たず、`definition_to_json` の正規形は `{"enabled": false, ...}` を書くので、名前だけ変えた版で**規則は実質同じなのに全件を戻す** | **妥当。** Task 0 の「省略は `STACK_DISABLED`」という契約と、比較の実装がずれていた | `parse_definition(...).stack` で**正規化してから**比べる。`previous_json is None`（新規作成）では比べない。「省略 → 明示的 disabled で戻らない」「省略 → enabled で戻る」の試験を足した |
+| minor 2 | **repoint 後も旧 epoch の残り全件を走査する。** 無限ループにはならないが、`StackGroupChanged` を握って `continue` するので、各行で同じ失敗を繰り返す | **妥当**（安全性ではなく打ち切り効率） | `DestinationChanged(StackGroupChanged)` を分け、**固定した epoch 全体が無効なときは第 2 パスを正常中止する**。プロファイル編集は次の行で現行版を読み直すので `continue` のままでよい |
+
+**確認された「指摘なし」:** `_assert_current` が 3 経路とも呼び出し側の
+`BEGIN IMMEDIATE` の中にあること、`mark_skipped` の `StackGroupChanged` が
+（cursor が先に進むので）同一実行の無限再評価を作らないこと、`mark_stacked` の
+全員 CAS が例外で取引ごと巻き戻ること、`_publish_revision` を既存の取引の中の
+共通 helper にする方針（`create` は media が無く 0 行、`duplicate` は `create` 経由）。
+
+**止め時の判断:** レビュー側は「安全性・冪等性・リースに関する新しい major は
+出ず、残りは実装中に局所テストで閉じられる minor。計画レビューを重ねるより、
+Task ごとの実装差分で SQL の実行計画・例外型の流れ・実際の Immich 応答形を
+確認する方が品質への寄与が大きい」と述べている。**計画レビューは 4 巡で打ち切り、
+実装へ入る。**
