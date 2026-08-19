@@ -238,6 +238,8 @@ merge:
   min_part_size_gib: 15
   sequence_pattern: '_(?P<seq>\d{4})_D$'
   output_name: "DJI_{ts}_{first_seq}-{last_seq}_MERGED.MP4"
+stack:
+  enabled: false                  # RAW を書かない機種なので組が無い（下記）
 immich:
   tags: ["DJI Osmo Pocket 4"]
   tag_pre_existing: true          # 既存アセットにもタグは付ける（追加のみ）
@@ -293,6 +295,50 @@ GUI での編集は既存定義を書き換えず、**新しいリビジョン�
 
 DST の境界で壁時計が曖昧（1 時間が 2 回ある）または存在しない場合は、
 それぞれ「先に来る方を採用」「1 時間後ろへずらす」と決め、`captured_at_note` に記録する。
+
+### スタッキング（`stack`）
+
+RAW+JPEG を同時記録する機種では、1 回のシャッターで 2 つのファイルができる
+（70D なら `IMG_1234.CR2` と `IMG_1234.JPG`）。Immich では別々の写真として並ぶので、
+**アップロード後にスタックで束ねる**（§9.11）。組を決めるのはローカルであり、
+プロファイルの規則として書く。
+
+```yaml
+stack:
+  enabled: true
+  extensions: [JPG, CR2]     # 先頭ほど primary。ここに無い拡張子は組に入れない
+  tolerance_seconds: 0       # captured_at の許容差。既定は完全一致
+```
+
+**組の同一性は 4 条件すべてを満たすものとする。**
+
+| 条件 | どこで見るか | 何を閉じるか |
+| --- | --- | --- |
+| 同じカード | `source_entry.volume_instance_id` | 連番が一周した別カードとの誤結合 |
+| 同じディレクトリ・同じ stem | `source_entry.rel_path`（**カード上の原名**） | 公開時の改名で組が崩れる／別物と組む |
+| `captured_at` が一致 | `media_file.captured_at` | 同一シャッターであることの直接の証拠 |
+| `captured_at_source` が同じ | `media_file.captured_at_source` | EXIF の時刻と mtime の時刻という**別々の時計**を突き合わせない |
+
+**ライブラリ側の `media_file.rel_path` の stem で組んではならない。** 公開は衝突時に
+名前へ `_{stamp}` を足す（§9.3）ので、次の経路で別々の写真が 1 つのスタックに入る。
+
+1. カード A が JPEG のみで `IMG_1234.JPG` を公開済み
+2. 連番が一周した別のカード B から `IMG_1234.CR2` が入る。CR2 は衝突しないので改名されない
+3. ライブラリ上の stem が一致してしまう
+
+`captured_at` の比較は文字列ではなく**瞬間**で行う（`captured_at` はオフセット付きで
+保存される §8 の唯一の例外なので、パースしてから比べる）。`tolerance_seconds` の既定は
+0（完全一致）で、ビルトインの `canon-eos` も 0 とする —— **実カードを一度も見ていない
+うちは緩めない**（`merge.enabled: false` と同じ理由）。
+
+この 4 条件には副次的な効き目がある。`exifread` が CR2 から `DateTimeOriginal` を
+読めない環境では、JPG は `exif`・CR2 は `mtime` fallback になって `captured_at_source` が
+食い違い、必ず見送りになる。**実データを見ていないというリスクが、黙った誤動作では
+なく理由つきの見送りとして画面に出る。**
+
+`recompute_timestamps` で `captured_at` が動くと、成立していなかった組が成立しうる。
+再計算ジョブは**実際に `captured_at` を動かしたレコードの見送り（`skipped`）を未評価へ
+戻す**。`stacked` は戻さない（相手側に既にあるものを作り直さない）。
 
 ## 7. ストレージレイアウト
 
@@ -471,7 +517,7 @@ quick_fingerprint = sha1( b"mfq" ‖ u8(version) ‖ u64le(size) ‖ w[0] ‖ w[
 | `upload_destination` | `id`, `name` UNIQUE, `kind`('immich'), `enabled`, `archived_at`, `current_revision_id`, `created_at` |
 | `destination_revision` | `id`, `destination_id`, `revision`, `target_epoch`, `base_url`, `public_url`, `credential_id`, `remote_user_id`, `server_instance_id`, `verified_at`, `created_at`。**不変** |
 | `destination_credential` | `id`, `destination_id`, `revision`, `secret_encrypted`, `key_fingerprint`, `created_at`, `purged_at` |
-| `upload_record` | `id`, `destination_id`, `target_epoch`, `media_file_id`, `state`, `selection_rule`, `origin`, `first_check_result`, `remote_asset_id`, `remote_is_trashed`, `remote_checked_at`, `checksum`, `attempts`, `last_error`, `eligibility_reason`, `merge_group_id`, `claim_job_id`, `claim_token`, `claim_expires_at`, `destination_revision_id`, `invalidated_at`, `invalidated_reason`, `updated_at` |
+| `upload_record` | `id`, `destination_id`, `target_epoch`, `media_file_id`, `state`, `selection_rule`, `origin`, `first_check_result`, `remote_asset_id`, `remote_is_trashed`, `remote_checked_at`, `checksum`, `attempts`, `last_error`, `eligibility_reason`, `merge_group_id`, `claim_job_id`, `claim_token`, `claim_expires_at`, `destination_revision_id`, `stack_state`, `remote_stack_id`, `stack_reason`, `invalidated_at`, `invalidated_reason`, `updated_at` |
 
 **転送先はユーザが管理するプロファイルである。** デバイスプロファイルと同じく
 Web 画面で作成・編集する（§12.3）。用語を 3 層に分ける。
@@ -1107,10 +1153,65 @@ pending → checking → uploading → asset_known → tagging → fixing_dateti
 承認を経ずに `complete` にする。
 
 失敗は指数バックオフで最大 `upload_max_attempts` 回まで再試行する。上限に達したら
-記録して次のファイルへ進む（1 件の失敗で全体を止めない）。並列度は既定 2。
+記録して次のファイルへ進む（1 件の失敗で全体を止めない）。
+
+**並列度の設定は置かない。** 送信は宛先ごとに 1 本のジョブで 1 件ずつ直列に進める
+（上記）。ワーカーを多重化しても増やせるのは失敗の同時多発であり、律速は
+ネットワークと相手側の取り込みである。設定だけを残すと「効かない設定」が画面に
+並ぶので、`UPLOAD_CONCURRENCY` は持たない。
 
 Immich の API は破壊的変更が入りうるため、エンドポイントとフィールド名は
 Phase 0 で対象バージョンの OpenAPI 定義から確定し、対応バージョンを README に明記する。
+
+### 9.11 RAW / JPEG のスタッキング
+
+RAW+JPEG の組（§6 の `stack`）を、アップロードの後に Immich のスタックとして束ねる。
+**アップロードの状態機械には状態を足さない。** スタックは「両方が送り終わって初めて
+成立する」操作で、`upload_record` は (メディア × 宛先) の粒度しか持たないため、
+**同じジョブの第 2 パス**として回す。`mode` が `send` / `recheck` / `approve` の
+いずれでも走らせる（承認で `complete` になった行も対象になる）。
+
+抽出は `state = 'complete'` かつ `stack_state IS NULL` の行を batch で区切って回す。
+**このジョブで新しく完了した行だけが自然に残る**ので、ライブラリ全体を舐めない。
+1 件ごとにキャンセルを観測し、外部への副作用の前にリースを確認する。
+
+組が成立しない場合も**見送りとして決着させる**（未評価のまま残さない。残すと毎回
+全件を舐めることになる）。見送りの理由は画面に出す。
+
+| 事象 | 記録 |
+| --- | --- |
+| `stack.enabled` が偽／自分の拡張子が `extensions` に無い | `skipped`（対象外） |
+| 相方が居ない／まだ `complete` でない／無効化済み | `skipped`（後から相方が完了したとき、**相方の側から `stacked` へ更新される**） |
+| どちらかの `origin` が `created_by_us` でない | `skipped`。**自分が上げたと証明できない資産は束ねない** |
+
+`origin` の条件は §9.10 のタグ付けより厳しくしている。`POST /stacks` は
+「渡した資産が既存スタックの primary なら、その既存スタックを吸収する」ため、
+タグ（追加のみ）と違って**利用者が手で作った組を作り直しうる**。
+
+相手の現在の姿は送る直前に読み直す（`AssetResponseDto.stack`）。
+
+| 相手の状態 | すること |
+| --- | --- |
+| 全員が `stack: null` | `POST /stacks {assetIds}` |
+| 既存スタックがあり、**メンバー集合が我々の組と一致** | 作らない。`stacked` と `remote_stack_id` を記録する（**中断からの回収経路**） |
+| 既存スタックがあり、集合が一致しない | **触らない。** `skipped` に理由を残す |
+
+`AssetResponseDto.stack` は `{id, primaryAssetId, assetCount}` しか返さないので、集合の
+一致は `GET /stacks?primaryAssetId=` でメンバーを引いて確かめる。既存スタックの
+primary が我々の組の外にある場合は引く手がかりが無いので、その時点で「一致しない」
+として触らない。
+
+primary は `POST` の応答を見て、`extensions` の先頭側でなければ `PUT /stacks/{id}` で
+直す。**既に望みどおりなら `PUT` を打たない**（相手を無駄に変えない）。どれが primary に
+なるかは相手の仕様に書かれていないので、確認そのものは常に行う。
+
+**中断からの回収に新しい状態は要らない。** 送信中や直後に落ちれば行は未評価のまま
+残り、次の送信で「集合が一致」の経路が回収する。
+
+失敗の扱いは 2 つに分ける。**接続不能と 5xx は未評価のまま残す**（宛先が落ちている
+だけなら、次の送信で再試行するのが正しい）。**4xx は理由つきの見送り**にする
+（再試行しても直らない）。どちらもジョブは次の組へ進み、送信そのものは失敗にしない
+—— スタックはアップロードの後始末であって、成否をアップロードに巻き込む理由がない。
 
 ## 10. アップロードの対象と宛先
 
@@ -1330,7 +1431,7 @@ claim では **(a) を必ず評価し、`selection_rule` に対応する現在�
 
 | 種類 | 例 | 保存先 |
 | --- | --- | --- |
-| **インフラ設定** | データルート、待ち受け、認証、既定 TZ、並列度、ログ | 環境変数 > DB（Web 画面） > 既定値 |
+| **インフラ設定** | データルート、待ち受け、認証、既定 TZ、送信のタイムアウトと再試行、ログ | 環境変数 > DB（Web 画面） > 既定値 |
 | **プロファイル** | デバイスプロファイル、**転送先プロファイル** | **DB のみ。Web 画面で管理する** |
 
 プロファイルはユーザのデータであって基盤の設定ではない。デバイスごとの
@@ -1354,7 +1455,6 @@ claim では **(a) を必ず評価し、`selection_rule` に対応する現在�
 | `HTTP_PORT` | `8080` | 待ち受けポート |
 | `AUTH_PASSWORD` | 未設定 | 設定すると認証が有効になる |
 | `SECRET_KEY` | 未設定 | 転送先の API キーを暗号化するマスター鍵（§12.3）。転送先が 1 件でもあれば必須 |
-| `UPLOAD_CONCURRENCY` | `2` | アップロード並列度。**Phase 3 では効かない**（送信は 1 件ずつ直列。多重化は Phase 4 のワーカー多重化と一緒に入れる） |
 | `UPLOAD_TIMEOUT_SECONDS` | `86400` | HTTP タイムアウト |
 | `UPLOAD_MAX_ATTEMPTS` | `3` | リトライ上限 |
 | `AUTO_IMPORT` | `trusted` | `trusted` / `off`。§12.1 |
@@ -1716,7 +1816,7 @@ Phase 1 の完了時に独立リポジトリ（`AkashiSN/mediaferry`）へ移管
 | `--immich-server` / `IMMICH_SERVER` | 転送先プロファイルの `base_url`（§12.3） |
 | `IMMICH_API_KEY` | 転送先プロファイルの API キー |
 | `--immich-client-timeout` | `MEDIAFERRY_UPLOAD_TIMEOUT_SECONDS` |
-| `--immich-concurrency` | `MEDIAFERRY_UPLOAD_CONCURRENCY` |
+| `--immich-concurrency` | **対応なし。** 送信は宛先ごとに 1 本で直列（§9.10） |
 | `--device-tag` / `--tag` | プロファイルの `immich.tags` |
 | `--split-tolerance` | プロファイルの `merge.tolerance_seconds` |
 | `--split-min-size-gib` | プロファイルの `merge.min_part_size_gib` |
@@ -1748,6 +1848,7 @@ Phase 0 と Phase 1 に集める**という基準で切った。
 | **3. Immich 同期**（完了） | 状態機械、**転送先プロファイルの CRUD と接続検証**、`origin` 判別、タグ、タイムゾーン補正、複数宛先への同時アップロード | 実 Immich にアップロードでき、途中で落としても再開し、既存アセットを勝手に変更しない。2 つの宛先へ同じメディアを送って独立に追跡できる。**実機の確認は `needs_immich` の `test_immich_live.py`**（既定の `pytest` では走らない） |
 | **4. Web UI** | React SPA、SSE、認証、CSRF。ここで初めて非 loopback バインドを既定にできる | エンドユーザが CLI に触れず一連の操作を完了できる |
 | **5. 汎用化** | `generic-dcim` / `canon-eos`、プロファイル編集 UI、信頼登録 UX、複数デバイス | EOS 70D の SD カードを取り込める |
+| **6. スタッキング** | RAW+JPEG を Immich のスタックとして束ねる（§6 の `stack`、§9.11）。`UPLOAD_CONCURRENCY` の撤去 | RAW+JPEG が 1 スタックになり、既存スタックのある資産には触らず、見送りの理由が画面に出る |
 
 **Phase 1〜3 は配布可能なリリースにしない。** `BIND_HOST` の既定を loopback とし、
 認証と CSRF が入る Phase 4 より前に LAN へ公開しない。アプリは非特権でも
@@ -1961,6 +2062,17 @@ content-addressed ストレージも採用しない。`library/` が SD の DCIM
 | **リースを守る仕掛けは 2 つ要る**（1 件ごとの pulse と、行をまたいだ経過時間） | `with_lease_pulse` は処理が間隔より短く終わると 1 度も打たない。1 枚ずつが短くても 100 枚で積もる。**どちらも `assert_lease` を先に呼ぶ** —— `extend_lease` は `cancelling` でも延ばすので、heartbeat だけだとキャンセルを取りこぼす |
 | **自動取り込みの文言は「いま始まるか」から作り、画面と確認ダイアログが同じ関数を見る** | 判定は watcher の候補条件と同じ（`AUTO_IMPORT` / `provisional` / `identity_confidence`）。片方だけで判定すると、§12.1 の同意の内容と実挙動がずれる |
 | **`/settings` が未解決・失敗の間は既定へ倒さない。信頼の操作もさせない** | `AUTO_IMPORT` を `trusted` と仮定すると、実設定が off でも「いまの中身をコピーする」同意を取ることになる |
+
+### Phase 6 の設計で確定した事項（2026-08-19）
+
+| 判断 | 理由 |
+| --- | --- |
+| **ワーカーの多重化はやらない。`UPLOAD_CONCURRENCY` を撤去する** | §9.10 は当初から「送信は宛先ごとに 1 本、1 件ずつ直列」と決めており、多重化で増やせるのは失敗の同時多発だけ。設定だけが 3 フェーズにわたって「効かないまま画面に並ぶ」状態だった。claim の契約（type も宛先も見ない単一 worker）と停止の契約に触る改造を、得るもの無しに入れない |
+| **スタックは `upload_record` の 3 列で持つ**（`stack_state` / `remote_stack_id` / `stack_reason`） | スタックの成否は「その宛先へその資産を送った結果」そのもので、`remote_asset_id` と同じ層。別表にすると無効化・再送・`target_epoch` との整合を二重に守ることになる |
+| **抽出は `complete` かつ未評価の行だけ。組めない場合も見送りとして決着させる** | 未評価のまま残すと、送信のたびにライブラリ全体を舐める。決着は「今は組めない」の記録であって永久の拒否ではなく、後から相方が完了したときに相方の側から `stacked` へ更新される |
+| **組の同一性はカード上の原名で取る**（§6 の 4 条件） | 公開名は衝突時に改名される。ライブラリ側の stem で組むと、連番が一周した別カードのファイルと束ねうる |
+| **`origin` は両方が `created_by_us` のときだけ** | `POST /stacks` は既存スタックを吸収する。タグ（追加のみ）より影響が大きく、`tag_pre_existing` に相乗りさせられない |
+| **中断からの回収に新しい状態を作らない** | 未評価のまま残った行を、次の送信で「既存スタックのメンバー集合が我々の組と一致する」経路が拾う。§9.10 の `checking` が既存を照合するのと同じ形 |
 
 ### Phase 3 の実装で確定した事項（2026-08-18）
 
