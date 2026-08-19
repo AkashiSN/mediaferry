@@ -49,11 +49,17 @@ export class ApiError extends Error {
   }
 }
 
+// **どこが悪いかを落とさない code。** 定型文だけでは直せない失敗がある
+// （プロファイルの定義は 1 枚の YAML なので、「形式が正しくありません」では
+// どの項目を直せばよいか分からない）。`detail` は API がこちらで書いた日本語
+// だけを入れる契約なので、添えても相手由来の値は出ない（§13）。
+const WITH_DETAIL = new Set(["validation_failed"]);
+
 /** 画面に出す日本語。**知らない code のときだけ** detail を添える。 */
 export function displayMessage(code: string, detail: string): string {
   const known = MESSAGES[code];
   if (known !== undefined) {
-    return known;
+    return detail && WITH_DETAIL.has(code) ? `${known}（${detail}）` : known;
   }
   return detail ? `予期しないエラー（詳細: ${detail}）` : "予期しないエラー";
 }

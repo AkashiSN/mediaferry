@@ -11,7 +11,8 @@ export type Confirmation =
   | { kind: "archive_destination"; name: string }
   | { kind: "discard_merge_group"; groupLabel: string; publishedCount: number }
   | { kind: "adopt_failed_merge"; groupLabel: string; reason: string }
-  | { kind: "approve_datetime"; current: string | null; proposed: string };
+  | { kind: "approve_datetime"; current: string | null; proposed: string }
+  | { kind: "archive_profile"; slug: string };
 
 export function describe(confirmation: Confirmation): { title: string; body: ReactNode } {
   switch (confirmation.kind) {
@@ -62,6 +63,17 @@ export function describe(confirmation: Confirmation): { title: string; body: Rea
         body: (
           <p>
             現在 {confirmation.current ?? "（不明）"} → 変更後 {confirmation.proposed}
+          </p>
+        ),
+      };
+    case "archive_profile":
+      return {
+        title: "このプロファイルを候補から外しますか",
+        body: (
+          <p>
+            {confirmation.slug} を候補から外します。取り込み済みのファイルと過去の
+            リビジョンは残りますが、
+            <strong>以後このプロファイルは新しいカードの判定に使われなくなります</strong>。
           </p>
         ),
       };
