@@ -13,7 +13,7 @@ export type Confirmation =
   | { kind: "adopt_failed_merge"; groupLabel: string; reason: string }
   | { kind: "approve_datetime"; current: string | null; proposed: string }
   | { kind: "archive_profile"; slug: string }
-  | { kind: "trust_volume"; label: string; starts: boolean; blocked: string | null };
+  | { kind: "trust_volume"; label: string; state: "starts" | "pending" | "blocked"; reason: string | null };
 
 export function describe(confirmation: Confirmation): { title: string; body: ReactNode } {
   switch (confirmation.kind) {
@@ -72,19 +72,22 @@ export function describe(confirmation: Confirmation): { title: string; body: Rea
         title: "このカードを信頼しますか",
         body: (
           <>
-            {confirmation.starts ? (
+            {confirmation.state !== "blocked" ? (
               <p>
                 {confirmation.label} を信頼すると、
                 <strong>
                   いま入っている中身も含めて、以後このカードを挿すだけで NAS へコピーされます
                 </strong>
-                （画面の操作は要りません）。取り込みは承認の数秒後に始まります。
+                （画面の操作は要りません）。取り込みは
+                {confirmation.state === "pending"
+                  ? `${confirmation.reason}始まります。`
+                  : "承認の数秒後に始まります。"}
               </p>
             ) : (
               // **始まらないのに「コピーされます」と書かない。** 同意の内容が
               // 実挙動とずれる（`watcher.py` の CANDIDATES を満たしていない）。
               <p>
-                {confirmation.label} の信頼を記録します。ただし{confirmation.blocked}ので、
+                {confirmation.label} の信頼を記録します。ただし{confirmation.reason}ので、
                 <strong>いまは自動取り込みは始まりません</strong>。条件が整うと、挿すだけで
                 NAS へコピーされるようになります。
               </p>

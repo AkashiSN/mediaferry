@@ -126,12 +126,15 @@ class VolumeWatcher:
 
     # ------------------------------------------------------------------
     def _enqueue_ready(self) -> list[str]:
-        # AUTO_IMPORT は Tier.RUNTIME。起動時のスナップショットを見てはいけない。
-        if SettingsService(self._conn, self._env).snapshot().auto_import != "trusted":
-            return []
         jobs: list[str] = []
         store = JobStore(self._conn)
         with immediate(self._conn):
+            # **「積んでよいか」の入力は全部、この排他区間の中で読む。**
+            # AUTO_IMPORT は Tier.RUNTIME なので起動時のスナップショットを見ては
+            # いけないが、外で読むのも同じ穴 —— 読んだ後・積む前に別接続の
+            # `PUT /settings` が `off` を commit できてしまう（§12.1）。
+            if SettingsService(self._conn, self._env).snapshot().auto_import != "trusted":
+                return []
             for row in self._conn.execute(CANDIDATES).fetchall():
                 # **印を付けるのと同じ条件を、同じトランザクションの中で取る。**
                 # SQLite に行ロックは無いので、更新できた側だけが実行者になる。

@@ -674,11 +674,32 @@ describe("デバイスの信頼登録", () => {
     expect(screen.queryByText(/次にこのカードを挿したときから/)).toBeNull();
   });
 
-  it("信頼済みでも確度が低ければ、自動取り込みしないと書く", async () => {
+  it("確度が低いだけなら、始まらないとは断言しない", async () => {
+    // **初回の観測は必ず low。** その観測で指紋を憶えるので、画面が一覧を
+    // 取り直すと同じ挿入のまま high になり、次の tick で積まれる
+    // （`jobs/watcher.py` と `jobs/volumes.py::_identity_confidence`）。
+    // 「いまは始まりません」と書くと、数秒後に始まる経路を否定してしまう。
     stubDevices([{ ...base, trusted: true, identity_confidence: "low" }]);
     renderDevices();
 
-    expect(await screen.findByText(/このカードだと確かめられていない/)).toBeInTheDocument();
+    expect(await screen.findByText(/確かめられしだい/)).toBeInTheDocument();
+    expect(screen.queryByText(/いまは自動取り込みは始まりません/)).toBeNull();
+  });
+
+  it("確度が低い未承認カードの確認は、同意の対象を示したまま条件を添える", async () => {
+    stubDevices([{ ...base, trusted: false, identity_confidence: "low" }]);
+    renderDevices();
+
+    await userEvent.click(await screen.findByRole("button", { name: "SD_Card を信頼する" }));
+
+    const dialog = await screen.findByRole("dialog");
+    // **同意の対象は変わらない**（いま入っている中身も含めてコピーされる）。
+    // 変わるのは「いつ始まるか」だけ。blocked の文（信頼を記録するだけ）に
+    // 落とすと、始まる見込みのカードで同意を取り損ねる。
+    expect(dialog).toHaveTextContent(/いま入っている中身も含めて/);
+    expect(dialog).toHaveTextContent(/確かめられしだい/);
+    expect(dialog).toHaveTextContent(/取り違え/);
+    expect(dialog).not.toHaveTextContent(/いまは自動取り込みは始まりません/);
   });
 
   it("watcher が積まない状態では、承認しても始まらないと書く", async () => {
@@ -689,6 +710,14 @@ describe("デバイスの信頼登録", () => {
 
     expect(await screen.findByText(/いまは自動取り込みは始まりません/)).toBeInTheDocument();
     expect(screen.queryByText(/数秒後から自動で取り込みます/)).toBeNull();
+  });
+
+  it("確度が低いカードでも、承認したら始まる見込みだと書く", async () => {
+    stubDevices([{ ...base, trusted: false, identity_confidence: "low" }]);
+    renderDevices();
+
+    expect(await screen.findByText(/確かめられしだい/)).toBeInTheDocument();
+    expect(screen.queryByText(/いまは自動取り込みは始まりません/)).toBeNull();
   });
 
   it("AUTO_IMPORT が off なら、承認しても始まらないと書く", async () => {

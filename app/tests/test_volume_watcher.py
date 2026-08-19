@@ -629,3 +629,71 @@ def test_the_watcher_owns_its_own_broker_connection(client):
     assert state.watcher._client is not state.volumes._client, (
         "watcher が API 側のブローカー接続を借りている"
     )
+
+
+def test_the_auto_import_setting_is_read_inside_the_exclusive_section(
+    watcher, database, db, volumes, monkeypatch
+):
+    """**「積んでよいか」の入力は全部、同じ排他区間の中で読む。**
+
+    `AUTO_IMPORT` だけ `BEGIN IMMEDIATE` の外で読んでいると、その隙間に
+    別接続の `PUT /settings` が `off` を commit でき、**off になった後で
+    `auto_import_at` を刻んで import を積める**（§12.1）。detach / archive /
+    信頼解除 / 版は排他の中へ移してあるので、ここだけ古い snapshot になる。
+
+    値そのものでは区別が付かない（読んだ順で正しい答えが変わる）ので、
+    **割り込もうとした側が書き込みロックで弾かれること**を見る。
+    """
+    import sqlite3
+
+    from mediaferry.settings import SettingsService
+
+    a_known_card(watcher, volumes)
+    trust_the_card(db)
+    other = database.connect()
+    other.execute("PRAGMA busy_timeout = 0")
+    committed: list[bool] = []
+    original = SettingsService.snapshot
+
+    def peeking(self):  # noqa: ANN001, ANN202
+        got = original(self)
+        try:
+            other.execute(
+                "INSERT INTO app_setting (key, value, updated_at)"
+                " VALUES ('AUTO_IMPORT', 'off', '2026')"
+            )
+            committed.append(True)
+        except sqlite3.OperationalError:
+            pass  # 書き込みロックに弾かれた＝排他の中で読んでいる
+        return got
+
+    monkeypatch.setattr(SettingsService, "snapshot", peeking)
+    try:
+        watcher.tick()
+    finally:
+        other.close()
+
+    assert committed == [], "AUTO_IMPORT を読んだ後に、別接続が off を commit できた"
+
+
+def test_a_first_seen_card_starts_after_the_screen_refreshes_it(watcher, db, volumes):
+    """**挿し直さなくても、同じ挿入のうちに自動取り込みが始まる。**
+
+    初回の観測は `identity_confidence = low`（憶えた指紋が無い）だが、その観測で
+    指紋を憶える。`GET /devices` は必ず `refresh()` を走らせるので、承認して
+    一覧を取り直すと同じ挿入のまま `high` になり、次の tick で積まれる。
+    **画面の文言はこの経路を否定してはいけない**（`autoImportOutlook` の
+    「確かめられしだい」がこれに対応する）。
+    """
+    watcher.tick()  # 初回の観測。low のまま指紋を憶える
+    assert db.execute("SELECT identity_confidence FROM volume_instance").fetchone()[0] == "low"
+    trust_the_card(db)
+    watcher.tick()
+    assert queued_imports(db) == [], "確度が low の間は積まない"
+
+    # 画面が一覧を取り直す（`GET /devices` は必ず refresh する）。
+    watcher._volumes.refresh()
+    assert db.execute("SELECT identity_confidence FROM volume_instance").fetchone()[0] == "high"
+
+    watcher.tick()
+    assert len(queued_imports(db)) == 1

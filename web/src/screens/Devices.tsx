@@ -29,47 +29,64 @@ type Devices = { volumes: Volume[] };
 type Setting = { key: string; value: string | null };
 type Settings = { settings: Setting[] };
 
-/** いま自動取り込みが始まる状態か。**`watcher.py` の `CANDIDATES` と同じ条件。**
+/** 自動取り込みの見通し。**`watcher.py` の `CANDIDATES` と同じ条件を見る。**
  *
  * 画面の文言と確認ダイアログの両方がここを見る。片方だけで判定すると、
  * 同意の内容と実挙動がずれる（それが起きた）。
+ *
+ * **`pending` を `blocked` と混ぜない。** 初回の観測は必ず
+ * `identity_confidence = low` だが、その観測で指紋を憶えるので、一覧を取り直すと
+ * 同じ挿入のまま `high` になり次の tick で積まれる（`_identity_confidence`）。
+ * 「いまは始まりません」と書くと、**数秒後に始まる経路を否定する**ことになる。
  */
-export function autoImportOutlook(
-  volume: Volume,
-  autoImport: string | null,
-): { starts: boolean; blocked: string | null } {
+export type Outlook =
+  | { state: "starts"; reason: null }
+  | { state: "pending"; reason: string }
+  | { state: "blocked"; reason: string };
+
+export function autoImportOutlook(volume: Volume, autoImport: string | null): Outlook {
   if (autoImport === null) {
     // **読めていない値を `trusted` と仮定しない。** 実設定が off でも
     // 「いまの中身を数秒後にコピー」と誤って同意を取ることになる。
-    return { starts: false, blocked: "設定をまだ読めていない" };
+    return { state: "blocked", reason: "設定をまだ読めていない" };
   }
   if (autoImport !== "trusted") {
-    return { starts: false, blocked: "AUTO_IMPORT が off な" };
+    return { state: "blocked", reason: "AUTO_IMPORT が off な" };
   }
   if (volume.provisional) {
-    return { starts: false, blocked: "対象の中身がまだ見つかっていない" };
+    return { state: "blocked", reason: "対象の中身がまだ見つかっていない" };
   }
   if (volume.identity_confidence !== "high") {
-    return { starts: false, blocked: "このカードだと確かめられていない" };
+    return { state: "pending", reason: "このカードだと確かめられしだい" };
   }
-  return { starts: true, blocked: null };
+  return { state: "starts", reason: null };
 }
 
 /** そのカードで自動取り込みがどうなるか（§12.1）。 */
 export function autoImportState(volume: Volume, autoImport: string | null): string {
-  const { starts, blocked } = autoImportOutlook(volume, autoImport);
+  const outlook = autoImportOutlook(volume, autoImport);
+  // **承認すると、いま挿してあるこのカードの中身が対象になる。** watcher は
+  // 毎 tick、現在 live な presence から候補を組み直すので、条件が揃っていれば
+  // 承認の数秒後に取り込みが始まる。「次に挿したときから」と書くと、同意の
+  // 対象を取り違えさせる。**逆に、条件が揃っていないのに断言もしない。**
   if (!volume.trusted) {
-    // **承認すると、いま挿してあるこのカードの中身が対象になる。** watcher は
-    // 毎 tick、現在 live な presence から候補を組み直すので、条件が揃っていれば
-    // 承認の数秒後に取り込みが始まる。「次に挿したときから」と書くと、同意の
-    // 対象を取り違えさせる。**逆に、条件が揃っていないのに断言もしない。**
-    return starts
-      ? "未承認です。承認すると、いま入っている中身も含めて、数秒後から自動で取り込みます。"
-      : `未承認です。承認しても、${blocked}ので、いまは自動取り込みは始まりません。`;
+    switch (outlook.state) {
+      case "starts":
+        return "未承認です。承認すると、いま入っている中身も含めて、数秒後から自動で取り込みます。";
+      case "pending":
+        return `未承認です。承認すると、${outlook.reason}、いま入っている中身も含めて自動で取り込みます。`;
+      case "blocked":
+        return `未承認です。承認しても、${outlook.reason}ので、いまは自動取り込みは始まりません。`;
+    }
   }
-  return starts
-    ? "信頼済み。挿すと自動で取り込みます。"
-    : `信頼済みですが、${blocked}ので、いまは自動取り込みは始まりません。`;
+  switch (outlook.state) {
+    case "starts":
+      return "信頼済み。挿すと自動で取り込みます。";
+    case "pending":
+      return `信頼済み。${outlook.reason}自動で取り込みます。`;
+    case "blocked":
+      return `信頼済みですが、${outlook.reason}ので、いまは自動取り込みは始まりません。`;
+  }
 }
 
 export function DevicesScreen() {
