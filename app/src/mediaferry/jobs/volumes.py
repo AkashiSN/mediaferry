@@ -19,6 +19,7 @@ from ..adapters.fs import DirfdTree, exists_beneath
 from ..clock import now_iso
 from ..core.manifest import content_manifest_digest
 from ..core.profiles.matching import VolumeFacts, resolve_profile
+from ..db.connection import immediate
 from ..db.profiles import ProfileRegistry
 from ..db.sources import (
     detach_absent,
@@ -147,18 +148,24 @@ class VolumeService:
             # その間の抜き差しで pass の対象がずれる。
             volumes = self._client.list_volumes()
 
-            # pass 1: 観測を DB へ反映する
-            observed = []
-            seen_presence: list[str] = []
-            for volume in volumes:
-                device_id = upsert_device(self._conn, volume.usb)
-                volume_id = resolve_volume_instance(self._conn, volume, device_id)
-                presence_id = sync_presence(self._conn, volume_id, volume)
-                seen_presence.append(presence_id)
-                observed.append((volume, volume_id, presence_id))
+            # **pass 1 と 2 を 1 つのトランザクションに入れる。**
+            # この層は 2 つのインスタンスが別々の接続で同時に動く（API 側と
+            # VolumeWatcher）。囲まないと autocommit で 1 文ずつ流れ、
+            # 相手の観測が pass の合間に挟まって「反映済みなのに detach された」
+            # 接続ができる。判定（pass 3）はマウントを伴って長いので外に出す。
+            with immediate(self._conn):
+                # pass 1: 観測を DB へ反映する
+                observed = []
+                seen_presence: list[str] = []
+                for volume in volumes:
+                    device_id = upsert_device(self._conn, volume.usb)
+                    volume_id = resolve_volume_instance(self._conn, volume, device_id)
+                    presence_id = sync_presence(self._conn, volume_id, volume)
+                    seen_presence.append(presence_id)
+                    observed.append((volume, volume_id, presence_id))
 
-            # pass 2: 消えた接続を detach する
-            detach_absent(self._conn, seen_presence)
+                # pass 2: 消えた接続を detach する
+                detach_absent(self._conn, seen_presence)
 
             # pass 3: 確定した live 集合を使って判定する
             definitions = [ref.definition for ref in self._registry.active()]

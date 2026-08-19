@@ -36,6 +36,7 @@ from ..db.sessions import SessionStore, revoke_sessions_if_password_changed
 from ..jobs.reconcile import Reconciler, ReconcileReport
 from ..jobs.runner import JobRunner
 from ..jobs.volumes import VolumeService
+from ..jobs.watcher import VolumeWatcher
 from ..settings import Settings, SettingsService, bootstrap_data_root, startup_warnings
 from .errors import install_error_handlers
 from .jobs_wiring import JobWorld
@@ -60,6 +61,8 @@ class AppState:
     env: Mapping[str, str]
     volumes: VolumeService
     runner: JobRunner
+    # 自動取り込みの監視（§12.1）。API 側とは別のスコープを持つ。
+    watcher: VolumeWatcher
     # 起動時に解決した設定（`Tier.RESTART` までは起動中に変わらない）。
     settings: Settings
     # **アプリに 1 つだけ持つ。** 要求ごとに作ると、キーごとのロックが共有されず
@@ -122,6 +125,15 @@ def create_app(
         # VolumeService は長寿命なので専用の接続を持つ。他とは共有しない。
         volumes_conn = database.connect()
         volumes = VolumeService(volumes_conn, ProfileRegistry(volumes_conn), client)
+        # **watcher は 1 つのスコープを丸ごと持つ**（専用の接続・レジストリ・
+        # VolumeService・ブローカー接続）。API 側の VolumeService を借りると、
+        # その refresh は API 側のブローカー接続を通るので、停止のために
+        # watcher のソケットを閉じても黙り込んだ refresh が止まらない。
+        # 接続だけ共有すると、1 本の接続を 2 つのロックで同時に使うことになる。
+        watcher_client = (
+            broker_factory() if broker_factory else BrokerClient(settings.broker_socket)
+        )
+        watcher = VolumeWatcher(database, env, watcher_client)
         world = JobWorld(database, env, volumes)
         runner = JobRunner(database)
         runner.register("scan", world.run_scan)
@@ -135,6 +147,7 @@ def create_app(
             env=env,
             volumes=volumes,
             runner=runner,
+            watcher=watcher,
             settings=settings,
             thumbnails=thumbnails,
             last_reconcile=report,
@@ -147,6 +160,7 @@ def create_app(
         app.state.mediaferry = state
 
         worker = asyncio.create_task(runner.run_forever())
+        watching = asyncio.create_task(watcher.run_forever())
         try:
             yield
         finally:
@@ -157,6 +171,11 @@ def create_app(
             # finally だけが走って、まだ読み書きしている接続を閉じてしまう。
             # 猶予を超えた場合はコンテナの SIGKILL に委ねる（プロセスごと
             # 終わるので、中途半端に資源を剥がすより安全）。
+            # **watcher を先に止める。** 後にすると、runner が降りた後に
+            # 自動取り込みが積まれて「停止したのにキューが伸びた」状態になる。
+            await watcher.stop()
+            await watching
+            watcher.close()
             await runner.stop()
             await worker
             volumes.close_all()
