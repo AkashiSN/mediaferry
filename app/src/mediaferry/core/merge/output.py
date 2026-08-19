@@ -16,6 +16,7 @@ from pathlib import PurePosixPath
 
 from ..naming import UnsafePath, library_rel_path, safe_source_rel_path
 from ..profiles.model import MergeRule
+from ..profiles.patterns import search
 from .grouping import MergePart
 
 TS_FORMAT = "%Y%m%d%H%M%S"
@@ -43,7 +44,7 @@ def merged_rel_path(profile_slug: str, rule: MergeRule, members: Sequence[MergeP
 
 
 def _sequence(rule: MergeRule, rel_path: str) -> str:
-    match = re.search(rule.sequence_pattern, PurePosixPath(rel_path).stem)
+    match = search(rule.sequence_pattern, PurePosixPath(rel_path).stem)
     if match is None:
         raise MergeOutputUndefined(f"連番が読めない: {rel_path}")
     try:

@@ -17,13 +17,13 @@ mtime の壁時計は UTC 表現から取る。**これは「カードの時刻�
 
 from __future__ import annotations
 
-import re
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import PurePosixPath
 from zoneinfo import ZoneInfo
 
 from .profiles.model import ProfileDefinition
+from .profiles.patterns import PatternTimeout, search
 
 
 class TimezoneUnresolved(RuntimeError):
@@ -70,10 +70,14 @@ def _wall_clock(
 ) -> tuple[datetime, str]:
     rule = defn.timestamp
     if rule.source == "filename" and rule.pattern is not None and rule.format is not None:
-        match = re.search(rule.pattern, PurePosixPath(rel_path).name)
-        if match is not None:
+        try:
+            found = search(rule.pattern, PurePosixPath(rel_path).name)
+        except PatternTimeout:
+            # 悪性の式で取り込み全体を止めない。fallback へ落とす。
+            found = None
+        if found is not None:
             try:
-                return datetime.strptime(match.group("ts"), rule.format), "filename"  # noqa: DTZ007
+                return datetime.strptime(found.group("ts"), rule.format), "filename"  # noqa: DTZ007
             except ValueError:
                 pass
     # **プロファイルが exif を宣言しているときだけ使う。** 宣言していない

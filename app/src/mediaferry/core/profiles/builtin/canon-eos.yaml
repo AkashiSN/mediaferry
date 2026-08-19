@@ -1,0 +1,43 @@
+# Canon EOS（70D 等）。**カードリーダー経由の UMS のみ**（PTP はスコープ外、§2）。
+slug: canon-eos
+name: Canon EOS
+hints:
+  # **USB ID は入れない。** カードリーダー経由が前提なので、見える ID は
+  # リーダーのものであって機種の手がかりにならない。
+  usb_ids: []
+  volume_labels: ["EOS_DIGITAL"]
+require:
+  roots: ["DCIM"]
+  # 実体は DCIM/100CANON/ の下にある。iter_names はサブディレクトリを辿る。
+  filename_pattern: '^(IMG_\d{4}\.(JPG|CR2)|MVI_\d{4}\.MOV)$'
+  min_matching_files: 1
+scan:
+  roots: ["DCIM"]
+  extensions: ["JPG", "CR2", "MOV"]
+timestamp:
+  # ファイル名に時刻が無い（IMG_1234 は連番）。JPG は EXIF から、
+  # MOV は EXIF を持たないので mtime へ落ちる。
+  source: exif
+  pattern: null
+  format: null
+  fallback: mtime
+  # EXIF にローカル時刻が入るので補正しない（§6）。
+  timezone_policy: none
+  timezone: null
+merge:
+  # **無効。** 70D の 4GB 分割が連番から判別できるかを実データ無しに確かめ
+  # られない。誤結合は公開済みの media_file を取り残すので高くつく。
+  # 手動結合（Phase 4）に委ねる。実カードで確かめてから有効化する。
+  enabled: false
+  tolerance_seconds: 5
+  min_part_size_gib: 4
+  keep_streams:
+    video: primary
+    audio: all
+    timecode: false
+    data: false
+immich:
+  tags: ["Canon EOS"]
+  tag_pre_existing: true
+  # timezone_policy が none なので、補正する対象が無い。
+  fix_datetime_after_upload: false

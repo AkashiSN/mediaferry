@@ -7,13 +7,13 @@
 
 from __future__ import annotations
 
-import re
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 from fnmatch import fnmatch
 from typing import Protocol
 
 from .model import ProfileDefinition
+from .patterns import PatternTimeout, compile_pattern, match
 
 # require の確認で読むファイル名の上限。数万件のカードで全件読まない。
 NAME_SCAN_LIMIT = 2000
@@ -83,7 +83,12 @@ def resolve_profile(
         roots = [root for root in defn.require.roots if tree.has_root(root)]
         if not roots:
             continue
-        matches = _count_matching_files(defn, tree, roots)
+        try:
+            matches = _count_matching_files(defn, tree, roots)
+        except PatternTimeout as exc:
+            # **黙って不一致にしない。** 原因が画面から分からなくなる。
+            # このプロファイルは候補から外し、次を試す。
+            return MatchOutcome(slug=None, provisional=False, reason=f"照合を打ち切った: {exc}")
         if matches >= defn.require.min_matching_files:
             return MatchOutcome(
                 slug=defn.slug,
@@ -104,11 +109,11 @@ def resolve_profile(
 
 
 def _count_matching_files(defn: ProfileDefinition, tree: SourceTree, roots: Sequence[str]) -> int:
-    pattern = re.compile(defn.require.filename_pattern)
+    pattern = compile_pattern(defn.require.filename_pattern)
     found = 0
     for root in roots:
         for name in tree.iter_names(root, NAME_SCAN_LIMIT):
-            if pattern.match(name):
+            if match(pattern, name):
                 found += 1
                 if found >= defn.require.min_matching_files:
                     return found

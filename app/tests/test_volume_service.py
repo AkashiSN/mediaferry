@@ -297,11 +297,12 @@ def test_a_swapped_card_is_judged_on_its_own_contents(db, broker, mount_manager,
     # 新しく open するものだけが差し替わる（世代も epoch も据え置き）。
     mount_manager.target = a_swapped_card(tmp_path)
 
-    # ビルトインは dji-osmo だけなので hints は一致し続ける。旧 dirfd を
-    # 流用していれば DJI のファイルが見えて確定 (provisional False) になる。
-    # 新カードを見ていれば DCIM はあるが要件を満たさず provisional になる。
+    # 差し替え後のカードは Canon の構成（DCIM/100CANON/IMG_0001.JPG）。
+    # **旧 dirfd を流用していれば DJI のファイルが見えて dji-osmo のまま**に
+    # なる。新しく開いていれば canon-eos に変わる。
     view = svc.refresh()[0]
-    assert view.provisional is True
+    assert view.profile_slug == "canon-eos", "旧カードの中身で判定している"
+    # 中身の指紋が変わったので、前回との連続性は言えない（§8）。
     assert view.identity_confidence == "low"
 
     # 判定だけでなく、次に開く dirfd も新しいカードでなければならない。

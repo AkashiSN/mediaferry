@@ -1,0 +1,42 @@
+# どのプロファイルの require も満たさないボリュームの受け皿（§6）。
+# **これがあるので「DCIM を持つ任意の USB が自動でコピーされる」経路ができる。**
+# だから信頼登録（§12.1）が要る。
+slug: generic-dcim
+name: 汎用 DCIM
+hints:
+  # 順位付けの手がかりを持たない。resolve_profile が最後に回す。
+  usb_ids: []
+  volume_labels: []
+require:
+  roots: ["DCIM"]
+  filename_pattern: '^[^/]+\.(JPG|JPEG|PNG|HEIC|MP4|MOV|AVI)$'
+  min_matching_files: 1
+scan:
+  roots: ["DCIM"]
+  # **メーカー固有の RAW は入れない。** 汎用で拾うと機種プロファイルを作る
+  # 動機が消えて、library/generic-dcim/ に何でも溜まる。
+  # MTS（AVCHD）も入れない —— BDMV の構造とセットで意味を持つので、
+  # 単体で拾うと分割された動画が個別に取り込まれる。
+  extensions: ["JPG", "JPEG", "PNG", "HEIC", "MP4", "MOV", "AVI"]
+timestamp:
+  source: exif
+  pattern: null
+  format: null
+  fallback: mtime
+  # 機種が分からないので、日時の解釈に介入しない。
+  timezone_policy: none
+  timezone: null
+merge:
+  # 機種が分からないので分割の規則も分からない。
+  enabled: false
+  tolerance_seconds: 5
+  min_part_size_gib: 4
+  keep_streams:
+    video: primary
+    audio: all
+    timecode: false
+    data: false
+immich:
+  tags: []
+  tag_pre_existing: false
+  fix_datetime_after_upload: false

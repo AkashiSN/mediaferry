@@ -182,3 +182,41 @@ def test_exif_wall_clock_gets_the_configured_offset():
     )
     assert got.source == "exif"
     assert got.at.isoformat() == "2026-08-19T14:30:05+09:00"
+
+
+def test_a_pathological_timestamp_pattern_falls_back_instead_of_hanging():
+    """`timestamp.pattern` もユーザが書く. 悪性の式で取り込みを止めない.
+
+    **別スレッドで上限付きに走らせる。** 直に呼ぶと、`timeout` を外す回帰の
+    ときにテストが「失敗」ではなくハングする。
+
+    ここは `matching` と違って `fallback` に落とす —— 判定と違い、取り込みは
+    1 ファイルごとの処理で、日時が決まらないことを理由に全体を止める必要が無い。
+    """
+    import threading
+
+    got: list = []
+
+    def run():
+        try:
+            got.append(
+                resolve_captured_at(
+                    # `ts` の名前付きグループは既存の検証が要求する。
+                    # **式が本当に破綻することを測ってから使う**（`\d{4}` を頭に
+                    # 置くと即座に失敗して破綻しない —— 変異試験が素通りする）。
+                    defn(pattern=r"(?P<ts>(a|a)+)$", format="%Y", timezone="Asia/Tokyo"),
+                    "a" * 40 + "!",
+                    mtime_ns_of("2026-05-05T10:00:00"),
+                    None,
+                )
+            )
+        except BaseException as exc:  # noqa: BLE001 - 何が出たかを表に出す
+            got.append(exc)
+
+    worker = threading.Thread(target=run, daemon=True)
+    worker.start()
+    worker.join(timeout=15)
+    assert not worker.is_alive(), "悪性の式で固まっている（timeout が効いていない）"
+    assert not isinstance(got[0], BaseException), f"例外が出た: {got[0]!r}"
+    assert got[0].source == "mtime"
+    assert got[0].at.year == 2026

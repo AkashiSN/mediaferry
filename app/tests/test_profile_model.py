@@ -143,3 +143,50 @@ def test_the_builtin_dji_profile_is_valid_and_has_no_local_timezone():
     assert "dji-osmo" in builtins
     assert builtins["dji-osmo"].timestamp.timezone is None
     assert builtins["dji-osmo"].timestamp.timezone_policy == "force_offset"
+
+
+# ----------------------------------------------------------------------
+# 正規表現（Task 4）
+
+
+def test_a_broken_regex_is_rejected():
+    with pytest.raises(ProfileInvalid, match="正規表現"):
+        parse_definition(
+            a_definition(require={**a_definition()["require"], "filename_pattern": "("})
+        )
+
+
+def test_a_very_long_regex_is_rejected():
+    """長さの上限は残す. 上限だけでは足りないが、無いよりはよい."""
+    with pytest.raises(ProfileInvalid, match="長すぎ"):
+        parse_definition(
+            a_definition(require={**a_definition()["require"], "filename_pattern": "a" * 5000})
+        )
+
+
+def test_merge_can_omit_the_sequence_pattern_when_it_is_disabled():
+    """`canon-eos` と `generic-dcim` は結合を持たない.
+
+    無効なのに連番の規則と出力名を書かせると、意味の無い値を発明することになる。
+    """
+    merge = {
+        "enabled": False,
+        "tolerance_seconds": 5,
+        "min_part_size_gib": 15,
+        "keep_streams": {"video": "primary", "audio": "all", "timecode": True, "data": False},
+    }
+    defn = parse_definition(a_definition(merge=merge))
+    assert defn.merge.enabled is False
+    assert defn.merge.sequence_pattern == ""
+    assert defn.merge.output_name == ""
+
+
+def test_merge_still_requires_the_sequence_pattern_when_it_is_enabled():
+    merge = {
+        "enabled": True,
+        "tolerance_seconds": 5,
+        "min_part_size_gib": 15,
+        "keep_streams": {"video": "primary", "audio": "all", "timecode": True, "data": False},
+    }
+    with pytest.raises(ProfileInvalid):
+        parse_definition(a_definition(merge=merge))

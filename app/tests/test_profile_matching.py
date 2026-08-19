@@ -143,3 +143,147 @@ def test_usb_id_globs_match_any_product():
     # ラベルを外し、スコアが USB の glob だけから来ることを確かめる
     assert hint_score(dji(), dji_facts(usb_product_id="9999", fs_label="OTHER")) > 0
     assert hint_score(dji(), dji_facts(usb_vendor_id="ffff", fs_label="OTHER")) == 0
+
+
+# ----------------------------------------------------------------------
+# catastrophic backtracking（Task 4）
+#
+# プロファイルはユーザが書き換える。長さの上限では防げない —— `(a+)+$` は
+# 8 文字で、41 文字の入力に対して事実上停止しない。しかもマッチは
+# `VolumeService` の `RLock` の中で最大 2000 件のファイル名に当たるので、
+# 1 本の悪い式で `GET /devices` も watcher も固まる。
+#
+# **実測して `regex` + `timeout` に替えた**（2026-08-19）:
+#   `re` は `(a+)+$` に `"a"*40+"!"` で 10 秒でも終わらない
+#   `regex` は同じ式を 0.000 秒で処理する（自前の最適化で潰す）
+#   `regex` でも潰しきれない `(a|a)+$` は `timeout=` が実測どおり発火する
+
+
+def a_pathological_profile(pattern: str):
+    from .test_profile_model import a_definition
+
+    return parse_definition(
+        a_definition(require={**a_definition()["require"], "filename_pattern": pattern})
+    )
+
+
+class ManyNames:
+    def has_root(self, name):
+        return name == "DCIM"
+
+    def iter_names(self, root, limit):
+        return ["a" * 40 + "!" for _ in range(5)]
+
+
+def test_a_pathological_pattern_gives_up_instead_of_hanging():
+    """**有限時間で降りる。** 固まらないことの保証は実行時が持つ.
+
+    **別スレッドで上限付きに走らせる。** 直に呼ぶと、`re` へ戻す回帰のときに
+    テストが「失敗」ではなく**ハング**する（この試験はまさにその状態を
+    再現するために書かれている）。回帰は assert で落ちなければならない。
+    """
+    import threading
+
+    outcome: list = []
+
+    def run():
+        outcome.append(
+            resolve_profile(
+                [a_pathological_profile(r"(a|a)+$")],
+                VolumeFacts("2ca3", "0020", "SD_Card"),
+                ManyNames(),
+            )
+        )
+
+    worker = threading.Thread(target=run, daemon=True)
+    worker.start()
+    worker.join(timeout=15)
+    assert not worker.is_alive(), "悪性の式で固まっている（timeout が効いていない）"
+    assert outcome[0].slug is None, "打ち切ったのに一致したことにしている"
+    assert "打ち切" in outcome[0].reason, f"理由が分からない: {outcome[0].reason}"
+
+
+def test_a_normal_pattern_is_not_affected():
+    """既存のビルトインの判定は変わらない（回帰）."""
+    from mediaferry.core.profiles.model import load_builtin_definitions
+
+    builtin_dji = next(d for d in load_builtin_definitions() if d.slug == "dji-osmo")
+    tree = DictTree({"DCIM": ["DJI_20260817143000_0001_D.MP4"]})
+    outcome = resolve_profile([builtin_dji], VolumeFacts("2ca3", "0020", "SD_Card"), tree)
+    assert outcome.slug == "dji-osmo"
+    assert outcome.provisional is False
+
+
+# ----------------------------------------------------------------------
+# ビルトイン 2 種（Task 4）
+
+
+def builtins():
+    from mediaferry.core.profiles.model import load_builtin_definitions
+
+    return load_builtin_definitions()
+
+
+def a_canon_card():
+    """`DCIM/100CANON/` の下に置く（`iter_names` はサブディレクトリを辿る）."""
+    return DictTree({"DCIM": ["IMG_0001.JPG", "IMG_0001.CR2", "MVI_0002.MOV"]})
+
+
+def test_a_canon_card_resolves_to_canon_eos():
+    outcome = resolve_profile(builtins(), VolumeFacts("", "", "EOS_DIGITAL"), a_canon_card())
+    assert outcome.slug == "canon-eos"
+    assert outcome.provisional is False
+
+
+def test_a_canon_card_resolves_even_through_a_card_reader():
+    """**USB ID は当てにならない。** カードリーダー経由が前提なので、見える
+    ID はリーダーのもの。ラベルも付け替えられる。中身で確定する（§6）。
+    """
+    outcome = resolve_profile(builtins(), VolumeFacts("058f", "6366", ""), a_canon_card())
+    assert outcome.slug == "canon-eos"
+
+
+def test_an_unknown_camera_falls_back_to_generic_dcim():
+    tree = DictTree({"DCIM": ["ABC_1234.JPG"]})
+    outcome = resolve_profile(builtins(), VolumeFacts("", "", ""), tree)
+    assert outcome.slug == "generic-dcim"
+
+
+def test_a_volume_without_dcim_is_out_of_scope():
+    outcome = resolve_profile(builtins(), VolumeFacts("", "", ""), DictTree({"Documents": ["a"]}))
+    assert outcome.slug is None
+
+
+def test_a_dji_card_does_not_fall_into_generic():
+    """順位付けの回帰. `generic-dcim` は最後に回す（§6）."""
+    tree = DictTree({"DCIM": ["DJI_20260817143000_0001_D.MP4"]})
+    outcome = resolve_profile(builtins(), VolumeFacts("2ca3", "0020", "SD_Card"), tree)
+    assert outcome.slug == "dji-osmo"
+
+
+def test_a_canon_card_does_not_fall_into_generic():
+    outcome = resolve_profile(builtins(), VolumeFacts("", "", ""), a_canon_card())
+    assert outcome.slug == "canon-eos"
+
+
+def test_canon_and_generic_do_not_merge():
+    """実データが無いので、分割の判別根拠が無い。誤結合の方が高くつく."""
+    by_slug = {d.slug: d for d in builtins()}
+    assert by_slug["canon-eos"].merge.enabled is False
+    assert by_slug["generic-dcim"].merge.enabled is False
+    assert by_slug["dji-osmo"].merge.enabled is True
+
+
+def test_canon_and_generic_do_not_rewrite_the_remote_datetime():
+    """`timezone_policy: none` なので補正する対象が無い（§6）."""
+    by_slug = {d.slug: d for d in builtins()}
+    for slug in ("canon-eos", "generic-dcim"):
+        assert by_slug[slug].timestamp.timezone_policy == "none"
+        assert by_slug[slug].immich.fix_datetime_after_upload is False
+
+
+def test_generic_dcim_does_not_claim_vendor_raw():
+    """汎用が RAW を拾うと、機種プロファイルを作る動機が消える."""
+    by_slug = {d.slug: d for d in builtins()}
+    assert "CR2" not in by_slug["generic-dcim"].scan.extensions
+    assert "CR2" in by_slug["canon-eos"].scan.extensions
