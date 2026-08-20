@@ -42,7 +42,7 @@ jobs:
         # `needs_root` / `needs_immich` / `needs_system` は既定で走らない。
         run: uv run pytest -q
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           node-version: "24"
           cache: npm
