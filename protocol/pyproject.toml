@@ -2,7 +2,7 @@
 name = "mediaferry-protocol"
 version = "0.0.0"
 description = "Wire protocol shared by mountd and the mediaferry app"
-requires-python = ">=3.12"
+requires-python = ">=3.14"
 dependencies = []
 
 [build-system]

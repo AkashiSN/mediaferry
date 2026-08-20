@@ -27,7 +27,8 @@ TrueNAS カスタムアプリ。
 
 ## コーディング規約
 
-- Python は `>=3.12`。ruff の設定は `pyproject.toml` にある
+- Python は `>=3.14`。実際に使う版は `.python-version` で 3.14 に固定してある
+  （配るイメージと同じ版で試すため）。ruff の設定は `pyproject.toml` にある
   （`line-length = 100`、`select = ["E", "F", "I", "UP", "B", "SIM", "ANN", "S"]`）
 - **`docs/` は ruff の対象外**（`extend-exclude`）。ruff は Markdown 内のコードブロックも
   整形するので、外すと仕様書と実装計画そのものが書き換わる

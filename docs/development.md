@@ -90,6 +90,12 @@ blocker が 2 件ずつ出た。**巡を重ねても止まらない。** Phase 5
 
 - **`ruff format` は Markdown 内のコードブロックも整形する。** `docs/` は
   `extend-exclude` で対象外にしてある。外すと仕様書と計画そのものが書き換わる
+- **Python の版は `.python-version`（3.14）で決まる。** イメージの
+  `python:3.14-slim-bookworm` と揃えてあるので、手元・CI・配るものが同じ版になる。
+  外すと uv がその場に居る適合版を掴み、**配らない版でテストが通る**
+- **`except` の括弧は ruff format が外す**（`except A, B:`）。`target-version` が
+  `py314` なので PEP 758 の書き方に整形される。Python 2 の `except E, name:` とは
+  別物で、**名前の束縛ではなく複数の型**を並べている
 - **変異試験は `PYTHONDONTWRITEBYTECODE=1` を付ける。** 変異の前後でバイト数が
   変わらない書き換え（`>` を `<` にする、`a or b` を `b or a` にする等）では、
   `.pyc` の無効化条件（mtime の秒＋サイズ）をすり抜けて古いバイトコードが使われ、

@@ -2,7 +2,7 @@
 name = "mediaferry-workspace"
 version = "0.0.0"
 description = "mediaferry workspace root"
-requires-python = ">=3.12"
+requires-python = ">=3.14"
 
 [tool.uv.workspace]
 members = ["protocol", "mountd", "app"]
@@ -21,7 +21,7 @@ dev = ["pytest>=8", "ruff>=0.16,<0.17"]
 
 [tool.ruff]
 line-length = 100
-target-version = "py312"
+target-version = "py314"
 # ruff は Markdown 内のコードブロックも整形する。docs/ は仕様書と実装計画の
 # 正本で、そこに載るコードは説明のための引用なので、整形の対象にしない。
 extend-exclude = ["docs"]
