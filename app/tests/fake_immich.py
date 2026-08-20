@@ -55,6 +55,9 @@ class FakeImmich:
         self.key_as_stack_id: bool = False
         # PUT を受けても primary を動かさない（応答だけ正常に見える相手）。
         self.ignore_primary_change: bool = False
+        # **作ってから落ちる相手。** サーバ側は成功し、こちらは失敗として見る
+        # （送信中の中断と同じ状態）。
+        self.fail_after_creating_the_stack: bool = False
         # 応答を遅らせる（リースを跨ぐ相手待ちを作る）。
         self.delay_seconds: float = 0.0
         self.empty_assets_in_the_stack_response: bool = False
@@ -309,6 +312,8 @@ class FakeImmich:
                     ids.append(asset_id)
         stack_id = f"stack-{len(self.stacks) + 1}"
         self.stacks[stack_id] = {"primary": ids[0], "assets": ids}
+        if self.fail_after_creating_the_stack:
+            return 503, {"message": "作った後で落ちた"}
         return 201, self._stack_view(stack_id)
 
     def _stacks_by_primary(self, path: str):  # noqa: ANN202

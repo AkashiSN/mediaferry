@@ -66,3 +66,16 @@ def test_it_does_not_log_warnings_for_unreadable_input(tmp_path, caplog):
     with caplog.at_level(logging.WARNING):
         assert read_datetime_original(path) is None
     assert not [r for r in caplog.records if r.name == "exifread"], "exifread の警告が漏れている"
+
+
+def test_a_synthetic_cr2_yields_its_capture_time(tmp_path):
+    """**推測で E2E を組まない。** 合成 CR2 が実装の読み取り経路を通るかを測る.
+
+    通らなければ、E2E で「組が成立しない」のを仕様どおりと誤読する。
+    """
+    from .exif_fixtures import a_tiff_with
+
+    path = tmp_path / "IMG_1234.CR2"
+    path.write_bytes(a_tiff_with(b"2026:08:19 10:30:00"))
+
+    assert read_datetime_original(path) == datetime(2026, 8, 19, 10, 30, 0)

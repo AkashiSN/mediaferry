@@ -314,3 +314,32 @@ def test_the_dashboard_does_not_count_invalidated_records(secret_env, client, ap
     summary = client.get("/api/dashboard").json()["destinations"][0]
 
     assert summary["stack_skipped"] == 0
+
+
+def test_the_dashboard_counts_stacks_not_records(secret_env, client, api_db):  # noqa: F811
+    """**1 つのスタックに 2 件以上のレコードが属する。** 行を数えると「2 組」に見える."""
+    from .test_schema_artifacts import a_media_file
+    from .test_schema_sources import a_profile
+    from .test_schema_uploads import a_destination, an_upload
+
+    profile = a_profile(api_db, slug="stack-count-cam")
+    dest = a_destination(api_db, name="stack-count")
+    for index in range(2):
+        an_upload(
+            api_db,
+            dest,
+            a_media_file(api_db, profile),
+            state="complete",
+            destination_revision_id=dest[1],
+            remote_asset_id=f"asset-{index}",
+            stack_state="stacked",
+            remote_stack_id="stack-1",
+        )
+
+    summary = next(
+        row
+        for row in client.get("/api/dashboard").json()["destinations"]
+        if row["name"] == "stack-count"
+    )
+
+    assert summary["stacked"] == 1

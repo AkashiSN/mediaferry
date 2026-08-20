@@ -134,6 +134,12 @@ class Stacker:
         epoch: int,
         row: sqlite3.Row,
     ) -> str:
+        # **バッチは snapshot。** 組を記録すると相方の行もその場で決着するが、
+        # 取り出し済みのバッチにはまだ残っている。読み直さずに進むと、**組ごとに
+        # 資産の読み取りを 2 度**出したうえで guard が弾くことになる。
+        current = self._uploads.get(row["id"])
+        if current is None or current["stack_state"] is not None:
+            return "settled"
         media = self._conn.execute(
             "SELECT * FROM media_file WHERE id = ?", (row["media_file_id"],)
         ).fetchone()

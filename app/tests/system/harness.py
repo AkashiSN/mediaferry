@@ -28,7 +28,7 @@ from mediaferry_protocol.messages import UsbInfo, VolumeInfo
 from mountd.server import BrokerServer
 
 from ..conftest import FakeMountManager
-from ..exif_fixtures import a_jpeg_with
+from ..exif_fixtures import a_jpeg_with, a_tiff_with
 from ..fake_immich import FakeImmich
 
 # 起動を待つ上限。CI の遅い環境でも足りる長さにする。
@@ -84,6 +84,13 @@ def _a_canon_card(root: Path) -> Path:
         (card / "DCIM" / "100CANON" / name).write_bytes(
             a_jpeg_with(f"2026:02:0{index + 3} 04:05:06".encode())
         )
+    # **RAW+JPEG の対**（§6 の `stack`）。同じシャッターなので EXIF の
+    # `DateTimeOriginal` は秒まで一致する。CR2 は TIFF ベースなので、
+    # 拡張子だけを変えた TIFF が実装の読み取り経路を通る
+    # （`test_exif.py::test_a_synthetic_cr2_yields_its_capture_time` で測った）。
+    shutter = b"2026:02:05 06:07:08"
+    (card / "DCIM" / "100CANON" / "IMG_0003.JPG").write_bytes(a_jpeg_with(shutter))
+    (card / "DCIM" / "100CANON" / "IMG_0003.CR2").write_bytes(a_tiff_with(shutter))
     return card
 
 

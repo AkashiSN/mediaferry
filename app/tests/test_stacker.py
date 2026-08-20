@@ -685,3 +685,63 @@ def test_a_repoint_stops_the_pass_instead_of_evaluating_the_rest(world, monkeypa
 
     # 1 組目の最初の guard は通り、GET の後の guard で落ちる。2 組目は評価しない。
     assert len(calls) == 3
+
+
+def test_the_partner_in_the_same_batch_is_not_read_again(world):
+    """**バッチは snapshot。** 組を記録したら、相方の行は相手に触らずに飛ばす.
+
+    読み直さずに進むと、組ごとに資産の読み取りを 2 度出したうえで guard が弾く。
+    """
+    world.run()
+
+    reads = [path for method, path in world.immich.requests if path.startswith("/api/assets/")]
+    assert len(reads) == 2
+
+
+def test_a_crash_between_the_creation_and_the_response_is_recovered(world):
+    """**送信中の中断。** 相手は作れているが、こちらは失敗として見た状態.
+
+    次の送信で「既存スタックのメンバー集合が我々の組と一致する」経路が拾う。
+    新しい状態は要らない（§9.11）。
+    """
+    world.immich.fail_after_creating_the_stack = True
+
+    first = world.run()
+
+    assert first == type(first)(0, 0, 1)  # 未評価のまま残す
+    assert len(world.immich.stacks) == 1
+    assert all(row["stack_state"] is None for row in world.rows().values())
+
+    world.immich.fail_after_creating_the_stack = False
+    second = world.run()
+
+    assert second.stacked == 1
+    # **作り直さない。** 相手側のスタックは 1 つのまま。
+    assert len(world.immich.stacks) == 1
+    assert {row["stack_state"] for row in world.rows().values()} == {"stacked"}
+
+
+def test_a_crash_before_the_primary_was_moved_is_recovered(world):
+    """`POST` の直後・`PUT` の前に落ちた状態。**primary まで直す。**"""
+    world.immich.stacks["stack-9"] = {
+        "primary": world.assets["IMG_1234.CR2"],
+        "assets": list(world.assets.values()),
+    }
+
+    world.run()
+
+    assert world.immich.stacks["stack-9"]["primary"] == world.assets["IMG_1234.JPG"]
+    assert {row["stack_state"] for row in world.rows().values()} == {"stacked"}
+
+
+def test_a_crash_before_the_records_were_written_is_recovered(world):
+    """`PUT` の後・記録の前に落ちた状態。**`PUT` を打ち直さない。**"""
+    world.immich.stacks["stack-9"] = {
+        "primary": world.assets["IMG_1234.JPG"],
+        "assets": list(world.assets.values()),
+    }
+
+    world.run()
+
+    assert not [path for method, path in world.immich.requests if method == "PUT"]
+    assert {row["stack_state"] for row in world.rows().values()} == {"stacked"}
