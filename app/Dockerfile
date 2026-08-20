@@ -8,7 +8,7 @@ COPY web/ /build/
 RUN npm run build
 
 # --- 実行イメージ -----------------------------------------------------------
-FROM python:3.12-slim-bookworm
+FROM python:3.14-slim-bookworm
 
 # ffprobe は公開前のメタデータ確定に、ffmpeg は Phase 2 の結合と
 # Phase 4 のサムネイル生成に使う。
