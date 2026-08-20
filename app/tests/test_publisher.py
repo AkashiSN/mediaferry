@@ -1,3 +1,4 @@
+import errno
 import hashlib
 import json
 import os
@@ -180,8 +181,28 @@ def test_a_cancel_requested_during_the_write_stops_the_publish(setup, db, data_r
     with pytest.raises(PublishAborted):
         publisher.publish(ctx, a_request(profile, a_source_entry(db, volume_id)), write)
     assert not (data_root / "library/dji-osmo/DCIM/A.MP4").exists()
-    # writing のまま残るので、次回起動の reconciliation が破棄する
-    assert db.execute("SELECT state FROM artifact_staging").fetchone()["state"] == "writing"
+    # staged より手前なので、書きかけはその場で捨てる
+    assert db.execute("SELECT count(*) FROM artifact_staging").fetchone()[0] == 0
+    assert list((data_root / "staging").rglob("*")) == [data_root / "staging" / ctx.job_id]
+
+
+def test_a_failed_copy_discards_its_staging_file(setup, db, data_root):
+    """カードが抜けた場合（手動チェックリスト #5）.
+
+    起動時の reconciliation は同じものを捨てるが、**起動するまで消えない**。
+    アプリを動かし続ける限り、最大で分割 1 本ぶん（DJI なら 16 GiB）が
+    利用者から見えないまま残る（`GET /orphans` にも出ない）。
+    """
+    publisher, ctx, profile, volume_id = setup
+
+    def write(writer):
+        writer.write(b"half")
+        raise OSError(errno.EIO, "Input/output error")
+
+    with pytest.raises(OSError, match="Input/output"):
+        publisher.publish(ctx, a_request(profile, a_source_entry(db, volume_id)), write)
+    assert db.execute("SELECT count(*) FROM artifact_staging").fetchone()[0] == 0
+    assert [p for p in (data_root / "staging").rglob("*") if p.is_file()] == []
 
 
 def test_a_cancel_cannot_land_between_the_lease_check_and_the_staged_transition(
@@ -229,6 +250,10 @@ def test_a_failure_after_staging_is_not_reported_as_an_import_failure(setup, db,
         publisher.publish(
             ctx, a_request(profile, a_source_entry(db, volume_id)), write_payload(b"payload")
         )
+    # **staged 以降は捨てない。** 実体は検証済みで、reconciliation が公開を完遂する。
+    row = db.execute("SELECT state, staging_rel_path FROM artifact_staging").fetchone()
+    assert row["state"] == "staged"
+    assert (data_root / row["staging_rel_path"]).exists()
 
 
 def test_resume_after_the_staging_file_is_gone(setup, db, data_root):
@@ -501,9 +526,8 @@ def test_a_missing_prepared_file_leaves_nothing_durable(setup, data_root, db):
             a_merge_request(profile, group_id),
             data_root / "work" / ctx.job_id / "missing.MP4",
         )
-    # writing の行だけが残る。次回起動の reconciliation が破棄する。
-    row = db.execute("SELECT state FROM artifact_staging").fetchone()
-    assert row["state"] == "writing"
+    # 行も実体も残さない。次の起動を待たずにその場で捨てる。
+    assert db.execute("SELECT count(*) FROM artifact_staging").fetchone()[0] == 0
     assert db.execute("SELECT count(*) FROM media_file").fetchone()[0] == 0
 
 
@@ -564,8 +588,11 @@ def test_a_cancelled_hash_scan_leaves_nothing_durable(setup, data_root, db):
     with pytest.raises(PublishCancelled):
         publisher.publish_prepared(ctx, a_merge_request(profile, group_id), prepared)
     assert db.execute("SELECT count(*) FROM media_file").fetchone()[0] == 0
-    assert db.execute("SELECT state FROM artifact_staging").fetchone()["state"] == "writing"
+    assert db.execute("SELECT count(*) FROM artifact_staging").fetchone()[0] == 0
     assert not (data_root / "derived/dji-osmo/DCIM/MERGED.MP4").exists()
+    # **結合の入力は消さない。** staging は work への link なので、取り違えると
+    # 中間生成物ごと落ちる。
+    assert prepared.exists()
 
 
 def test_the_lease_pulse_waits_for_the_work_before_raising(setup, monkeypatch):
@@ -634,7 +661,9 @@ def test_a_size_that_disagrees_with_the_disk_is_aborted(setup, data_root, db, mo
     with pytest.raises(PublishAborted):
         publisher.publish_prepared(ctx, a_merge_request(profile, group_id), prepared)
     assert db.execute("SELECT count(*) FROM media_file").fetchone()[0] == 0
-    assert db.execute("SELECT state FROM artifact_staging").fetchone()["state"] == "writing"
+    assert db.execute("SELECT count(*) FROM artifact_staging").fetchone()[0] == 0
+    assert [f for f in (data_root / "staging").rglob("*") if f.is_file()] == []
+    assert prepared.exists()
 
 
 # ----------------------------------------------------------------------

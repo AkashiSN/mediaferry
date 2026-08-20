@@ -78,6 +78,25 @@ class AppState:
     event_streams: int = 0
 
 
+def _log_reconcile(report: ReconcileReport) -> None:
+    """起動時の回収の結果を 1 行残す.
+
+    **黙って捨てない。** 破棄も再開もディスク上の実体を動かすので、記録が
+    無いと消えた容量の説明が付かない。API から見えるのは孤立の件数だけで
+    （`GET /orphans`）、破棄した staging はどこにも出ない。
+    """
+    counts = {
+        name: value for name, value in vars(report).items() if isinstance(value, int) and value
+    }
+    logger.info("起動時の回収: %s", counts or "齟齬なし")
+    if report.orphans or report.unrecoverable:
+        logger.warning(
+            "孤立 %d 件、自動で回収できない staging %d 件。画面で判断が要る",
+            len(report.orphans),
+            len(report.unrecoverable),
+        )
+
+
 def create_app(
     env: Mapping[str, str] | None = None,
     broker_factory: Callable[[], BrokerClient] | None = None,
@@ -114,6 +133,7 @@ def create_app(
                 ArtifactPublisher(startup, settings.data_root, MediaProbe()),
                 JobStore(startup),
             ).run()
+            _log_reconcile(report)
         finally:
             startup.close()
 

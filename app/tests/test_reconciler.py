@@ -563,3 +563,50 @@ def test_a_completed_record_keeps_its_history_even_if_the_group_changed(db, data
 
     assert report.uploads_invalidated == 0
     assert db.execute("SELECT invalidated_at FROM upload_record").fetchone()[0] is None
+
+
+def test_the_startup_reconciliation_leaves_a_record_in_the_log(
+    db, data_root, broker_factory, monkeypatch, caplog
+):
+    """**黙って消さない.** 3 GiB を捨てた事実がどこにも残らないと、消えた容量の説明が付かない.
+
+    `GET /orphans` に出るのは孤立だけで、破棄した staging の件数はどこにも出ない。
+    """
+    import logging
+
+    from fastapi.testclient import TestClient
+
+    from mediaferry.api.app import create_app
+
+    ProfileRegistry(db).sync_builtins()
+    profile = ProfileRegistry(db).current("dji-osmo")
+    volume_id = a_volume(db, profile=(profile.profile_id, profile.revision_id))
+    store = JobStore(db)
+    store.enqueue("import", {})
+    ctx = store.claim_next()
+    staging = data_root / "staging" / ctx.job_id / "half-written"
+    staging.parent.mkdir(parents=True)
+    staging.write_bytes(b"half")
+    db.execute(
+        "INSERT INTO artifact_staging (id, kind, job_id, lease_token, state, staging_rel_path,"
+        " source_entry_id, created_at, updated_at)"
+        " VALUES ('s1', 'import', ?, ?, 'writing', ?, ?, '2026-01-01T00:00:00+00:00',"
+        " '2026-01-01T00:00:00+00:00')",
+        (
+            ctx.job_id,
+            ctx.lease_token,
+            f"staging/{ctx.job_id}/half-written",
+            a_source_entry(db, volume_id),
+        ),
+    )
+    store.finish(ctx.job_id, ctx.lease_token, "failed")
+
+    monkeypatch.setenv("MEDIAFERRY_DATA_ROOT", str(data_root))
+    monkeypatch.setenv("MEDIAFERRY_DEFAULT_TIMEZONE", "Asia/Tokyo")
+    with (
+        caplog.at_level(logging.INFO, logger="mediaferry.api.app"),
+        TestClient(create_app(broker_factory=broker_factory), base_url="http://127.0.0.1:8080"),
+    ):
+        pass
+    assert "discarded" in caplog.text
+    assert not staging.exists()

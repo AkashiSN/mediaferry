@@ -792,6 +792,14 @@ COMMIT;
     呼び出し元のレコード（`source_entry.media_file_id` または
     `merge_group.output_media_file_id`）を更新して commit する。
 
+**手順 2〜7 の途中で落ちたら、その場で書きかけを捨てる。** `writing` の行と
+`staging/<job-id>/<uuid>` を消してから例外を上げ直す。起動時の reconciliation
+（§9.6）も同じものを捨てるが、それは次の起動まで走らない ——
+待つと、動かし続ける限り分割 1 本ぶん（DJI なら 16 GiB）が残り、しかも
+`GET /orphans` には出ない（行を持つ実体は孤立ではない）。**捨ててよいのは
+自分のジョブが `writing` で持っている行だけ**で、`staged` 以降には触らない。
+後始末の失敗で本当の失敗を覆い隠さない。
+
 `link` + `unlink` を採用したのは、`renameat2(RENAME_NOREPLACE)` が Python 標準
 ライブラリから直接呼べない一方、`link` は同じ no-clobber 性を持ち、同一ファイル
 システム内で原子的だからである。
@@ -849,7 +857,7 @@ dirfd 起点で `scan.roots` 配下から `scan.extensions` に一致するフ�
 
 | 齟齬 | 回収 |
 | --- | --- |
-| `artifact_staging.state = writing` | staging を削除しレコードを破棄。呼び出し元は再実行 |
+| `artifact_staging.state = writing` | staging を削除しレコードを破棄。呼び出し元は再実行。**通常はここまで残らない** —— `staged` の手前で落ちた行は publish 側がその場で捨てる（§9.3）。ここに来るのは、捨てる前にプロセスごと落ちた場合 |
 | `artifact_staging.state = staged` | §9.3 の手順 8 から再開。永続化済みの `final_rel_path` と `content_sha1` だけを使い、パスを推測しない |
 | `artifact_staging.state = published` だが `media_file` が無い | 手順 11 を再実行 |
 | `library/` `derived/` に実体があるが `media_file` も `artifact_staging` も無い（orphan） | ハッシュを取って画面に出す。**削除しない** |
@@ -858,6 +866,11 @@ dirfd 起点で `scan.roots` 配下から `scan.extensions` に一致するフ�
 
 一時ファイルを無条件に消さないのは、別ジョブが使用中の可能性があるため。
 必ずジョブの所有権とリース状態、および `artifact_staging` の参照を確認する。
+
+**回収の結果は起動時にログへ 1 行残す**（0 でない項目だけ、無ければ「齟齬なし」）。
+破棄も再開もディスク上の実体を動かすので、記録が無いと消えた容量の説明が付かない。
+孤立か自動で回収できない staging があるときは、続けて警告を出す。API から見えるのは
+孤立の件数だけ（`GET /orphans`）。
 
 ### 9.7 結合グループの検出
 

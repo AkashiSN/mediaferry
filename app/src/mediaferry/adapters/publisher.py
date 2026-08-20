@@ -14,6 +14,7 @@ from __future__ import annotations
 import contextlib
 import hashlib
 import json
+import logging
 import os
 import sqlite3
 import time
@@ -33,6 +34,8 @@ from ..db.jobs import JobContext, LeaseLost
 from ..ids import new_id
 from .ffprobe import MediaProbe
 from .fs import fsync_dir
+
+logger = logging.getLogger(__name__)
 
 STEP_WRITING_ROW = 1
 STEP_WRITTEN = 2
@@ -207,87 +210,97 @@ class ArtifactPublisher:
         )
         self._checkpoint(STEP_WRITING_ROW)
 
-        # 2〜3. 実体を staging に置く。ジョブ用ディレクトリを新しく作ったときは、
-        #       その名前を持つ親（staging/）も fsync する。中のファイルだけ
-        #       永続化しても、<job-id> のエントリが失われれば丸ごと消える。
-        if not staging_abs.parent.exists():
-            staging_abs.parent.mkdir(parents=True, exist_ok=True)
-            fsync_dir(staging_abs.parent.parent)
-        size, sha1 = materialise(staging_abs)
-
-        # 4. サイズの検証
-        on_disk = staging_abs.stat().st_size
-        if on_disk != size:
-            raise PublishAborted(f"書き込みサイズが一致しない（{on_disk} != {size}）")
-        self._checkpoint(STEP_VERIFIED)
-
-        # 5. メタデータは公開前に確定させる。実体はあるがメタデータが欠けたまま
-        #    永久にスキップされる状態を作らない。ffprobe の timeout はリースと
-        #    同値なので、囲まないと手順 7 で失効しうる。
-        #    **遅延解決もここで行う。** 手順 4（サイズの検証）の後なので、読むのは
-        #    検証済みのバイト列。前で読むと未完成のファイルを読み、後で読むと
-        #    metadata_json に載らないまま手順 7 で commit される。
-        #    リースの心拍で囲むのは ffprobe と同じ理由（相手待ちが長くなりうる）。
-        def _read_metadata() -> tuple[CapturedAt, Any]:
-            captured = request.captured
-            if captured is None:
-                # 例外を投げない契約（adapters/exif.py が握る）。投げると、
-                # 検証まで済んだファイルがここで落ちて staging に残る。
-                captured = request.resolve_captured(staging_abs)
-            return captured, self._probe.describe(staging_abs, request.extension)
-
-        captured, probe = _with_lease_pulse(ctx, _read_metadata)
-        metadata = {
-            "role": request.role,
-            # 衝突時の別名系列は必ず「最初に望んだパス」から辿る。再開時に
-            # 変更後の final_rel_path から辿ると、名前に接尾辞が二重に付く。
-            "desired_rel_path": request.desired_rel_path,
-            "profile_id": request.profile_id,
-            "profile_revision_id": request.profile_revision_id,
-            "kind": probe.kind,
-            # UTC へ正規化しない。復元した現地の壁時計が読めなくなる。
-            "captured_at": captured.at.isoformat(),
-            "captured_at_source": captured.source,
-            "captured_at_tz": captured.tz,
-            "captured_at_note": captured.note,
-            "duration_seconds": probe.duration_seconds,
-            "probe_state": probe.probe_state,
-            "mtime_ns": request.mtime_ns,
-            # 衝突時の別名に使う壁時計。ここで確定して永続化する。再開のたびに
-            # 計算し直すと、算出方法を変えた版で別の名前へ落ちる。
-            "collision_stamp": _collision_stamp(request.mtime_ns),
-        }
-        self._checkpoint(STEP_METADATA)
-
-        # 6. 公開先の決定
-        final_rel = request.desired_rel_path
-        self._checkpoint(STEP_FINAL_PATH)
-
-        # 7. staged。ここが後戻りできない点で、以後は reconciliation が公開を
-        #    完遂する。だからリースの確認は手順 8 の直前ではなくここで行う。
-        #
-        #    確認と遷移を 1 つの BEGIN IMMEDIATE に入れるのが要点。別々にすると
-        #    その隙間にキャンセルが commit でき、「キャンセル済みと表示した後に
-        #    公開される」経路が残る。
+        # **staged より手前で落ちたら、書きかけをその場で捨てる。**
+        # 起動時の reconciliation も同じものを捨てるが、それは次の起動まで
+        # 走らない。動かし続ける限り、分割 1 本ぶん（DJI なら 16 GiB）が
+        # 利用者から見えないまま残る（`GET /orphans` にも出ない）。
         try:
-            with immediate(self._conn):
-                ctx.assert_lease()
-                self._conn.execute(
-                    "UPDATE artifact_staging SET state = 'staged', final_rel_path = ?,"
-                    " expected_size = ?, content_sha1 = ?, metadata_json = ?, updated_at = ?"
-                    " WHERE id = ?",
-                    (
-                        final_rel,
-                        size,
-                        sha1,
-                        json.dumps(metadata, ensure_ascii=False),
-                        now_iso(),
-                        staging_id,
-                    ),
-                )
-        except LeaseLost as exc:
-            raise PublishAborted(str(exc)) from exc
-        self._checkpoint(STEP_STAGED)
+            # 2〜3. 実体を staging に置く。ジョブ用ディレクトリを新しく作ったときは、
+            #       その名前を持つ親（staging/）も fsync する。中のファイルだけ
+            #       永続化しても、<job-id> のエントリが失われれば丸ごと消える。
+            if not staging_abs.parent.exists():
+                staging_abs.parent.mkdir(parents=True, exist_ok=True)
+                fsync_dir(staging_abs.parent.parent)
+            size, sha1 = materialise(staging_abs)
+
+            # 4. サイズの検証
+            on_disk = staging_abs.stat().st_size
+            if on_disk != size:
+                raise PublishAborted(f"書き込みサイズが一致しない（{on_disk} != {size}）")
+            self._checkpoint(STEP_VERIFIED)
+
+            # 5. メタデータは公開前に確定させる。実体はあるがメタデータが欠けたまま
+            #    永久にスキップされる状態を作らない。ffprobe の timeout はリースと
+            #    同値なので、囲まないと手順 7 で失効しうる。
+            #    **遅延解決もここで行う。** 手順 4（サイズの検証）の後なので、読むのは
+            #    検証済みのバイト列。前で読むと未完成のファイルを読み、後で読むと
+            #    metadata_json に載らないまま手順 7 で commit される。
+            #    リースの心拍で囲むのは ffprobe と同じ理由（相手待ちが長くなりうる）。
+            def _read_metadata() -> tuple[CapturedAt, Any]:
+                captured = request.captured
+                if captured is None:
+                    # 例外を投げない契約（adapters/exif.py が握る）。投げると、
+                    # 検証まで済んだファイルがここで落ちて staging に残る。
+                    captured = request.resolve_captured(staging_abs)
+                return captured, self._probe.describe(staging_abs, request.extension)
+
+            captured, probe = _with_lease_pulse(ctx, _read_metadata)
+            metadata = {
+                "role": request.role,
+                # 衝突時の別名系列は必ず「最初に望んだパス」から辿る。再開時に
+                # 変更後の final_rel_path から辿ると、名前に接尾辞が二重に付く。
+                "desired_rel_path": request.desired_rel_path,
+                "profile_id": request.profile_id,
+                "profile_revision_id": request.profile_revision_id,
+                "kind": probe.kind,
+                # UTC へ正規化しない。復元した現地の壁時計が読めなくなる。
+                "captured_at": captured.at.isoformat(),
+                "captured_at_source": captured.source,
+                "captured_at_tz": captured.tz,
+                "captured_at_note": captured.note,
+                "duration_seconds": probe.duration_seconds,
+                "probe_state": probe.probe_state,
+                "mtime_ns": request.mtime_ns,
+                # 衝突時の別名に使う壁時計。ここで確定して永続化する。再開のたびに
+                # 計算し直すと、算出方法を変えた版で別の名前へ落ちる。
+                "collision_stamp": _collision_stamp(request.mtime_ns),
+            }
+            self._checkpoint(STEP_METADATA)
+
+            # 6. 公開先の決定
+            final_rel = request.desired_rel_path
+            self._checkpoint(STEP_FINAL_PATH)
+
+            # 7. staged。ここが後戻りできない点で、以後は reconciliation が公開を
+            #    完遂する。だからリースの確認は手順 8 の直前ではなくここで行う。
+            #
+            #    確認と遷移を 1 つの BEGIN IMMEDIATE に入れるのが要点。別々にすると
+            #    その隙間にキャンセルが commit でき、「キャンセル済みと表示した後に
+            #    公開される」経路が残る。
+            try:
+                with immediate(self._conn):
+                    ctx.assert_lease()
+                    self._conn.execute(
+                        "UPDATE artifact_staging SET state = 'staged', final_rel_path = ?,"
+                        " expected_size = ?, content_sha1 = ?, metadata_json = ?, updated_at = ?"
+                        " WHERE id = ?",
+                        (
+                            final_rel,
+                            size,
+                            sha1,
+                            json.dumps(metadata, ensure_ascii=False),
+                            now_iso(),
+                            staging_id,
+                        ),
+                    )
+            except LeaseLost as exc:
+                raise PublishAborted(str(exc)) from exc
+            self._checkpoint(STEP_STAGED)
+        except Exception:
+            # 後始末の失敗で本当の失敗を覆い隠さない。
+            with contextlib.suppress(Exception):
+                self._discard_writing(staging_id)
+            raise
 
         try:
             return self._finish(staging_id)
@@ -352,6 +365,21 @@ class ArtifactPublisher:
         fsync_dir(staging_abs.parent)
         self._checkpoint(STEP_FSYNCED)
         return size, digest.hexdigest()
+
+    def _discard_writing(self, staging_id: str) -> None:
+        """staged より手前で落ちた行を捨てる. staged 以降には触らない.
+
+        **他のジョブが使っている可能性は無い。** 自分のジョブが writing で
+        持っている行だけを対象にするので、「一時ファイルを無条件に消さない」
+        原則（§9.6）の対象外になる。
+        """
+        row = self._row(staging_id)
+        if row is None or row["state"] != "writing":
+            return
+        with contextlib.suppress(OSError):
+            (self._data_root / row["staging_rel_path"]).unlink()
+        self._conn.execute("DELETE FROM artifact_staging WHERE id = ?", (staging_id,))
+        logger.info("書きかけの staging %s を捨てた", staging_id)
 
     def resume(self, staging_id: str) -> PublishedArtifact | None:
         """reconciliation から呼ぶ. 永続化済みの情報だけを使い、パスを推測しない."""
