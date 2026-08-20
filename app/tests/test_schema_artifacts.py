@@ -245,13 +245,13 @@ def test_a_superseded_group_cannot_gain_active_members(db):
     first = a_merge_group(db, profile, digest="d1")
     second = a_merge_group(db, profile, digest="d2")
     db.execute("UPDATE merge_group SET superseded_by_id = ? WHERE id = ?", (second, first))
-    with pytest.raises(sqlite3.IntegrityError, match="supersede"):
+    with pytest.raises(sqlite3.IntegrityError, match="live state"):
         db.execute(
             "INSERT INTO merge_member VALUES (?, ?, 0, 1)", (first, a_media_file(db, profile))
         )
     # 非 active としてなら履歴に残せる
     db.execute("INSERT INTO merge_member VALUES (?, ?, 0, 0)", (first, a_media_file(db, profile)))
-    with pytest.raises(sqlite3.IntegrityError, match="supersede"):
+    with pytest.raises(sqlite3.IntegrityError, match="live state"):
         db.execute("UPDATE merge_member SET active = 1 WHERE merge_group_id = ?", (first,))
 
 
@@ -264,7 +264,7 @@ def test_a_member_cannot_be_moved_into_a_superseded_group(db):
     successor = a_merge_group(db, profile, digest="d3")
     db.execute("UPDATE merge_group SET superseded_by_id = ? WHERE id = ?", (successor, doomed))
     db.execute("INSERT INTO merge_member VALUES (?, ?, 0, 1)", (active_group, media_id))
-    with pytest.raises(sqlite3.IntegrityError, match="supersede"):
+    with pytest.raises(sqlite3.IntegrityError, match="live state"):
         db.execute(
             "UPDATE merge_member SET merge_group_id = ? WHERE merge_group_id = ?",
             (doomed, active_group),
@@ -275,7 +275,7 @@ def test_an_active_group_cannot_hold_an_inactive_member(db):
     """active は親の状態の写しなので、片方だけずらせない."""
     profile = a_profile(db)
     group = a_merge_group(db, profile, digest="d1")
-    with pytest.raises(sqlite3.IntegrityError, match="supersede"):
+    with pytest.raises(sqlite3.IntegrityError, match="live state"):
         db.execute(
             "INSERT INTO merge_member VALUES (?, ?, 0, 0)", (group, a_media_file(db, profile))
         )

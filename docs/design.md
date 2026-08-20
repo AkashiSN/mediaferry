@@ -1395,7 +1395,9 @@ primary は `POST` の応答を見て、`extensions` の先頭側でなければ
 次は既定では出さないが、ユーザがフィルタで表示して選べる。「選べない」のではなく
 「うっかり選ばない」ようにするための区別である。
 
-- `status = failed` / `skipped` のグループの member（結合できなかったので個別に上げる）
+- `status = failed` のグループの member（結合できなかったので個別に上げる）。**破棄した
+  グループの member はここではなく既定の一覧に戻る**（`0017`。破棄は「このまとまりは
+  無し」であって、ファイルを隠すことではない）
 - 検証不合格でまだ採用していない derived（中身を確認した上で）
 
 ### 宛先ごとの状態
@@ -1440,7 +1442,7 @@ primary は `POST` の応答を見て、`extensions` の先頭側でなければ
 | `selection_rule` | 選べる場面 | **claim 時に評価する現在の条件** |
 | --- | --- | --- |
 | `default` | 既定の一覧から選んだ | (b) を満たす |
-| `failed_group_member` | 結合に失敗・skip したグループの member を個別に上げる | **今も**そのグループが `failed` / `skipped` で、M がその member |
+| `failed_group_member` | 結合に失敗したグループの member を個別に上げる | **今も**そのグループが `failed` で、M がその active な member |
 | `adopted_derived` | 検証不合格の derived を中身を見て採用した | `adopted_at IS NOT NULL` かつ生成元グループと `output_media_file_id` / `input_digest` が整合 |
 
 **未採用の derived を選ぶ操作は「採用」そのものとして扱う。** 同じ

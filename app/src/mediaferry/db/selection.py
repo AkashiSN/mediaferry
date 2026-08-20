@@ -45,14 +45,16 @@ _DERIVED = (
     " ORDER BY m.captured_at DESC"
 )
 
-# `skipped` は Phase 2 では作られない（破棄は Phase 4）。§10 が「failed / skipped の
-# グループの member」と定めているので、条件は最初から両方書いておく。
+# **`skipped` はここに来ない。** 破棄したグループは member を手放すので（`0017`）、
+# その構成ファイルは `_ORIGINALS` に戻る —— 破棄は「このまとまりは無し」であって、
+# ファイルを隠すことではない。ここで拾うのは `failed` だけ（再試行できるので、
+# グループは生きている）。
 _MEMBERS_OF_UNMERGED = (
     "SELECT m.id, m.rel_path, m.role, g.id AS merge_group_id FROM media_file m"
     " JOIN merge_member mm ON mm.media_file_id = m.id"
     " JOIN merge_group g ON g.id = mm.merge_group_id"
     " WHERE m.missing_at IS NULL AND mm.active = 1"
-    "   AND g.superseded_by_id IS NULL AND g.status IN ('failed', 'skipped')"
+    "   AND g.superseded_by_id IS NULL AND g.status = 'failed'"
     " ORDER BY m.captured_at DESC"
 )
 

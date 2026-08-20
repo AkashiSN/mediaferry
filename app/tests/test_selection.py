@@ -3,6 +3,7 @@ import json
 import pytest
 
 from mediaferry.core.merge.digest import input_digest
+from mediaferry.db.merges import MergeRepository
 from mediaferry.db.profiles import ProfileRegistry
 from mediaferry.db.selection import (
     INCLUDE_FAILED_GROUP_MEMBERS,
@@ -187,13 +188,21 @@ def test_failed_group_members_can_be_shown_with_a_filter(db, profile):
     assert {item.reason for item in shown} == {"failed_group_member"}
 
 
-def test_skipped_group_members_can_be_shown_with_the_same_filter(db, profile):
+def test_discarded_group_members_come_back_as_plain_originals(db, profile):
+    """**破棄は「このまとまりは無し」であって、ファイルを隠すことではない.**
+
+    破棄したグループは member を手放すので（`0017`）、その構成ファイルは
+    opt-in 無しで普通の選択肢に戻る。`failed` は再試行できてグループが生きて
+    いるので、そちらは opt-in のまま。
+    """
     members = a_pair(db, profile)
-    a_group(db, profile, members, status="skipped", verification=None)
-    shown = SelectionService(db, ProfileRegistry(db)).selectable(
-        include=[INCLUDE_FAILED_GROUP_MEMBERS]
-    )
-    assert ids(shown) == {media_id for media_id, _ in members}
+    group_id = a_group(db, profile, members, verification=None)
+    MergeRepository(db).discard(group_id)
+    service = SelectionService(db, ProfileRegistry(db))
+    assert ids(service.selectable()) == {media_id for media_id, _ in members}
+    assert ids(service.selectable(include=[INCLUDE_FAILED_GROUP_MEMBERS])) == {
+        media_id for media_id, _ in members
+    }
 
 
 def test_a_string_false_is_not_a_pass(db, profile):

@@ -389,7 +389,9 @@ class UploadRepository:
                 " WHERE mm.media_file_id = ? AND mm.active = 1 AND g.id = ?",
                 (media["id"], row["merge_group_id"]),
             ).fetchone()
-            if member is None or member["status"] not in ("failed", "skipped"):
+            # **`skipped` はここに来ない。** 破棄したグループは member を手放すので
+            # （`0017`）、その構成ファイルは既定の一覧の側で選ばれる。
+            if member is None or member["status"] != "failed":
                 return "結合できなかったグループの構成ファイル、という根拠が成立しない"
             return None
         if rule == "adopted_derived":

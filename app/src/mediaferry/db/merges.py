@@ -195,11 +195,14 @@ class MergeRepository:
         """
         with immediate(self._conn):
             self._assert_editable(group_id)
+            # **無効化は skipped にする前に行う**（`supersede` と同じ理由）。
+            # `status` を立てた trigger が member を `active = 0` にするので、
+            # 後だと「active な member」を条件にした無効化が 1 件も当たらない。
+            self._invalidate_pending(group_id, "結合グループを破棄した")
             self._conn.execute(
                 "UPDATE merge_group SET status = 'skipped', updated_at = ? WHERE id = ?",
                 (now_iso(), group_id),
             )
-            self._invalidate_pending(group_id, "結合グループを破棄した")
 
     def supersede(self, group_id: str, media_ids: list[str], digest: str) -> str:
         """構成を変えた新しいグループを作り、旧グループをそこへ向け直す.

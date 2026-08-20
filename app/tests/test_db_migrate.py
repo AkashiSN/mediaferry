@@ -306,6 +306,7 @@ def test_a_database_from_the_previous_release_still_opens(tmp_path):
         "0014_media_file_listing.sql": None,
         "0015_stacking.sql": None,
         "0016_stack_needs_its_asset.sql": None,
+        "0017_discard_frees_members.sql": None,
     }
     shipped = sorted(path.name for path in MIGRATIONS_DIR.glob("*.sql"))
     assert shipped == sorted(frozen), "版を足したら、この一覧にも足す"
@@ -550,3 +551,61 @@ def test_a_profile_filtered_listing_does_not_sort_the_whole_profile(tmp_path):
     conn.close()
 
     assert "TEMP B-TREE" not in plan, plan
+
+
+def test_a_group_discarded_before_the_change_gives_its_files_back(tmp_path):
+    """`0017`。**既存の DB を埋め戻さないと、実機がそのまま詰まる.**
+
+    実機には「破棄済みなのに member が active」なグループが 2 つ残っていた。
+    その状態では再検出も組み直しもできないので、版を足すだけでは直らない。
+    """
+    from .test_schema_artifacts import a_media_file
+    from .test_schema_sources import a_profile
+
+    conn = Database(tmp_path / "old.sqlite3").connect()
+    apply_migrations(conn)
+    profile_id, revision_id = a_profile(conn)
+    media = [
+        a_media_file(conn, (profile_id, revision_id), rel_path=f"library/dji-osmo/P{i}.MP4")
+        for i in range(2)
+    ]
+
+    # 0017 が入る前の DB へ戻す（active は superseded_by_id だけの写しだった）。
+    conn.execute("DELETE FROM schema_migration WHERE version = 17")
+    conn.execute("DROP TRIGGER merge_group_discard_deactivates_members")
+    conn.execute("DROP TRIGGER merge_group_discard_is_final")
+    conn.execute("DROP TRIGGER merge_member_insert_matches_parent")
+    conn.execute("DROP TRIGGER merge_member_update_matches_parent")
+    conn.execute(
+        "INSERT INTO merge_group (id, profile_id, profile_revision_id, status, input_digest,"
+        " detected_by, created_at, updated_at)"
+        " VALUES ('g-old', ?, ?, 'skipped', 'digest-old', 'auto', ?, ?)",
+        (profile_id, revision_id, now_iso(), now_iso()),
+    )
+    for position, media_id in enumerate(media):
+        conn.execute(
+            "INSERT INTO merge_member (merge_group_id, media_file_id, position, active)"
+            " VALUES ('g-old', ?, ?, 1)",
+            (media_id, position),
+        )
+
+    # 0003 の版の trigger を戻す（0017 はこれを DROP するところから始まる）。
+    for name, event in (
+        ("merge_member_insert_matches_parent", "BEFORE INSERT ON merge_member"),
+        (
+            "merge_member_update_matches_parent",
+            "BEFORE UPDATE OF merge_group_id, active ON merge_member",
+        ),
+    ):
+        conn.execute(
+            f"CREATE TRIGGER {name} {event}"  # noqa: S608
+            " WHEN NEW.active <> (SELECT superseded_by_id IS NULL FROM merge_group"
+            "                     WHERE id = NEW.merge_group_id)"
+            " BEGIN SELECT RAISE(ABORT, 'member active flag must match the group"
+            " supersede state'); END"
+        )
+
+    assert apply_migrations(conn) == [17]
+
+    assert conn.execute("SELECT count(*) FROM merge_member WHERE active = 1").fetchone()[0] == 0
+    conn.close()

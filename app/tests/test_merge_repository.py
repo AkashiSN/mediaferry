@@ -1,3 +1,4 @@
+import sqlite3
 from datetime import UTC, datetime
 
 import pytest
@@ -272,3 +273,48 @@ def test_regrouping_across_two_groups_is_refused_not_a_crash(db, profile):
 
     with pytest.raises(GroupNotEditable):
         repo.supersede(first, everyone, "digest-merged")
+
+
+def test_discarding_a_group_frees_its_files(db, profile):
+    """**破棄したグループはファイルを手放す。** さもないと組み直す経路が無い.
+
+    `active` が `superseded_by_id` だけの写しだった頃は、破棄しても member が
+    active のまま残り、再検出の境界になっていた。2 つのグループを 1 つにまとめる
+    操作（§13 の supersede）も、相手側の member が active なので必ず 409 になる。
+    実機で、割れて検出された 5 パートを組み直せずに詰まった。
+    """
+    repo = MergeRepository(db)
+    candidate = a_candidate(db, profile)
+    group_id = repo.save_detected(profile, candidate, "digest-1")
+    repo.discard(group_id)
+    taken = db.execute("SELECT count(*) FROM merge_member WHERE active = 1").fetchone()[0]
+    assert taken == 0
+
+
+def test_a_freed_file_can_join_a_different_group(db, profile):
+    """解放したファイルは、別の構成なら組み直せる（同じ構成は digest が拒む）."""
+    repo = MergeRepository(db)
+    first = a_candidate(db, profile, count=2)
+    repo.discard(repo.save_detected(profile, first, "digest-1"))
+    extra = a_candidate(db, profile, count=1, prefix="EXT")
+    everyone = [part.media_file_id for part in first.members + extra.members]
+    group_id = repo.create_manual(everyone, "digest-2")
+    assert group_id is not None
+    assert len(repo.members(group_id)) == 3
+
+
+def test_the_same_grouping_is_not_detected_again_after_a_discard(db, profile):
+    """解放しても、捨てたのと同じ構成は作り直さない（`input_digest` が番人）."""
+    repo = MergeRepository(db)
+    candidate = a_candidate(db, profile)
+    repo.discard(repo.save_detected(profile, candidate, "digest-1"))
+    assert repo.save_detected(profile, candidate, "digest-1") is None
+
+
+def test_a_discard_cannot_be_undone(db, profile):
+    """戻せると、active と親の状態が乖離する（supersede と同じ理由）."""
+    repo = MergeRepository(db)
+    group_id = repo.save_detected(profile, a_candidate(db, profile), "digest-1")
+    repo.discard(group_id)
+    with pytest.raises(sqlite3.IntegrityError):
+        db.execute("UPDATE merge_group SET status = 'detected' WHERE id = ?", (group_id,))
