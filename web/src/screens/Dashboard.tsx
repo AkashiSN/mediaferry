@@ -17,6 +17,8 @@ type DestinationSummary = {
   awaiting_approval: number;
   pending: number;
   unsent: number;
+  stacked: number;
+  stack_skipped: number;
 };
 
 type Dashboard = {
@@ -81,6 +83,7 @@ export function DashboardScreen() {
               <th>未送信</th>
               <th>失敗</th>
               <th>承認待ち</th>
+              <th>スタック</th>
             </tr>
           </thead>
           <tbody>
@@ -96,6 +99,12 @@ export function DashboardScreen() {
                 <td>{destination.failed}</td>
                 <td>
                   <Link to="/approvals">{destination.awaiting_approval}</Link>
+                </td>
+                <td>
+                  {destination.stacked} 組
+                  {destination.stack_skipped > 0 && (
+                    <> / 見送り {destination.stack_skipped} 件</>
+                  )}
                 </td>
               </tr>
             ))}

@@ -32,6 +32,7 @@ from ..jobs.preflight import PreflightCache
 from ..jobs.recheck import Rechecker
 from ..jobs.recompute import Recomputer
 from ..jobs.scan import Scanner
+from ..jobs.stacker import Stacker
 from ..jobs.uploader import Uploader
 from ..jobs.volumes import VolumeSelection, VolumeService
 from ..settings import SettingsService
@@ -124,7 +125,8 @@ class JobWorld:
             "info",
             f"再計算{'完了' if outcome.finished else 'を中止した（ここまでの分は反映済み）'}:"
             f" 変更 {outcome.changed} 件 / 据え置き {outcome.unchanged} 件"
-            f" / 飛ばし {outcome.skipped} 件 / 再確認へ戻し {outcome.requeued} 件",
+            f" / 飛ばし {outcome.skipped} 件 / 再確認へ戻し {outcome.requeued} 件"
+            f" / スタック再評価 {outcome.reopened} 件",
         )
 
     def run_upload(self, ctx: JobContext, conn: sqlite3.Connection) -> None:
@@ -145,12 +147,17 @@ class JobWorld:
 
         preflight = PreflightCache(destinations, open_client)
         destination_id = ctx.params["destination_id"]
+        stacker = Stacker(
+            conn, uploads, destinations, ProfileRegistry(conn), open_client, preflight
+        )
         if ctx.params.get("mode") == "approve":
             # 承認は 1 件だけを扱う。外部副作用の所有権はジョブのリースが持つ。
             ApprovalService(
                 conn, uploads, destinations, ProfileRegistry(conn), open_client, preflight
             ).approve(ctx, ctx.params["upload_record_id"])
             ctx.emit("info", "日時の補正を承認して書き戻した")
+            # **承認で `complete` になった行も第 2 パスの対象**（§9.11）。
+            _emit_stacks(ctx, stacker.run(ctx, destination_id))
             return
         if ctx.params.get("mode") == "recheck":
             outcome = Rechecker(uploads, destinations, open_client, preflight).run(
@@ -161,6 +168,7 @@ class JobWorld:
                 f"再確認: {outcome.checked} 件 / ゴミ箱 {outcome.trashed} 件"
                 f" / 消滅 {outcome.vanished} 件 / 復元 {outcome.restored} 件",
             )
+            _emit_stacks(ctx, stacker.run(ctx, destination_id))
             return
         uploader = Uploader(
             conn,
@@ -178,6 +186,7 @@ class JobWorld:
             f"アップロード完了: 送信 {outcome.sent} 件 / 承認待ち {outcome.awaiting} 件"
             f" / 見送り {outcome.skipped} 件 / 失敗 {outcome.failed} 件",
         )
+        _emit_stacks(ctx, stacker.run(ctx, destination_id))
 
 
 def _fixed_profile(conn: sqlite3.Connection, selection: VolumeSelection) -> ProfileRef:
@@ -205,3 +214,13 @@ def _profile_ref(conn: sqlite3.Connection, params: Mapping[str, Any]) -> Profile
         revision=0,
         definition=registry.definition_of(revision_id),
     )
+
+
+def _emit_stacks(ctx: JobContext, outcome) -> None:  # noqa: ANN001 - StackOutcome
+    """第 2 パスの結果を出す. **何も無かったときは黙る**（毎回並べない）."""
+    if outcome.stacked or outcome.skipped or outcome.deferred:
+        ctx.emit(
+            "info",
+            f"スタック: {outcome.stacked} 組 / 見送り {outcome.skipped} 件"
+            f" / 保留 {outcome.deferred} 件",
+        )

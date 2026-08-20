@@ -378,8 +378,24 @@ Expected: PASS
 - [ ] **Step 5: 変異試験**
 
 トリガの各枝（3 つの OR）を 1 つずつ壊し、対応するテストが落ちること。
-**部分索引の述語から `invalidated_at IS NULL` を外す**変異が EXPLAIN のテストで
-落ちること（落ちなければテストの当て方が悪い）。
+
+**実施結果（2026-08-19）: 11 件中 10 件を検出。**
+
+- **`IS` を `=` に戻す変異が検出された** —— これは実装中に見つけた本物の欠陥でもある。
+  `stack_state` が NULL のとき `NEW.stack_state = 'stacked'` は NULL を返し、
+  `偽 OR NULL` は NULL、`NOT NULL` も NULL になるので **WHEN が成立せず trigger が
+  黙って素通りする**。最初に `=` で書いたときは「未評価へ戻すのに理由が残っている」が
+  通ってしまった。**比較は `IS` で書く**
+- **3 件は当て方を直して初めて成立した。** `WHEN 0` を足す形と、
+  `NEW.state = 'complete' AND` を括らずに足す形は、どちらも構文エラーか
+  「最初の枝にしか掛からない」になり、狙いの判断を壊していなかった
+  （`AND` は `OR` より強いので、**全体を括る**必要がある）
+- **素通り 1 件（構造的に検出できない）:** 部分索引の述語から
+  `invalidated_at IS NULL` を落とす変異。部分索引は「索引の述語が問い合わせの
+  WHERE から導ける」ときに使えるので、**述語を緩めても索引は使われ続け、
+  EXPLAIN に差が出ない**。差が出るのは索引の大きさと走査量だけで、
+  無効化された行を大量に作って走査量を測るテストが要る。**入れない**
+  （効果に対して試験が重い）
 
 - [ ] **Step 6: コミット**
 
@@ -661,8 +677,17 @@ Expected: PASS
 
 - [ ] **Step 5: 変異試験**
 
-`_stack_from` の `_identifier` を素通しに、`stack_by_primary` の
-`stack.primary_asset_id == checked` を常に真に、`assets` の空検査を外す。
+**実施結果（2026-08-19）: 14 件中 14 件を検出**（最初は 6/12 で、素通り 6 件は
+**すべてテストの当て方が原因**だった）。
+
+| 素通りの原因 | 直し方 |
+| --- | --- |
+| 相手の応答に**その形を作るつまみが無い**（空の `assets`、重複した member、絞り込みを無視する一覧、本物の非 JSON） | fake にトグルを足し、その形を実際に返させた |
+| **相方がマスクしている**（`assets` の空検査は primary の member 検査が、重複の検査は全単射の件数比較が塞ぐ） | `pairs` で対を同時に壊した。**対で検出できるので、冗長さは意図であって削ってよい根拠にはならない** |
+| **テストが差を見ていない**（`echo_key_as_ids` は全単射の検査でも落ちるので、識別子の検査を外しても同じ例外が出る） | `key_as_stack_id`（資産の集合は正しいまま、**id だけに鍵を混ぜる**）を足した。`remote_stack_id` は DB に入り次の要求の URL にも入るので、ここは識別子の検査だけが守っている |
+
+**`json.dumps` を通すと「JSON の文字列」になり、`.json()` が成功してしまう。**
+本物の非 JSON を返すには、fake の応答を bytes のまま書き出す経路が要る。
 
 - [ ] **Step 6: コミット**
 
@@ -1061,6 +1086,20 @@ def resolve_group(
             partners.append(candidate)
     if not partners:
         return Refusal("相方が見つからない")
+    # **判定の順序が理由の正しさを決める。** `None` を重複より先に見ないと、
+    # 再確認で両方の資産が消えた `[None, None]` を「重なっている」と表示する
+    # （実装差分レビュー 3 巡目の minor）。
+    identifiers = [member.remote_asset_id for member in (primary, *partners)]
+    if any(identifier is None for identifier in identifiers):
+        return Refusal("組の資産 ID が分からない")
+    if len(set(identifiers)) != len(identifiers):
+        # **相手が両方へ同じ資産 ID を返すことがある**（実装差分レビュー 2 巡目）。
+        # そのまま進むと、作成では `ValueError` がジョブ全体を落とし、回収では
+        # 1 資産のスタックを 2 行へ `stacked` と記録する。
+        return Refusal("相方と資産 ID が重なっている")
+    for member in (primary, *partners):
+        if member.origin != "created_by_us":
+            return Refusal("自分が上げたと証明できない資産が含まれる")
     for partner in partners:
         if partner.profile_id != primary.profile_id:
             # 規則は 1 つに決まっている必要がある（§9.11）。
@@ -1071,10 +1110,6 @@ def resolve_group(
             return Refusal("相方と時刻の根拠が違う（EXIF と mtime を突き合わせない）")
         if not _within(primary.captured_at, partner.captured_at, rule.tolerance_seconds):
             return Refusal("相方と撮影時刻が一致しない")
-        if partner.origin != "created_by_us" or primary.origin != "created_by_us":
-            return Refusal("自分が上げたと証明できない資産が含まれる")
-        if partner.remote_asset_id is None:
-            return Refusal("相方の資産 ID が分からない")
     members = sorted(
         [primary, *partners], key=lambda c: rule.extensions.index(extension_of(c.rel_path))
     )
@@ -1301,7 +1336,19 @@ Expected: PASS
 
 - [ ] **Step 5: 変異試験**
 
-対象: `stacking.py` と `uploads.py` の新規部分。最低限この 8 つ:
+**実施結果（2026-08-20）: 規則 20/20、リポジトリ 20/20 を検出。**
+素通りは 2 件出て、どちらも**テストの穴**だった。
+
+| 素通り | 原因 | 直し方 |
+| --- | --- | --- |
+| 相方の拡張子の検査を外す | **同じカード・同じ stem で規則外の拡張子**という筋書きが無かった（規則外の例は stem まで違っていた） | Canon が実際に書く `IMG_1234.THM` を同じ stem で置いた |
+| 範囲引きの上端を外す | 混入させた `IMG_12345.JPG` を `media_file_id = NULL` / `state = 'seen'` で入れていたので、**範囲以外の条件でも落ちていた** | published かつ `media_file_id` つきで入れ、**範囲だけで落ちる形**にした |
+
+**当て方を直した変異も 1 件。** 上端を `prefix || 'zzz'` に下げる形は、`.`（0x2E）
+より大きい文字で始まる名前を同じように切るので、**範囲の意味を変えていなかった**。
+上端ごと外す形にして初めて成立した。
+
+参考（当てた変異の例）:
 `captured_at_source` の比較を外す、`tolerance_seconds` を `<` から `<=` へ、
 `origin` の検査を primary だけにする、`extensions.index` を逆順に、
 `c.media_file_id != primary.media_file_id` を外す（自分を相方に数える）、
@@ -1737,7 +1784,26 @@ Expected: PASS
 
 - [ ] **Step 5: 変異試験**
 
-`_guard` の 2 段目（`POST` 直前の取り直し）を消す、preflight を消す、
+**実施結果（2026-08-20）: 24 件中 23 件を検出**（最初は 7/20）。**素通りの精査で
+実装の欠陥が 1 つ見つかった** —— `_settle` の見送りを `members[0]` に付けていたので、
+**相方を処理したときに自分ではない行が決着していた**（理由の付く先が組の先頭に
+偏る）。処理中の行に付ける形へ直した。
+
+| 素通りの型 | 例 | 直し方 |
+| --- | --- | --- |
+| **リースを跨ぐ量になっていない** | 遅い相手のテストが 1 回の読み取りぶんしか遅くなく、preflight の心拍だけで足りていた | `HEARTBEAT_INTERVAL` を縮め（既存の `test_publisher` と同じ作法）、**2 回の読み取りでリースを跨ぐ**量にした |
+| **割り込む窓が違う** | キャンセルを差し込むのが資産の読み取りの後だけで、**preflight の相手待ち**の窓が無かった | `on_preflight` を足し、`users/me` の応答直後に割り込めるようにした |
+| **相手に触らない差は通信では見えない** | 向き先が変わったあと `continue` しても、guard が読み取りの前に落ちるので**要求の数に差が出ない** | **組を何回評価したか**（`guard_stack_group` の呼び出し数）で見る |
+| **相方がマスクしている（と当時は判断した）** | `_beat` の `assert_lease` は、続けて呼ぶ `mark_skipped` の `_assert_current` が同じ場合を弾く | **この判定は後で覆った。** 実装差分レビュー 1 巡目の major 2 のとおり、**行頭の確認が偽を返した直後**にキャンセルを commit すれば観測できる（そのとき `_beat` は受け口の外にあり、ジョブが `failed` になっていた） |
+| **無限ループとして現れる** | `cursor` を進めない変異は、テストが落ちる代わりに**止まらなくなる** | 渡した cursor が単調増加することを直接見るテストを足し、その 1 本だけに当てて検出した |
+
+**冗長と分かった早期打ち切り**（いずれも対で壊せば検出できる。削ってよい根拠には
+ならない）: `_one` の `rule.enabled`（`resolve_group` も見る）、`_adopted` の
+「primary が組の外」（集合の一致でも落ちる）、`None in stack_ids`
+（呼び出し側が `existing == {None}` を先に分けているので到達しない）。
+
+参考（当てた変異の例）: `_guard` の 2 段目（`POST` 直前の取り直し）を消す、
+preflight を消す、
 `with_lease_pulse` を外す、`ctx.cancelled()` の確認を消す、`cursor = row["id"]` を消す、
 既存スタックの集合一致を `>=` に緩める、回収の経路から primary の検査を消す、
 `unstacked_batch` から `epoch` を落とす、`DestinationUnusable` を `continue` に変える、
@@ -1985,7 +2051,21 @@ Expected: PASS
 
 - [ ] **Step 5: 変異試験**
 
-`stack_state = 'skipped'` の条件を外す（`stacked` も戻る）、`_reopen_stack` を
+**実施結果（2026-08-20）: 14 件中 13 件を検出。**
+
+- **素通り 1 件（構造的に検出できない）:** `_publish_revision` の
+  `previous_json is None` の早期 return。この枝は `create` からしか来ず、
+  そのときメディアはまだ 1 件も無いので、`previous_json = definition_json`
+  （比較して差なし）と**観測できる差が無い**。読みやすさのために残す
+- **当て方を直した変異 2 件。** 「変化が無くても戻す」は `continue` の後ろに
+  置いたままで `_same` の枝を通っておらず、狙いの判断を壊していなかった。
+  「新規作成でも比較する」は `'{}'` を渡す形だと `parse_definition` が全件で
+  落ちる（成立しない形）
+- **テストの穴 1 件。** 「省略 → 明示的な disabled」を見るつもりのテストが、
+  **どちらも省略**を比べていた。正規形（`definition_to_json`）を通して初めて
+  差が出る
+
+参考（当てた変異の例）: `stack_state = 'skipped'` の条件を外す（`stacked` も戻る）、`_reopen_stack` を
 `_same` の側（変化なし）でも呼ぶ、トランザクションの外へ出す、
 `_publish_revision` の `profile_id` の絞りを外す（他のプロファイルまで戻る）、
 `_stack_rule_of` の比較を常に真にする（`stack` 以外の編集でも全件戻る）／常に偽にする
@@ -2052,8 +2132,17 @@ Expected: PASS（型の再生成を忘れると最後のテストが落ちる）
 
 - [ ] **Step 5: 変異試験**
 
-未知の `stack_state` を素通しにする、`unevaluated` を `= 'unevaluated'` にする、
-サマリの `invalidated_at IS NULL` を外す。
+**実施結果（2026-08-20）: 9 件中 9 件を検出。**
+
+**ドライバの盲点を 1 つ直した。** 落ちたテストを `FAILED` の行だけで数えていたので、
+**構文が壊れる変異は 1 件も `FAILED` を出さず「素通り」に見えていた**（収集エラーは
+`ERROR` の行になる）。`ERROR` も数えるようにしたうえで、その変異は**成立する形**
+（`try` ごと外す）へ当て直した。
+
+当てた変異: 未知の `stack_state` を素通しにする、`unevaluated` を
+`= 'unevaluated'` にする、フィルタを無視する、サマリの `invalidated_at IS NULL` を
+外す、`stacked` と `skipped` を取り違える、`_view` の 3 列を落とす、
+400 を返さない。
 
 - [ ] **Step 6: コミット**
 
@@ -2165,7 +2254,19 @@ Expected: 3 spec すべて PASS（journey / phase5 / phase6）
 
 - [ ] **Step 4: crash consistency**
 
-`test_crash_consistency.py` に、第 2 パスの**3 点**で `os._exit` する筋書きを足す。
+**計画から外れた判断（2026-08-20）:** `test_crash_consistency.py` の子プロセス
+（`crash_child.py`）は**公開の経路しか持たない**（宛先も相手も無い）ので、
+第 2 パスを `os._exit` で落とすには子を作り直すことになる。**同じ 3 つの状態を
+実プロセス内で作って回収を見る形**にした（§9.3 の議論と同じで、効くのは
+「落とし方」ではなく**残る状態**）。
+
+| 作る状態 | 作り方 | 確かめること |
+| --- | --- | --- |
+| 作成の応答を受け取る前に落ちた | fake が**スタックを作ってから 503 を返す** | 1 回目は未評価のまま保留、2 回目に集合一致で回収し、**作り直さない** |
+| `POST` の直後・`PUT` の前に落ちた | 集合は一致するが primary が違うスタックを置く | primary を望みの側へ直す |
+| `PUT` の後・記録の前に落ちた | 望みどおりのスタックを置く | `PUT` を打ち直さない |
+
+参考（当初の案）: `test_crash_consistency.py` に、第 2 パスの**3 点**で `os._exit` する筋書きを足す。
 
 | 落とす場所 | 次の送信で起きるべきこと |
 | --- | --- |
@@ -2265,6 +2366,100 @@ git commit -m "docs(mediaferry): Phase 6 の実測と引き継ぎを書き戻す
 | 規則の版の固定 | **組ごとに読んだ `revision_id` を固定し、guard と最終 CAS で「まだ現行か」を見る** | プロファイルの編集は同期 API で行えるので、組を決めた後・送る前に規則が変わりうる |
 | 宛先の epoch の固定 | 開始時に固定し、**guard で「宛先の現行 epoch と同じか」も見る** | epoch を進める編集は `complete` を無効化しないので、第 2 パスだけが既存の停止境界から外れる |
 | 動画の組 | **作らない** | `MVI_*.MOV` は 1 ファイルで完結する。組にする根拠が無い |
+
+## 実装差分のレビュー
+
+### 1 巡目（2026-08-20、codex `--fresh`。blocker 0 / major 5 / minor 3）
+
+**8 件すべて妥当。反論できたものは無い。** 計画レビューで収束した論点ではなく、
+**実装して初めて現れた接続部**から出た（無効化した宛先、再確認、回収の GET、
+`PUT` 後の実像）。
+
+| # | 指摘 | 判定 | 反映 |
+| --- | --- | --- | --- |
+| major 1 | **`_assert_current` が宛先の `enabled` / `archived_at` を見ない。** `rename_or_toggle` と `archive` は epoch を進めないので、資産 GET を待っている間に無効化・保管されても guard を通り、`POST` / `PUT` が出る | **妥当。** `claim_next` は `d.enabled = 1 AND d.archived_at IS NULL` を見ており、**claim を使わない第 2 パスだけが抜けていた** | 現行 epoch の SELECT に同じ条件を足し、不一致は `DestinationChanged`（第 2 パスごと打ち切り）。無効・保管の試験を追加 |
+| major 2 | **行間 heartbeat の `LeaseLost` が受け口の外。** 行頭の `cancelled()` が偽を返した直後にキャンセルが commit されると、`_beat` が投げて `JobRunner` がジョブを `failed` にする | **妥当。** 利用者のキャンセルを失敗として記録する経路（§9.9 に反する） | `_beat` を同じ `try` に入れた。**この指摘で「`_beat` の `assert_lease` は構造的に検出できない」という前巡の判定も覆った** —— 確認の直後に commit する試験で観測できる |
+| major 3 | **回収に使う `stack_by_primary` だけ pulse を通っていない。** timeout は 86400 秒なので、正常な長い応答で直後の `mark_stacked` がリースを失う | **妥当。** 既存の「遅い相手」の試験は新規作成の経路で、この穴を通らなかった | `_adopted` に `ctx` を渡して囲んだ。`GET /api/stacks` だけを遅らせる試験を追加 |
+| major 4 | **相手の応答をローカルの組へ結び付け切れていない。** ① `asset(A)` が返り値 id と要求 A の一致を見ない ② `_adopted` が primary の集合を 1 要素か見ず、引けた id と名乗った id の一致も見ない ③ `PUT` 後の確認が `stack_id` しか見ない | **妥当。** ①は「相手が値を選べる」場面そのもの（§14） | adapter に `returned != requested` の検査を足し、`_adopted` は**ローカルの組（`decision`）を基準に**集合・primary・id を全部見る。`PUT` 後も id / primary / 集合の 3 つを確かめる。fake に「id を入れ替える」「primary が食い違う」「引けた id が違う」「`PUT` 後に member が変わる」を足した |
+| major 5 | **`remote_asset_id` が変わっても古い `stack_state` が残る。** 再確認で消滅（NULL）や別 ID になっても 3 列が残り、requeue しても第 2 パスへ戻らない。旧スタックを現在の結果として画面に出し続ける | **妥当。** スタックは「その `remote_asset_id` を送った結果」なので、ID が変われば結果も無効 | `stamp_many` / `stamp_remote` は **ID が変わったときだけ** 3 列を同じ UPDATE で NULL にする（`CASE WHEN`）。retry / requeue は常に NULL にする。**`0016` で「`stacked` なら `remote_asset_id` がある」を trigger にした**（将来の消し忘れを fail-closed に）。`0015` は書き換えない |
+| minor 1 | `RemoteAsset.stack` が「キー欠落」と「`null`」を区別しない。契約の文言と実装が一致していない | **妥当** | **契約の側をそろえた** —— 実 Immich は入っていない資産へ `null` を返すのが正規形なので、「欠落または `null` は None、形が違えば protocol error」と書き直した（設計・コメント・試験） |
+| minor 2 | E2E がテスト名と反して**見送りの理由の表示経路を通していない** | **妥当** | 相方の無い JPG を同じ E2E で送り、**宛先の画面に理由が出る**ところまで通した。ダッシュボードの「見送り 1 件」も見る |
+| minor 3 | 宛先の画面が見送りを 200 件で黙って切る | **妥当** | 50 件で区切り、**切ったことを画面に出す**（「先頭 50 件だけを出しています」） |
+
+**変異試験（この巡の反映分）: 16 件中 14 件を検出。** 残る 2 件は冗長で、
+**対で壊せば検出できる**ことを確認した。
+
+| 冗長 | 相方 |
+| --- | --- |
+| `PUT` 後の `moved.primary_asset_id != wanted_primary` | `stack_by_primary` が primary で絞って返すので、**この条件は構造的に到達しない**（クライアントの側が既に保証している） |
+| `_adopted` の `ours` をローカルの組から作る | adapter の「要求と応答の id が一致」。**両方を外すと `test_members_swapped_by_the_peer_are_refused` が落ちる**ことを手で確かめた（別ファイルなので単一ファイルのドライバでは対にできない） |
+
+**前巡の判定を 1 つ訂正した。** `_beat` の `assert_lease` は「構造的に検出できない」
+と書いていたが、**major 2 の窓で観測できる**（レビューの指摘どおり）。
+
+### 2 巡目（2026-08-20、codex `--fresh`。blocker 0 / major 3 / minor 0）
+
+**3 件すべて妥当。いずれも 1 巡目の対処が作った境界。**
+
+| # | 指摘 | 判定 | 反映 |
+| --- | --- | --- | --- |
+| major 1 | **資産 ID が変わったとき、同じスタックの相方が `stacked` のまま残る。** 1 巡目は「変わった 1 行」しか戻していなかった。相方が残ると、次に組み直すとき `_member_moved` の `stack_state IS NOT 'stacked'` が拒み、**以後ずっと組めない**（画面も古いスタックを出し続ける） | **妥当。** `mark_stacked` は組全員へ同じ `remote_stack_id` を書くので、戻すのも組単位でなければ釣り合わない | `_reopen_stack_of` を足し、**`(destination_id, target_epoch, remote_stack_id)` を共有する `stacked` 全員**を同じ取引で戻す |
+| major 2 | **`0016` が「別 ID への差し替え」を塞いでいない。** NULL だけを見るので、`advance_owned`（汎用の `_locked_cas`）が古い `remote_stack_id` を新しい資産の結果として残せる。再計算で `needs_recheck` へ戻った `stacked` の行を送り直す経路が実在する | **妥当。** 経路を試験に起こしたら、trigger がジョブごと落とすことも確認できた | trigger を `OLD.remote_asset_id IS NOT NEW.remote_asset_id` まで広げ、**`_locked_cas` が `remote_asset_id` を書くときは先に組を戻す**。正当な書き換えは通り、消し忘れは fail-closed |
+| major 3 | **組の中で `remote_asset_id` が重複しうる。** `resolve_group` は `media_file_id` でしか一意化せず、相手が両方へ同じ資産 ID を返せば 2 行が 1 ID に縮退する。作成では `ValueError` が例外分類の外へ漏れて**ジョブ全体が失敗**し、回収では 1 資産のスタックを 2 行へ `stacked` と記録する | **妥当。** 試験に起こすと `ValueError` がそのまま漏れた | `resolve_group` で**相手に触る前に**重複を見て、理由つきの見送りにする |
+
+**変異試験（この巡の反映分）: 11 件中 10 件を検出。**
+
+**素通り 1 件は構造的な冗長。** `_reopen_stack_of` の `stack_state = 'stacked'` は、
+同じ WHERE の `remote_stack_id = ?` が既に見送りを除いている（`0015` の trigger が
+「`skipped` なら `remote_stack_id` は NULL」を守るため）。**trigger と対で壊せば
+検出できる**ので、冗長さは意図であって削ってよい根拠にはならない。
+
+**テストの穴を 2 つ塞いだ。** 「同じ ID を書き直しても戻さない」は `stamp_many`
+経由でしか見ておらず、内側の番兵（`new_asset_id == 現在値`）を通る `stamp_remote` /
+`_locked_cas` の経路が試験に無かった。`0016` の INSERT 側も、`stacked` +
+`remote_stack_id` あり + 資産 ID 無しで作る筋書きが無かった。
+
+### 3 巡目（2026-08-20、codex `--fresh`。blocker 0 / major 1 / minor 1）
+
+**2 件とも妥当。2 巡目の対処が作った境界。**
+
+| # | 指摘 | 判定 | 反映 |
+| --- | --- | --- | --- |
+| major 1 | **`_reopen_stack_of` を CAS より先に呼んでいるので、「古い観測は何も書かない」が破れる。** `stamp_many` は CAS に外れても組の再オープンだけが commit される。`stamp_remote` も「`complete` だけを対象」という公開契約に反して組を開く | **妥当。** 組を開くのは `remote_asset_id` を変える前でなければならない（`0016`）が、**外れる観測で開いてはいけない** | `BEGIN IMMEDIATE` の中で**先に本体 UPDATE の全条件を SELECT で確かめ**、通ったときだけ組を開いて書く。書き込みロックを持っているので、確認と書き込みの間に誰も割り込めない |
+| minor 1 | **「分からない」を「重なっている」と表示する。** 重複の検査が `None` の検査より前にあるので、再確認で両方の資産が消えて `[None, None]` になると「資産 ID が重なっている」と出る | **妥当。** 理由は画面に出るので、取り違えたまま残る | `None` を先に見る。理由も「組の資産 ID が分からない」に統一した |
+
+**変異試験（この巡の反映分）: 4 件中 4 件を検出。**
+
+**確認された「指摘なし」:** `_locked_cas` は CAS 失敗時に `ClaimLost` が
+`immediate` の外へ伝わって取引ごと巻き戻るので同じ穴が無いこと、
+`advance_owned` / `finish_owned` の `assert_lease` が reopen より先にあること、
+`0016` の拡張・「同じ ID なら戻さない」・組全体のキー・重複 ID の見送り、
+`stack_state = 'stacked'` を冗長と判定したこと。
+
+### 4 巡目（2026-08-20、codex `--fresh`。blocker 0 / major 0 / minor 1）
+
+**実装上の指摘は無し。** 残った 1 件は docs のみで、Task 7 の提示コードが
+2・3 巡目の反映（重複検査の追加、`None` を先に見る順序、理由の文言）に
+追随していなかった。**実装の正しい形へ同期した**（文言が一致することを
+機械的に確かめた）。
+
+**確認された「指摘なし」:** `stamp_many` の事前 SELECT が本体 UPDATE と同じ
+条件で、`BEGIN IMMEDIATE` の中なので割り込めないこと。外れた stamp が
+`written` に入らないこと。`stamp_remote` の早期 return が呼び出し側の期待を
+壊さないこと（戻り値は元から `None`）。理由の文言に画面側の固定依存が無いこと。
+`_locked_cas`・`0016`・組全体の reopen に新しい穴が無いこと。
+
+**判定: docs の minor を直せばマージ可。5 巡目は不要。**
+
+**実装差分レビューの推移**（この案件の傾向どおり、**毎巡「前の巡の対処が作った
+境界」から出た**）:
+
+| 巡 | blocker | major | minor | 出どころ |
+| --- | --- | --- | --- | --- |
+| 1 | 0 | 5 | 3 | 実装して初めて現れた接続部（無効化した宛先、再確認、回収の GET、`PUT` 後の実像） |
+| 2 | 0 | 3 | 0 | 1 巡目の対処が作った境界（組の相方、trigger の穴、資産 ID の重複） |
+| 3 | 0 | 1 | 1 | 2 巡目の対処が作った境界（reopen と CAS の順序、理由の取り違え） |
+| 4 | 0 | 0 | 1 | docs の同期のみ |
 
 ## レビュー記録
 

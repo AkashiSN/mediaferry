@@ -98,6 +98,21 @@ def _destination_summary(conn, row) -> dict[str, Any]:  # noqa: ANN001
         "pending": counts["pending"],
         # **「まだ送っていない」＝ この宛先の記録がまだ無いもの。** 失敗や承認待ちは
         # 既に記録があるので別に数える（画面はそれぞれ違う操作を出す）。
+        # スタックの結果（§9.11）。**無効化された記録は数えない。**
+        #
+        # **`stacked` は「組の数」。** 1 つのスタックに 2 件以上のレコードが属する
+        # ので、行を数えると画面に「2 組」と出る。見送りは行ごとに理由が違いうる
+        # ので、そちらは件数のまま。
+        "stacked": conn.execute(
+            "SELECT count(DISTINCT remote_stack_id) AS n FROM upload_record"
+            " WHERE destination_id = ? AND stack_state = 'stacked' AND invalidated_at IS NULL",
+            (row["id"],),
+        ).fetchone()["n"],
+        "stack_skipped": conn.execute(
+            "SELECT count(*) AS n FROM upload_record"
+            " WHERE destination_id = ? AND stack_state = 'skipped' AND invalidated_at IS NULL",
+            (row["id"],),
+        ).fetchone()["n"],
         "unsent": conn.execute(
             "SELECT count(*) AS n FROM media_file m WHERE NOT EXISTS ("
             " SELECT 1 FROM upload_record u WHERE u.media_file_id = m.id"

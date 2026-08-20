@@ -102,6 +102,18 @@ class RemoteAsset:
     asset_id: str
     date_time_original: str | None
     is_trashed: bool
+    # スタックに入っていなければ両方 None。**旧版は `stack` キーを持たない。**
+    stack_id: str | None = None
+    stack_primary_asset_id: str | None = None
+
+
+@dataclass(frozen=True)
+class RemoteStack:
+    """相手が持っているスタック（読み取り）."""
+
+    stack_id: str
+    primary_asset_id: str
+    asset_ids: tuple[str, ...]
 
 
 class ImmichClient:
@@ -270,13 +282,107 @@ class ImmichClient:
         checked = self._identifier(asset_id, "GET /api/assets の asset id")
         body = _as_object(self._request("GET", f"/api/assets/{checked}"), "GET /api/assets")
         returned = self._identifier(_required_str(body, "id", "GET /api/assets"), "GET /api/assets")
+        # **要求した資産と応答が対応することまで見る。** ここを見ないと、相手が
+        # 別の資産を返したときに、その資産のスタックをこちらの組と取り違える。
+        if returned != checked:
+            raise ImmichProtocolError("GET /api/assets が要求と違う資産を返した")
         exif = body.get("exifInfo")
         when = exif.get("dateTimeOriginal") if isinstance(exif, dict) else None
+        stack_id, stack_primary = self._stack_field(body, "GET /api/assets")
         return RemoteAsset(
             asset_id=returned,
             date_time_original=when if isinstance(when, str) and when else None,
             is_trashed=bool(body.get("isTrashed")),
+            stack_id=stack_id,
+            stack_primary_asset_id=stack_primary,
         )
+
+    def _stack_field(self, body: dict[str, Any], label: str) -> tuple[str | None, str | None]:
+        """`AssetResponseDto.stack` を読む.
+
+        **「無い」と「形が違う」を分ける。** キーが無い（`stack` を知らない版）のも
+        `null`（スタックに入っていない、実 Immich の正規形）も `None` として扱う。
+        **形が違うものを黙って `None` にはしない** —— スタック済みの資産を
+        「入っていない」と読んで作り直すことになる。
+        """
+        stack = body.get("stack")
+        if stack is None:
+            return None, None
+        if not isinstance(stack, dict):
+            raise ImmichProtocolError(f"{label} の stack が object ではない")
+        return (
+            self._identifier(_required_str(stack, "id", label), label),
+            self._identifier(_required_str(stack, "primaryAssetId", label), label),
+        )
+
+    def create_stack(self, asset_ids: Sequence[str]) -> RemoteStack:
+        """スタックを作る.
+
+        **既存スタックを吸収しうる。** 呼ぶ前に全員の `stack` を見ること（§9.11）。
+        """
+        checked = [self._identifier(a, "POST /api/stacks の asset id") for a in asset_ids]
+        if len(set(checked)) != len(checked):
+            # **入力の重複を先に閉じる。** 重複したまま送ると、相手が畳んで返しても
+            # 集合の比較が通ってしまう（[A, A, B] を送って [A, B] が返る）。
+            raise ValueError("create_stack に同じ asset id が複数ある")
+        body = _as_object(
+            self._request(
+                "POST",
+                "/api/stacks",
+                # **非冪等で既存スタックを吸収するので、redirect を追わない。**
+                # `_request` は 303 でも method を変えずに再送する。
+                allow_redirect=False,
+                json={"assetIds": checked},
+            ),
+            "POST /api/stacks",
+        )
+        created = self._stack_from(body, "POST /api/stacks")
+        # **要求した集合と全単射であることを確かめる。** 吸収の仕様がある以上、
+        # 返ってきた集合が違えば「別のものを作った」ので、その id を確定させない。
+        if len(created.asset_ids) != len(checked) or set(created.asset_ids) != set(checked):
+            raise ImmichProtocolError("POST /api/stacks が要求と違う集合を返した")
+        return created
+
+    def stack_by_primary(self, primary_asset_id: str) -> RemoteStack | None:
+        """主資産から引く. 見つからなければ `None`."""
+        checked = self._identifier(primary_asset_id, "GET /api/stacks の primary asset id")
+        response = self._request("GET", "/api/stacks", params={"primaryAssetId": checked})
+        for item in _as_array(response, "GET /api/stacks"):
+            stack = self._stack_from(item, "GET /api/stacks")
+            if stack.primary_asset_id == checked:
+                return stack
+        return None
+
+    def set_stack_primary(self, stack_id: str, asset_id: str) -> None:
+        """代表を差し替える. **冪等**なので redirect の扱いは既定のまま."""
+        stack = self._identifier(stack_id, "PUT /api/stacks の stack id")
+        asset = self._identifier(asset_id, "PUT /api/stacks の primary asset id")
+        self._request("PUT", f"/api/stacks/{stack}", json={"primaryAssetId": asset})
+
+    def _stack_from(self, body: dict[str, Any], label: str) -> RemoteStack:
+        """**壊れた応答を DB へ確定させない。** 形が違えば protocol error にする."""
+        assets = body.get("assets")
+        if not isinstance(assets, list) or not assets:
+            raise ImmichProtocolError(f"{label} の応答に assets が無い")
+        ids = tuple(
+            self._identifier(_required_str(a, "id", label), label)
+            for a in assets
+            if isinstance(a, dict)
+        )
+        if len(ids) != len(assets):
+            raise ImmichProtocolError(f"{label} の assets に object でない要素がある")
+        if len(set(ids)) != len(ids):
+            raise ImmichProtocolError(f"{label} の assets に重複がある")
+        stack = RemoteStack(
+            stack_id=self._identifier(_required_str(body, "id", label), label),
+            primary_asset_id=self._identifier(_required_str(body, "primaryAssetId", label), label),
+            asset_ids=ids,
+        )
+        # **primary は必ず member。** 外れていると、primary の検査が永久に一致せず
+        # `PUT` を打ち続ける。
+        if stack.primary_asset_id not in stack.asset_ids:
+            raise ImmichProtocolError(f"{label} の primaryAssetId が assets に無い")
+        return stack
 
     def set_date_time_original(self, asset_id: str, when: str) -> None:
         asset = self._identifier(asset_id, "set_date_time_original の asset id")
@@ -337,6 +443,21 @@ def _as_object(response: httpx.Response, label: str) -> dict[str, Any]:
         raise ImmichProtocolError(f"{label} の応答が JSON ではない") from exc
     if not isinstance(body, dict):
         raise ImmichProtocolError(f"{label} の応答が object ではない")
+    return body
+
+
+def _as_array(response: httpx.Response, label: str) -> list[dict[str, Any]]:
+    """JSON を object の配列として読む. 壊れた応答も protocol error に正規化する."""
+    try:
+        body = response.json()
+    except ValueError as exc:
+        raise ImmichProtocolError(f"{label} の応答が JSON ではない") from exc
+    if not isinstance(body, list):
+        raise ImmichProtocolError(f"{label} の応答が配列ではない")
+    for item in body:
+        if not isinstance(item, dict):
+            # **黙って読み飛ばさない**（「N 件見た」と言いながら見ていない状態を作る）。
+            raise ImmichProtocolError(f"{label} の応答に object でない要素がある")
     return body
 
 

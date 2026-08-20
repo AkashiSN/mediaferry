@@ -304,6 +304,8 @@ def test_a_database_from_the_previous_release_still_opens(tmp_path):
         "0012_recompute_lookups.sql": None,
         "0013_media_file_by_profile.sql": None,
         "0014_media_file_listing.sql": None,
+        "0015_stacking.sql": None,
+        "0016_stack_needs_its_asset.sql": None,
     }
     shipped = sorted(path.name for path in MIGRATIONS_DIR.glob("*.sql"))
     assert shipped == sorted(frozen), "版を足したら、この一覧にも足す"

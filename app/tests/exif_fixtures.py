@@ -31,3 +31,23 @@ def a_jpeg_with(datetime_original: bytes | None) -> bytes:
     tiff += value
     app1 = b"Exif\x00\x00" + tiff
     return b"\xff\xd8\xff\xe1" + struct.pack(">H", len(app1) + 2) + app1 + b"\xff\xd9"
+
+
+def a_tiff_with(datetime_original: bytes) -> bytes:
+    """最小の TIFF（EXIF の `DateTimeOriginal` だけ）.
+
+    CR2 は TIFF ベースなので、拡張子を `.CR2` にしてもこの構造を読む。
+    **合成データが実装の読み取り経路を通ることを、テストで測ってから使う。**
+    """
+    value = datetime_original + b"\x00"
+    tiff = b"II" + struct.pack("<HI", 42, 8)
+    exif_ifd_offset = 8 + 2 + 12 + 4
+    tiff += struct.pack("<H", 1)
+    tiff += struct.pack("<HHII", 0x8769, 4, 1, exif_ifd_offset)  # ExifIFDPointer
+    tiff += struct.pack("<I", 0)
+    value_offset = exif_ifd_offset + 2 + 12 + 4
+    tiff += struct.pack("<H", 1)
+    tiff += struct.pack("<HHII", 0x9003, 2, len(value), value_offset)  # DateTimeOriginal
+    tiff += struct.pack("<I", 0)
+    tiff += value
+    return tiff

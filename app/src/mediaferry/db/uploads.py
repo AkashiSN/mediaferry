@@ -18,6 +18,7 @@ from dataclasses import dataclass
 from datetime import timedelta
 
 from ..clock import iso, now_iso, utcnow
+from ..core.uploads.stacking import HIGH_SENTINEL
 from ..ids import new_id
 from .connection import immediate
 from .destinations import DestinationRepository
@@ -76,6 +77,18 @@ RELEASED_STATES = ("pending", "needs_recheck")
 
 class NoLongerEligible(RuntimeError):
     """送る直前に §10 の根拠が崩れていた. 送らずに見送る."""
+
+
+class StackGroupChanged(RuntimeError):
+    """組の前提が、相手を待っている間に変わった. **その組は諦める。**"""
+
+
+class DestinationChanged(StackGroupChanged):
+    """**宛先の向き先が変わった。** 固定した epoch 全体が無効なので打ち切る.
+
+    組ごとの事情ではないので、次の組へ進んでも同じ失敗を繰り返すだけになる
+    （旧 epoch の未評価行を末尾まで走査することになる）。
+    """
 
 
 class UploadRequestInvalid(ValueError):
@@ -681,6 +694,23 @@ class UploadRepository:
         with immediate(self._conn):
             ctx.assert_lease()
             for stamp in stamps:
+                # **先に、この観測がまだ通るかを確かめる。** 組を開くのは
+                # `remote_asset_id` を変える前でなければならない（`0016`）が、
+                # CAS に外れる観測で開いてしまうと「古い観測は何も書かない」を
+                # 破る（現在のスタックを壊す）。**`BEGIN IMMEDIATE` の中なので、
+                # 確認と書き込みの間に誰も割り込めない。**
+                still = self._conn.execute(
+                    "SELECT 1 FROM upload_record WHERE id = ? AND state = 'complete'"
+                    "   AND remote_asset_id IS ? AND remote_checked_at IS ?",
+                    (stamp.record_id, stamp.expect_asset_id, stamp.expect_checked_at),
+                ).fetchone()
+                if still is None:
+                    continue
+                # **ID が変わるなら、その前にスタックの結果を組ごと捨てる**（§9.11）。
+                # スタックは「その `remote_asset_id` を送った結果」なので、消滅や
+                # 別 ID への差し替えで現在の姿を表さなくなる。
+                if stamp.asset_id != stamp.expect_asset_id:
+                    self._reopen_stack_of(stamp.record_id)
                 updated = self._conn.execute(
                     "UPDATE upload_record SET remote_asset_id = ?, remote_is_trashed = ?,"
                     " remote_checked_at = ?, updated_at = ?"
@@ -708,6 +738,15 @@ class UploadRepository:
         進行中の行は所有者がいるので、claim を持たないこの経路では触らない。
         """
         with immediate(self._conn):
+            # **契約は「`complete` だけを対象」。** 組もその内側なので、先に確かめる。
+            still = self._conn.execute(
+                "SELECT 1 FROM upload_record WHERE id = ? AND state = 'complete'",
+                (record_id,),
+            ).fetchone()
+            if still is None:
+                return
+            # 資産 ID が変わるなら、スタックの結果を組ごと捨てる（上と同じ理由）。
+            self._reopen_stack_of(record_id, new_asset_id=asset_id)
             self._conn.execute(
                 "UPDATE upload_record SET remote_asset_id = ?, remote_is_trashed = ?,"
                 " remote_checked_at = ?, updated_at = ? WHERE id = ? AND state = 'complete'",
@@ -763,9 +802,265 @@ class UploadRepository:
             "SELECT * FROM upload_record WHERE id = ?", (record_id,)
         ).fetchone()
 
-    def list_records(
-        self, destination_id: str | None = None, state: str | None = None, limit: int = 200
+    # ------------------------------------------------------------------
+    # スタック（§9.11）
+
+    def unstacked_batch(
+        self, destination_id: str, target_epoch: int, after_id: str, limit: int
     ) -> list[sqlite3.Row]:
+        """スタック未評価の完了レコードを id の昇順で取る（keyset）.
+
+        **`target_epoch` を必ず絞る。** 向き先を変えた宛先では旧 epoch の
+        `complete` が監査履歴として残る（`_invalidate_old_epoch_locked` は
+        `state <> 'complete'` だけを無効化する）ので、絞らないと**別ライブラリへ
+        送った資産 ID を現行の資格情報で送る**。`records_for_recheck` が同じ理由で
+        epoch を条件にしているのと同じ形にそろえる。
+
+        **`LIMIT` を繰り返すだけでは足りない。** 相手が落ちていて未評価のまま
+        残した行は次の周回でも条件を満たすので、同じ行を読み直して進まなくなる。
+
+        述語の順序は `0015` の部分索引と一字一句そろえる。
+        """
+        return list(
+            self._conn.execute(
+                "SELECT * FROM upload_record"
+                " WHERE destination_id = ? AND target_epoch = ? AND state = 'complete'"
+                "   AND stack_state IS NULL AND invalidated_at IS NULL AND id > ?"
+                " ORDER BY id LIMIT ?",
+                (destination_id, target_epoch, after_id, limit),
+            )
+        )
+
+    def sources_of(self, media_file_id: str) -> list[sqlite3.Row]:
+        """公開の元になったカード上の観測（**すべて**）.
+
+        **1 つに絞らない。** `observed_at` は再スキャンのたびに更新される
+        （`scan.py` の `_touch`）ので、「最初の観測」を順序で選ぶと同じ組が実行の
+        たびに変わりうる。**公開名では組を作れない**（衝突時に改名される。§6）。
+        """
+        return list(
+            self._conn.execute(
+                "SELECT volume_instance_id, rel_path FROM source_entry"
+                " WHERE media_file_id = ? AND state = 'published'",
+                (media_file_id,),
+            )
+        )
+
+    def siblings_on_card(self, volume_instance_id: str, prefix: str) -> list[sqlite3.Row]:
+        """同じカードで `<dir>/<stem>.` から始まる観測（UNIQUE 索引の範囲引き）."""
+        return list(
+            self._conn.execute(
+                "SELECT rel_path, media_file_id FROM source_entry"
+                " WHERE volume_instance_id = ? AND rel_path > ? AND rel_path < ?"
+                "   AND media_file_id IS NOT NULL AND state = 'published'",
+                (volume_instance_id, prefix, prefix + HIGH_SENTINEL),
+            )
+        )
+
+    def record_for(
+        self, destination_id: str, target_epoch: int, media_file_id: str
+    ) -> sqlite3.Row | None:
+        """**現行 epoch のレコードだけ**を返す（旧 epoch は別ライブラリの履歴）."""
+        return self._conn.execute(
+            "SELECT * FROM upload_record"
+            " WHERE destination_id = ? AND target_epoch = ? AND media_file_id = ?",
+            (destination_id, target_epoch, media_file_id),
+        ).fetchone()
+
+    def guard_stack_group(
+        self,
+        ctx: JobContext,
+        members: Sequence[sqlite3.Row],
+        destination_id: str,
+        target_epoch: int,
+        profile_revision_id: str,
+    ) -> None:
+        """**外部へ触る直前に通す。** `uploader._guard` のスタック版.
+
+        `complete` のレコードは claim を持たないので `prepare_side_effect` は
+        流用できない。1 件でも合わなければ `StackGroupChanged` を送出して、その組を
+        諦める（相手には触らない）。
+        """
+        with immediate(self._conn):
+            self._assert_current(ctx, destination_id, target_epoch, profile_revision_id)
+            for member in members:
+                if self._member_moved(member, target_epoch):
+                    raise StackGroupChanged(f"レコード {member['id']} が変わった")
+
+    def mark_stacked(
+        self,
+        ctx: JobContext,
+        members: Sequence[sqlite3.Row],
+        destination_id: str,
+        target_epoch: int,
+        profile_revision_id: str,
+        remote_stack_id: str,
+    ) -> None:
+        """組の全員を 1 つのトランザクションで記録する.
+
+        **全員に当たらなければ 1 行も書かない。** 一部だけ `stacked` になると、
+        残りは別の組として再評価され、相手側に既にあるスタックを作り直そうとする。
+
+        **見送り済みの相方は引き上げる。** 見送りは「今は組めない」の記録であって
+        永久の拒否ではない（§9.11）。
+        """
+        with immediate(self._conn):
+            # **guard と同じ現行値を見る。** 相手を待っている間に向き替えや
+            # プロファイル編集が commit されうる。外部副作用は済んでいるので、
+            # 落ちたら DB を書かずに次の送信の「既存スタックの回収」へ渡す。
+            self._assert_current(ctx, destination_id, target_epoch, profile_revision_id)
+            for member in members:
+                updated = self._conn.execute(
+                    "UPDATE upload_record SET stack_state = 'stacked', remote_stack_id = ?,"
+                    " stack_reason = NULL, updated_at = ?"
+                    " WHERE id = ? AND target_epoch = ? AND state = 'complete'"
+                    "   AND invalidated_at IS NULL AND remote_asset_id IS ?"
+                    "   AND (stack_state IS NULL OR stack_state = 'skipped')",
+                    (
+                        remote_stack_id,
+                        now_iso(),
+                        member["id"],
+                        target_epoch,
+                        member["remote_asset_id"],
+                    ),
+                )
+                if updated.rowcount != 1:
+                    # `immediate` の外へ出して取引ごと巻き戻す。
+                    raise StackGroupChanged(f"レコード {member['id']} を記録できない")
+
+    def mark_skipped(
+        self,
+        ctx: JobContext,
+        record: sqlite3.Row,
+        destination_id: str,
+        target_epoch: int,
+        profile_revision_id: str,
+        reason: str,
+    ) -> None:
+        """見送りを記録する. **相手に触らない経路でも、記録の条件は同じにする。**
+
+        規則が無効・観測が無い・相方が居ない、といった見送りは guard を通らない。
+        だが**書く条件を緩めてはいけない** —— 規則を読んだ直後にプロファイルが
+        編集されると、次の順序で**旧規則の判断が新しい版の世界へ残る**。
+
+        1. こちらが旧版 R1 の規則で「見送り」と判断する
+        2. 別の接続が R2 を発行し、既存の見送りを未評価へ戻して commit
+           （この行はまだ未評価なので対象外）
+        3. こちらが R1 の判断を書く → **R2 では二度と評価されない**
+
+        リースも同じ理由で要る。見送りが大量にあると書いている間に切れうるし、
+        `finish_claimed` は token と status しか見ないので、失効した後の書き込みが
+        `succeeded` として残せてしまう。
+        """
+        with immediate(self._conn):
+            self._assert_current(ctx, destination_id, target_epoch, profile_revision_id)
+            updated = self._conn.execute(
+                "UPDATE upload_record SET stack_state = 'skipped', stack_reason = ?,"
+                " remote_stack_id = NULL, updated_at = ?"
+                " WHERE id = ? AND target_epoch = ? AND state = 'complete'"
+                "   AND invalidated_at IS NULL AND remote_asset_id IS ?"
+                "   AND stack_state IS NULL",
+                (reason, now_iso(), record["id"], target_epoch, record["remote_asset_id"]),
+            )
+            if updated.rowcount != 1:
+                # **成功として数えない。** 数えると第 2 パスの集計が嘘になる。
+                raise StackGroupChanged(f"レコード {record['id']} を記録できない")
+
+    def _reopen_stack_of(self, record_id: str, new_asset_id: str | None = "") -> None:
+        """その行が属する**スタックの全員**を未評価へ戻す（§9.11）.
+
+        **組は 1 つの結果。** 片方の資産 ID が変わっただけでも、その
+        `remote_stack_id` は現在の姿を表さなくなる。片方だけ戻すと、次に組み直す
+        ときに `_member_moved` が相方の `stacked` を拒み、**以後ずっと組めない**
+        （画面も古いスタックを現在の結果として出し続ける）。
+
+        `new_asset_id` に既定の番兵を渡すと「変わる前提」で戻す。呼び出し側が
+        新しい ID を渡した場合は、同じなら何もしない。
+
+        **見送り（`skipped`）は組の結果ではない**ので触らない。
+        """
+        row = self._conn.execute(
+            "SELECT destination_id, target_epoch, remote_asset_id, remote_stack_id"
+            " FROM upload_record WHERE id = ?",
+            (record_id,),
+        ).fetchone()
+        if row is None or row["remote_stack_id"] is None:
+            return
+        if new_asset_id != "" and new_asset_id == row["remote_asset_id"]:
+            return
+        self._conn.execute(
+            "UPDATE upload_record SET stack_state = NULL, remote_stack_id = NULL,"
+            " stack_reason = NULL, updated_at = ?"
+            " WHERE destination_id = ? AND target_epoch = ? AND remote_stack_id = ?"
+            "   AND stack_state = 'stacked'",
+            (now_iso(), row["destination_id"], row["target_epoch"], row["remote_stack_id"]),
+        )
+
+    def _assert_current(
+        self,
+        ctx: JobContext,
+        destination_id: str,
+        target_epoch: int,
+        profile_revision_id: str,
+    ) -> None:
+        """リース・宛先の現行 epoch・プロファイルの現行版をまとめて見る.
+
+        **呼び出し側が開いた `BEGIN IMMEDIATE` の中で使う**（確認と書き込みの間に
+        誰も割り込めない）。guard と記録の両方から同じものを見る —— 片方だけ
+        弱くすると、そこが抜け道になる。
+
+        **宛先の現行 epoch を見るのが要点。** epoch を進める編集は
+        `state <> 'complete'` の行しか無効化しないので、`complete` を扱うこの経路
+        だけが既存の停止境界から外れる。固定した旧リビジョンの preflight は、
+        旧向き先が生きていれば成功してしまう。
+        """
+        ctx.assert_lease()
+        # **`claim_next` と同じ安全条件を見る。** 第 2 パスは `complete` を扱うので
+        # claim を通らない —— ここで見なければ、無効にした宛先や保管した宛先へ
+        # `POST` / `PUT` を出す（`rename_or_toggle` と `archive` は epoch を進めない）。
+        current = self._conn.execute(
+            "SELECT r.target_epoch AS epoch FROM upload_destination d"
+            " JOIN destination_revision r ON r.id = d.current_revision_id"
+            " WHERE d.id = ? AND d.enabled = 1 AND d.archived_at IS NULL",
+            (destination_id,),
+        ).fetchone()
+        if current is None or current["epoch"] != target_epoch:
+            raise DestinationChanged("宛先が使えない（向き先が変わった・無効・保管済み）")
+        profile = self._conn.execute(
+            "SELECT 1 FROM device_profile"
+            " WHERE id = (SELECT profile_id FROM profile_revision WHERE id = ?)"
+            "   AND current_revision_id = ?",
+            (profile_revision_id, profile_revision_id),
+        ).fetchone()
+        if profile is None:
+            raise StackGroupChanged("プロファイルの版が変わった")
+
+    def _member_moved(self, member: sqlite3.Row, target_epoch: int) -> bool:
+        """組を決めたときの姿と違っていないか."""
+        return (
+            self._conn.execute(
+                "SELECT 1 FROM upload_record WHERE id = ? AND target_epoch = ?"
+                "   AND state = 'complete' AND invalidated_at IS NULL"
+                "   AND remote_asset_id IS ? AND stack_state IS NOT 'stacked'",
+                (member["id"], target_epoch, member["remote_asset_id"]),
+            ).fetchone()
+            is None
+        )
+
+    # ------------------------------------------------------------------
+
+    def list_records(
+        self,
+        destination_id: str | None = None,
+        state: str | None = None,
+        limit: int = 200,
+        stack_state: str | None = None,
+    ) -> list[sqlite3.Row]:
+        """`stack_state` は `stacked` / `skipped` / `unevaluated`.
+
+        **未知の値を素通りさせない**（呼び出し側が 400 にする）。「絞ったつもりで
+        全件が出る」を作らない。
+        """
         clauses, params = [], []
         if destination_id is not None:
             clauses.append("destination_id = ?")
@@ -773,6 +1068,14 @@ class UploadRepository:
         if state is not None:
             clauses.append("state = ?")
             params.append(state)
+        if stack_state is not None:
+            if stack_state == "unevaluated":
+                clauses.append("stack_state IS NULL")
+            elif stack_state in ("stacked", "skipped"):
+                clauses.append("stack_state = ?")
+                params.append(stack_state)
+            else:
+                raise UploadRequestInvalid(f"stack_state が不正: {stack_state}")
         where = f" WHERE {' AND '.join(clauses)}" if clauses else ""
         return list(
             self._conn.execute(
@@ -814,6 +1117,11 @@ class UploadRepository:
         **fields: object,
     ) -> None:
         """**呼び出し側が開いたトランザクションの中で使う。** 条件は `_cas` と同じ."""
+        if "remote_asset_id" in fields:
+            # **資産 ID が変わるなら、その前にスタックの結果を組ごと捨てる**（§9.11）。
+            # 再計算で `needs_recheck` へ戻った `stacked` の行を別の資産で送り直す
+            # 経路がここを通る。`0016` の trigger が同じことを fail-closed で守る。
+            self._reopen_stack_of(record_id, new_asset_id=fields["remote_asset_id"])
         extra = "".join(f", {name} = ?" for name in fields)
         clauses = ["id = ?", "claim_token = ?"]
         guard: list[object] = [record_id, token]

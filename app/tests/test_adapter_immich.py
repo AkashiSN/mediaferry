@@ -232,3 +232,159 @@ def test_a_reject_without_is_trashed_is_a_protocol_error(client, immich, monkeyp
     )
     with pytest.raises(ImmichProtocolError):
         client.bulk_upload_check([("k1", "0" * 40)])
+
+
+# --- スタック（Phase 6 / §9.11） ----------------------------------------
+
+
+def test_an_asset_reports_its_stack(client, immich):
+    immich.stacks["stack-1"] = {"primary": "asset-1", "assets": ["asset-1", "asset-2"]}
+    asset = client.asset("asset-2")
+    assert asset.stack_id == "stack-1"
+    assert asset.stack_primary_asset_id == "asset-1"
+
+
+def test_an_asset_without_a_stack_reports_none(client):
+    asset = client.asset("asset-1")
+    assert asset.stack_id is None
+    assert asset.stack_primary_asset_id is None
+
+
+def test_a_malformed_stack_field_is_a_protocol_error(client, immich):
+    """**キーが無いのは旧版で None、あるのに形が違うのは protocol error。**"""
+    immich.malformed_stack_field = True
+    with pytest.raises(ImmichProtocolError):
+        client.asset("asset-1")
+
+
+def test_creating_a_stack_returns_its_members(client):
+    stack = client.create_stack(["asset-1", "asset-2"])
+    assert set(stack.asset_ids) == {"asset-1", "asset-2"}
+    assert stack.primary_asset_id in stack.asset_ids
+
+
+def test_a_stack_can_be_read_back_by_its_primary(client):
+    created = client.create_stack(["asset-1", "asset-2"])
+    found = client.stack_by_primary(created.primary_asset_id)
+    assert found is not None
+    assert found.stack_id == created.stack_id
+    assert set(found.asset_ids) == set(created.asset_ids)
+
+
+def test_an_unknown_primary_has_no_stack(client):
+    assert client.stack_by_primary("asset-9") is None
+
+
+def test_the_primary_can_be_moved(client):
+    created = client.create_stack(["asset-1", "asset-2"])
+    other = next(a for a in created.asset_ids if a != created.primary_asset_id)
+    client.set_stack_primary(created.stack_id, other)
+    moved = client.stack_by_primary(other)
+    assert moved is not None and moved.stack_id == created.stack_id
+
+
+def test_identifiers_from_the_peer_are_validated(client, immich):
+    """**相手が選べる値を経路へ組み立てない**（§14。既存の `_identifier` と同じ扱い）."""
+    immich.echo_key_as_ids = True
+    with pytest.raises(ImmichProtocolError):
+        client.create_stack(["asset-1", "asset-2"])
+
+
+def test_a_response_without_assets_is_a_protocol_error(client, immich):
+    immich.stack_response_without_assets = True
+    with pytest.raises(ImmichProtocolError):
+        client.create_stack(["asset-1", "asset-2"])
+
+
+def test_a_response_with_a_different_set_is_a_protocol_error(client, immich):
+    """**吸収の仕様がある以上、違う集合が返ったら「別のものを作った」。**"""
+    immich.drop_one_asset_from_the_stack_response = True
+    with pytest.raises(ImmichProtocolError):
+        client.create_stack(["asset-1", "asset-2"])
+
+
+def test_a_primary_outside_the_members_is_a_protocol_error(client, immich):
+    immich.primary_outside_the_stack = True
+    with pytest.raises(ImmichProtocolError):
+        client.create_stack(["asset-1", "asset-2"])
+
+
+def test_duplicate_inputs_are_refused_before_sending(client, immich):
+    """入力の重複を先に閉じる（[A, A, B] を送って [A, B] が返ると集合比較が通る）."""
+    with pytest.raises(ValueError):
+        client.create_stack(["asset-1", "asset-1"])
+    assert immich.requests == []
+
+
+def test_the_create_does_not_follow_a_redirect(client, immich):
+    """**非冪等で吸収する要求を自動 replay させない**（303 でも method は変わらない）."""
+    immich.redirect_to = "/api/stacks"
+    with pytest.raises(ImmichRedirected):
+        client.create_stack(["asset-1", "asset-2"])
+
+
+def test_a_broken_list_response_is_a_protocol_error(client, immich):
+    """`response.json()` を直に呼ぶと `ValueError` が漏れて分岐に入らない."""
+    immich.stack_list_is_not_json = True
+    with pytest.raises(ImmichProtocolError):
+        client.stack_by_primary("asset-1")
+
+
+def test_a_non_object_element_is_not_skipped_silently(client, immich):
+    immich.stack_list_has_a_scalar = True
+    with pytest.raises(ImmichProtocolError):
+        client.stack_by_primary("asset-1")
+
+
+def test_an_empty_assets_list_is_a_protocol_error(client, immich):
+    immich.empty_assets_in_the_stack_response = True
+    with pytest.raises(ImmichProtocolError):
+        client.create_stack(["asset-1", "asset-2"])
+
+
+def test_a_duplicated_member_in_the_response_is_a_protocol_error(client, immich):
+    """**件数が違うのに集合は同じ**（[A, B] を送って [A, A, B] が返る）。"""
+    immich.duplicate_asset_in_the_stack_response = True
+    with pytest.raises(ImmichProtocolError):
+        client.create_stack(["asset-1", "asset-2"])
+
+
+def test_a_stack_of_another_primary_is_not_taken(client, immich):
+    """絞り込みを無視して返す相手から、無関係なスタックを掴まない."""
+    client.create_stack(["asset-1", "asset-2"])
+    immich.stack_list_ignores_the_primary_filter = True
+    assert client.stack_by_primary("asset-9") is None
+
+
+def test_a_body_that_is_not_json_at_all_is_a_protocol_error(client, immich):
+    """`response.json()` を直に呼ぶと `ValueError` が漏れて分岐に入らない."""
+    immich.stack_list_is_not_even_json = True
+    with pytest.raises(ImmichProtocolError):
+        client.stack_by_primary("asset-1")
+
+
+def test_the_stack_id_itself_is_validated(client, immich):
+    """**id は DB に入り、次の要求の URL にも入る**（`remote_stack_id`）。
+
+    資産の集合が正しくても、id だけに鍵を混ぜられる。全単射の検査は
+    この経路を守らない。
+    """
+    immich.key_as_stack_id = True
+    with pytest.raises(ImmichProtocolError, match="識別子"):
+        client.create_stack(["asset-1", "asset-2"])
+
+
+def test_an_asset_response_for_another_id_is_a_protocol_error(client, immich):
+    """**要求した資産と応答が対応することまで見る。**
+
+    A を読んで C が返ると、こちらは C のスタックを自分の組と取り違える。
+    """
+    immich.swap_asset_ids = True
+    with pytest.raises(ImmichProtocolError, match="要求"):
+        client.asset("asset-1")
+
+
+def test_an_explicit_null_stack_is_not_a_stack(client, immich):
+    """実 Immich はスタックに入っていない資産へ `"stack": null` を返す."""
+    immich.null_stack_field = True
+    assert client.asset("asset-1").stack_id is None

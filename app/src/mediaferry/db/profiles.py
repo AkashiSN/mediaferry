@@ -91,23 +91,12 @@ class ProfileRegistry:
                     (profile_id, slug, name or slug, now_iso()),
                 )
             revision = (row["revision"] or 0) + 1 if row is not None else 1
-            revision_id = new_id()
-            self._conn.execute(
-                "INSERT INTO profile_revision"
-                " (id, profile_id, revision, definition_json, schema_version, created_at)"
-                " VALUES (?, ?, ?, ?, ?, ?)",
-                (
-                    revision_id,
-                    profile_id,
-                    revision,
-                    definition_json,
-                    PROFILE_SCHEMA_VERSION,
-                    now_iso(),
-                ),
-            )
-            self._conn.execute(
-                "UPDATE device_profile SET current_revision_id = ? WHERE id = ?",
-                (revision_id, profile_id),
+            self._publish_revision(
+                profile_id,
+                new_id(),
+                revision,
+                definition_json,
+                row["definition_json"] if row is not None else None,
             )
         return True
 
@@ -180,7 +169,7 @@ class ProfileRegistry:
                 " VALUES (?, ?, ?, 0, ?)",
                 (profile_id, defn.slug, defn.name, now_iso()),
             )
-            self._insert_revision(profile_id, revision_id, 1, definition_to_json(defn))
+            self._publish_revision(profile_id, revision_id, 1, definition_to_json(defn), None)
         return self.current(defn.slug)
 
     def update(self, slug: str, defn: ProfileDefinition) -> ProfileRef:
@@ -192,8 +181,17 @@ class ProfileRegistry:
                 " JOIN profile_revision r ON r.id = p.current_revision_id WHERE p.id = ?",
                 (row["id"],),
             ).fetchone()
-            self._insert_revision(
-                row["id"], new_id(), current["revision"] + 1, definition_to_json(defn)
+            previous = self._conn.execute(
+                "SELECT definition_json FROM profile_revision r"
+                " JOIN device_profile p ON p.current_revision_id = r.id WHERE p.id = ?",
+                (row["id"],),
+            ).fetchone()
+            self._publish_revision(
+                row["id"],
+                new_id(),
+                current["revision"] + 1,
+                definition_to_json(defn),
+                previous["definition_json"],
             )
             self._conn.execute(
                 "UPDATE device_profile SET name = ? WHERE id = ?", (defn.name, row["id"])
@@ -217,9 +215,26 @@ class ProfileRegistry:
                 "UPDATE device_profile SET archived_at = ? WHERE id = ?", (now_iso(), row["id"])
             )
 
-    def _insert_revision(
-        self, profile_id: str, revision_id: str, revision: int, definition_json: str
+    def _publish_revision(
+        self,
+        profile_id: str,
+        revision_id: str,
+        revision: int,
+        definition_json: str,
+        previous_json: str | None,
     ) -> None:
+        """新しいリビジョンを現行にする. **呼び出し側の取引の中で使う。**
+
+        版を発行する経路は 2 つある（利用者の編集とビルトインの同期）ので、
+        ここにまとめる。**分けると、片方だけ戻らない。**
+
+        `stack` 節が変わったときは、そのプロファイルのメディアの**見送りを未評価へ
+        戻す**（規則そのものが変わったので、前の判断は根拠を失っている）。
+        **`stacked` は戻さない**（相手側に既にあるものを作り直さない）。
+
+        **戻す範囲を `stack` の変化に限る。** 名前やタグだけの編集で全件を再評価
+        すると、相手側の事情で見送った行まで問い合わせ直すことになる。
+        """
         self._conn.execute(
             "INSERT INTO profile_revision"
             " (id, profile_id, revision, definition_json, schema_version, created_at)"
@@ -230,6 +245,17 @@ class ProfileRegistry:
             "UPDATE device_profile SET current_revision_id = ? WHERE id = ?",
             (revision_id, profile_id),
         )
+        if previous_json is None:
+            # 新規作成。メディアがまだ無いので戻す対象も無い。
+            return
+        if _stack_rule_of(previous_json) != _stack_rule_of(definition_json):
+            self._conn.execute(
+                "UPDATE upload_record SET stack_state = NULL, stack_reason = NULL,"
+                " updated_at = ?"
+                " WHERE stack_state = 'skipped' AND media_file_id IN ("
+                "     SELECT id FROM media_file WHERE profile_id = ?)",
+                (now_iso(), profile_id),
+            )
 
     def definition_of(self, revision_id: str) -> ProfileDefinition:
         row = self._conn.execute(
@@ -250,3 +276,14 @@ def _to_ref(row: sqlite3.Row) -> ProfileRef:
         builtin=bool(row["builtin"]) if "builtin" in keys else True,
         archived=(row["archived_at"] is not None) if "archived_at" in keys else False,
     )
+
+
+def _stack_rule_of(definition_json: str) -> object:
+    """定義から `stack` 節を**正規化して**取り出す.
+
+    **生の dict で比べてはいけない。** Phase 6 より前のリビジョンの JSON には
+    `stack` キーが無く（省略時は `STACK_DISABLED` として読む）、新しい JSON は
+    正規形で `{"enabled": false, ...}` を持つ。生で比べると**規則が実質変わって
+    いないのに全件を戻す**ことになる。
+    """
+    return parse_definition(json.loads(definition_json)).stack

@@ -17,6 +17,7 @@ import base64
 import hashlib
 import json
 import threading
+import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
 
@@ -39,6 +40,41 @@ class FakeImmich:
         self.tags: dict[str, str] = {}  # name -> id
         self.tagged: dict[str, list[str]] = {}  # tag_id -> asset_ids
         self.datetimes: dict[str, str] = {}
+        # スタック。`stack_id -> {"primary": asset_id, "assets": [asset_id, ...]}`
+        self.stacks: dict[str, dict[str, Any]] = {}
+        # 応答を壊すつまみ（fail-closed の検査用）。
+        self.stack_response_without_assets: bool = False
+        self.drop_one_asset_from_the_stack_response: bool = False
+        self.primary_outside_the_stack: bool = False
+        self.stack_list_is_not_json: bool = False
+        self.stack_list_is_not_even_json: bool = False
+        self.stack_list_ignores_the_primary_filter: bool = False
+        self.duplicate_asset_in_the_stack_response: bool = False
+        # **スタック id だけに鍵を混ぜる。** 資産の集合は正しいままなので、
+        # 全単射の検査では落ちない（識別子の検査だけが守っている経路）。
+        self.key_as_stack_id: bool = False
+        # PUT を受けても primary を動かさない（応答だけ正常に見える相手）。
+        self.ignore_primary_change: bool = False
+        # **作ってから落ちる相手。** サーバ側は成功し、こちらは失敗として見る
+        # （送信中の中断と同じ状態）。
+        self.fail_after_creating_the_stack: bool = False
+        # `GET /api/stacks` だけを遅らせる（回収の経路の相手待ち）。
+        self.stack_lookup_delay_seconds: float = 0.0
+        # 要求と違う資産 ID を返す（相手が値を選べる場面）。
+        self.swap_asset_ids: bool = False
+        # 資産ごとに別々の primary を名乗る。
+        self.disagree_on_the_primary: bool = False
+        # `PUT` の後で member を差し替える（同じ stack id のまま中身が変わる）。
+        self.change_members_after_the_put: bool = False
+        # 資産が名乗った id とは違う id のスタックを返す。
+        self.lookup_returns_another_stack_id: bool = False
+        # 応答を遅らせる（リースを跨ぐ相手待ちを作る）。
+        self.delay_seconds: float = 0.0
+        self.empty_assets_in_the_stack_response: bool = False
+        self.stack_list_has_a_scalar: bool = False
+        self.malformed_stack_field: bool = False
+        # 実 Immich の正規形（スタックに入っていない資産は `null`）。
+        self.null_stack_field: bool = False
         self.uploads: list[dict[str, Any]] = []
         self.requests: list[tuple[str, str]] = []
         self.fail_next: int = 0  # 次の N 回を 503 にする
@@ -85,6 +121,8 @@ class FakeImmich:
     # ------------------------------------------------------------------
     def route(self, method: str, path: str, body: bytes, headers: dict[str, str]):  # noqa: ANN201
         self.requests.append((method, path))
+        if self.delay_seconds:
+            time.sleep(self.delay_seconds)
         if self.redirect_to is not None:
             # **1 回だけ返す。** 毎回 301 にすると、追従した先で何が起きても
             # 「redirect が多すぎる」に化けて、追従の可否を見分けられない。
@@ -109,9 +147,30 @@ class FakeImmich:
             asset_id = path.split("/")[3]
             if self.echo_key_as_ids:
                 return 200, {"id": API_KEY, "isTrashed": False}
+            if self.swap_asset_ids:
+                # **要求した id と違う id を返す。** 検査が無ければ、こちらは
+                # 別の資産のスタックを自分の組と取り違える。
+                asset_id = f"{asset_id}-swapped"
             body = {"id": asset_id, "isTrashed": asset_id in self.trashed}
             if asset_id in self.datetimes:
                 body["exifInfo"] = {"dateTimeOriginal": self.datetimes[asset_id]}
+            if self.null_stack_field:
+                body["stack"] = None
+            elif self.malformed_stack_field:
+                # キーはあるが object ではない（旧版の「キーが無い」とは別物）。
+                body["stack"] = "stack-1"
+            else:
+                found = self._stack_of(asset_id)
+                if found is not None:
+                    stack_id, stack = found
+                    primary = stack["primary"]
+                    if self.disagree_on_the_primary and asset_id != stack["assets"][0]:
+                        primary = stack["assets"][-1]
+                    body["stack"] = {
+                        "id": stack_id,
+                        "primaryAssetId": primary,
+                        "assetCount": len(stack["assets"]),
+                    }
             return 200, body
         if method == "GET" and path == "/api/tags":
             if self.echo_key_as_ids:
@@ -132,6 +191,21 @@ class FakeImmich:
             ids = json.loads(body)["ids"]
             self.tagged.setdefault(tag_id, []).extend(ids)
             return 200, [{"id": asset_id, "success": True} for asset_id in ids]
+        if method == "POST" and path == "/api/stacks":
+            return self._create_stack(json.loads(body))
+        if method == "GET" and path.startswith("/api/stacks?"):
+            return self._stacks_by_primary(path)
+        if method == "PUT" and path.startswith("/api/stacks/"):
+            stack_id = path.split("/")[3]
+            stack = self.stacks.get(stack_id)
+            if stack is None:
+                return 404, {"message": "no such stack"}
+            if not self.ignore_primary_change:
+                stack["primary"] = json.loads(body)["primaryAssetId"]
+            if self.change_members_after_the_put:
+                # 利用者が member を差し替えた状態（stack id は同じまま）。
+                stack["assets"] = [stack["primary"], "someone-else"]
+            return 200, self._stack_view(stack_id)
         if method == "PUT" and path.startswith("/api/assets/"):
             asset_id = path.split("/")[3]
             self.datetimes[asset_id] = json.loads(body)["dateTimeOriginal"]
@@ -220,6 +294,76 @@ class FakeImmich:
         self.assets[checksum] = asset_id
         return 201, {"id": asset_id, "status": "created"}
 
+    def _stack_of(self, asset_id: str):  # noqa: ANN202
+        for stack_id, stack in self.stacks.items():
+            if asset_id in stack["assets"]:
+                return stack_id, stack
+        return None
+
+    def _stack_view(self, stack_id: str):  # noqa: ANN202
+        stack = self.stacks[stack_id]
+        assets = list(stack["assets"])
+        if self.drop_one_asset_from_the_stack_response:
+            assets = assets[:-1]
+        if self.duplicate_asset_in_the_stack_response:
+            # **要求と件数が違うのに集合は同じ**（[A, B] を送って [A, A, B] が返る）。
+            assets = [assets[0], *assets]
+        if self.empty_assets_in_the_stack_response:
+            assets = []
+        primary = API_KEY if self.echo_key_as_ids else stack["primary"]
+        if self.primary_outside_the_stack:
+            primary = "someone-else"
+        body = {
+            "id": API_KEY if (self.echo_key_as_ids or self.key_as_stack_id) else stack_id,
+            "primaryAssetId": primary,
+            "assets": [{"id": API_KEY if self.echo_key_as_ids else a} for a in assets],
+        }
+        if self.stack_response_without_assets:
+            del body["assets"]
+        return body
+
+    def _create_stack(self, payload):  # noqa: ANN001, ANN202
+        """**実物の地雷を再現する。**
+
+        渡した資産のどれかが既存スタックの primary なら、その既存スタックを
+        新しいスタックへ畳み込む（Immich v3.1.0 の仕様）。
+        """
+        ids = list(payload["assetIds"])
+        absorbed = [stack_id for stack_id, stack in self.stacks.items() if stack["primary"] in ids]
+        for stack_id in absorbed:
+            for asset_id in self.stacks.pop(stack_id)["assets"]:
+                if asset_id not in ids:
+                    ids.append(asset_id)
+        stack_id = f"stack-{len(self.stacks) + 1}"
+        self.stacks[stack_id] = {"primary": ids[0], "assets": ids}
+        if self.fail_after_creating_the_stack:
+            return 503, {"message": "作った後で落ちた"}
+        return 201, self._stack_view(stack_id)
+
+    def _stacks_by_primary(self, path: str):  # noqa: ANN202
+        if self.stack_lookup_delay_seconds:
+            time.sleep(self.stack_lookup_delay_seconds)
+        if self.stack_list_is_not_even_json:
+            return 200, b"<html>proxy body</html>"
+        if self.stack_list_is_not_json:
+            return 200, "これは JSON の配列ではない"
+        primary = path.split("primaryAssetId=")[1]
+        if self.stack_list_has_a_scalar:
+            return 200, ["scalar"]
+        if self.stack_list_ignores_the_primary_filter:
+            # **絞り込みを無視して全部返す相手。** こちらが primary の一致を
+            # 確かめていなければ、無関係なスタックを掴む。
+            return 200, [self._stack_view(stack_id) for stack_id in self.stacks]
+        found = [
+            self._stack_view(stack_id)
+            for stack_id, stack in self.stacks.items()
+            if stack["primary"] == primary
+        ]
+        if self.lookup_returns_another_stack_id:
+            for view in found:
+                view["id"] = "stack-elsewhere"
+        return 200, found
+
 
 def _handler_for(fake: FakeImmich):  # noqa: ANN202
     class Handler(BaseHTTPRequestHandler):
@@ -239,7 +383,9 @@ def _handler_for(fake: FakeImmich):  # noqa: ANN202
                 self.send_header("content-length", "0")
                 self.end_headers()
                 return
-            raw = json.dumps(payload).encode()
+            # **本物の非 JSON を返せるようにする。** `json.dumps` を通すと
+            # 「JSON の文字列」になってしまい、`.json()` が成功する。
+            raw = payload if isinstance(payload, bytes) else json.dumps(payload).encode()
             self.send_response(status)
             self.send_header("content-type", "application/json")
             self.send_header("content-length", str(len(raw)))

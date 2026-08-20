@@ -18,7 +18,7 @@ import uuid
 
 import pytest
 
-from mediaferry.adapters.immich import ImmichClient
+from mediaferry.adapters.immich import ImmichClient, ImmichProtocolError
 
 pytestmark = pytest.mark.needs_immich
 
@@ -143,3 +143,100 @@ def _cleanup(url: str, key: str, asset_id: str | None, tag_name: str) -> None:
             if tag["name"] == tag_name:
                 response = raw.delete(f"/api/tags/{tag['id']}")
                 assert response.status_code < 400, f"タグを消せなかった: {response.status_code}"
+
+
+def test_the_stack_path_works_against_a_real_server(client, tmp_path):
+    """作成 → 取得 → primary 差し替え → 削除まで実機で通す（§9.11）.
+
+    **「既存スタックを吸収する」挙動そのものも測る。** こちらが触らないと決めた
+    判断の前提なので、前提の側を確かめる —— 仕様の文言だけを根拠にしない。
+
+    **作ったものは必ず消す。**
+    """
+    import os
+
+    assets: list[str] = []
+    try:
+        for index in range(3):
+            path = tmp_path / f"mediaferry-stack-{uuid.uuid4().hex[:8]}.jpg"
+            _a_unique_jpeg(path, uuid.uuid4().bytes)
+            sha1 = hashlib.sha1(path.read_bytes(), usedforsecurity=False).hexdigest()
+            uploaded = client.upload_asset(
+                path,
+                sha1_hex=sha1,
+                device_asset_id=f"mediaferry:{uuid.uuid4().hex}",
+                file_created_at="2026-08-19T10:30:00+00:00",
+                file_modified_at="2026-08-19T10:30:00+00:00",
+            )
+            assert uploaded.status == "created", index
+            assets.append(uploaded.asset_id)
+
+        # 1. 2 枚で作る。応答は要求した集合と全単射で、primary は member。
+        stack = client.create_stack(assets[:2])
+        assert set(stack.asset_ids) == set(assets[:2])
+        assert stack.primary_asset_id in stack.asset_ids
+
+        # 2. 資産を読むと、スタックに入っていることが分かる（`AssetResponseDto.stack`）。
+        member = client.asset(assets[0])
+        assert member.stack_id == stack.stack_id
+        assert member.stack_primary_asset_id == stack.primary_asset_id
+
+        # 3. 主資産から引ける。
+        found = client.stack_by_primary(stack.primary_asset_id)
+        assert found is not None
+        assert found.stack_id == stack.stack_id
+
+        # 4. primary を差し替えられる。
+        other = next(a for a in stack.asset_ids if a != stack.primary_asset_id)
+        client.set_stack_primary(stack.stack_id, other)
+        moved = client.stack_by_primary(other)
+        assert moved is not None and moved.stack_id == stack.stack_id
+
+        # 5. **吸収の挙動を測る。** 現 primary を含む集合で作り直すと、既存の
+        #    スタックが畳み込まれる —— これが「送る前に相手を読む」根拠。
+        #
+        #    **生の HTTP で測る。** `create_stack` は「要求と違う集合が返ったら
+        #    protocol error」なので、吸収された応答はクライアントを通らない
+        #    （アプリとしてはそれが正しい。ここで測りたいのは相手の挙動）。
+        absorbed = _raw_create_stack(
+            os.environ["MEDIAFERRY_TEST_IMMICH_URL"],
+            os.environ["MEDIAFERRY_TEST_IMMICH_KEY"],
+            [other, assets[2]],
+        )
+        # 仕様どおりなら旧スタックの相方まで入って 3 枚。**違ったら記録を直す。**
+        assert len(absorbed) == 3, (
+            f"POST /stacks の吸収が仕様と違う（{len(absorbed)} 枚）。"
+            " design.md §9.11 の前提を実測へ書き直すこと"
+        )
+        assert set(absorbed) == set(assets)
+
+        # 6. **こちらのクライアントは、その応答を確定させない。**
+        with pytest.raises(ImmichProtocolError):
+            client.create_stack([assets[0], assets[1]])
+    finally:
+        _delete_assets(
+            os.environ["MEDIAFERRY_TEST_IMMICH_URL"],
+            os.environ["MEDIAFERRY_TEST_IMMICH_KEY"],
+            assets,
+        )
+
+
+def _delete_assets(url: str, key: str, asset_ids: list[str]) -> None:
+    """**資産を消せばスタックも消える**（スタックは資産の関係でしかない）."""
+    import httpx
+
+    if not asset_ids:
+        return
+    with httpx.Client(base_url=url, headers={"x-api-key": key}, timeout=60.0) as raw:
+        response = raw.request("DELETE", "/api/assets", json={"ids": asset_ids, "force": True})
+        assert response.status_code < 400, f"資産を消せなかった: {response.status_code}"
+
+
+def _raw_create_stack(url: str, key: str, asset_ids: list[str]) -> list[str]:
+    """検査を通さずに `POST /stacks` を叩く（相手の挙動そのものを測る）."""
+    import httpx
+
+    with httpx.Client(base_url=url, headers={"x-api-key": key}, timeout=60.0) as raw:
+        response = raw.post("/api/stacks", json={"assetIds": asset_ids})
+        assert response.status_code < 400, response.status_code
+        return [asset["id"] for asset in response.json()["assets"]]

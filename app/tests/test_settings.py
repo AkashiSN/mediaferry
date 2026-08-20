@@ -4,6 +4,7 @@ import pytest
 
 from mediaferry.clock import now_iso
 from mediaferry.settings import (
+    SETTING_SPECS,
     SettingInvalid,
     SettingLocked,
     SettingsService,
@@ -22,7 +23,6 @@ def test_defaults_are_used_when_nothing_is_set(db):
     assert snapshot.http_port == 8080
     assert str(snapshot.broker_socket) == "/run/mediaferry/broker.sock"
     assert snapshot.auto_import == "trusted"
-    assert snapshot.upload_concurrency == 2
     assert snapshot.default_timezone is None
 
 
@@ -138,3 +138,23 @@ def test_non_loopback_without_auth_warns(db):
     assert [w.code for w in warnings] == ["unauthenticated_exposure"]
     assert any("認証" in w.message for w in warnings)
     assert startup_warnings(service(db).snapshot()) == []
+
+
+def test_the_concurrency_setting_is_gone(db):
+    """**効かない設定を画面に並べない**（§9.10 は当初から直列と決めている）."""
+    assert "UPLOAD_CONCURRENCY" not in SETTING_SPECS
+    assert not hasattr(service(db).snapshot(), "upload_concurrency")
+
+
+def test_a_left_over_env_var_does_not_break_startup(db):
+    """撤去後も、古い env が残っている環境が起動できる（未知のキーは読まない）."""
+    assert service(db, UPLOAD_CONCURRENCY="4").snapshot().upload_max_attempts == 3
+
+
+def test_setting_the_removed_key_through_the_api_is_refused(db):
+    with pytest.raises(SettingInvalid, match="未知の設定キー"):
+        service(db).set("UPLOAD_CONCURRENCY", "4")
+
+
+def test_it_is_not_listed_any_more(db):
+    assert "UPLOAD_CONCURRENCY" not in {s.key for s in service(db).describe_all()}

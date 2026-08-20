@@ -46,6 +46,8 @@ class RecomputeOutcome:
     unchanged: int
     skipped: int
     requeued: int
+    # 時刻が動いたので、スタックの見送りを未評価へ戻した件数（§6）。
+    reopened: int = 0
     # **キャンセルを「完了」と書かせない。** 協調キャンセルは正常 return で表すので、
     # 戻り値だけを見る呼び出し側にはここでしか区別が付かない。
     finished: bool = True
@@ -57,9 +59,12 @@ class _Tally:
     unchanged: int = 0
     skipped: int = 0
     requeued: int = 0
+    reopened: int = 0
 
     def outcome(self, *, finished: bool) -> RecomputeOutcome:
-        return RecomputeOutcome(self.changed, self.unchanged, self.skipped, self.requeued, finished)
+        return RecomputeOutcome(
+            self.changed, self.unchanged, self.skipped, self.requeued, self.reopened, finished
+        )
 
 
 class Recomputer:
@@ -334,6 +339,7 @@ class Recomputer:
                     continue
                 tally.changed += 1
                 tally.requeued += self._requeue(row, profile)
+                tally.reopened += self._reopen_stack(row)
         return skipped
 
     def _write(self, row: sqlite3.Row, value: CapturedAt, revision_id: str) -> None:
@@ -342,6 +348,19 @@ class Recomputer:
             " captured_at_note = ?, captured_at_revision_id = ? WHERE id = ?",
             (value.at.isoformat(), value.source, value.tz, value.note, revision_id, row["id"]),
         )
+
+    def _reopen_stack(self, row: sqlite3.Row) -> int:
+        """スタックの見送りを未評価へ戻す（§6）.
+
+        時刻が動くと、成立していなかった組が成立しうる。抽出は未評価しか拾わない
+        ので、戻さないと二度と再評価されない。**`stacked` は戻さない**
+        （相手側に既にあるものを作り直さない）。
+        """
+        return self._conn.execute(
+            "UPDATE upload_record SET stack_state = NULL, stack_reason = NULL, updated_at = ?"
+            " WHERE media_file_id = ? AND stack_state = 'skipped'",
+            (now_iso(), row["id"]),
+        ).rowcount
 
     def _requeue(self, row: sqlite3.Row, profile: ProfileRef) -> int:
         """送信済みを `needs_recheck` へ戻す（`CLAIMABLE_STATES` に入っている）.

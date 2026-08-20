@@ -19,6 +19,54 @@ type Destination = {
 
 type Destinations = { destinations: Destination[] };
 
+/** スタックの見送り（§9.11）。**理由は常に出す**（対象外のときだけ出すと、
+ * 出ていないことが仕様に見える）。 */
+type SkippedStack = {
+  id: string;
+  media_file_id: string;
+  stack_reason: string | null;
+};
+
+type SkippedStacks = { records: SkippedStack[] };
+
+/** 一度に出す件数。**打ち切ったことを黙らない**（下の「ほかにもある」）。 */
+const SKIP_PAGE = 50;
+
+function StackSkips({ destinationId }: { destinationId: string }) {
+  const skipped = useQuery<SkippedStacks>(
+    `/uploads?destination_id=${destinationId}&stack_state=skipped&limit=${SKIP_PAGE}`,
+  );
+  const records = skipped.data?.records ?? [];
+  return (
+    <section>
+      <h3>スタックの見送り</h3>
+      {skipped.error !== null && skipped.error !== undefined && (
+        <ErrorBanner error={skipped.error} />
+      )}
+      {skipped.data === undefined ? (
+        <p>読み込み中…</p>
+      ) : records.length === 0 ? (
+        <p>見送りはありません。</p>
+      ) : (
+        <>
+          <ul>
+            {records.map((record) => (
+              <li key={record.id}>
+                {record.media_file_id}: {record.stack_reason ?? "理由不明"}
+              </li>
+            ))}
+          </ul>
+          {records.length === SKIP_PAGE && (
+            <p role="note">
+              先頭 {SKIP_PAGE} 件だけを出しています（ほかにもあります）。
+            </p>
+          )}
+        </>
+      )}
+    </section>
+  );
+}
+
 /** 同じ向き先を指す宛先が他にあるか（§12.3。UNIQUE は置かず警告だけ）。 */
 export function sharesLibrary(all: Destination[], one: Destination): boolean {
   if (one.remote_user_id === null) {
@@ -113,6 +161,7 @@ export function DestinationsScreen() {
             {sharesLibrary(destinations.data?.destinations ?? [], destination) && (
               <p role="note">同じライブラリを指している宛先があります。</p>
             )}
+            <StackSkips destinationId={destination.id} />
             <div className="actions">
               <button
                 type="button"
