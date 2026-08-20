@@ -12,7 +12,12 @@ mediaferry-protocol = { workspace = true }
 mountd = { workspace = true }
 
 [dependency-groups]
-dev = ["pytest>=8"]
+# **道具も宣言する。** ruff を書いていなかったので、`uv run ruff` は PATH 上の
+# 実行ファイルに解決していた。手元にたまたま入っていると気づけず、CI で
+# 「Failed to spawn: ruff」になる。
+#
+# ruff は版で指摘と整形が変わる。上限を切って、手元と CI で同じ版を使う。
+dev = ["pytest>=8", "ruff>=0.16,<0.17"]
 
 [tool.ruff]
 line-length = 100
