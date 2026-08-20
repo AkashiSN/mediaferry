@@ -80,8 +80,8 @@ class GroupDetector:
     def _runs(self, profile: ProfileRef) -> list[list[MergePart]]:
         """アクティブな member を境界にして、連続した並びの断片に分ける."""
         rows = self._conn.execute(
-            "SELECT m.id, m.rel_path, m.sha1, m.captured_at, m.duration_seconds,"
-            " m.size_bytes, m.probe_state,"
+            "SELECT m.id, m.rel_path, m.sha1, m.captured_at, m.captured_at_source,"
+            " m.duration_seconds, m.size_bytes, m.probe_state,"
             " EXISTS (SELECT 1 FROM merge_member mm"
             "         WHERE mm.media_file_id = m.id AND mm.active = 1) AS taken"
             " FROM media_file m"
@@ -104,6 +104,7 @@ class GroupDetector:
                     duration_seconds=row["duration_seconds"],
                     size_bytes=row["size_bytes"],
                     probe_state=row["probe_state"],
+                    captured_at_source=row["captured_at_source"],
                 )
             )
         return [run for run in runs if len(run) >= 2]

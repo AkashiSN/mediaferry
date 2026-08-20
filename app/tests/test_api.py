@@ -73,6 +73,22 @@ def test_scan_then_import_walks_the_whole_path(client, data_root):
     assert (data_root / media[0]["rel_path"]).exists()
 
 
+def test_the_import_summary_counts_what_it_skipped(client):
+    """2 度目の取り込みが「何もしなかった」ように読めてはいけない.
+
+    スキップは効いているのに件数がどこにも出ないと、チェックリストの
+    「取込済のファイルはスキップされる」を画面からもログからも確かめられない。
+    """
+    volume_id = client.get("/api/devices").json()["volumes"][0]["volume_instance_id"]
+    _await_job(client, client.post(f"/api/volumes/{volume_id}/scan").json()["job_id"])
+    _await_job(client, client.post(f"/api/volumes/{volume_id}/import").json()["job_id"])
+    second = client.post(f"/api/volumes/{volume_id}/import").json()["job_id"]
+    _await_job(client, second)
+    events = client.get(f"/api/jobs/{second}/events", params={"after_seq": 0}).json()["events"]
+    summary = events[-1]["message"]
+    assert summary == "取り込み完了: 0 件 / スキップ 1 件 / 失敗 0 件"
+
+
 def test_trusting_a_volume_sticks(client):
     volume_id = client.get("/api/devices").json()["volumes"][0]["volume_instance_id"]
     assert client.post(f"/api/volumes/{volume_id}/trust").status_code == 200

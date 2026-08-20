@@ -75,7 +75,14 @@ class JobWorld:
             outcome = importer.run(ctx, handle.dirfd, selection.volume_instance_id, profile)
         finally:
             self._volumes.release(selection)
-        ctx.emit("info", f"取り込み完了: {outcome.published} 件")
+        # **スキャンの完了行と同じ形にする。** 公開の件数だけだと、2 度目の
+        # 取り込みが「何もしなかった」ように読める。スキップの件数は
+        # `ImportOutcome` にあるのに、出さなければ画面にもログにも残らない。
+        ctx.emit(
+            "info",
+            f"取り込み完了: {outcome.published} 件 / スキップ {outcome.skipped} 件"
+            f" / 失敗 {outcome.failed} 件",
+        )
 
     def run_detect_groups(self, ctx: JobContext, conn: sqlite3.Connection) -> None:
         profile = _profile_ref(conn, ctx.params)

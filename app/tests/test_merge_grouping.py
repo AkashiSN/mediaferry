@@ -1,5 +1,7 @@
 from datetime import UTC, datetime, timedelta
 
+import pytest
+
 from mediaferry.core.merge.grouping import GIB, MergePart, detect_groups
 from mediaferry.core.profiles.model import KeepStreams, MergeRule
 
@@ -19,7 +21,15 @@ def a_rule(**overrides):
     return MergeRule(**values)
 
 
-def a_part(index, *, offset_seconds, duration=1500.0, size=16 * GIB, probe_state="ok"):
+def a_part(
+    index,
+    *,
+    offset_seconds,
+    duration=1500.0,
+    size=16 * GIB,
+    probe_state="ok",
+    source="filename",
+):
     return MergePart(
         media_file_id=f"id-{index}",
         rel_path=f"library/dji-osmo/DCIM/DJI_001/DJI_{index:04d}_D.MP4",
@@ -28,6 +38,7 @@ def a_part(index, *, offset_seconds, duration=1500.0, size=16 * GIB, probe_state
         duration_seconds=duration,
         size_bytes=size,
         probe_state=probe_state,
+        captured_at_source=source,
     )
 
 
@@ -56,7 +67,31 @@ def test_a_small_previous_part_splits_the_group():
 
 
 def test_an_overlap_splits_the_group():
+    # ちょうど 1 秒。秒への丸めでは作れない差なので、本物の重なり。
     parts = [a_part(1, offset_seconds=0), a_part(2, offset_seconds=1499)]
+    assert detect_groups(parts, a_rule()) == []
+
+
+def test_a_sub_second_overlap_is_rounding_not_an_overlap():
+    """実機の DJI で出た形（手動チェックリスト #5 の後）.
+
+    16 GiB で分割された 1 本の録画の継ぎ目が +0.963 / +0.091 / **−0.909** /
+    +0.877 とばらつき、1 か所だけ負になって 5 パートが 2 つに割れた。
+    `captured_at` はファイル名由来で**秒までしか無い**のに duration は小数なので、
+    終端の推定は構造的に ±1 秒ぶれる。**符号は丸めの結果でしかない。**
+    """
+    parts = [a_part(1, offset_seconds=0), a_part(2, offset_seconds=1499.091)]
+    groups = detect_groups(parts, a_rule())
+    assert len(groups) == 1
+    assert groups[0].gaps == (pytest.approx(-0.909),)
+
+
+def test_a_sub_second_overlap_still_splits_a_high_resolution_timestamp():
+    """mtime 由来なら秒未満まで分かるので、負の差は本物の重なり."""
+    parts = [
+        a_part(1, offset_seconds=0, source="mtime"),
+        a_part(2, offset_seconds=1499.091, source="mtime"),
+    ]
     assert detect_groups(parts, a_rule()) == []
 
 
@@ -102,3 +137,16 @@ def test_a_single_part_is_not_a_candidate():
 def test_a_disabled_rule_detects_nothing():
     parts = [a_part(1, offset_seconds=0), a_part(2, offset_seconds=1502)]
     assert detect_groups(parts, a_rule(enabled=False)) == []
+
+
+def test_the_coarser_of_the_two_timestamps_decides_the_slack():
+    """誤差は粗い方が支配する. 細かい方を採ると、丸めの逃げ道が閉じる.
+
+    直前が秒までしか無ければ、終端の推定はそれだけで 1 秒ぶれる。次の開始が
+    秒未満まで分かっていても、その誤差は消えない。
+    """
+    parts = [
+        a_part(1, offset_seconds=0, source="filename"),
+        a_part(2, offset_seconds=1499.091, source="mtime"),
+    ]
+    assert len(detect_groups(parts, a_rule())) == 1
