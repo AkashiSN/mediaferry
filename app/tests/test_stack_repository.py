@@ -481,3 +481,113 @@ def test_stamp_remote_also_reopens_the_stack(world, db):
     repo.stamp_remote(records["JPG"], "another-asset", 0, now_iso())
 
     assert rows(db)[records["JPG"]]["stack_state"] is None
+
+
+def test_a_changed_asset_id_reopens_the_whole_group(world, db):
+    """**組は 1 つの結果。** 片方の資産 ID が変われば、相方の結果も無効になる.
+
+    片方だけ戻すと、次に組み直そうとしたとき `_member_moved` が相方の
+    `stacked` を拒み、**以後ずっと組めない**（画面も古いスタックを出し続ける）。
+    """
+    from mediaferry.db.uploads import Stamp
+
+    repo, ctx, destination_id, revision, records = world
+    repo.mark_stacked(ctx, list(rows(db).values()), destination_id, EPOCH, revision, "stack-1")
+    record = rows(db)[records["JPG"]]
+
+    repo.stamp_many(
+        ctx,
+        [
+            Stamp(
+                record_id=record["id"],
+                asset_id=None,
+                is_trashed=0,
+                expect_asset_id=record["remote_asset_id"],
+                expect_checked_at=record["remote_checked_at"],
+            )
+        ],
+        now_iso(),
+    )
+
+    assert {row["stack_state"] for row in rows(db).values()} == {None}
+    assert {row["remote_stack_id"] for row in rows(db).values()} == {None}
+
+
+def test_stamp_remote_reopens_the_whole_group(world, db):
+    repo, ctx, destination_id, revision, records = world
+    repo.mark_stacked(ctx, list(rows(db).values()), destination_id, EPOCH, revision, "stack-1")
+
+    repo.stamp_remote(records["JPG"], "another-asset", 0, now_iso())
+
+    assert {row["stack_state"] for row in rows(db).values()} == {None}
+
+
+def test_a_skipped_partner_is_not_disturbed(world, db):
+    """見送りは組の結果ではないので、他人の資産 ID の変化で戻さない."""
+    repo, ctx, destination_id, revision, records = world
+    repo.mark_skipped(
+        ctx, rows(db)[records["CR2"]], destination_id, EPOCH, revision, "相方が見つからない"
+    )
+
+    repo.stamp_remote(records["JPG"], "another-asset", 0, now_iso())
+
+    assert rows(db)[records["CR2"]]["stack_state"] == "skipped"
+
+
+def test_uploading_a_new_asset_over_a_stacked_record_reopens_the_group(world, db):
+    """**再確認へ戻った `stacked` の行を、別の資産で送り直す経路。**
+
+    再計算は `complete` → `needs_recheck` を動かすが `stack_state` は残す
+    （スタック済みという事実は真のまま）。その後の送信が新しい資産 ID を書く
+    ので、**その時点で組の結果は無効になる**。塞がないと `0016` がジョブごと
+    落とすか、古い `remote_stack_id` が新しい資産の結果として残る。
+    """
+    repo, ctx, destination_id, revision, records = world
+    repo.mark_stacked(ctx, list(rows(db).values()), destination_id, EPOCH, revision, "stack-1")
+    record_id = records["JPG"]
+    db.execute(
+        "UPDATE upload_record SET state = 'checking', claim_job_id = ?, claim_token = ?,"
+        " claim_expires_at = ? WHERE id = ?",
+        (ctx.job_id, "token-1", "2999-01-01T00:00:00+00:00", record_id),
+    )
+
+    repo.advance_owned(
+        _with_token(ctx, "token-1"),
+        record_id,
+        "asset_known",
+        "checking",
+        remote_asset_id="asset-new",
+    )
+
+    assert {row["stack_state"] for row in rows(db).values()} == {None}
+    assert rows(db)[record_id]["remote_asset_id"] == "asset-new"
+
+
+def _with_token(ctx, token):
+    """claim のトークンだけを差し替えた文脈（リースは本物）."""
+    from dataclasses import replace as _replace
+
+    return _replace(ctx, lease_token=ctx.lease_token) if token is None else _Ctx(ctx, token)
+
+
+class _Ctx:
+    def __init__(self, ctx, token):
+        self._ctx = ctx
+        self.lease_token = token
+
+    def __getattr__(self, name):
+        return getattr(self._ctx, name)
+
+
+def test_rewriting_the_same_asset_id_keeps_the_stack(world, db):
+    """**同じ値を書き直すだけなら、結果は現在の姿のまま。**
+
+    再確認は毎回この経路を通るので、ここで戻すと組が永久に落ち着かない。
+    """
+    repo, ctx, destination_id, revision, records = world
+    repo.mark_stacked(ctx, list(rows(db).values()), destination_id, EPOCH, revision, "stack-1")
+    record = rows(db)[records["JPG"]]
+
+    repo.stamp_remote(record["id"], record["remote_asset_id"], 0, now_iso())
+
+    assert rows(db)[records["JPG"]]["stack_state"] == "stacked"

@@ -848,3 +848,23 @@ def test_a_lookup_that_returns_another_stack_id_is_refused(world):
 
     assert outcome.stacked == 0
     assert "stacked" not in {row["stack_state"] for row in world.rows().values()}
+
+
+def test_a_group_whose_members_share_one_asset_id_is_refused(world):
+    """**組の中で `remote_asset_id` が重複したら、相手に触る前に見送る。**
+
+    `resolve_group` は `media_file_id` で一意化するが、相手が両方へ同じ資産 ID を
+    返せば 2 行が 1 ID に縮退する。そのまま進むと `create_stack` の `ValueError`
+    がジョブ全体を落とし、回収の経路では 1 資産のスタックを 2 行へ `stacked` と
+    記録してしまう。
+    """
+    world.db.execute(
+        "UPDATE upload_record SET remote_asset_id = ? WHERE id = ?",
+        (world.assets["IMG_1234.JPG"], world.records["IMG_1234.CR2"]),
+    )
+
+    outcome = world.run()
+
+    assert outcome.stacked == 0
+    assert world.immich.stacks == {}
+    assert "資産 ID が重なっている" in world.row("IMG_1234.JPG")["stack_reason"]

@@ -211,3 +211,61 @@ def test_a_skipped_record_may_lose_its_remote_asset(db):
     )
     db.execute("UPDATE upload_record SET remote_asset_id = NULL WHERE id = ?", (record,))
     assert _row(db, record)["stack_state"] == "skipped"
+
+
+def test_a_stacked_record_must_not_switch_to_another_asset(db):
+    """**別 ID への差し替えも fail-closed にする**（`0016`）.
+
+    NULL だけを塞ぐと、`advance_owned` のような汎用の書き手が古い
+    `remote_stack_id` を新しい資産の結果として残せる。
+    """
+    record = a_complete_record(db)
+    db.execute(
+        "UPDATE upload_record SET stack_state = 'stacked', remote_stack_id = 's' WHERE id = ?",
+        (record,),
+    )
+    with pytest.raises(sqlite3.IntegrityError, match="stack"):
+        db.execute("UPDATE upload_record SET remote_asset_id = 'another' WHERE id = ?", (record,))
+
+
+def test_switching_the_asset_and_clearing_the_stack_together_is_allowed(db):
+    record = a_complete_record(db)
+    db.execute(
+        "UPDATE upload_record SET stack_state = 'stacked', remote_stack_id = 's' WHERE id = ?",
+        (record,),
+    )
+    db.execute(
+        "UPDATE upload_record SET remote_asset_id = 'another', stack_state = NULL,"
+        " remote_stack_id = NULL WHERE id = ?",
+        (record,),
+    )
+    assert _row(db, record)["remote_asset_id"] == "another"
+
+
+def test_rewriting_the_same_asset_id_is_allowed(db):
+    """同じ値を書き直すだけなら、結果は現在の姿のまま."""
+    record = a_complete_record(db)
+    db.execute(
+        "UPDATE upload_record SET stack_state = 'stacked', remote_stack_id = 's' WHERE id = ?",
+        (record,),
+    )
+    db.execute("UPDATE upload_record SET remote_asset_id = 'asset-1' WHERE id = ?", (record,))
+    assert _row(db, record)["stack_state"] == "stacked"
+
+
+def test_an_insert_cannot_create_a_stacked_record_without_an_asset(db):
+    """行を作る側でも見る（`0015` は `remote_stack_id` しか要求しない）."""
+    profile = a_profile(db)
+    media = a_media_file(db, profile)
+    dest = a_destination(db)
+    with pytest.raises(sqlite3.IntegrityError, match="stack"):
+        an_upload(
+            db,
+            dest,
+            media,
+            state="complete",
+            destination_revision_id=dest[1],
+            remote_asset_id=None,
+            stack_state="stacked",
+            remote_stack_id="s",
+        )

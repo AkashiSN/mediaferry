@@ -2387,6 +2387,28 @@ git commit -m "docs(mediaferry): Phase 6 の実測と引き継ぎを書き戻す
 **前巡の判定を 1 つ訂正した。** `_beat` の `assert_lease` は「構造的に検出できない」
 と書いていたが、**major 2 の窓で観測できる**（レビューの指摘どおり）。
 
+### 2 巡目（2026-08-20、codex `--fresh`。blocker 0 / major 3 / minor 0）
+
+**3 件すべて妥当。いずれも 1 巡目の対処が作った境界。**
+
+| # | 指摘 | 判定 | 反映 |
+| --- | --- | --- | --- |
+| major 1 | **資産 ID が変わったとき、同じスタックの相方が `stacked` のまま残る。** 1 巡目は「変わった 1 行」しか戻していなかった。相方が残ると、次に組み直すとき `_member_moved` の `stack_state IS NOT 'stacked'` が拒み、**以後ずっと組めない**（画面も古いスタックを出し続ける） | **妥当。** `mark_stacked` は組全員へ同じ `remote_stack_id` を書くので、戻すのも組単位でなければ釣り合わない | `_reopen_stack_of` を足し、**`(destination_id, target_epoch, remote_stack_id)` を共有する `stacked` 全員**を同じ取引で戻す |
+| major 2 | **`0016` が「別 ID への差し替え」を塞いでいない。** NULL だけを見るので、`advance_owned`（汎用の `_locked_cas`）が古い `remote_stack_id` を新しい資産の結果として残せる。再計算で `needs_recheck` へ戻った `stacked` の行を送り直す経路が実在する | **妥当。** 経路を試験に起こしたら、trigger がジョブごと落とすことも確認できた | trigger を `OLD.remote_asset_id IS NOT NEW.remote_asset_id` まで広げ、**`_locked_cas` が `remote_asset_id` を書くときは先に組を戻す**。正当な書き換えは通り、消し忘れは fail-closed |
+| major 3 | **組の中で `remote_asset_id` が重複しうる。** `resolve_group` は `media_file_id` でしか一意化せず、相手が両方へ同じ資産 ID を返せば 2 行が 1 ID に縮退する。作成では `ValueError` が例外分類の外へ漏れて**ジョブ全体が失敗**し、回収では 1 資産のスタックを 2 行へ `stacked` と記録する | **妥当。** 試験に起こすと `ValueError` がそのまま漏れた | `resolve_group` で**相手に触る前に**重複を見て、理由つきの見送りにする |
+
+**変異試験（この巡の反映分）: 11 件中 10 件を検出。**
+
+**素通り 1 件は構造的な冗長。** `_reopen_stack_of` の `stack_state = 'stacked'` は、
+同じ WHERE の `remote_stack_id = ?` が既に見送りを除いている（`0015` の trigger が
+「`skipped` なら `remote_stack_id` は NULL」を守るため）。**trigger と対で壊せば
+検出できる**ので、冗長さは意図であって削ってよい根拠にはならない。
+
+**テストの穴を 2 つ塞いだ。** 「同じ ID を書き直しても戻さない」は `stamp_many`
+経由でしか見ておらず、内側の番兵（`new_asset_id == 現在値`）を通る `stamp_remote` /
+`_locked_cas` の経路が試験に無かった。`0016` の INSERT 側も、`stacked` +
+`remote_stack_id` あり + 資産 ID 無しで作る筋書きが無かった。
+
 ## レビュー記録
 
 **`--fresh` で回すこと** —— 継ぎ足すと、自分が提案した対処の周りが盲点になる

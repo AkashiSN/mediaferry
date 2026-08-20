@@ -694,15 +694,14 @@ class UploadRepository:
         with immediate(self._conn):
             ctx.assert_lease()
             for stamp in stamps:
+                # **ID が変わるなら、その前にスタックの結果を組ごと捨てる**（§9.11）。
+                # スタックは「その `remote_asset_id` を送った結果」なので、消滅や
+                # 別 ID への差し替えで現在の姿を表さなくなる。
+                if stamp.asset_id != stamp.expect_asset_id:
+                    self._reopen_stack_of(stamp.record_id)
                 updated = self._conn.execute(
                     "UPDATE upload_record SET remote_asset_id = ?, remote_is_trashed = ?,"
-                    " remote_checked_at = ?, updated_at = ?,"
-                    # **資産 ID が変わったらスタックの結果を未評価へ戻す**（§9.11）。
-                    # スタックは「その `remote_asset_id` を送った結果」なので、
-                    # 消滅や別 ID への差し替えで現在の姿を表さなくなる。
-                    " stack_state = CASE WHEN remote_asset_id IS ? THEN stack_state END,"
-                    " remote_stack_id = CASE WHEN remote_asset_id IS ? THEN remote_stack_id END,"
-                    " stack_reason = CASE WHEN remote_asset_id IS ? THEN stack_reason END"
+                    " remote_checked_at = ?, updated_at = ?"
                     " WHERE id = ? AND state = 'complete'"
                     "   AND remote_asset_id IS ? AND remote_checked_at IS ?",
                     (
@@ -710,9 +709,6 @@ class UploadRepository:
                         stamp.is_trashed,
                         checked_at,
                         now_iso(),
-                        stamp.asset_id,
-                        stamp.asset_id,
-                        stamp.asset_id,
                         stamp.record_id,
                         stamp.expect_asset_id,
                         stamp.expect_checked_at,
@@ -730,24 +726,12 @@ class UploadRepository:
         進行中の行は所有者がいるので、claim を持たないこの経路では触らない。
         """
         with immediate(self._conn):
+            # 資産 ID が変わるなら、スタックの結果を組ごと捨てる（上と同じ理由）。
+            self._reopen_stack_of(record_id, new_asset_id=asset_id)
             self._conn.execute(
                 "UPDATE upload_record SET remote_asset_id = ?, remote_is_trashed = ?,"
-                " remote_checked_at = ?, updated_at = ?,"
-                # 資産 ID が変わったらスタックの結果を未評価へ戻す（上と同じ理由）。
-                " stack_state = CASE WHEN remote_asset_id IS ? THEN stack_state END,"
-                " remote_stack_id = CASE WHEN remote_asset_id IS ? THEN remote_stack_id END,"
-                " stack_reason = CASE WHEN remote_asset_id IS ? THEN stack_reason END"
-                " WHERE id = ? AND state = 'complete'",
-                (
-                    asset_id,
-                    is_trashed,
-                    checked_at,
-                    now_iso(),
-                    asset_id,
-                    asset_id,
-                    asset_id,
-                    record_id,
-                ),
+                " remote_checked_at = ?, updated_at = ? WHERE id = ? AND state = 'complete'",
+                (asset_id, is_trashed, checked_at, now_iso(), record_id),
             )
 
     def stamp_remote_datetime(
@@ -963,6 +947,36 @@ class UploadRepository:
                 # **成功として数えない。** 数えると第 2 パスの集計が嘘になる。
                 raise StackGroupChanged(f"レコード {record['id']} を記録できない")
 
+    def _reopen_stack_of(self, record_id: str, new_asset_id: str | None = "") -> None:
+        """その行が属する**スタックの全員**を未評価へ戻す（§9.11）.
+
+        **組は 1 つの結果。** 片方の資産 ID が変わっただけでも、その
+        `remote_stack_id` は現在の姿を表さなくなる。片方だけ戻すと、次に組み直す
+        ときに `_member_moved` が相方の `stacked` を拒み、**以後ずっと組めない**
+        （画面も古いスタックを現在の結果として出し続ける）。
+
+        `new_asset_id` に既定の番兵を渡すと「変わる前提」で戻す。呼び出し側が
+        新しい ID を渡した場合は、同じなら何もしない。
+
+        **見送り（`skipped`）は組の結果ではない**ので触らない。
+        """
+        row = self._conn.execute(
+            "SELECT destination_id, target_epoch, remote_asset_id, remote_stack_id"
+            " FROM upload_record WHERE id = ?",
+            (record_id,),
+        ).fetchone()
+        if row is None or row["remote_stack_id"] is None:
+            return
+        if new_asset_id != "" and new_asset_id == row["remote_asset_id"]:
+            return
+        self._conn.execute(
+            "UPDATE upload_record SET stack_state = NULL, remote_stack_id = NULL,"
+            " stack_reason = NULL, updated_at = ?"
+            " WHERE destination_id = ? AND target_epoch = ? AND remote_stack_id = ?"
+            "   AND stack_state = 'stacked'",
+            (now_iso(), row["destination_id"], row["target_epoch"], row["remote_stack_id"]),
+        )
+
     def _assert_current(
         self,
         ctx: JobContext,
@@ -1084,6 +1098,11 @@ class UploadRepository:
         **fields: object,
     ) -> None:
         """**呼び出し側が開いたトランザクションの中で使う。** 条件は `_cas` と同じ."""
+        if "remote_asset_id" in fields:
+            # **資産 ID が変わるなら、その前にスタックの結果を組ごと捨てる**（§9.11）。
+            # 再計算で `needs_recheck` へ戻った `stacked` の行を別の資産で送り直す
+            # 経路がここを通る。`0016` の trigger が同じことを fail-closed で守る。
+            self._reopen_stack_of(record_id, new_asset_id=fields["remote_asset_id"])
         extra = "".join(f", {name} = ?" for name in fields)
         clauses = ["id = ?", "claim_token = ?"]
         guard: list[object] = [record_id, token]

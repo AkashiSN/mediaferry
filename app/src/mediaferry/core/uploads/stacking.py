@@ -116,6 +116,12 @@ def _refused(primary: Candidate, partners: Sequence[Candidate], rule: StackRule)
             # `POST /stacks` は既存スタックを吸収する。タグ（追加のみ）と違って
             # 利用者が手で作った組を作り直しうるので、**証明できない相手には触らない**。
             return Refusal("自分が上げたと証明できない資産が含まれる")
+    identifiers = [member.remote_asset_id for member in (primary, *partners)]
+    if len(set(identifiers)) != len(identifiers):
+        # **相手が両方へ同じ資産 ID を返すことがある。** そのまま進むと、
+        # 作成では「同じ id が複数ある」で落ち、回収では 1 資産のスタックを
+        # 2 行へ `stacked` と記録してしまう。
+        return Refusal("相方と資産 ID が重なっている")
     for partner in partners:
         if partner.profile_id != primary.profile_id:
             # 規則が 1 つに決まらない（§9.11）。
