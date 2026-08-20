@@ -13,6 +13,7 @@ import { DestinationsScreen } from "./Destinations";
 import { DevicesScreen } from "./Devices";
 import { LibraryScreen, summarise } from "./Library";
 import { MergesScreen } from "./Merges";
+import { DashboardScreen } from "./Dashboard";
 import { SettingsScreen } from "./Settings";
 
 type Handler = (path: string, init?: RequestInit) => unknown;
@@ -794,5 +795,104 @@ describe("デバイスの信頼登録", () => {
 
     expect(await screen.findByText(/挿すと自動で取り込みます/)).toBeInTheDocument();
     expect(screen.queryByText(/自動取り込みは無効/)).toBeNull();
+  });
+});
+
+
+describe("スタックの結果（§9.11）", () => {
+  const destinations = {
+    destinations: [{ id: "d1", name: "home", enabled: true, base_url: "http://immich.invalid" }],
+  };
+
+  it("宛先ごとに見送りの理由を出す", async () => {
+    stubApi({
+      "/destinations": destinations,
+      "/uploads": {
+        records: [
+          {
+            id: "u1",
+            media_file_id: "m1",
+            stack_state: "skipped",
+            stack_reason: "相方が見つからない",
+          },
+        ],
+      },
+    });
+
+    render(
+      <MemoryRouter>
+        <DestinationsScreen />
+      </MemoryRouter>,
+    );
+
+    expect(await screen.findByText(/相方が見つからない/)).toBeInTheDocument();
+  });
+
+  it("見送りが無いときは、無いと書く", async () => {
+    // **出ていないことが仕様に見える**のを避ける（Phase 5 Task 8 の教訓）。
+    stubApi({ "/destinations": destinations, "/uploads": { records: [] } });
+
+    render(
+      <MemoryRouter>
+        <DestinationsScreen />
+      </MemoryRouter>,
+    );
+
+    expect(await screen.findByText(/見送りはありません/)).toBeInTheDocument();
+  });
+
+  it("見送りだけを問い合わせる", async () => {
+    stubApi({ "/destinations": destinations, "/uploads": { records: [] } });
+
+    render(
+      <MemoryRouter>
+        <DestinationsScreen />
+      </MemoryRouter>,
+    );
+
+    await waitFor(() =>
+      expect(
+        calls.some((call) => call.path === "/uploads?destination_id=d1&stack_state=skipped"),
+      ).toBe(true),
+    );
+  });
+
+  it("ダッシュボードがスタックの件数を出す", async () => {
+    stubApi({
+      "/dashboard": {
+        media_total: 1,
+        destinations: [
+          {
+            destination_id: "d1",
+            name: "home",
+            enabled: true,
+            complete: 3,
+            failed: 0,
+            awaiting_approval: 0,
+            pending: 0,
+            unsent: 0,
+            stacked: 2,
+            stack_skipped: 1,
+          },
+        ],
+        running_jobs: 0,
+        recent_imports: [],
+        orphans: 0,
+        missing: 0,
+        warnings: [],
+      },
+      "/devices": { volumes: [] },
+    });
+
+    render(
+      <MemoryRouter>
+        <DashboardScreen />
+      </MemoryRouter>,
+    );
+
+    const row = await screen.findByRole("row", { name: /home/ });
+    expect(row).toHaveTextContent("2");
+    expect(row).toHaveTextContent("1");
+    expect(await screen.findByRole("columnheader", { name: "スタック" })).toBeInTheDocument();
   });
 });
