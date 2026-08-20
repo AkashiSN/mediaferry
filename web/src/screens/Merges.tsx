@@ -46,11 +46,14 @@ export function MergesScreen() {
   const [confirmation, setConfirmation] = useState<{ value: Confirmation; run: () => Promise<void> } | null>(null);
   const [busy, setBusy] = useState(false);
 
-  async function act(path: string, body?: unknown) {
+  async function act(path: string, body?: unknown, method?: "POST" | "PATCH" | "DELETE") {
     setBusy(true);
     setError(null);
     try {
-      await request(path, { method: path.includes("?action=") ? "PATCH" : "POST", body });
+      await request(path, {
+        method: method ?? (path.includes("?action=") ? "PATCH" : "POST"),
+        body,
+      });
       groups.reload();
       discarded.reload();
     } catch (caught) {
@@ -124,6 +127,26 @@ export function MergesScreen() {
                     }
                   >
                     不合格でも採用する
+                  </button>
+                )}
+                {group.status === "merged" && group.superseded_by_id === null && (
+                  <button
+                    type="button"
+                    disabled={busy}
+                    onClick={() =>
+                      setConfirmation({
+                        value: {
+                          kind: "remerge_group",
+                          groupLabel: group.members[0]?.rel_path ?? group.id,
+                        },
+                        run: () =>
+                          act(`/merge-groups/${group.id}?action=regroup`, {
+                            media_ids: group.members.map((member) => member.media_file_id),
+                          }),
+                      })
+                    }
+                  >
+                    同じ構成でやり直す
                   </button>
                 )}
                 {group.superseded_by_id === null && group.status !== "skipped" && (
@@ -211,10 +234,37 @@ export function MergesScreen() {
         <details>
           <summary>破棄した組み合わせ（{discarded.data?.groups.length ?? 0} 件）</summary>
           <p>
-            構成ファイルは手放しているので、これらは記録です。同じ組み合わせが自動検出で
-            作り直されることはありません。
+            構成ファイルは手放しているので、これらは記録です。**消すと、もう一度
+            「候補を検出する」を押したときに同じ組み合わせがまた出ることがあります**
+            （この記録が「作り直さない」の根拠になっています）。
           </p>
-          <ul>{(discarded.data?.groups ?? []).map(renderGroup)}</ul>
+          <ul>
+            {(discarded.data?.groups ?? []).map((group) => (
+              <li key={group.id}>
+                <h2>{group.members.length} パート（破棄済み）</h2>
+                <ul>
+                  {group.members.map((member) => (
+                    <li key={member.media_file_id}>{member.rel_path}</li>
+                  ))}
+                </ul>
+                <button
+                  type="button"
+                  disabled={busy}
+                  onClick={() =>
+                    setConfirmation({
+                      value: {
+                        kind: "delete_merge_history",
+                        groupLabel: group.members[0]?.rel_path ?? group.id,
+                      },
+                      run: () => act(`/merge-groups/${group.id}`, undefined, "DELETE"),
+                    })
+                  }
+                >
+                  消す
+                </button>
+              </li>
+            ))}
+          </ul>
         </details>
       )}
       {regrouping && (

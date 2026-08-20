@@ -318,3 +318,58 @@ def test_a_discard_cannot_be_undone(db, profile):
     repo.discard(group_id)
     with pytest.raises(sqlite3.IntegrityError):
         db.execute("UPDATE merge_group SET status = 'detected' WHERE id = ?", (group_id,))
+
+
+def test_a_discarded_group_can_be_deleted(db, profile):
+    """**履歴は利用者のものではない。** 何も持っていない破棄の記録は消せる.
+
+    残る理由は `input_digest` の番人だけで、検出は利用者が押したときにしか
+    走らない。消したあと同じ組み合わせが再び出るのは、消したのだから当然。
+    """
+    repo = MergeRepository(db)
+    group_id = repo.save_detected(profile, a_candidate(db, profile), "digest-1")
+    repo.discard(group_id)
+    repo.delete_discarded(group_id)
+    assert repo.get(group_id) is None
+    assert db.execute("SELECT count(*) FROM merge_member").fetchone()[0] == 0
+
+
+def test_a_live_group_cannot_be_deleted(db, profile):
+    """消せるのは破棄した記録だけ. 生きている候補は破棄が先."""
+    repo = MergeRepository(db)
+    group_id = repo.save_detected(profile, a_candidate(db, profile), "digest-1")
+    with pytest.raises(GroupNotEditable):
+        repo.delete_discarded(group_id)
+
+
+def test_a_group_that_produced_a_file_cannot_be_deleted(db, profile):
+    """**結合結果を持つ記録は消さない。** 消すと、その派生物の出所が消える."""
+    repo = MergeRepository(db)
+    group_id = repo.save_detected(profile, a_candidate(db, profile), "digest-1")
+    output = a_media_file(db, (profile.profile_id, profile.revision_id), role="derived")
+    db.execute(
+        "UPDATE merge_group SET output_media_file_id = ?, status = 'merged' WHERE id = ?",
+        (output, group_id),
+    )
+    repo.discard(group_id)
+    with pytest.raises(GroupNotEditable):
+        repo.delete_discarded(group_id)
+
+
+def test_the_same_grouping_can_be_rebuilt_after_a_pipeline_fix(db, profile):
+    """**やり直しの経路**（§13）. 構成を変えない組み直しで、新しい候補を作る.
+
+    結合の実装を直しても `input_digest` は動かない（検証器の版を digest に
+    入れる案は Phase 2 で退けた）。merged のグループは再結合できず、破棄すると
+    digest の番人が再検出を止める。実機で結合を直した後、作り直せずに詰まった。
+    """
+    repo = MergeRepository(db)
+    candidate = a_candidate(db, profile)
+    group_id = repo.save_detected(profile, candidate, "digest-1")
+    media_ids = [part.media_file_id for part in candidate.members]
+
+    new_id = repo.supersede(group_id, media_ids, "digest-1")
+
+    assert repo.get(group_id)["superseded_by_id"] == new_id
+    assert repo.get(new_id)["status"] == "detected"
+    assert [row["media_file_id"] for row in repo.members(new_id)] == media_ids

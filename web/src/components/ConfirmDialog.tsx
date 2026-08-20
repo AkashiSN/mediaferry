@@ -10,6 +10,8 @@ export type Confirmation =
   | { kind: "upload"; count: number; totalBytes: number; destinationNames: string[] }
   | { kind: "archive_destination"; name: string }
   | { kind: "discard_merge_group"; groupLabel: string; publishedCount: number }
+  | { kind: "delete_merge_history"; groupLabel: string }
+  | { kind: "remerge_group"; groupLabel: string }
   | { kind: "adopt_failed_merge"; groupLabel: string; reason: string }
   | { kind: "approve_datetime"; current: string | null; proposed: string }
   | { kind: "archive_profile"; slug: string }
@@ -45,6 +47,28 @@ export function describe(confirmation: Confirmation): { title: string; body: Rea
           <p>
             {confirmation.groupLabel} を破棄します。公開済みのファイル
             {confirmation.publishedCount} 件は消えませんが、選択肢には出なくなります。
+          </p>
+        ),
+      };
+    case "delete_merge_history":
+      return {
+        title: "この破棄の記録を消しますか",
+        body: (
+          <p>
+            {confirmation.groupLabel} の記録を消します。**もう一度「候補を検出する」を
+            押すと、この組み合わせがまた出ることがあります**（記録が「作り直さない」の
+            根拠になっているため）。ファイルは何も消えません。
+          </p>
+        ),
+      };
+    case "remerge_group":
+      return {
+        title: "同じ構成でやり直しますか",
+        body: (
+          <p>
+            {confirmation.groupLabel} と同じ構成で新しい候補を作ります。**いまの結合物は
+            消えません**（古いグループに残ります）。結合の実装が変わったときに、作り直す
+            ための操作です。
           </p>
         ),
       };

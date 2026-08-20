@@ -156,6 +156,20 @@ def patch_group(  # noqa: ANN201
     raise ApiError(400, ErrorCode.UNKNOWN_ACTION, "知らない操作", {"action": action})
 
 
+@router.delete("/merge-groups/{group_id}")
+def delete_group(group_id: str, conn=Depends(get_conn)) -> dict[str, str]:  # noqa: ANN001, B008
+    """破棄の記録を消す（§13）.
+
+    **消せるのは破棄済みで、何も持っていないものだけ。** 画面では「破棄した
+    組み合わせ」から消す。もう一度検出すると同じ組み合わせが出ることがある
+    —— それは消したのだから当然で、確認ダイアログにもそう書く。
+    """
+    repo = MergeRepository(conn)
+    _found(repo, group_id)
+    _edited(repo.delete_discarded, group_id)
+    return {"status": "ok"}
+
+
 @router.post("/merge-groups")
 def create_group(
     body: dict[str, Any] = Body(default={}),  # noqa: B008

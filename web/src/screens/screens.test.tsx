@@ -1031,3 +1031,60 @@ describe("ジョブの進捗", () => {
     expect(screen.queryByText(/コピー中|結合中/)).toBeNull();
   });
 });
+
+
+describe("破棄の記録を消す", () => {
+  it("確認が出るまで消さない", async () => {
+    const member = { media_file_id: "m1", rel_path: "library/a.MP4", size_bytes: 1, gap_seconds: null };
+    stubApi({
+      "/merge-groups?status=skipped": {
+        groups: [
+          {
+            id: "old",
+            status: "skipped",
+            detected_by: "auto",
+            input_digest: "d2",
+            verification: null,
+            superseded_by_id: null,
+            members: [member],
+          },
+        ],
+      },
+      "/merge-groups": { groups: [] },
+    });
+    render(<MergesScreen />);
+
+    await userEvent.click(await screen.findByText("破棄した組み合わせ（1 件）"));
+    await userEvent.click(await screen.findByRole("button", { name: "消す" }));
+
+    expect(await screen.findByRole("dialog")).toBeInTheDocument();
+    expect(calls.some((call) => call.method === "DELETE")).toBe(false);
+  });
+});
+
+describe("同じ構成でやり直す", () => {
+  it("結合済みのグループにだけ出る", async () => {
+    const member = { media_file_id: "m1", rel_path: "library/a.MP4", size_bytes: 1, gap_seconds: null };
+    stubApi({
+      "/merge-groups?status=skipped": { groups: [] },
+      "/merge-groups": {
+        groups: [
+          {
+            id: "g1",
+            status: "merged",
+            detected_by: "auto",
+            input_digest: "d",
+            verification: null,
+            superseded_by_id: null,
+            members: [member],
+          },
+        ],
+      },
+    });
+    render(<MergesScreen />);
+
+    await userEvent.click(await screen.findByRole("button", { name: "同じ構成でやり直す" }));
+    expect(await screen.findByRole("dialog")).toBeInTheDocument();
+    expect(calls.some((call) => call.method === "PATCH")).toBe(false);
+  });
+});

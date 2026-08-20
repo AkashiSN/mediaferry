@@ -204,6 +204,31 @@ class MergeRepository:
                 (now_iso(), group_id),
             )
 
+    def delete_discarded(self, group_id: str) -> None:
+        """破棄の記録を消す. **消せるのは何も持っていないものだけ.**
+
+        残す理由は `input_digest` の番人（同じ組み合わせを検出し直さない）だが、
+        検出は利用者が押したときにしか走らない。**忘れてよいと言われたものを、
+        隠れて憶えておかない** —— 消したあと同じ組み合わせが再び出るのは、
+        消したのだから当然であって、驚きではない。
+        """
+        with immediate(self._conn):
+            row = self._conn.execute(
+                "SELECT * FROM merge_group WHERE id = ?", (group_id,)
+            ).fetchone()
+            if row is None:
+                raise GroupNotEditable("そのグループは無い")
+            if row["status"] != "skipped":
+                raise GroupNotEditable("破棄したグループだけ消せる")
+            if row["output_media_file_id"] is not None:
+                # 消すと、その派生物がどこから来たのか分からなくなる。
+                raise GroupNotEditable("結合結果を持っているグループは消せない")
+            try:
+                self._conn.execute("DELETE FROM merge_group WHERE id = ?", (group_id,))
+            except sqlite3.IntegrityError as exc:
+                # 送信の記録や staging がまだ指している（どれも ON DELETE RESTRICT）。
+                raise GroupNotEditable("このグループを指している記録がまだある") from exc
+
     def supersede(self, group_id: str, media_ids: list[str], digest: str) -> str:
         """構成を変えた新しいグループを作り、旧グループをそこへ向け直す.
 
@@ -220,6 +245,14 @@ class MergeRepository:
             self._invalidate_pending(group_id, "結合グループを組み直した")
             new_id_value = new_id()
             now = now_iso()
+            # **旧グループを先に向け直す。** `UNIQUE(input_digest) WHERE
+            # superseded_by_id IS NULL` があるので、構成を変えない組み直し
+            # （＝ digest が同じ）は、先に新しい行を入れると必ず衝突する。
+            # **やり直しの経路がそれ**（結合の実装を直しても digest は動かない）。
+            # まだ存在しない id を指すことになるので、外部キーの検査を commit まで
+            # 遅らせる（`PRAGMA defer_foreign_keys` は取引の終わりで自動的に戻る）。
+            self._conn.execute("PRAGMA defer_foreign_keys = ON")
+            self._point_at(group_id, new_id_value)
             self._conn.execute(
                 "INSERT INTO merge_group (id, profile_id, profile_revision_id, status,"
                 " input_digest, detected_by, created_at, updated_at)"
@@ -233,11 +266,6 @@ class MergeRepository:
                     now,
                 ),
             )
-            # **順序が意味を持つ。** 1 つのファイルが active な member でいられるのは
-            # 1 グループだけ（部分索引 `merge_member_one_active_group`）。旧グループの
-            # member を外すのは `superseded_by_id` を立てた trigger なので、
-            # 向け直してから新しい member を入れる。
-            self._point_at(group_id, new_id_value)
             try:
                 for position, media_id in enumerate(media_ids):
                     self._conn.execute(

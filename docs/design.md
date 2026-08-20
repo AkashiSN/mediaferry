@@ -1540,7 +1540,8 @@ claim では **(a) を必ず評価し、`selection_rule` に対応する現在�
 | POST | `/merge-groups/detect` | 結合グループの検出ジョブを開始（プロファイルごとに 1 本） |
 | POST | `/merge-groups/preview` | 閾値を変えたときの候補を再計算（保存しない） |
 | POST | `/merge-groups` | 手動でグループを作成 |
-| PATCH | `/merge-groups/{id}` | 構成変更 / skip / 検証不合格の採用 |
+| PATCH | `/merge-groups/{id}` | 構成変更 / skip / 検証不合格の採用。**構成を変えない組み直しが「やり直し」**（結合の実装を直した後に作り直す） |
+| DELETE | `/merge-groups/{id}` | 破棄の記録を消す。**`skipped` で結合結果を持たないものだけ**。消すと同じ組み合わせが再び検出されうる |
 | POST | `/merge-groups/{id}/merge` | 結合ジョブを開始 |
 | GET | `/destinations` | 転送先の一覧。**API キーは応答に一切出さない**（マスク値も返さない） |
 | POST | `/destinations` | 転送先を作る。URL を検証してから接続を確かめ、`remote_user_id` を記録する |

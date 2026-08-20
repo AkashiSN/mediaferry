@@ -311,3 +311,22 @@ def test_the_list_shows_live_groups_only(client, api_db):
     assert [g["id"] for g in client.get("/api/merge-groups?status=skipped").json()["groups"]] == [
         dropped
     ]
+
+
+def test_a_discarded_group_can_be_deleted_from_the_history(client, api_db):
+    """画面の「破棄した組み合わせ」から消せる."""
+    profile = ProfileRegistry(api_db).current("dji-osmo")
+    group_id = a_merge_group(
+        api_db, (profile.profile_id, profile.revision_id), "digest-x", status="skipped"
+    )
+    assert client.delete(f"/api/merge-groups/{group_id}").status_code == 200
+    assert client.get("/api/merge-groups?status=skipped").json()["groups"] == []
+
+
+def test_a_live_group_is_not_deletable(client, api_db):
+    """生きている候補は破棄が先（消すのは記録だけ）."""
+    profile = ProfileRegistry(api_db).current("dji-osmo")
+    group_id = a_merge_group(api_db, (profile.profile_id, profile.revision_id), "digest-y")
+    response = client.delete(f"/api/merge-groups/{group_id}")
+    assert response.status_code == 409
+    assert response.json()["error"]["code"] == "conflict"
