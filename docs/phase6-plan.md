@@ -2041,7 +2041,21 @@ Expected: PASS
 
 - [ ] **Step 5: 変異試験**
 
-`stack_state = 'skipped'` の条件を外す（`stacked` も戻る）、`_reopen_stack` を
+**実施結果（2026-08-20）: 14 件中 13 件を検出。**
+
+- **素通り 1 件（構造的に検出できない）:** `_publish_revision` の
+  `previous_json is None` の早期 return。この枝は `create` からしか来ず、
+  そのときメディアはまだ 1 件も無いので、`previous_json = definition_json`
+  （比較して差なし）と**観測できる差が無い**。読みやすさのために残す
+- **当て方を直した変異 2 件。** 「変化が無くても戻す」は `continue` の後ろに
+  置いたままで `_same` の枝を通っておらず、狙いの判断を壊していなかった。
+  「新規作成でも比較する」は `'{}'` を渡す形だと `parse_definition` が全件で
+  落ちる（成立しない形）
+- **テストの穴 1 件。** 「省略 → 明示的な disabled」を見るつもりのテストが、
+  **どちらも省略**を比べていた。正規形（`definition_to_json`）を通して初めて
+  差が出る
+
+参考（当てた変異の例）: `stack_state = 'skipped'` の条件を外す（`stacked` も戻る）、`_reopen_stack` を
 `_same` の側（変化なし）でも呼ぶ、トランザクションの外へ出す、
 `_publish_revision` の `profile_id` の絞りを外す（他のプロファイルまで戻る）、
 `_stack_rule_of` の比較を常に真にする（`stack` 以外の編集でも全件戻る）／常に偽にする

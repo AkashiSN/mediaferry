@@ -979,3 +979,78 @@ def test_a_cancelled_run_is_not_reported_as_finished(dji, db, data_root):
 
     assert outcome.finished is False
     assert run(db, data_root, to_berlin(db, ProfileRegistry(db).current("my-dji"))).finished is True
+
+
+# --- スタックの見送りを未評価へ戻す（Phase 6 / §6） ---------------------
+
+
+def a_skipped_record(db, media_id, dest, reason="相方と撮影時刻が一致しない"):
+    record = a_sent_record(db, media_id, dest)
+    db.execute(
+        "UPDATE upload_record SET stack_state = 'skipped', stack_reason = ? WHERE id = ?",
+        (reason, record),
+    )
+    return record
+
+
+def test_a_changed_capture_time_reopens_a_skipped_stack(dji, db, data_root):
+    """時刻がずれていて見送った組は、再計算で成立しうる（§6）."""
+    profile, _, part1, _, _ = dji
+    record = a_skipped_record(db, part1, a_destination(db))
+
+    outcome = run(db, data_root, to_berlin(db, profile))
+
+    row = db.execute("SELECT * FROM upload_record WHERE id = ?", (record,)).fetchone()
+    assert row["stack_state"] is None
+    assert row["stack_reason"] is None
+    assert outcome.reopened == 1
+
+
+def test_an_unchanged_capture_time_leaves_the_skip_alone(dji, db, data_root):
+    profile, _, part1, _, _ = dji
+    record = a_skipped_record(db, part1, a_destination(db))
+
+    outcome = run(db, data_root, profile)
+
+    row = db.execute("SELECT * FROM upload_record WHERE id = ?", (record,)).fetchone()
+    assert row["stack_state"] == "skipped"
+    assert outcome.reopened == 0
+
+
+def test_an_existing_stack_is_not_reopened(dji, db, data_root):
+    """**相手側に既にあるものを作り直さない**（§6）."""
+    profile, _, part1, _, _ = dji
+    dest = a_destination(db)
+    record = a_sent_record(db, part1, dest)
+    db.execute(
+        "UPDATE upload_record SET stack_state = 'stacked', remote_stack_id = 's' WHERE id = ?",
+        (record,),
+    )
+
+    run(db, data_root, to_berlin(db, profile))
+
+    row = db.execute("SELECT * FROM upload_record WHERE id = ?", (record,)).fetchone()
+    assert row["stack_state"] == "stacked"
+
+
+def test_the_skip_of_another_media_is_left_alone(dji, db, data_root):
+    """戻すのは**時刻が動いたレコード**だけ."""
+    profile, _, part1, part2, _ = dji
+    dest = a_destination(db)
+    other = a_skipped_record(db, part2, dest)
+    db.execute(
+        "UPDATE media_file SET captured_at_revision_id = profile_revision_id WHERE id = ?",
+        (part2,),
+    )
+    # part2 だけを対象外にする（別プロファイルへ移す）。
+    moved = a_user_profile(db, "dji-osmo", "other-camera")
+    db.execute(
+        "UPDATE media_file SET profile_id = ?, profile_revision_id = ?,"
+        " captured_at_revision_id = ? WHERE id = ?",
+        (moved.profile_id, moved.revision_id, moved.revision_id, part2),
+    )
+
+    run(db, data_root, to_berlin(db, profile))
+
+    row = db.execute("SELECT * FROM upload_record WHERE id = ?", (other,)).fetchone()
+    assert row["stack_state"] == "skipped"

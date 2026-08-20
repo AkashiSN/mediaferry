@@ -125,7 +125,8 @@ class JobWorld:
             "info",
             f"再計算{'完了' if outcome.finished else 'を中止した（ここまでの分は反映済み）'}:"
             f" 変更 {outcome.changed} 件 / 据え置き {outcome.unchanged} 件"
-            f" / 飛ばし {outcome.skipped} 件 / 再確認へ戻し {outcome.requeued} 件",
+            f" / 飛ばし {outcome.skipped} 件 / 再確認へ戻し {outcome.requeued} 件"
+            f" / スタック再評価 {outcome.reopened} 件",
         )
 
     def run_upload(self, ctx: JobContext, conn: sqlite3.Connection) -> None:
