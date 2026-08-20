@@ -1,5 +1,7 @@
 node_modules/
 dist/
+# tsc -b の増分ビルドの覚え書き。ビルドのたびに書き換わる生成物。
+*.tsbuildinfo
 openapi.json
 test-results/
 playwright-report/
