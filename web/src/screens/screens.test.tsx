@@ -125,9 +125,42 @@ describe("転送先の退役", () => {
   });
 });
 
+describe("破棄した組み合わせ", () => {
+  it("既定の一覧には出さず、開いたときだけ見せる", async () => {
+    const member = { media_file_id: "m1", rel_path: "library/a.MP4", size_bytes: 1, gap_seconds: null };
+    stubApi({
+      "/merge-groups?status=skipped": {
+        groups: [
+          {
+            id: "old",
+            status: "skipped",
+            detected_by: "auto",
+            input_digest: "d2",
+            verification: null,
+            superseded_by_id: null,
+            members: [member],
+          },
+        ],
+      },
+      "/merge-groups": { groups: [] },
+    });
+    render(<MergesScreen />);
+
+    const summary = await screen.findByText("破棄した組み合わせ（1 件）");
+    // 畳んだ状態で開ける。中身は記録なので、操作のボタンは出さない。
+    await userEvent.click(summary);
+    expect(await screen.findByText("library/a.MP4")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "結合する" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "破棄する" })).toBeNull();
+  });
+});
+
 describe("結合グループの破棄", () => {
   it("確認が出るまで破棄しない", async () => {
     stubApi({
+      // **前方一致なので、細かい方を先に置く**（`/merge-groups` が先だと履歴の
+      // 問い合わせにも同じ本文が返り、同じグループが 2 度描かれる）。
+      "/merge-groups?status=skipped": { groups: [] },
       "/merge-groups": {
         groups: [
           {

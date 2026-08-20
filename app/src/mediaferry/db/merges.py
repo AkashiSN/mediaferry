@@ -332,16 +332,24 @@ class MergeRepository:
     def list_groups(
         self, status: str | None = None, limit: int = 200, offset: int = 0
     ) -> list[sqlite3.Row]:
+        """既定は**いま操作できるグループだけ**. 履歴は `status` を指定して取る.
+
+        **`superseded_by_id` を持つ行はどの場合も出さない。** 置き換えられた
+        構成そのものなので、一覧に並べる意味が無い（`status` を指定しても同じ）。
+        `skipped` を既定から外すのは、破棄と組み直しのたびに操作できない行が
+        増え、同じファイル名が繰り返し並ぶため。
+        """
         if status is None:
             return list(
                 self._conn.execute(
-                    "SELECT * FROM merge_group ORDER BY created_at DESC LIMIT ? OFFSET ?",
+                    "SELECT * FROM merge_group WHERE superseded_by_id IS NULL"
+                    " AND status <> 'skipped' ORDER BY created_at DESC LIMIT ? OFFSET ?",
                     (limit, offset),
                 )
             )
         return list(
             self._conn.execute(
-                "SELECT * FROM merge_group WHERE status = ?"
+                "SELECT * FROM merge_group WHERE status = ? AND superseded_by_id IS NULL"
                 " ORDER BY created_at DESC LIMIT ? OFFSET ?",
                 (status, limit, offset),
             )

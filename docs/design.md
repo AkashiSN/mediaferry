@@ -1532,7 +1532,7 @@ claim では **(a) を必ず評価し、`selection_rule` に対応する現在�
 | GET | `/media` | 一覧。`status` / `profile` / `kind` / `from` / `to` / `q` / `page` |
 | GET | `/media/{id}` | 詳細 |
 | GET | `/media/{id}/thumbnail` | サムネイル（`at` で秒指定。10 秒刻みに丸め、1 本あたり 32 枚まで） |
-| GET | `/merge-groups` | 結合グループ一覧 |
+| GET | `/merge-groups` | 結合グループ一覧。**既定はいま操作できるものだけ**（`superseded_by_id IS NULL` かつ `status <> 'skipped'`）。履歴は `?status=skipped` で取る。**置き換えられた行は `status` を指定しても出さない** |
 | POST | `/merge-groups/detect` | 結合グループの検出ジョブを開始（プロファイルごとに 1 本） |
 | POST | `/merge-groups/preview` | 閾値を変えたときの候補を再計算（保存しない） |
 | POST | `/merge-groups` | 手動でグループを作成 |

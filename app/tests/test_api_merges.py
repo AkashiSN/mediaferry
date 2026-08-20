@@ -287,3 +287,27 @@ def test_regrouping_across_two_groups_answers_409_not_500(client, api_db):
     )
     assert response.status_code == 409
     assert response.json()["error"]["code"] == "conflict"
+
+
+def test_the_list_shows_live_groups_only(client, api_db):
+    """**一覧は「いま操作できるもの」だけ。** 履歴は明示的に求めたときだけ出す.
+
+    既定に混ぜると、破棄と組み直しのたびに操作できない行が増え、同じファイル名が
+    繰り返し並ぶ。実機で 2 回破棄しただけで 3 つ並び、どれが生きているのか
+    読み取れなくなった。
+    """
+    profile = ProfileRegistry(api_db).current("dji-osmo")
+    profile_ref = (profile.profile_id, profile.revision_id)
+    live = a_merge_group(api_db, profile_ref, "digest-live")
+    dropped = a_merge_group(api_db, profile_ref, "digest-dropped", status="skipped")
+    replaced = a_merge_group(api_db, profile_ref, "digest-replaced")
+    api_db.execute("UPDATE merge_group SET superseded_by_id = ? WHERE id = ?", (live, replaced))
+    # **置き換えられた行は status を指定しても出さない。** 構成そのものが古い。
+    gone = a_merge_group(api_db, profile_ref, "digest-gone", status="skipped")
+    api_db.execute("UPDATE merge_group SET superseded_by_id = ? WHERE id = ?", (live, gone))
+
+    assert [g["id"] for g in client.get("/api/merge-groups").json()["groups"]] == [live]
+    # 履歴は status を指定すれば見える（画面の「破棄した組み合わせ」）。
+    assert [g["id"] for g in client.get("/api/merge-groups?status=skipped").json()["groups"]] == [
+        dropped
+    ]

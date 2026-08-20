@@ -33,6 +33,8 @@ type Groups = { groups: Group[] };
 
 export function MergesScreen() {
   const groups = useQuery<Groups>("/merge-groups");
+  // 破棄したものは既定の一覧に入らない（API の既定が生きているものだけ）。
+  const discarded = useQuery<Groups>("/merge-groups?status=skipped");
   const media = useQuery<{ media: { id: string; rel_path: string }[] }>("/media?page_size=200");
   // 手で組むときの選択（**検出が拾えなかった並びを人が組む**）。
   const [picked, setPicked] = useState<Set<string>>(new Set());
@@ -40,6 +42,7 @@ export function MergesScreen() {
   const [error, setError] = useState<unknown>(null);
   const { received } = useEvents();
   useReloadOnEvents(received, groups.reload);
+  useReloadOnEvents(received, discarded.reload);
   const [confirmation, setConfirmation] = useState<{ value: Confirmation; run: () => Promise<void> } | null>(null);
   const [busy, setBusy] = useState(false);
 
@@ -49,12 +52,106 @@ export function MergesScreen() {
     try {
       await request(path, { method: path.includes("?action=") ? "PATCH" : "POST", body });
       groups.reload();
+      discarded.reload();
     } catch (caught) {
       setError(caught);
     } finally {
       setBusy(false);
       setConfirmation(null);
     }
+  }
+
+  function renderGroup(group: Group) {
+    return (
+            <li key={group.id}>
+              <h2>
+                {group.members.length} パート（{group.status}
+                {group.detected_by === "manual" ? " / 手動" : ""}）
+              </h2>
+              {/* **なぜこの並びなのかを見せる**（§13）。 */}
+              <table>
+                <thead>
+                  <tr>
+                    <th>ファイル</th>
+                    <th>大きさ</th>
+                    <th>撮影日時</th>
+                    <th>長さ</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {group.members.map((member) => (
+                    <tr key={member.media_file_id}>
+                      <td>{member.rel_path}</td>
+                      <td>{formatBytes(member.size_bytes)}</td>
+                      <td>{member.captured_at}</td>
+                      <td>
+                        {member.duration_seconds === null ? "—" : `${Math.round(member.duration_seconds)} 秒`}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+              {group.verification && (
+                <p>
+                  検証: {group.verification.verdict}
+                  {group.verification.reason ? `（${group.verification.reason}）` : ""}
+                </p>
+              )}
+              <div className="actions">
+                {group.status === "detected" && (
+                  <button type="button" disabled={busy} onClick={() => void act(`/merge-groups/${group.id}/merge`)}>
+                    結合する
+                  </button>
+                )}
+                {group.status === "failed" && (
+                  <button type="button" disabled={busy} onClick={() => void act(`/merge-groups/${group.id}/merge`)}>
+                    再試行する
+                  </button>
+                )}
+                {group.verification?.verdict === "fail" && (
+                  <button
+                    type="button"
+                    disabled={busy}
+                    onClick={() =>
+                      setConfirmation({
+                        value: {
+                          kind: "adopt_failed_merge",
+                          groupLabel: group.members[0]?.rel_path ?? group.id,
+                          reason: group.verification?.reason ?? "検証に不合格",
+                        },
+                        run: () => act(`/merge-groups/${group.id}?action=adopt`),
+                      })
+                    }
+                  >
+                    不合格でも採用する
+                  </button>
+                )}
+                {group.superseded_by_id === null && group.status !== "skipped" && (
+                  <button type="button" disabled={busy} onClick={() => setRegrouping(group)}>
+                    構成を変える
+                  </button>
+                )}
+                {group.superseded_by_id === null && group.status !== "skipped" && (
+                  <button
+                    type="button"
+                    disabled={busy}
+                    onClick={() =>
+                      setConfirmation({
+                        value: {
+                          kind: "discard_merge_group",
+                          groupLabel: group.members[0]?.rel_path ?? group.id,
+                          publishedCount: group.status === "merged" ? 1 : 0,
+                        },
+                        run: () => act(`/merge-groups/${group.id}?action=discard`),
+                      })
+                    }
+                  >
+                    破棄する
+                  </button>
+                )}
+              </div>
+            </li>
+    );
   }
 
   return (
@@ -103,97 +200,23 @@ export function MergesScreen() {
         </button>
       </details>
       <ul>
-        {(groups.data?.groups ?? []).map((group) => (
-          <li key={group.id}>
-            <h2>
-              {group.members.length} パート（{group.status}
-              {group.detected_by === "manual" ? " / 手動" : ""}）
-            </h2>
-            {/* **なぜこの並びなのかを見せる**（§13）。 */}
-            <table>
-              <thead>
-                <tr>
-                  <th>ファイル</th>
-                  <th>大きさ</th>
-                  <th>撮影日時</th>
-                  <th>長さ</th>
-                </tr>
-              </thead>
-              <tbody>
-                {group.members.map((member) => (
-                  <tr key={member.media_file_id}>
-                    <td>{member.rel_path}</td>
-                    <td>{formatBytes(member.size_bytes)}</td>
-                    <td>{member.captured_at}</td>
-                    <td>
-                      {member.duration_seconds === null ? "—" : `${Math.round(member.duration_seconds)} 秒`}
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-            {group.verification && (
-              <p>
-                検証: {group.verification.verdict}
-                {group.verification.reason ? `（${group.verification.reason}）` : ""}
-              </p>
-            )}
-            <div className="actions">
-              {group.status === "detected" && (
-                <button type="button" disabled={busy} onClick={() => void act(`/merge-groups/${group.id}/merge`)}>
-                  結合する
-                </button>
-              )}
-              {group.status === "failed" && (
-                <button type="button" disabled={busy} onClick={() => void act(`/merge-groups/${group.id}/merge`)}>
-                  再試行する
-                </button>
-              )}
-              {group.verification?.verdict === "fail" && (
-                <button
-                  type="button"
-                  disabled={busy}
-                  onClick={() =>
-                    setConfirmation({
-                      value: {
-                        kind: "adopt_failed_merge",
-                        groupLabel: group.members[0]?.rel_path ?? group.id,
-                        reason: group.verification?.reason ?? "検証に不合格",
-                      },
-                      run: () => act(`/merge-groups/${group.id}?action=adopt`),
-                    })
-                  }
-                >
-                  不合格でも採用する
-                </button>
-              )}
-              {group.superseded_by_id === null && group.status !== "skipped" && (
-                <button type="button" disabled={busy} onClick={() => setRegrouping(group)}>
-                  構成を変える
-                </button>
-              )}
-              {group.superseded_by_id === null && group.status !== "skipped" && (
-                <button
-                  type="button"
-                  disabled={busy}
-                  onClick={() =>
-                    setConfirmation({
-                      value: {
-                        kind: "discard_merge_group",
-                        groupLabel: group.members[0]?.rel_path ?? group.id,
-                        publishedCount: group.status === "merged" ? 1 : 0,
-                      },
-                      run: () => act(`/merge-groups/${group.id}?action=discard`),
-                    })
-                  }
-                >
-                  破棄する
-                </button>
-              )}
-            </div>
-          </li>
-        ))}
+        {(groups.data?.groups ?? []).map(renderGroup)}
       </ul>
+
+      {/* **履歴は畳む。** 破棄したものは操作できず、同じファイル名が繰り返し並ぶので、
+          既定の一覧に混ぜると「いま何が起きるのか」が読めなくなる（API の既定も
+          生きているグループだけ）。**なぜこの組み合わせを作らないか**の根拠として
+          見たい場面はあるので、消さずに開けるようにする。 */}
+      {(discarded.data?.groups ?? []).length > 0 && (
+        <details>
+          <summary>破棄した組み合わせ（{discarded.data?.groups.length ?? 0} 件）</summary>
+          <p>
+            構成ファイルは手放しているので、これらは記録です。同じ組み合わせが自動検出で
+            作り直されることはありません。
+          </p>
+          <ul>{(discarded.data?.groups ?? []).map(renderGroup)}</ul>
+        </details>
+      )}
       {regrouping && (
         <div className="dialog-backdrop" role="presentation">
           <div className="dialog" role="dialog" aria-modal="true" aria-label="構成を変える">
