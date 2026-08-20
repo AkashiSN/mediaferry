@@ -1,9 +1,9 @@
 # mediaferry 引き継ぎ資料
 
-最終更新: 2026-08-19
-ブランチ: **`main`**（Phase 5 はマージ済み。単独リポジトリ、計 160 コミット）
-**Phase 5 は `main` に入っている。** 次は Phase 6。
-**`origin/main` へ push 済み**（2026-08-19）。コミット数はこのコミット時点のもので、
+最終更新: 2026-08-20
+ブランチ: **`phase6-stacking`**（`main` から分岐。計 177 コミット）
+**Phase 6 は Task 0〜10 の実装が終わり、`main` へのマージ待ち。**
+コミット数はこのコミット時点のもので、
 **読むときは `git rev-list --count HEAD` で実測し直す**。
 
 **この種の数値は作業のたびに古くなる。** 引き継ぎ資料を更新するときは
@@ -17,10 +17,10 @@
 
 ## 1. 現在地
 
-**Phase 0〜4 は実装・検証とも完了。** 実 Immich での確認も済んでいる
-（2026-08-19、v3.1.0）。**Phase 5 は計画（レビュー 2 巡）と実装の Task 0〜9 が完了。**
-**実装差分の codex レビューは 9 巡回した（`--fresh`、blocker 0）。`main` へマージ済み。**
-**次は Phase 6。**
+**Phase 0〜5 は実装・検証とも完了**（Phase 5 は `main` にマージ済み）。
+**Phase 6 は計画（codex レビュー 4 巡、`--fresh`）と実装の Task 0〜10 が完了。**
+実 Immich での確認も済んでいる（2026-08-20、v3.1.0）。
+**次は Phase 6 の実装差分レビューと `main` へのマージ。**
 
 | Phase | 内容 | 状態 |
 | --- | --- | --- |
@@ -30,7 +30,7 @@
 | 3 | Immich 同期（転送先プロファイル、状態機械、タグ、日時補正、複数宛先） | **完了**（`phase3-plan.md` の 14 タスク。レビュー 7 巡。**実 Immich でも確認済み**） |
 | 4 | Web UI（認証・CSRF・SSE・サムネイル・8 画面・E2E） | **完了**（`phase4-plan.md` の 19 タスク。計画レビュー 1 巡 + 実装差分レビュー 1 巡） |
 | 5 | 汎用化（Canon、プロファイル編集 UI、複数デバイス） | **完了**（10 タスク。計画レビュー 2 巡と実装差分レビュー 9 巡を反映済み） |
-| 6 | `UPLOAD_CONCURRENCY` の多重化、RAW/JPEG のスタッキング | **未着手**（Phase 5 から送った）。**次はここから** |
+| 6 | RAW/JPEG のスタッキング、`UPLOAD_CONCURRENCY` の撤去 | **実装完了**（11 タスク。計画レビュー 4 巡）。**`main` へのマージが次** |
 
 ### Phase 5 の進捗（`docs/phase5-plan.md`）
 
@@ -49,6 +49,33 @@
 
 **変異試験の列は各 Task を実装した時点の数字。** その後のレビュー反映で足した
 guard の変異は、`phase5-plan.md` 末尾の巡ごとの記録にある（いずれも全件検出）。
+
+### Phase 6 の進捗（`docs/phase6-plan.md`）
+
+| Task | 内容 | 状態 | 変異試験 |
+| --- | --- | --- | --- |
+| 0 | プロファイルの `stack` 節 | **完了** | 11 中 11 検出 |
+| 1 | `0015`（3 列・trigger・部分索引・設定行の掃除） | **完了** | 11 中 10 検出 |
+| 2 | `UPLOAD_CONCURRENCY` の撤去 | **完了** | — |
+| 3 | Immich クライアントのスタック経路 + fake | **完了** | 14 中 14 検出 |
+| 4 | 組の解決（純関数）と抽出・記録 | **完了** | 40 中 40 検出 |
+| 5 | 第 2 パス（`Stacker`）と配線 | **完了** | 24 中 23 検出 |
+| 6 | 見送りを未評価へ戻す 2 経路 | **完了** | 14 中 13 検出 |
+| 7 | API（一覧・フィルタ・サマリ） | **完了** | 9 中 9 検出 |
+| 8 | 画面（宛先の見送り一覧、ダッシュボードの組数） | **完了** | — |
+| 9 | E2E と中断からの回収 | **完了** | — |
+| 10 | 実 Immich とドキュメント | **完了** | — |
+
+**実装中に本物の欠陥が 4 つ見つかった**（いずれも変異試験・E2E・実機が捕まえた）:
+
+- **trigger の三値論理。** `NEW.stack_state = 'stacked'` は値が NULL のとき NULL を
+  返し、`偽 OR NULL` → `NOT NULL` → NULL で **WHEN が成立せず trigger が黙って
+  素通りする**。`IS` で書く
+- **見送りの理由を組の先頭に付けていた。** 相方を処理したときに自分ではない行が
+  決着していた
+- **バッチは snapshot。** 組を記録すると相方の行も決着するが、取り出し済みの
+  バッチには残っている。読み直さずに進むと組ごとに資産の読み取りを 2 度出す
+- **ダッシュボードの「組」がレコード数だった**（1 スタックが「2 組」と出ていた）
 
 **計画レビューと実装差分レビューの指摘はすべて反映してある**（§3 の「Phase 5 で
 確定した契約」と `phase5-plan.md` 末尾の「実装差分のレビュー」）。
@@ -88,20 +115,20 @@ blocker が 2 件ずつ出た。**巡を重ねても止まらない。** Phase 5
 ### 検証状態
 
 ```
-uv run pytest                  1153 passed, 4 deselected   ← Phase 5 Task 0〜9 とレビュー反映
+uv run pytest                  1311 passed, 5 deselected   ← Phase 6 Task 0〜10 を含む
 uv run pytest -m needs_root      1 passed   ← detached mount の実証
-uv run pytest -m needs_immich    3 passed   ← 実 Immich v3.1.0 で確認済み（2026-08-19。
+uv run pytest -m needs_immich    4 passed   ← 実 Immich v3.1.0 で確認済み（2026-08-20。
                                               環境変数が無いと skip される）
 uv run pytest -m needs_system    9 passed   ← 実プロセスを起動する E2E の土台
                                               （SSE の線上の挙動と、2 枚差しの判定）
 uv run ruff check .            All checks passed
-uv run ruff format --check .   182 files already formatted
-npm --prefix web test          61 passed
+uv run ruff format --check .   188 files already formatted
+npm --prefix web test          65 passed
 npm --prefix web run lint / typecheck / build   通る
-npm --prefix web run test:e2e  2 passed（journey と phase5）
+npm --prefix web run test:e2e  3 passed（journey と phase5 と phase6）
 ```
 
-**全体テストは 2 分 45 秒ほどかかる。** 待つ前提で回すこと（バックグラウンドへ
+**全体テストは 3 分 30 秒ほどかかる。** 待つ前提で回すこと（バックグラウンドへ
 逃がして待つのが速い）。**テストの実行中にソースやテストを書き換えない** ——
 一度それで 8 分かかる不可解な実行を作った（`ruff format` が収集済みのテスト
 ファイルを書き換えた）。
@@ -146,6 +173,13 @@ assert している。
    知識から書いており、**実データを一度も見ていない**。E2E で通しているのは、
    その `require` から組み立てた合成カードまで。手順は
    `phase1-manual-checklist.md` の 13〜16 番にある。
+
+   **Phase 6 で確認項目が 1 つ増えた**（17 番相当。チェックリストへ足す）:
+   **RAW+JPEG の組が実カードで成立するか**。4 条件のうち「同じ stem」と
+   「`captured_at` が秒まで一致」「`captured_at_source` が同じ」は実データ依存で、
+   特に **`exifread` が実機の CR2 から `DateTimeOriginal` を読めるか**が要。
+   読めなければ JPG は `exif`・CR2 は `mtime` fallback になり、**理由つきの
+   見送りとして画面に出る**（黙って誤動作はしない）。
    - 13: `DCIM/100CANON/` の構成とボリュームラベルが想定どおりか
    - 14: **4GB 分割が連番から判別できるか**（`merge.enabled` を有効化してよいかの判断）
    - 15: **MOV の `creation_time` が壁時計か UTC か**（第 4 の timestamp source を足すかの判断）
@@ -166,6 +200,7 @@ assert している。
 | `docs/phase3-plan.md` | Phase 3（Immich 同期）の実装計画。**実行済み**。codex のレビュー 7 巡を反映し、実装で外れた判断と検出できなかった変異を書き戻してある | ✅ |
 | `docs/phase4-plan.md` | Phase 4（Web UI）の実装計画。**実行済み**（19 タスク）。計画レビュー 1 巡と実装差分レビュー 1 巡を反映し、「実装を終えて」に**実装で初めて分かったこと**を書き戻してある | ✅ |
 | `docs/phase5-plan.md` | Phase 5（汎用化）の実装計画。**実行済み**（10 タスク）。計画レビュー 2 巡と実装差分レビュー 9 巡を反映し、実施した変異試験の結果と「実装で分かったこと」を書き戻してある | ✅ |
+| `docs/phase6-plan.md` | Phase 6（スタッキング）の実装計画。**実行済み**（11 タスク）。計画レビュー 4 巡を反映し、実施した変異試験の結果と「実装で分かったこと」を書き戻してある | ✅ |
 | `docs/phase1-backup.md` | バックアップとリストア、再構築できる範囲（§18-4） | ✅ |
 | `docs/phase1-manual-checklist.md` | 実機が要る確認の手順。**16 項目**（1〜12 は実 USB と DJI、13〜16 は Phase 5 で足した Canon EOS 70D の実カード） | ✅ |
 | `docs/phase0-findings.md` | Phase 0 の実測結果と設計への反映 | ✅ |
@@ -448,9 +483,10 @@ blocker として指摘されたもの**で、理屈で戻すと同じ穴に落�
 
 ### 手順
 
-**Phase 5 は `main` にマージ済み。次は Phase 6**（`UPLOAD_CONCURRENCY` の多重化、
-RAW/JPEG のスタッキング）。下の「Phase 5 から Phase 6 へ送ったもの」に、実測つきの
-前提が書いてある。**計画から始める**（`docs/phase6-plan.md` はまだ無い）。
+**Phase 6 の実装は Task 0〜10 まで終わっている**（ブランチ `phase6-stacking`）。
+**次は実装差分の codex レビューと、`main` へのマージ。** 計画レビューは 4 巡して
+打ち切った（4 巡目は blocker 0 / major 0）が、この案件では**実装差分を見せると
+文書では出なかった層が出る**（§1 の表）。レビュー役には hash とファイル名を渡す。
 
 **Phase 5 のレビューから持ち越す教訓**（記録は `phase5-plan.md` 末尾の 9 巡ぶんの表）:
 
@@ -472,19 +508,23 @@ RAW/JPEG のスタッキング）。下の「Phase 5 から Phase 6 へ送った
 
 §1「残っていること」の 1〜3。TrueNAS ホスト、実 DJI、実 Canon が要る。
 
-### Phase 5 から Phase 6 へ送ったもの
+### `UPLOAD_CONCURRENCY` はやらないと決めた（Phase 6）
 
-- **`UPLOAD_CONCURRENCY` の多重化。** Phase 4 → Phase 5 → Phase 6 と 2 度送っている。
-  現行の `JobRunner` は全ジョブ種で共通の単一 worker で、`claim_next()` は type も
-  宛先も見ない。「宛先ごとに 1 本」を保つには claim のトランザクションで宛先単位の
-  排他が要り、Phase 3 で固めたリースと停止の契約に触れる
-- **RAW / JPEG の Immich 上でのスタッキング。** API は実 Immich v3.1.0 で確認済み
-  （読み取りのみ、2026-08-19）。`POST /stacks` `{assetIds}`、`GET /stacks?primaryAssetId=`、
-  `PUT /stacks/{id}` `{primaryAssetId}`、`DELETE /stacks/{id}/assets/{assetId}`、
-  `AssetResponseDto.stack`。**`POST /stacks` は「渡した資産が既存スタックの primary
-  なら、その既存スタックを吸収する」**ので、Phase 3 の「既存アセットを勝手に変更
-  しない」に直接当たる —— 送る前に `AssetResponseDto.stack` を見る必要がある。
-  詳細は `phase5-plan.md` の「RAW / JPEG のスタッキングを Phase 6 へ送る（実測つき）」
+**3 度目の先送りにしなかった。** Phase 4 → 5 → 6 と送られてきたが、`design.md`
+§9.10 は当初から「送信は宛先ごとに 1 本、1 件ずつ直列」と決めており、ワーカーを
+多重化しても増やせるのは**失敗の同時多発**だけ（律速はネットワークと相手側の
+取り込み）。設定だけが 3 フェーズ「効かないまま画面に並ぶ」状態だったので、
+**設定ごと撤去した**（`0015` が DB の行も消す）。判断は §21 に記録してある。
+
+### Phase 6 で分かったこと（実測）
+
+- **`POST /stacks` の吸収は実在する**（2026-08-20、実 Immich v3.1.0 で実測）。
+  A と B のスタックがあるところへ `{B, C}` を送ると**応答は {A, B, C} の 3 枚**に
+  なる。こちらのクライアントは「要求と違う集合」を protocol error にするので、
+  吸収された結果を `remote_stack_id` として保存することはない
+- **`exifread` は拡張子だけ変えた TIFF を CR2 として読む。** E2E の合成カードは
+  これに乗っている（`test_exif.py::test_a_synthetic_cr2_yields_its_capture_time`
+  で先に測ってから使った）
 
 ### 変異試験のやり方（ドライバはリポジトリに無い）
 
@@ -793,6 +833,9 @@ uv run pytest -m needs_immich
 | **`0014`（一覧の索引）と `IN` → `=`** | **入れた**（実装差分レビュー 6 巡目）。`0013` を足したら、プロファイルで絞った一覧が `media_file_captured_at` を辿る経路から外れ、**全行を拾ってから並べ替える**ようになった。`media_file (profile_id, captured_at DESC, id DESC)` を足し、`_filters` の `IN (SELECT ...)` を `= (SELECT ...)` へ変えた（`IN` だと複数の値を取りうると見なされ、索引があっても並べ替えを外せない）。**索引を足したら、他の問い合わせの EXPLAIN も見る** |
 | **`js-yaml` を web の依存に足した** | プロファイル編集の YAML テキストエリア（Task 7）。**v5 は自前の型を持つ**ので `@types/js-yaml` は入れない（入れると衝突する） |
 | ~~**`main` へのマージ**~~ | **済んだ**（2026-08-19）。`phase5-generalization` の 21 コミットを `--no-ff` でマージし、マージ結果でも全テストを流してからブランチを消した |
+| **`0015`（スタックの 3 列）** | **入れた**（Task 1）。trigger 2 本が 3 列の組み合わせを守る。**比較は `IS`**（`=` だと NULL のとき WHEN が成立せず素通りする）。索引 `upload_record (destination_id, target_epoch, id)` は部分索引で、**述語を問い合わせ側と一字一句そろえる** |
+| **スタックの規則は「現行リビジョン」で読む** | 取り込み時の版ではない（`immich.tags` と同じ層）。組ごとに版を固定し、guard と記録の CAS で「まだ現行か」を見る。版が進んだら見送りを未評価へ戻す（`_publish_revision`） |
+| **「既存スタックに触らない」は保証ではない** | Immich に条件付きの作成が無く、読み直しと `POST` の間の競合は実装で閉じられない。残余として §9.11 に明記して受け入れた。吸収されても、要求と違う集合は protocol error にするので **id は記録しない** |
 | 認証を既定 off のままにするか | ユーザの判断で off。`BIND_HOST` の既定を loopback にし、認証無効で非 loopback にバインドしていたら警告する緩和のみ |
 | Phase 1〜3 を配布可能リリースにしない | 認証と CSRF が入る Phase 4 より前に LAN へ公開しない |
 | SSE（`GET /events`） | Phase 4 の Web UI と一緒に入れる。Phase 1 は `GET /api/jobs/{id}/events?after_seq=` のポーリング |
