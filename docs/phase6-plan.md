@@ -2122,8 +2122,17 @@ Expected: PASS（型の再生成を忘れると最後のテストが落ちる）
 
 - [ ] **Step 5: 変異試験**
 
-未知の `stack_state` を素通しにする、`unevaluated` を `= 'unevaluated'` にする、
-サマリの `invalidated_at IS NULL` を外す。
+**実施結果（2026-08-20）: 9 件中 9 件を検出。**
+
+**ドライバの盲点を 1 つ直した。** 落ちたテストを `FAILED` の行だけで数えていたので、
+**構文が壊れる変異は 1 件も `FAILED` を出さず「素通り」に見えていた**（収集エラーは
+`ERROR` の行になる）。`ERROR` も数えるようにしたうえで、その変異は**成立する形**
+（`try` ごと外す）へ当て直した。
+
+当てた変異: 未知の `stack_state` を素通しにする、`unevaluated` を
+`= 'unevaluated'` にする、フィルタを無視する、サマリの `invalidated_at IS NULL` を
+外す、`stacked` と `skipped` を取り違える、`_view` の 3 列を落とす、
+400 を返さない。
 
 - [ ] **Step 6: コミット**
 

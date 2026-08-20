@@ -991,8 +991,17 @@ class UploadRepository:
     # ------------------------------------------------------------------
 
     def list_records(
-        self, destination_id: str | None = None, state: str | None = None, limit: int = 200
+        self,
+        destination_id: str | None = None,
+        state: str | None = None,
+        limit: int = 200,
+        stack_state: str | None = None,
     ) -> list[sqlite3.Row]:
+        """`stack_state` は `stacked` / `skipped` / `unevaluated`.
+
+        **未知の値を素通りさせない**（呼び出し側が 400 にする）。「絞ったつもりで
+        全件が出る」を作らない。
+        """
         clauses, params = [], []
         if destination_id is not None:
             clauses.append("destination_id = ?")
@@ -1000,6 +1009,14 @@ class UploadRepository:
         if state is not None:
             clauses.append("state = ?")
             params.append(state)
+        if stack_state is not None:
+            if stack_state == "unevaluated":
+                clauses.append("stack_state IS NULL")
+            elif stack_state in ("stacked", "skipped"):
+                clauses.append("stack_state = ?")
+                params.append(stack_state)
+            else:
+                raise UploadRequestInvalid(f"stack_state が不正: {stack_state}")
         where = f" WHERE {' AND '.join(clauses)}" if clauses else ""
         return list(
             self._conn.execute(

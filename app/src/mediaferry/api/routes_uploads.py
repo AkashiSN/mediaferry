@@ -57,10 +57,14 @@ def list_uploads(
     destination_id: str | None = None,
     state: str | None = None,
     limit: int = 200,
+    stack_state: str | None = None,
     conn=Depends(get_conn),  # noqa: ANN001, B008
     box=Depends(get_box),  # noqa: ANN001, B008
 ) -> dict[str, Any]:
-    rows = _uploads(conn, box).list_records(destination_id, state, limit)
+    try:
+        rows = _uploads(conn, box).list_records(destination_id, state, limit, stack_state)
+    except UploadRequestInvalid as exc:
+        raise ApiError(400, ErrorCode.BAD_REQUEST, str(exc)) from exc
     return {"records": [_view(row, conn) for row in rows]}
 
 
@@ -212,6 +216,10 @@ def _view(row, conn=None) -> dict[str, Any]:  # noqa: ANN001
         "remote_asset_id": row["remote_asset_id"],
         "remote_is_trashed": bool(row["remote_is_trashed"]),
         "remote_checked_at": row["remote_checked_at"],
+        # スタックの結果（§9.11）。未評価は `null`。
+        "stack_state": row["stack_state"],
+        "remote_stack_id": row["remote_stack_id"],
+        "stack_reason": row["stack_reason"],
         "attempts": row["attempts"],
         "last_error": row["last_error"],
         "eligibility_reason": row["eligibility_reason"],

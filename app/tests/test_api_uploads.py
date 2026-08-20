@@ -227,3 +227,90 @@ def test_the_list_can_be_narrowed_by_destination_and_state(world, client, immich
 
     body = client.get("/api/uploads?state=failed").json()
     assert [row["destination_id"] for row in body["records"]] == [family]
+
+
+# --- スタックの表示とフィルタ（Phase 6 / §9.11） ------------------------
+
+
+def a_stacked_and_a_skipped(db):
+    """`stacked` 1 件と `skipped` 1 件を作り、その id を返す."""
+    from .test_schema_artifacts import a_media_file
+    from .test_schema_sources import a_profile
+    from .test_schema_uploads import a_destination, an_upload
+
+    # ビルトインは fixture が同期済みなので、衝突しない slug を使う。
+    profile = a_profile(db, slug="stack-test-cam")
+    dest = a_destination(db, name="stack-test")
+    made = {}
+    for name, fields in (
+        ("stacked", {"stack_state": "stacked", "remote_stack_id": "stack-1"}),
+        ("skipped", {"stack_state": "skipped", "stack_reason": "相方が見つからない"}),
+        ("open", {}),
+    ):
+        made[name] = an_upload(
+            db,
+            dest,
+            a_media_file(db, profile),
+            state="complete",
+            destination_revision_id=dest[1],
+            remote_asset_id=f"asset-{name}",
+            **fields,
+        )
+    return dest[0], made
+
+
+def test_a_record_shows_its_stack_state(secret_env, client, api_db):  # noqa: F811
+    _, made = a_stacked_and_a_skipped(api_db)
+
+    response = client.get("/api/uploads")
+    assert response.status_code == 200, response.json()
+    records = {row["id"]: row for row in response.json()["records"]}
+
+    assert records[made["stacked"]]["stack_state"] == "stacked"
+    assert records[made["stacked"]]["remote_stack_id"] == "stack-1"
+    assert records[made["skipped"]]["stack_reason"] == "相方が見つからない"
+    assert records[made["open"]]["stack_state"] is None
+
+
+def test_records_can_be_filtered_by_stack_state(secret_env, client, api_db):  # noqa: F811
+    _, made = a_stacked_and_a_skipped(api_db)
+
+    body = client.get("/api/uploads?stack_state=skipped").json()
+
+    assert [row["id"] for row in body["records"]] == [made["skipped"]]
+
+
+def test_unevaluated_records_can_be_listed(secret_env, client, api_db):  # noqa: F811
+    _, made = a_stacked_and_a_skipped(api_db)
+
+    body = client.get("/api/uploads?stack_state=unevaluated").json()
+
+    assert [row["id"] for row in body["records"]] == [made["open"]]
+
+
+def test_an_unknown_stack_state_is_refused(secret_env, client):  # noqa: F811
+    """**絞ったつもりで全件が出る**を作らない."""
+    assert client.get("/api/uploads?stack_state=nonsense").status_code == 400
+
+
+def test_the_dashboard_counts_stacks_per_destination(secret_env, client, api_db):  # noqa: F811
+    a_stacked_and_a_skipped(api_db)
+
+    summary = client.get("/api/dashboard").json()["destinations"][0]
+
+    assert summary["stacked"] == 1
+    assert summary["stack_skipped"] == 1
+
+
+def test_the_dashboard_does_not_count_invalidated_records(secret_env, client, api_db):  # noqa: F811
+    from mediaferry.clock import now_iso
+
+    _, made = a_stacked_and_a_skipped(api_db)
+    api_db.execute(
+        "UPDATE upload_record SET invalidated_at = ?, invalidated_reason = 'x' WHERE id = ?",
+        (now_iso(), made["skipped"]),
+    )
+
+    summary = client.get("/api/dashboard").json()["destinations"][0]
+
+    assert summary["stack_skipped"] == 0

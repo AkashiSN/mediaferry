@@ -2266,6 +2266,7 @@ export interface operations {
                 destination_id?: string | null;
                 state?: string | null;
                 limit?: number;
+                stack_state?: string | null;
             };
             header?: never;
             path?: never;
