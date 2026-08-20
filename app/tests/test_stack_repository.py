@@ -591,3 +591,46 @@ def test_rewriting_the_same_asset_id_keeps_the_stack(world, db):
     repo.stamp_remote(record["id"], record["remote_asset_id"], 0, now_iso())
 
     assert rows(db)[records["JPG"]]["stack_state"] == "stacked"
+
+
+def test_a_stale_observation_does_not_touch_the_group(world, db):
+    """**古い観測は何も書かない。** 組の再オープンも「何も」に含まれる.
+
+    観測の後に別経路が同じ行を動かしていたら、その `Stamp` は自分の UPDATE を
+    飛ばす。**その前に組を開いてしまうと、現在のスタックを壊す。**
+    """
+    from mediaferry.db.uploads import Stamp
+
+    repo, ctx, destination_id, revision, records = world
+    repo.mark_stacked(ctx, list(rows(db).values()), destination_id, EPOCH, revision, "stack-1")
+    record = rows(db)[records["JPG"]]
+
+    written = repo.stamp_many(
+        ctx,
+        [
+            Stamp(
+                record_id=record["id"],
+                asset_id=None,
+                is_trashed=0,
+                # **観測した時点とは違う値**を期待値に渡す（＝古い観測）。
+                expect_asset_id="observed-something-else",
+                expect_checked_at=record["remote_checked_at"],
+            )
+        ],
+        now_iso(),
+    )
+
+    assert written == set()
+    assert {row["stack_state"] for row in rows(db).values()} == {"stacked"}
+    assert {row["remote_stack_id"] for row in rows(db).values()} == {"stack-1"}
+
+
+def test_stamp_remote_leaves_the_group_alone_when_the_row_is_not_complete(world, db):
+    """公開契約は「`complete` だけを対象」。**組もその契約の内側。**"""
+    repo, ctx, destination_id, revision, records = world
+    repo.mark_stacked(ctx, list(rows(db).values()), destination_id, EPOCH, revision, "stack-1")
+    db.execute("UPDATE upload_record SET state = 'needs_recheck' WHERE id = ?", (records["JPG"],))
+
+    repo.stamp_remote(records["JPG"], "another-asset", 0, now_iso())
+
+    assert {row["stack_state"] for row in rows(db).values()} == {"stacked"}

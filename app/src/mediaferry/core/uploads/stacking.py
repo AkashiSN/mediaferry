@@ -117,6 +117,10 @@ def _refused(primary: Candidate, partners: Sequence[Candidate], rule: StackRule)
             # 利用者が手で作った組を作り直しうるので、**証明できない相手には触らない**。
             return Refusal("自分が上げたと証明できない資産が含まれる")
     identifiers = [member.remote_asset_id for member in (primary, *partners)]
+    if any(identifier is None for identifier in identifiers):
+        # **「分からない」を「重なっている」と言わない。** 再確認で資産が消えると
+        # `None` が並ぶが、それは相手が同じ ID を返した事象ではない。
+        return Refusal("組の資産 ID が分からない")
     if len(set(identifiers)) != len(identifiers):
         # **相手が両方へ同じ資産 ID を返すことがある。** そのまま進むと、
         # 作成では「同じ id が複数ある」で落ち、回収では 1 資産のスタックを
@@ -128,8 +132,6 @@ def _refused(primary: Candidate, partners: Sequence[Candidate], rule: StackRule)
             return Refusal("相方が別のプロファイルに属している")
         if partner.invalidated or partner.state != "complete":
             return Refusal("相方はまだ送信が終わっていない")
-        if partner.remote_asset_id is None or primary.remote_asset_id is None:
-            return Refusal("相方の資産 ID が分からない")
         if partner.captured_at_source != primary.captured_at_source:
             return Refusal("相方と時刻の根拠が違う（EXIF と mtime を突き合わせない）")
         if not _within(primary.captured_at, partner.captured_at, rule.tolerance_seconds):

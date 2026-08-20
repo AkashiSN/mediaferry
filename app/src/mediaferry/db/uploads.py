@@ -694,6 +694,18 @@ class UploadRepository:
         with immediate(self._conn):
             ctx.assert_lease()
             for stamp in stamps:
+                # **先に、この観測がまだ通るかを確かめる。** 組を開くのは
+                # `remote_asset_id` を変える前でなければならない（`0016`）が、
+                # CAS に外れる観測で開いてしまうと「古い観測は何も書かない」を
+                # 破る（現在のスタックを壊す）。**`BEGIN IMMEDIATE` の中なので、
+                # 確認と書き込みの間に誰も割り込めない。**
+                still = self._conn.execute(
+                    "SELECT 1 FROM upload_record WHERE id = ? AND state = 'complete'"
+                    "   AND remote_asset_id IS ? AND remote_checked_at IS ?",
+                    (stamp.record_id, stamp.expect_asset_id, stamp.expect_checked_at),
+                ).fetchone()
+                if still is None:
+                    continue
                 # **ID が変わるなら、その前にスタックの結果を組ごと捨てる**（§9.11）。
                 # スタックは「その `remote_asset_id` を送った結果」なので、消滅や
                 # 別 ID への差し替えで現在の姿を表さなくなる。
@@ -726,6 +738,13 @@ class UploadRepository:
         進行中の行は所有者がいるので、claim を持たないこの経路では触らない。
         """
         with immediate(self._conn):
+            # **契約は「`complete` だけを対象」。** 組もその内側なので、先に確かめる。
+            still = self._conn.execute(
+                "SELECT 1 FROM upload_record WHERE id = ? AND state = 'complete'",
+                (record_id,),
+            ).fetchone()
+            if still is None:
+                return
             # 資産 ID が変わるなら、スタックの結果を組ごと捨てる（上と同じ理由）。
             self._reopen_stack_of(record_id, new_asset_id=asset_id)
             self._conn.execute(

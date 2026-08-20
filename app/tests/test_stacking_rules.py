@@ -187,7 +187,8 @@ def test_an_invalidated_partner_refuses_the_group():
 
 
 def test_a_partner_without_a_remote_asset_id_refuses_the_group():
-    assert isinstance(resolve_group(a_jpg(), [a_jpg(), a_cr2(remote_asset_id=None)], RULE), Refusal)
+    refusal = resolve_group(a_jpg(), [a_jpg(), a_cr2(remote_asset_id=None)], RULE)
+    assert "資産 ID が分からない" in refusal.reason
 
 
 def test_a_partner_of_another_profile_is_refused():
@@ -229,3 +230,14 @@ def test_a_sibling_with_an_extension_outside_the_rule_is_not_a_partner():
     )
     refusal = resolve_group(a_jpg(), [a_jpg(), thumbnail], RULE)
     assert "相方が見つからない" in refusal.reason
+
+
+def test_two_missing_asset_ids_are_not_reported_as_a_duplicate():
+    """**「分からない」を「重なっている」と言わない。**
+
+    再確認で両方の資産が消えると `[None, None]` になる。これは相手が同じ ID を
+    返した事象ではないので、理由を取り違えない。
+    """
+    gone = [a_jpg(remote_asset_id=None), a_cr2(remote_asset_id=None)]
+    refusal = resolve_group(gone[0], gone, RULE)
+    assert "資産 ID が分からない" in refusal.reason
