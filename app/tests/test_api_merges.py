@@ -258,3 +258,32 @@ def test_a_media_already_in_a_group_cannot_be_grouped_again(client, api_db):
     again = client.post("/api/merge-groups", json={"media_ids": parts})
 
     assert again.status_code == 409
+
+
+def test_regrouping_across_two_groups_answers_409_not_500(client, api_db):
+    """実機で 500 になった形. **画面から「2 つを 1 つに」を試すと必ずここを通る.**"""
+    from .test_schema_artifacts import a_media_file
+
+    profile = ProfileRegistry(api_db).current("dji-osmo")
+    profile_ref = (profile.profile_id, profile.revision_id)
+    groups = []
+    for name in ("a", "b"):
+        parts = [
+            a_media_file(api_db, profile_ref, rel_path=f"library/regroup/{name}_{index}.MP4")
+            for index in range(2)
+        ]
+        group_id = a_merge_group(api_db, profile_ref, f"digest-{name}")
+        for position, media in enumerate(parts):
+            api_db.execute(
+                "INSERT INTO merge_member (merge_group_id, media_file_id, position, active)"
+                " VALUES (?, ?, ?, 1)",
+                (group_id, media, position),
+            )
+        groups.append((group_id, parts))
+
+    everyone = groups[0][1] + groups[1][1]
+    response = client.patch(
+        f"/api/merge-groups/{groups[0][0]}?action=regroup", json={"media_ids": everyone}
+    )
+    assert response.status_code == 409
+    assert response.json()["error"]["code"] == "conflict"

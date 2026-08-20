@@ -3,7 +3,7 @@ from datetime import UTC, datetime
 import pytest
 
 from mediaferry.core.merge.grouping import GIB, GroupCandidate, MergePart
-from mediaferry.db.merges import GroupNotClaimable, MergeRepository
+from mediaferry.db.merges import GroupNotClaimable, GroupNotEditable, MergeRepository
 from mediaferry.db.profiles import ProfileRegistry
 
 from .test_schema_artifacts import a_media_file
@@ -254,3 +254,21 @@ def test_releasing_only_moves_a_merging_group(db, profile):
     # 公開済みのグループを detected へ戻すと、出力が宙に浮く。
     with pytest.raises(GroupNotClaimable):
         repo.release(group_id)
+
+
+def test_regrouping_across_two_groups_is_refused_not_a_crash(db, profile):
+    """**2 つのグループを 1 つにまとめる操作は、必ずこの経路を通る**（§13）.
+
+    実機で結合判定を直した後、既に 2 つに割れて検出されていたものを組み直そうと
+    して 500 になった。`create_manual` は同じ IntegrityError を捕まえて 409 で
+    断っているのに、`supersede` にだけその処理が無かった。
+    """
+    repo = MergeRepository(db)
+    first = repo.save_detected(profile, a_candidate(db, profile, prefix="AAA"), "digest-a")
+    second = a_candidate(db, profile, prefix="BBB")
+    repo.save_detected(profile, second, "digest-b")
+    everyone = [row["media_file_id"] for row in repo.members(first)]
+    everyone += [part.media_file_id for part in second.members]
+
+    with pytest.raises(GroupNotEditable):
+        repo.supersede(first, everyone, "digest-merged")

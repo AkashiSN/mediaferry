@@ -235,12 +235,22 @@ class MergeRepository:
             # member を外すのは `superseded_by_id` を立てた trigger なので、
             # 向け直してから新しい member を入れる。
             self._point_at(group_id, new_id_value)
-            for position, media_id in enumerate(media_ids):
-                self._conn.execute(
-                    "INSERT INTO merge_member (merge_group_id, media_file_id, position, active)"
-                    " VALUES (?, ?, ?, 1)",
-                    (new_id_value, media_id, position),
-                )
+            try:
+                for position, media_id in enumerate(media_ids):
+                    self._conn.execute(
+                        "INSERT INTO merge_member (merge_group_id, media_file_id, position,"
+                        " active) VALUES (?, ?, ?, 1)",
+                        (new_id_value, media_id, position),
+                    )
+            except sqlite3.IntegrityError as exc:
+                # 別のアクティブなグループが持っているファイルを引き込もうとした
+                # （部分索引 `merge_member_one_active_group`）。**2 つのグループを
+                # 1 つにまとめる操作は必ずここを通る**ので、内部エラーにせず理由を
+                # 添えて断る（`create_manual` と同じ扱い）。
+                raise GroupNotEditable(
+                    "その構成には別のグループが持っているファイルがある。"
+                    "先にそちらを破棄するか、組み直す"
+                ) from exc
         return new_id_value
 
     def _point_at(self, old_id: str, new_id_value: str) -> None:
