@@ -39,8 +39,13 @@ class JobContext:
         row = self._store.get(self.job_id)
         return row is None or row["status"] != "running"
 
-    def heartbeat(self) -> None:
-        self._store.extend_lease(self.job_id, self.lease_token)
+    def heartbeat(self, progress: dict[str, Any] | None = None) -> None:
+        """リースを延ばす. **進捗があれば同じ UPDATE に乗せる**（書き込みを増やさない）.
+
+        `progress` を渡さない心拍は、前の値をそのまま残す。脈動は進捗を持たない
+        場所（`fsync` や ffprobe の待ち）からも打たれるので、消すと表示が点滅する。
+        """
+        self._store.extend_lease(self.job_id, self.lease_token, progress)
 
     def assert_lease(self) -> None:
         """外部への副作用の直前に呼ぶ. 延長はしない."""
@@ -108,19 +113,38 @@ class JobStore:
         if row is None:
             raise LeaseLost(f"ジョブ {job_id} のリースが無効（キャンセル・失効・別の所有者）")
 
-    def extend_lease(self, job_id: str, token: str) -> None:
-        """heartbeat. 期限切れのリースは復活させない."""
-        updated = self._conn.execute(
-            "UPDATE job SET lease_expires_at = ? WHERE id = ? AND lease_token = ?"
-            " AND status IN ('running', 'cancelling') AND lease_expires_at > ?",
-            (self._expiry(), job_id, token, iso(utcnow())),
-        )
+    def extend_lease(self, job_id: str, token: str, progress: dict[str, Any] | None = None) -> None:
+        """heartbeat. 期限切れのリースは復活させない.
+
+        **進捗は同じ UPDATE に乗せる。** 別の書き込みにすると、長い処理の間ずっと
+        DB への書き込みが 2 倍になる。渡されなければ列に触らない。
+        """
+        if progress is None:
+            updated = self._conn.execute(
+                "UPDATE job SET lease_expires_at = ? WHERE id = ? AND lease_token = ?"
+                " AND status IN ('running', 'cancelling') AND lease_expires_at > ?",
+                (self._expiry(), job_id, token, iso(utcnow())),
+            )
+        else:
+            updated = self._conn.execute(
+                "UPDATE job SET lease_expires_at = ?, progress_json = ?"
+                " WHERE id = ? AND lease_token = ?"
+                " AND status IN ('running', 'cancelling') AND lease_expires_at > ?",
+                (
+                    self._expiry(),
+                    json.dumps(progress, ensure_ascii=False),
+                    job_id,
+                    token,
+                    iso(utcnow()),
+                ),
+            )
         if updated.rowcount != 1:
             raise LeaseLost(f"ジョブ {job_id} のリースを失っている")
 
     def finish(self, job_id: str, token: str, status: str, error: str | None = None) -> None:
+        """終わったジョブの「いま何をしているか」は無いので、進捗は落とす."""
         updated = self._conn.execute(
-            "UPDATE job SET status = ?, error = ?, finished_at = ?,"
+            "UPDATE job SET status = ?, error = ?, finished_at = ?, progress_json = NULL,"
             " lease_token = NULL, lease_expires_at = NULL"
             " WHERE id = ? AND lease_token = ? AND status IN ('running', 'cancelling')",
             (status, error, iso(utcnow()), job_id, token),

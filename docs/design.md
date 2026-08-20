@@ -901,6 +901,10 @@ dirfd 起点で `scan.roots` 配下から `scan.extensions` に一致するフ�
 ### 9.8 結合と結合結果の検証
 
 1. ffmpeg concat demuxer（`-f concat -safe 0 -c copy -fflags +genpts`）を試す。
+   **data ストリームは `-map` に含めない** —— concat demuxer が運べず、
+   `Cannot map stream #0:N - unsupported type` で即座に落ちる（実機の DJI は
+   `tmcd` を持つので毎回これで TS へ落ちていた）。TS 経路も同じものを落とすので、
+   最初から選ばなければ失うものは無い。落としたものは `route_dropped` に記録する。
 2. 失敗したら TS 経由のフォールバック（各ファイルを `mpegts` に変換して
    `concat:` プロトコルで結合、`-bsf:a aac_adtstoasc`）。コーデックに応じて
    `h264_mp4toannexb` / `hevc_mp4toannexb` を選ぶ。

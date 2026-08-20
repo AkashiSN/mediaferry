@@ -310,3 +310,24 @@ def test_the_result_serialises_to_json():
     assert payload["seam_offsets"] == [1500.0]
     assert {c["name"] for c in payload["checks"]} == {"duration", "streams", "frames", "size"}
     assert payload["checks"][3]["detail"]["part_bit_rates"] == [80242041.0, 80242041.0]
+
+
+TMCD = {"index": 4, "codec_type": "data", "codec_name": None, "codec_tag_string": "tmcd"}
+
+
+def test_a_stream_the_route_could_not_carry_is_not_counted_as_missing():
+    """**実機の DJI はここで必ず落ちていた.**
+
+    TS 経路は `tmcd` を運べない。実装はそれを `route_dropped` に記録し、`size`
+    検査も差し引いている（`excluded_streams`）のに、`streams` 検査だけが
+    差し引かずに「期待に無い」と判定していた。**TS 経路を通ると必ず不合格になる。**
+    """
+    parts = [a_part(extra=[TMCD]), a_part(extra=[TMCD])]
+    merged = a_merged()
+    assert verdicts(verify(parts, merged, KEEP, "ts", route_dropped=[TMCD]))["streams"] == "pass"
+
+
+def test_a_stream_that_vanished_without_a_reason_still_fails():
+    """経路のせいだと言えないなら、消えたことは失敗のまま."""
+    parts = [a_part(extra=[TMCD]), a_part(extra=[TMCD])]
+    assert verdicts(verify(parts, a_merged(), KEEP, "concat"))["streams"] == "fail"

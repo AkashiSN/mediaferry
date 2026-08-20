@@ -14,6 +14,7 @@ import { DevicesScreen } from "./Devices";
 import { LibraryScreen, summarise } from "./Library";
 import { MergesScreen } from "./Merges";
 import { DashboardScreen } from "./Dashboard";
+import { JobsScreen } from "./Jobs";
 import { SettingsScreen } from "./Settings";
 
 type Handler = (path: string, init?: RequestInit) => unknown;
@@ -972,5 +973,61 @@ describe("見送りの打ち切り", () => {
 
     await screen.findByText(/相方が見つからない/);
     expect(screen.queryByText(/ほかにもあります/)).toBeNull();
+  });
+});
+
+
+describe("ジョブの進捗", () => {
+  it("いまどのファイルをどこまで書いたかを出す", async () => {
+    stubApi({
+      "/jobs": {
+        jobs: [
+          {
+            id: "j1",
+            type: "import",
+            status: "running",
+            created_at: "2026-08-21T00:00:00+00:00",
+            started_at: "2026-08-21T00:00:00+00:00",
+            progress: {
+              phase: "copy",
+              rel_path: "DCIM/DJI_001/DJI_20260808125404_0002_D.MP4",
+              file_index: 3,
+              file_count: 29,
+              bytes_done: 8 * 1024 ** 3,
+              bytes_total: 16 * 1024 ** 3,
+              bytes_done_all: 40 * 1024 ** 3,
+              bytes_total_all: 120 * 1024 ** 3,
+            },
+          },
+        ],
+      },
+    });
+    render(<JobsScreen />);
+
+    const line = await screen.findByText(/コピー中/);
+    expect(line.textContent).toContain("3/29 件");
+    expect(line.textContent).toContain("DJI_20260808125404_0002_D.MP4");
+    expect(line.textContent).toContain("50%");
+  });
+
+  it("終わったジョブには進捗が無いので、最後のイベントを出す", async () => {
+    stubApi({
+      "/jobs": {
+        jobs: [
+          {
+            id: "j1",
+            type: "merge",
+            status: "succeeded",
+            created_at: "2026-08-21T00:00:00+00:00",
+            started_at: "2026-08-21T00:00:00+00:00",
+            progress: null,
+          },
+        ],
+      },
+    });
+    render(<JobsScreen />);
+
+    expect(await screen.findByText("完了")).toBeInTheDocument();
+    expect(screen.queryByText(/コピー中|結合中/)).toBeNull();
   });
 });

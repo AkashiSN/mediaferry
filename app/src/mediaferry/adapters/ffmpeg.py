@@ -52,6 +52,11 @@ LOG_TAIL_CHARS = 2000
 
 # mpegts が運べない種別。tmcd（タイムコード）と djmd / dbgi がここに入る。
 UNSUPPORTED_BY_TS = frozenset({"data"})
+# **concat demuxer も data を運べない。** `-map` に残すと
+# `Cannot map stream #0:N - unsupported type` で即座に落ちる（実機の DJI は
+# `tmcd` を持つので毎回これで TS 経路へ落ちていた）。TS 経路も同じものを落とす
+# ので、最初から選ばなければ失うものは無く、往復を丸ごと省ける。
+UNSUPPORTED_BY_CONCAT = frozenset({"data"})
 
 # MP4 の中の H.264 / H.265 を mpegts へ入れるには Annex B へ直す。
 _ANNEXB = {"h264": "h264_mp4toannexb", "hevc": "hevc_mp4toannexb"}
@@ -99,22 +104,36 @@ class MergeRunner:
         output_name: str,
         on_progress: Callable[[], None],
         cancelled: Callable[[], bool],
+        on_note: Callable[[str], None] | None = None,
     ) -> MergeOutcome:
+        """`on_note` は経路の判断を呼び出し側へ伝える.
+
+        **どの経路を通ったかは、その出力がなぜその形なのかの説明**なので、
+        コンテナのログではなくジョブの記録に残す（`job_event`）。ログにも
+        残すのは、ジョブの外（起動時など）から追う場合のため。
+        """
+
+        def note(message: str) -> None:
+            logger.warning("%s", message)
+            if on_note is not None:
+                on_note(message)
+
         selections = [selected_streams(streams, keep) for streams in part_streams]
         output = work_dir / output_name
         if _topology_matches(part_streams, selections):
+            carried, dropped = _split_unsupported(selections[0], UNSUPPORTED_BY_CONCAT)
             try:
                 self._run(
-                    self._concat_command(parts, map_arguments(selections[0]), work_dir, output),
+                    self._concat_command(parts, map_arguments(carried), work_dir, output),
                     work_dir / "concat.log",
                     on_progress,
                     cancelled,
                 )
-                return MergeOutcome("concat", output, self.tool_version(), ())
+                return MergeOutcome("concat", output, self.tool_version(), dropped)
             except MergeFailed as exc:
-                logger.warning("concat demuxer に失敗した。TS 経由へ落とす: %s", exc)
+                note(f"concat demuxer に失敗した。TS 経由へ落とす: {exc}")
         else:
-            logger.warning("パート間でストリームの並びが違うので concat demuxer を使わない")
+            note("パート間でストリームの並びが違うので concat demuxer を使わない")
         output.unlink(missing_ok=True)
         dropped = self._ts_merge(
             parts, part_streams, selections, work_dir, output, on_progress, cancelled
@@ -282,6 +301,21 @@ class MergeRunner:
         with contextlib.suppress(ProcessLookupError):
             os.killpg(group, signal.SIGKILL)
         process.wait()
+
+
+def _split_unsupported(
+    streams: Sequence[dict[str, Any]], unsupported: frozenset[str]
+) -> tuple[list[dict[str, Any]], tuple[dict[str, Any], ...]]:
+    """運べる型と、経路が運べない型に分ける. 落としたものは記録して返す."""
+    carried: list[dict[str, Any]] = []
+    dropped: dict[tuple[Any, ...], dict[str, Any]] = {}
+    for stream in streams:
+        if stream.get("codec_type") in unsupported:
+            summary = stream_summary(stream)
+            dropped[(summary["codec_type"], summary["codec_tag_string"])] = summary
+            continue
+        carried.append(stream)
+    return carried, tuple(dropped.values())
 
 
 def _topology_matches(

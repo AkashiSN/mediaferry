@@ -1,3 +1,4 @@
+import json
 import sqlite3
 import threading
 
@@ -196,3 +197,36 @@ def test_a_live_lease_is_not_reaped(db):
     assert store.reap_expired_leases() == 0
     assert store.get(ctx.job_id)["status"] == "running"
     ctx.assert_lease()  # リースも無傷
+
+
+def test_progress_rides_along_with_the_heartbeat(db):
+    """**進捗は心拍と同じ 1 回の UPDATE に乗せる。** 書き込みを増やさない.
+
+    `job_event` には入れない —— あれは監査の記録で、心拍のたびに行を足すと
+    際限なく増える。進捗は「いまの値」だけあればよいので上書きが正しい。
+    """
+    store = JobStore(db)
+    store.enqueue("import", {})
+    ctx = store.claim_next()
+    ctx.heartbeat({"phase": "copy", "bytes_done": 5, "bytes_total": 10})
+    assert json.loads(store.get(ctx.job_id)["progress_json"])["bytes_done"] == 5
+
+
+def test_a_heartbeat_without_progress_keeps_the_last_value(db):
+    """脈動は進捗を持たない場所からも打たれる. そこで消すと表示が点滅する."""
+    store = JobStore(db)
+    store.enqueue("import", {})
+    ctx = store.claim_next()
+    ctx.heartbeat({"phase": "copy", "bytes_done": 5})
+    ctx.heartbeat()
+    assert json.loads(store.get(ctx.job_id)["progress_json"])["bytes_done"] == 5
+
+
+def test_finishing_clears_the_progress(db):
+    """終わったジョブの「いま何をしているか」は無い."""
+    store = JobStore(db)
+    store.enqueue("import", {})
+    ctx = store.claim_next()
+    ctx.heartbeat({"phase": "copy", "bytes_done": 5})
+    store.finish(ctx.job_id, ctx.lease_token, "succeeded")
+    assert store.get(ctx.job_id)["progress_json"] is None

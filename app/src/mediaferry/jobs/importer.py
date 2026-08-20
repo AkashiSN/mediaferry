@@ -105,12 +105,27 @@ class Importer:
             )
 
         published = failed = 0
-        for row in pending:
+        # **進捗の分母は「これから取り込むもの」**。スキップ済みは含めない
+        # （2 度目の取り込みで「29 件中 1 件」と出ると、何も起きていないのに
+        # 止まっているように見える）。
+        total_bytes = sum(row["size_bytes"] for row in pending)
+        done_bytes = 0
+        for index, row in enumerate(pending, start=1):
             if ctx.cancelled():
                 break
-            ctx.heartbeat()
+            progress = {
+                "phase": "copy",
+                "rel_path": row["rel_path"],
+                "file_index": index,
+                "file_count": len(pending),
+                "bytes_done": 0,
+                "bytes_total": row["size_bytes"],
+                "bytes_done_all": done_bytes,
+                "bytes_total_all": total_bytes,
+            }
+            ctx.heartbeat(progress)
             try:
-                self._publish_one(ctx, dirfd, row, profile)
+                self._publish_one(ctx, dirfd, row, profile, progress)
             except PublishAborted, CopyCancelled:
                 # staged より前なので durable なものは残っていない。差し戻す。
                 # キャンセルなら降りる。失効なら失敗として上へ投げる。
@@ -141,6 +156,7 @@ class Importer:
                 ctx.emit("error", f"{row['rel_path']} の取り込みに失敗した: {exc}")
                 continue
             published += 1
+            done_bytes += row["size_bytes"]
             ctx.emit("info", f"{row['rel_path']} を取り込んだ")
 
         outcome = ImportOutcome(published=published, skipped=skipped, failed=failed)
@@ -184,7 +200,12 @@ class Importer:
         return None, resolve
 
     def _publish_one(
-        self, ctx: JobContext, dirfd: int, row: sqlite3.Row, profile: ProfileRef
+        self,
+        ctx: JobContext,
+        dirfd: int,
+        row: sqlite3.Row,
+        profile: ProfileRef,
+        progress: dict[str, object] | None = None,
     ) -> None:
         # **EXIF はステージ済みのファイルから読む**（§9.3 手順 5）。ここでは
         # まだ staging が無いので、値ではなく「読み方」を渡す。
@@ -208,6 +229,8 @@ class Importer:
             (now_iso(), row["id"]),
         )
 
+        base_done = int(progress["bytes_done_all"]) if progress is not None else 0
+
         def write(writer: HashingWriter) -> None:
             fd = open_beneath(dirfd, row["rel_path"])
             last_beat = time.monotonic()
@@ -222,7 +245,12 @@ class Importer:
                         # **バイト数ではなく経過時間で打つ。** 低速なカードや
                         # read が詰まった場合、閾値バイトに達する前にリースが
                         # 切れて全件が中止される。
-                        ctx.heartbeat()
+                        #
+                        # 進捗は同じ UPDATE に相乗りするので、書き込みは増えない。
+                        if progress is not None:
+                            progress["bytes_done"] = writer.size
+                            progress["bytes_done_all"] = base_done + writer.size
+                        ctx.heartbeat(progress)
                         last_beat = time.monotonic()
 
         self._publisher.publish(ctx, request, write)

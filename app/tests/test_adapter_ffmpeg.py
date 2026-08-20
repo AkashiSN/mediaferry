@@ -242,3 +242,26 @@ def test_a_cancelled_merge_raises_and_leaves_no_output(clips, work_dir):
 
 def test_the_tool_version_is_the_first_line_of_ffmpeg_version(clips):
     assert MergeRunner().tool_version().startswith("ffmpeg version")
+
+
+def test_the_concat_route_does_not_map_streams_it_cannot_carry(tmp_path, work_dir):
+    """**実機の DJI はこれで毎回 TS へ落ちていた.**
+
+    concat demuxer は data ストリームを運べず、`-map` に残すと
+    `Cannot map stream #0:4 - unsupported type` で即座に落ちる。TS 経路も同じ
+    ものを落とすので、最初から選ばなければ失うものは無く、**往復を丸ごと省ける**
+    （実機では 74.87 GiB で 14 分かかっていた）。TS 経路は `hvc1` を `hev1` に
+    変えてしまうので、通らずに済むこと自体に価値がある。
+    """
+    if shutil.which("ffmpeg") is None:
+        pytest.skip("ffmpeg が無い")
+    parts = [
+        make_clip(tmp_path / "a.MP4", timecode=True),
+        make_clip(tmp_path / "b.MP4", timecode=True),
+    ]
+    outcome = MergeRunner().merge(
+        parts, streams_for(parts), KEEP, work_dir, "MERGED.MP4", lambda: None, never_cancelled
+    )
+    assert outcome.route == "concat"
+    assert [s["codec_tag_string"] for s in outcome.dropped_by_route] == ["tmcd"]
+    assert MediaProbe().describe(outcome.output_path, "MP4").probe_state == "ok"

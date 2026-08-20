@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from dataclasses import asdict
 from typing import Any
 
@@ -353,6 +354,24 @@ def _job(row) -> dict[str, Any]:  # noqa: ANN001
         "type": row["type"],
         "status": row["status"],
         "created_at": row["created_at"],
+        # 速度と残り時間を画面が出すのに要る（進捗と合わせて平均を取る）。
+        "started_at": row["started_at"],
         "finished_at": row["finished_at"],
         "error": row["error"],
+        # **走っている間だけ入る**（`finish` が落とす）。速度と残り時間は画面が
+        # 2 点の差分から出す —— こちらで持つと、心拍の間隔に依存した値を
+        # 永続化することになる。
+        "progress": _progress(row),
     }
+
+
+def _progress(row) -> dict[str, Any] | None:  # noqa: ANN001
+    raw = row["progress_json"]
+    if not raw:
+        return None
+    try:
+        value = json.loads(raw)
+    except ValueError:
+        # 読めない値で一覧全体を落とさない。進捗は表示のためだけのもの。
+        return None
+    return value if isinstance(value, dict) else None

@@ -93,7 +93,7 @@ def verify(
 ) -> Verification:
     checks = (
         _duration_check(parts, merged),
-        _streams_check(parts, merged, keep),
+        _streams_check(parts, merged, keep, route_dropped),
         _frames_check(parts, merged, keep),
         _size_check(parts, merged, keep, route),
     )
@@ -129,7 +129,19 @@ def _duration_check(parts: Sequence[ProbedFile], merged: ProbedFile) -> Check:
     )
 
 
-def _streams_check(parts: Sequence[ProbedFile], merged: ProbedFile, keep: KeepStreams) -> Check:
+def _streams_check(
+    parts: Sequence[ProbedFile],
+    merged: ProbedFile,
+    keep: KeepStreams,
+    route_dropped: Sequence[dict[str, Any]] = (),
+) -> Check:
+    """**経路が運べなかったものは「消えた」に数えない。**
+
+    TS 経路は `tmcd` を運べない。それは経路の性質であって結合の失敗ではないので、
+    `size` 検査と同じように差し引く（差し引かないと、TS 経路は必ず不合格になる）。
+    ただし**理由を言えるものだけ** —— `route_dropped` に無いストリームが消えたら
+    失敗のまま。
+    """
     signatures = {stream_signature(selected_streams(part.streams, keep)) for part in parts}
     if len(signatures) != 1:
         return Check(
@@ -143,12 +155,19 @@ def _streams_check(parts: Sequence[ProbedFile], merged: ProbedFile, keep: KeepSt
     expected = next(iter(signatures))
     if not expected:
         return Check("streams", FAIL, {"reason": "保持対象のストリームが 1 本も無い"})
-    actual = stream_signature(selected_streams(merged.streams, keep))
-    return Check(
-        "streams",
-        PASS if actual == expected else FAIL,
-        {"expected": [list(s) for s in expected], "actual": [list(s) for s in actual]},
+    carried = tuple(
+        signature
+        for signature in expected
+        if signature not in {stream_signature([stream])[0] for stream in route_dropped}
     )
+    actual = stream_signature(selected_streams(merged.streams, keep))
+    detail: dict[str, Any] = {
+        "expected": [list(s) for s in carried],
+        "actual": [list(s) for s in actual],
+    }
+    if carried != expected:
+        detail["dropped_by_route"] = [list(s) for s in expected if s not in carried]
+    return Check("streams", PASS if actual == carried else FAIL, detail)
 
 
 def _frames_check(parts: Sequence[ProbedFile], merged: ProbedFile, keep: KeepStreams) -> Check:

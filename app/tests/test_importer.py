@@ -179,7 +179,7 @@ def test_the_copy_heartbeats_on_elapsed_time_not_bytes(importing, db, monkeypatc
     monkeypatch.setattr(importer_module, "COPY_CHUNK", 8)
     monkeypatch.setattr(importer_module, "HEARTBEAT_INTERVAL", 0)
     beats = []
-    monkeypatch.setattr(ctx, "heartbeat", lambda: beats.append(1))
+    monkeypatch.setattr(ctx, "heartbeat", lambda progress=None: beats.append(1))
     importer.run(ctx, fd, volume_id, profile)
     # 100 バイトを 8 バイトずつなので、ファイル単位の 1 回より多く打つ
     assert len(beats) > 2
@@ -304,3 +304,37 @@ def test_a_photo_without_exif_falls_back(importing, db, tmp_path):
     importer.run(ctx, fd, volume_id, profile)
     row = db.execute("SELECT * FROM media_file WHERE rel_path LIKE '%PANO_0001%'").fetchone()
     assert row["captured_at_source"] == "mtime"
+
+
+def test_the_copy_reports_where_it_is(importing, db, monkeypatch):
+    """**16 GiB のコピーが無言だと、止まっているのか進んでいるのか分からない.**
+
+    心拍と同じ 1 回の UPDATE に乗せるので、書き込みは増えない。
+    """
+    import json
+
+    importer, ctx, fd, volume_id, profile = importing
+    seen = []
+    real = ctx.heartbeat
+
+    def watching(progress=None):
+        if progress is not None:
+            seen.append(progress)
+        real(progress)
+
+    monkeypatch.setattr(ctx, "heartbeat", watching)
+    monkeypatch.setattr("mediaferry.jobs.importer.HEARTBEAT_INTERVAL", 0)
+    importer.run(ctx, fd, volume_id, profile)
+
+    assert seen, "進捗が 1 度も報告されていない"
+    copying = [p for p in seen if p["phase"] == "copy"]
+    assert copying
+    first = copying[0]
+    assert first["file_count"] == 2
+    assert first["file_index"] >= 1
+    assert first["bytes_total"] > 0
+    assert first["bytes_total_all"] >= first["bytes_total"]
+    assert first["rel_path"]
+    # 心拍と同じ行に乗っている（別の書き込みではない）。
+    stored = json.loads(JobStore(db).get(ctx.job_id)["progress_json"])
+    assert stored["phase"] == "copy"

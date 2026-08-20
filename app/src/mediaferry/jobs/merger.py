@@ -117,14 +117,49 @@ class Merger:
         # **全パートを先に probe する。** 先頭の構成を全体に当てはめると、
         # 保持しない data track の位置が違うパートで別のストリームを選ぶ。
         probed_parts = [self._probed(path, extension) for path in parts]
+
+        # **経路の判断はジョブの記録に残す。** どちらを通ったかは「その出力が
+        # なぜその形なのか」の説明なので、コンテナのログにしか無いと画面から
+        # 追えない（実機で `tmcd` が原因の TS 落ちを、ログを読むまで気づけなかった）。
+        fell_back = False
+
+        def note(message: str) -> None:
+            nonlocal fell_back
+            # note が出るのは TS へ落ちるときだけ（並びが違う場合も TS へ行く）。
+            fell_back = True
+            ctx.emit("warning", message, {"merge_group_id": group_id})
+
+        total_bytes = sum(row["size_bytes"] for row in members)
+
+        def beat() -> None:
+            # **書けた量は work/ を見る。** ffmpeg は別プロセスなので、
+            # 進捗はファイルの育ち方でしか測れない。TS 経路は「各パートの .ts」と
+            # 「結合後の出力」を両方置くので、分母が倍になる。
+            written = sum(
+                path.stat().st_size
+                for path in work.glob("*")
+                if path.suffix.lower() in (".mp4", ".ts")
+            )
+            ctx.heartbeat(
+                {
+                    "phase": "merge",
+                    "rel_path": desired,
+                    "route": "ts" if fell_back else "concat",
+                    "parts": len(parts),
+                    "bytes_done": written,
+                    "bytes_total": total_bytes * (2 if fell_back else 1),
+                }
+            )
+
         outcome = self._runner.merge(
             parts,
             [probed.streams for probed in probed_parts],
             rule.keep_streams,
             work,
             PurePosixPath(desired).name,
-            ctx.heartbeat,
+            beat,
             ctx.cancelled,
+            on_note=note,
         )
 
         verification = verify(

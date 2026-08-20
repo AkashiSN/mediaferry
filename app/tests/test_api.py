@@ -289,3 +289,28 @@ def test_devices_persists_whether_the_match_was_provisional(client, database, fa
     view = client.get("/api/devices").json()["volumes"][0]
     assert view["provisional"] is True, "暫定マッチの筋書きになっていない"
     assert stored_flag(view) is True
+
+
+def test_a_running_job_carries_its_progress(client, api_db=None):
+    """走っているジョブの「いまどこか」を API から見せる（画面が 2 秒ごとに引く）."""
+    import json as json_module
+
+    from mediaferry.db.jobs import JobStore
+
+    conn = client.app.state.mediaferry.database.connect()
+    try:
+        store = JobStore(conn)
+        store.enqueue("import", {})
+        ctx = store.claim_next()
+        ctx.heartbeat({"phase": "copy", "bytes_done": 5, "bytes_total": 10})
+        body = client.get(f"/api/jobs/{ctx.job_id}").json()
+        assert body["progress"]["phase"] == "copy"
+        assert body["progress"]["bytes_done"] == 5
+        listed = {job["id"]: job for job in client.get("/api/jobs").json()["jobs"]}
+        assert listed[ctx.job_id]["progress"]["bytes_total"] == 10
+        # 終わったら消える。
+        store.finish(ctx.job_id, ctx.lease_token, "succeeded")
+        assert client.get(f"/api/jobs/{ctx.job_id}").json()["progress"] is None
+        assert json_module.dumps(body)
+    finally:
+        conn.close()

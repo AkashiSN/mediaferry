@@ -355,3 +355,50 @@ def _clip_with_timecode(path, *, audio_first, seconds=2):
     ]
     subprocess.run(command, check=True, capture_output=True)  # noqa: S603
     return path
+
+
+def test_the_fallback_reason_lands_in_the_job_record(world, db, monkeypatch):
+    """**なぜこの出力がこの形なのか**は、コンテナのログではなくジョブに残す.
+
+    実機では `tmcd` が原因で毎回 TS へ落ちていたのに、画面からは経路名しか
+    見えず、理由は `docker logs` を読むまで分からなかった。
+    """
+    from mediaferry.adapters.ffmpeg import MergeFailed
+
+    merger, ctx, profile, _, group_id = world
+
+    def broken(self, *args, **kwargs):  # noqa: ANN001, ANN202, ARG001
+        raise MergeFailed("ffmpeg が 1 で終了した: Cannot map stream #0:4")
+
+    monkeypatch.setattr("mediaferry.adapters.ffmpeg.MergeRunner._concat_command", broken)
+    result = merger.run(ctx, group_id, "digest-1", profile)
+
+    assert result.route == "ts"
+    messages = [
+        row["message"]
+        for row in db.execute(
+            "SELECT message FROM job_event WHERE job_id = ? AND level = 'warning'", (ctx.job_id,)
+        )
+    ]
+    assert any("TS 経由へ落とす" in message for message in messages)
+    assert any("Cannot map stream" in message for message in messages)
+
+
+def test_the_merge_reports_how_far_it_has_written(world, db, monkeypatch):
+    """結合は 1 時間かかることがある. 無言だと止まっているのか分からない."""
+    import json
+
+    merger, ctx, profile, _, group_id = world
+    seen = []
+    real = ctx.heartbeat
+    monkeypatch.setattr(
+        ctx, "heartbeat", lambda progress=None: (seen.append(progress), real(progress))[1]
+    )
+    merger.run(ctx, group_id, "digest-1", profile)
+
+    merging = [p for p in seen if p and p.get("phase") == "merge"]
+    assert merging, "結合の進捗が 1 度も報告されていない"
+    assert merging[0]["route"] == "concat"
+    assert merging[0]["parts"] == 2
+    assert merging[0]["bytes_total"] > 0
+    assert json.dumps(merging[0])
