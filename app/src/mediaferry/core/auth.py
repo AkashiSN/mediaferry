@@ -36,7 +36,7 @@ def verify_password(stored: str, plain: str) -> bool:
     """
     try:
         return _hasher.verify(stored, plain)
-    except (Argon2Error, ValueError, TypeError):
+    except Argon2Error, ValueError, TypeError:
         return False
 
 

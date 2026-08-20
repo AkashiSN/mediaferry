@@ -129,7 +129,7 @@ class BrokerServer:
                     request, fds = recv_message(conn, max_fds=1)
                 except ConnectionClosed:
                     return
-                except (ProtocolError, TimeoutError, OSError):
+                except ProtocolError, TimeoutError, OSError:
                     with contextlib.suppress(OSError):
                         send_message(conn, _error("bad_request", "malformed request"))
                     return

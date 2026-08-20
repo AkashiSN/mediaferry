@@ -164,7 +164,7 @@ class BrokerClient:
         with self._lock:
             try:
                 reply, fds = self._exchange(payload, expect_fd)
-            except (ProtocolError, OSError):
+            except ProtocolError, OSError:
                 if not self._may_retry(payload):
                     raise
                 # 副作用の無い読み取りだけを、1 度だけ繋ぎ直して再送する。

@@ -83,7 +83,7 @@ class Merger:
         self._repo.claim_for_merge(group_id, expected_digest)
         try:
             return self._merge(ctx, group_id, profile)
-        except (MergeCancelled, PublishCancelled):
+        except MergeCancelled, PublishCancelled:
             # どちらも staged より前。durable なものは残っていないので、
             # グループを detected へ戻して再実行できるようにする。
             self._repo.release(group_id)

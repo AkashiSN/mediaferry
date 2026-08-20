@@ -34,7 +34,7 @@ def blkid_probe(device_node: str) -> dict[str, str]:
             timeout=BLKID_TIMEOUT_SECONDS,
             check=False,
         ).stdout
-    except (OSError, subprocess.TimeoutExpired):
+    except OSError, subprocess.TimeoutExpired:
         return {}
     result: dict[str, str] = {}
     for line in out.splitlines():
@@ -47,7 +47,7 @@ def blkid_probe(device_node: str) -> dict[str, str]:
 def _read_int(path: Path) -> int | None:
     try:
         return int(path.read_text().strip())
-    except (OSError, ValueError):
+    except OSError, ValueError:
         return None
 
 

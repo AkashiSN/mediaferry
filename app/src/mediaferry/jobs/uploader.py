@@ -162,7 +162,7 @@ class Uploader:
                 return self._steps(ctx, client, record, media, profile, revision["id"], progress)
             except ImmichUnavailable as exc:
                 return self._retry_or_fail(ctx, record, exc)
-            except (ImmichAuthFailed, ImmichRedirected, ImmichProtocolError):
+            except ImmichAuthFailed, ImmichRedirected, ImmichProtocolError:
                 # 鍵が違う・向き先がおかしい・応答の形が違う。再試行しても
                 # 変わらないので、ジョブごと止めて人に見せる。送信の途中かも
                 # しれないので、claim は `_guarded` の finally が外す。

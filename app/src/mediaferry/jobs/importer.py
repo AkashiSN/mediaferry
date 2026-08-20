@@ -111,7 +111,7 @@ class Importer:
             ctx.heartbeat()
             try:
                 self._publish_one(ctx, dirfd, row, profile)
-            except (PublishAborted, CopyCancelled):
+            except PublishAborted, CopyCancelled:
                 # staged より前なので durable なものは残っていない。差し戻す。
                 # キャンセルなら降りる。失効なら失敗として上へ投げる。
                 self._conn.execute(

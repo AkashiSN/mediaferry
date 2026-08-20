@@ -166,7 +166,7 @@ def _verification_passed(verification_json: str | None) -> bool:
         return False
     try:
         return json.loads(verification_json).get("passed") is True
-    except (AttributeError, TypeError, ValueError):
+    except AttributeError, TypeError, ValueError:
         return False
 
 

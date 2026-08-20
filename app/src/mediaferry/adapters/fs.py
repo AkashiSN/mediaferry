@@ -57,7 +57,7 @@ def exists_beneath(dirfd: int, rel_path: str) -> bool:
     """dirfd の下にそのパスがあるか. 開けるかどうかで判定する."""
     try:
         fd = open_beneath(dirfd, rel_path)
-    except (OSError, EscapeAttempt):
+    except OSError, EscapeAttempt:
         return False
     os.close(fd)
     return True

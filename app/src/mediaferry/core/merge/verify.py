@@ -260,7 +260,7 @@ def _video_frames(probed: ProbedFile, keep: KeepStreams) -> int | None:
             return None
         try:
             total += int(raw)
-        except (TypeError, ValueError):
+        except TypeError, ValueError:
             return None
     return total
 
@@ -271,7 +271,7 @@ def _bitrate_of(stream: dict[str, Any]) -> float | None:
         return None
     try:
         return float(raw)
-    except (TypeError, ValueError):
+    except TypeError, ValueError:
         return None
 
 
