@@ -343,3 +343,60 @@ def test_the_dashboard_counts_stacks_not_records(secret_env, client, api_db):  #
     )
 
     assert summary["stacked"] == 1
+
+
+def test_requeue_clears_the_stack_result(secret_env, client, api_db):  # noqa: F811
+    """**送り直す前に、前回の結果を捨てる。**
+
+    残すと `unstacked_batch` が拾わず、新しい資産で組み直せない。
+    """
+    from mediaferry.clock import now_iso
+
+    from .test_schema_artifacts import a_media_file
+    from .test_schema_sources import a_profile
+    from .test_schema_uploads import a_destination, an_upload
+
+    profile = a_profile(api_db, slug="requeue-cam")
+    dest = a_destination(api_db, name="requeue-dest")
+    record = an_upload(
+        api_db,
+        dest,
+        a_media_file(api_db, profile),
+        state="complete",
+        destination_revision_id=dest[1],
+        remote_asset_id=None,
+        remote_checked_at=now_iso(),
+        stack_state="skipped",
+        stack_reason="相方が見つからない",
+    )
+
+    assert client.post(f"/api/uploads/{record}/requeue").status_code == 200
+
+    row = api_db.execute(
+        "SELECT stack_state, stack_reason FROM upload_record WHERE id = ?", (record,)
+    ).fetchone()
+    assert row["stack_state"] is None
+    assert row["stack_reason"] is None
+
+
+def test_retry_clears_the_stack_result(secret_env, client, api_db):  # noqa: F811
+    from .test_schema_artifacts import a_media_file
+    from .test_schema_sources import a_profile
+    from .test_schema_uploads import a_destination, an_upload
+
+    profile = a_profile(api_db, slug="retry-cam")
+    dest = a_destination(api_db, name="retry-dest")
+    record = an_upload(
+        api_db,
+        dest,
+        a_media_file(api_db, profile),
+        state="failed",
+        destination_revision_id=dest[1],
+        stack_state="skipped",
+        stack_reason="相方が見つからない",
+    )
+
+    assert client.post(f"/api/uploads/{record}/retry").status_code == 200
+
+    row = api_db.execute("SELECT stack_state FROM upload_record WHERE id = ?", (record,)).fetchone()
+    assert row["stack_state"] is None

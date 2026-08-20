@@ -29,9 +29,12 @@ type SkippedStack = {
 
 type SkippedStacks = { records: SkippedStack[] };
 
+/** 一度に出す件数。**打ち切ったことを黙らない**（下の「ほかにもある」）。 */
+const SKIP_PAGE = 50;
+
 function StackSkips({ destinationId }: { destinationId: string }) {
   const skipped = useQuery<SkippedStacks>(
-    `/uploads?destination_id=${destinationId}&stack_state=skipped`,
+    `/uploads?destination_id=${destinationId}&stack_state=skipped&limit=${SKIP_PAGE}`,
   );
   const records = skipped.data?.records ?? [];
   return (
@@ -45,13 +48,20 @@ function StackSkips({ destinationId }: { destinationId: string }) {
       ) : records.length === 0 ? (
         <p>見送りはありません。</p>
       ) : (
-        <ul>
-          {records.map((record) => (
-            <li key={record.id}>
-              {record.media_file_id}: {record.stack_reason ?? "理由不明"}
-            </li>
-          ))}
-        </ul>
+        <>
+          <ul>
+            {records.map((record) => (
+              <li key={record.id}>
+                {record.media_file_id}: {record.stack_reason ?? "理由不明"}
+              </li>
+            ))}
+          </ul>
+          {records.length === SKIP_PAGE && (
+            <p role="note">
+              先頭 {SKIP_PAGE} 件だけを出しています（ほかにもあります）。
+            </p>
+          )}
+        </>
       )}
     </section>
   );

@@ -170,3 +170,44 @@ def _settings_rows(conn):
 
 def _row(db, record_id):
     return db.execute("SELECT * FROM upload_record WHERE id = ?", (record_id,)).fetchone()
+
+
+def test_a_stacked_record_must_keep_its_remote_asset(db):
+    """**将来の消し忘れを fail-closed にする**（`0016`）.
+
+    スタックは「その `remote_asset_id` を送った結果」なので、ID を消すなら
+    結果も一緒に捨てる。
+    """
+    record = a_complete_record(db)
+    db.execute(
+        "UPDATE upload_record SET stack_state = 'stacked', remote_stack_id = 's' WHERE id = ?",
+        (record,),
+    )
+    with pytest.raises(sqlite3.IntegrityError, match="stack"):
+        db.execute("UPDATE upload_record SET remote_asset_id = NULL WHERE id = ?", (record,))
+
+
+def test_clearing_both_together_is_allowed(db):
+    record = a_complete_record(db)
+    db.execute(
+        "UPDATE upload_record SET stack_state = 'stacked', remote_stack_id = 's' WHERE id = ?",
+        (record,),
+    )
+    db.execute(
+        "UPDATE upload_record SET remote_asset_id = NULL, stack_state = NULL,"
+        " remote_stack_id = NULL WHERE id = ?",
+        (record,),
+    )
+    assert _row(db, record)["stack_state"] is None
+
+
+def test_a_skipped_record_may_lose_its_remote_asset(db):
+    """見送りは「送らなかった」記録なので、資産 ID とは独立."""
+    record = a_complete_record(db)
+    db.execute(
+        "UPDATE upload_record SET stack_state = 'skipped', stack_reason = '相方が居ない'"
+        " WHERE id = ?",
+        (record,),
+    )
+    db.execute("UPDATE upload_record SET remote_asset_id = NULL WHERE id = ?", (record,))
+    assert _row(db, record)["stack_state"] == "skipped"

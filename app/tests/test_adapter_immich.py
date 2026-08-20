@@ -372,3 +372,19 @@ def test_the_stack_id_itself_is_validated(client, immich):
     immich.key_as_stack_id = True
     with pytest.raises(ImmichProtocolError, match="識別子"):
         client.create_stack(["asset-1", "asset-2"])
+
+
+def test_an_asset_response_for_another_id_is_a_protocol_error(client, immich):
+    """**要求した資産と応答が対応することまで見る。**
+
+    A を読んで C が返ると、こちらは C のスタックを自分の組と取り違える。
+    """
+    immich.swap_asset_ids = True
+    with pytest.raises(ImmichProtocolError, match="要求"):
+        client.asset("asset-1")
+
+
+def test_an_explicit_null_stack_is_not_a_stack(client, immich):
+    """実 Immich はスタックに入っていない資産へ `"stack": null` を返す."""
+    immich.null_stack_field = True
+    assert client.asset("asset-1").stack_id is None

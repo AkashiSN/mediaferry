@@ -196,6 +196,22 @@ class World:
     def cancel(self):
         self.db.execute("UPDATE job SET status = 'cancelling'")
 
+    def cancel_before_the_next_row(self):
+        """**行頭の確認の直後**にキャンセルを commit する（行間 heartbeat の窓）."""
+        state = {"seen": 0}
+        original = self.ctx.cancelled
+
+        def hooked():
+            # **確認が偽を返した後**に commit する（先に cancel すると、その確認
+            # 自身が真を返して窓にならない）。
+            answer = original()
+            state["seen"] += 1
+            if state["seen"] == 2:
+                self.cancel()
+            return answer
+
+        self.ctx.cancelled = hooked
+
     def expire_lease(self):
         self.db.execute("UPDATE job SET lease_expires_at = '2000-01-01T00:00:00+00:00'")
 
@@ -745,3 +761,90 @@ def test_a_crash_before_the_records_were_written_is_recovered(world):
 
     assert not [path for method, path in world.immich.requests if method == "PUT"]
     assert {row["stack_state"] for row in world.rows().values()} == {"stacked"}
+
+
+def test_a_cancel_between_the_row_check_and_the_heartbeat_is_not_a_failure(world, monkeypatch):
+    """**利用者が押したキャンセルを失敗として記録しない**（§9.9）.
+
+    行頭の `cancelled()` が偽を返した直後にキャンセルが commit されると、
+    行間の heartbeat が `LeaseLost` を投げる。受け口の外に置くと、`JobRunner` の
+    汎用経路がジョブを `failed` にする。
+    """
+    monkeypatch.setattr("mediaferry.core.lease_pulse.HEARTBEAT_INTERVAL", 0)
+    world.cancel_before_the_next_row()
+
+    outcome = world.run()
+
+    assert outcome.stacked == 0
+    assert world.immich.stacks == {}
+
+
+def test_a_slow_lookup_during_recovery_does_not_lose_the_lease(world, monkeypatch):
+    """**回収の経路の GET も心拍で守る。**
+
+    既存スタックを引く `GET /api/stacks` だけ囲み忘れると、正常な長い応答で
+    直後の `mark_stacked` がリースを失い、ジョブが失敗になる。
+    """
+    monkeypatch.setattr("mediaferry.core.lease_pulse.HEARTBEAT_INTERVAL", 0.05)
+    world.immich.stacks["stack-9"] = {
+        "primary": world.assets["IMG_1234.JPG"],
+        "assets": list(world.assets.values()),
+    }
+    world.immich.stack_lookup_delay_seconds = 1.2
+    world.with_a_short_lease(seconds=1)
+
+    assert world.run().stacked == 1
+
+
+def test_members_that_disagree_on_the_primary_are_left_alone(world):
+    """資産ごとに別々の primary を名乗る相手には触らない."""
+    world.immich.stacks["stack-9"] = {
+        "primary": world.assets["IMG_1234.JPG"],
+        "assets": list(world.assets.values()),
+    }
+    world.immich.disagree_on_the_primary = True
+
+    outcome = world.run()
+
+    assert outcome.stacked == 0
+    assert ("POST", "/api/stacks") not in world.immich.requests
+    # **引きにさえ行かない**（どの primary を信じるか決められない）。
+    assert not [path for _, path in world.immich.requests if path.startswith("/api/stacks?")]
+
+
+def test_members_swapped_by_the_peer_are_refused(world):
+    """**相手が要求と違う資産 ID を返したら、その応答で組を作らない。**"""
+    world.immich.swap_asset_ids = True
+
+    outcome = world.run()
+
+    assert outcome.stacked == 0
+    assert world.immich.stacks == {}
+
+
+def test_members_changed_after_the_put_are_refused(world):
+    """`PUT` と読み直しの間に member が差し替わっても、`stacked` と書かない."""
+    world.immich.stacks["stack-9"] = {
+        "primary": world.assets["IMG_1234.CR2"],
+        "assets": list(world.assets.values()),
+    }
+    world.immich.change_members_after_the_put = True
+
+    outcome = world.run()
+
+    assert outcome.stacked == 0
+    assert "stacked" not in {row["stack_state"] for row in world.rows().values()}
+
+
+def test_a_lookup_that_returns_another_stack_id_is_refused(world):
+    """**引けた id が、資産が名乗った id と違ったら採用しない。**"""
+    world.immich.stacks["stack-9"] = {
+        "primary": world.assets["IMG_1234.JPG"],
+        "assets": list(world.assets.values()),
+    }
+    world.immich.lookup_returns_another_stack_id = True
+
+    outcome = world.run()
+
+    assert outcome.stacked == 0
+    assert "stacked" not in {row["stack_state"] for row in world.rows().values()}

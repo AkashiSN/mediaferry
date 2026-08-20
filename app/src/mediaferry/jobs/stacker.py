@@ -88,8 +88,11 @@ class Stacker:
                     cursor = row["id"]
                     if ctx.cancelled():
                         return StackOutcome(stacked, skipped, deferred)
-                    last_beat = self._beat(ctx, last_beat)
                     try:
+                        # **受け口の中で打つ。** 行頭の確認が偽を返した直後に
+                        # キャンセルが commit されると、ここが `LeaseLost` を投げる。
+                        # 外に置くと `JobRunner` の汎用経路がジョブを失敗にする。
+                        last_beat = self._beat(ctx, last_beat)
                         result = self._one(ctx, client, revision, epoch, row)
                     except DestinationUnusable as exc:
                         ctx.emit("warning", f"宛先の障害でスタックを中断した: {exc}")
@@ -261,7 +264,7 @@ class Stacker:
         if existing == {None}:
             stack = self._create(ctx, client, members, decision, revision, epoch, profile)
         else:
-            stack = self._adopted(client, assets, members)
+            stack = self._adopted(ctx, client, assets, decision)
             if stack is None:
                 # **理由は「いま処理している行」に付ける。** 組の先頭に付けると、
                 # 相方を処理したときに自分ではない行が決着してしまう。
@@ -278,8 +281,16 @@ class Stacker:
             self._guard(ctx, members, destination_id, epoch, revision, profile.revision_id)
             with_lease_pulse(ctx, lambda: client.set_stack_primary(stack.stack_id, wanted_primary))
             # **読み直して確かめる。** 応答を信じるのではなく、相手の現在の姿を見る。
+            # `PUT` と読み直しの間に member を差し替えられることもあるので、
+            # **id・primary・集合の 3 つ**を見る。
             moved = with_lease_pulse(ctx, lambda: client.stack_by_primary(wanted_primary))
-            if moved is None or moved.stack_id != stack.stack_id:
+            ours = {member.remote_asset_id for member in decision.members}
+            if (
+                moved is None
+                or moved.stack_id != stack.stack_id
+                or moved.primary_asset_id != wanted_primary
+                or set(moved.asset_ids) != ours
+            ):
                 raise ImmichProtocolError("primary の差し替えが反映されていない")
         self._uploads.mark_stacked(
             ctx, members, destination_id, epoch, profile.revision_id, stack.stack_id
@@ -303,23 +314,39 @@ class Stacker:
         asset_ids = [member.remote_asset_id for member in decision.members]
         return with_lease_pulse(ctx, lambda: client.create_stack(asset_ids))
 
-    def _adopted(self, client: ImmichClient, assets, members) -> RemoteStack | None:  # noqa: ANN001
+    def _adopted(
+        self,
+        ctx: JobContext,
+        client: ImmichClient,
+        assets,  # noqa: ANN001 - Sequence[RemoteAsset]
+        decision: Group,
+    ) -> RemoteStack | None:
         """既にスタックがある場合に、**それが我々の組そのものか**を確かめる.
 
         一致すれば「既にできている」として記録する（**中断からの回収経路**）。
         一致しなければ触らない —— 利用者が手で作った組を作り直さない。
+
+        **見るのはローカルの組（`decision`）との一致。** 相手の応答から作った
+        集合どうしを比べると、相手が値を選べる場面で取り違える。
         """
+        ours = {member.remote_asset_id for member in decision.members}
         stack_ids = {asset.stack_id for asset in assets}
         if len(stack_ids) != 1 or None in stack_ids:
             # 一部だけスタック済み、または別々のスタック。
             return None
-        ours = {asset.asset_id for asset in assets}
-        primary = next(iter({asset.stack_primary_asset_id for asset in assets}))
+        primaries = {asset.stack_primary_asset_id for asset in assets}
+        if len(primaries) != 1:
+            # **資産ごとに別々の primary を名乗る相手には触らない。**
+            return None
+        primary = next(iter(primaries))
         if primary not in ours:
             # 主資産が組の外にある。**引く手がかりが無いので触らない。**
             return None
-        found = client.stack_by_primary(primary)
-        if found is None or set(found.asset_ids) != ours:
+        found = with_lease_pulse(ctx, lambda: client.stack_by_primary(primary))
+        if found is None or found.stack_id != next(iter(stack_ids)):
+            # 引けた id が、資産が名乗っていた id と違う。
+            return None
+        if set(found.asset_ids) != ours:
             return None
         return found
 

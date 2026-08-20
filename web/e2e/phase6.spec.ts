@@ -53,9 +53,10 @@ test("RAW+JPEG が 1 スタックになり、見送りの理由も画面に出�
   const pair = page.getByRole("checkbox", { name: /IMG_0003\.(JPG|CR2) を選ぶ$/ });
   await expect(pair).toHaveCount(2, { timeout: 60_000 });
 
-  // 4. 2 枚を送る。
+  // 4. 2 枚と、**組にならない 1 枚**（相方の無い JPG）を送る。
   await pair.nth(0).check();
   await pair.nth(1).check();
+  await page.getByRole("checkbox", { name: /IMG_0001\.JPG を選ぶ$/ }).check();
   await page.getByRole("checkbox", { name: "immich-1" }).check();
   await page.getByRole("button", { name: /送信する/ }).click();
   await expect(page.getByRole("dialog")).toBeVisible();
@@ -79,9 +80,16 @@ test("RAW+JPEG が 1 スタックになり、見送りの理由も画面に出�
   };
   await expect.poll(membersOfTheStack, { timeout: 60_000 }).toBe(2);
 
-  // 6. ダッシュボードに組の数が出る。
+  // 6. **束ねられなかった 1 枚は、理由が宛先の画面に出る。**
+  //    「対象外のときだけ出す」形にしないので、文言まで当てる（Phase 5 の教訓）。
+  await page.getByRole("navigation").getByRole("link", { name: "転送先" }).click();
+  await expect(page.getByText(/相方が見つからない/)).toBeVisible({ timeout: 30_000 });
+
+  // 7. ダッシュボードに組の数と見送りの件数が出る。
   await page.getByRole("navigation").getByRole("link", { name: "ダッシュボード" }).click();
-  await expect(page.getByRole("row", { name: /immich-1/ })).toContainText("1 組");
+  const row = page.getByRole("row", { name: /immich-1/ });
+  await expect(row).toContainText("1 組");
+  await expect(row).toContainText("見送り 1 件");
 
   expect(crashes).toEqual([]);
 });

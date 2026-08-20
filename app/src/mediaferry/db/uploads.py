@@ -696,7 +696,13 @@ class UploadRepository:
             for stamp in stamps:
                 updated = self._conn.execute(
                     "UPDATE upload_record SET remote_asset_id = ?, remote_is_trashed = ?,"
-                    " remote_checked_at = ?, updated_at = ?"
+                    " remote_checked_at = ?, updated_at = ?,"
+                    # **資産 ID が変わったらスタックの結果を未評価へ戻す**（§9.11）。
+                    # スタックは「その `remote_asset_id` を送った結果」なので、
+                    # 消滅や別 ID への差し替えで現在の姿を表さなくなる。
+                    " stack_state = CASE WHEN remote_asset_id IS ? THEN stack_state END,"
+                    " remote_stack_id = CASE WHEN remote_asset_id IS ? THEN remote_stack_id END,"
+                    " stack_reason = CASE WHEN remote_asset_id IS ? THEN stack_reason END"
                     " WHERE id = ? AND state = 'complete'"
                     "   AND remote_asset_id IS ? AND remote_checked_at IS ?",
                     (
@@ -704,6 +710,9 @@ class UploadRepository:
                         stamp.is_trashed,
                         checked_at,
                         now_iso(),
+                        stamp.asset_id,
+                        stamp.asset_id,
+                        stamp.asset_id,
                         stamp.record_id,
                         stamp.expect_asset_id,
                         stamp.expect_checked_at,
@@ -723,8 +732,22 @@ class UploadRepository:
         with immediate(self._conn):
             self._conn.execute(
                 "UPDATE upload_record SET remote_asset_id = ?, remote_is_trashed = ?,"
-                " remote_checked_at = ?, updated_at = ? WHERE id = ? AND state = 'complete'",
-                (asset_id, is_trashed, checked_at, now_iso(), record_id),
+                " remote_checked_at = ?, updated_at = ?,"
+                # 資産 ID が変わったらスタックの結果を未評価へ戻す（上と同じ理由）。
+                " stack_state = CASE WHEN remote_asset_id IS ? THEN stack_state END,"
+                " remote_stack_id = CASE WHEN remote_asset_id IS ? THEN remote_stack_id END,"
+                " stack_reason = CASE WHEN remote_asset_id IS ? THEN stack_reason END"
+                " WHERE id = ? AND state = 'complete'",
+                (
+                    asset_id,
+                    is_trashed,
+                    checked_at,
+                    now_iso(),
+                    asset_id,
+                    asset_id,
+                    asset_id,
+                    record_id,
+                ),
             )
 
     def stamp_remote_datetime(
@@ -959,14 +982,17 @@ class UploadRepository:
         旧向き先が生きていれば成功してしまう。
         """
         ctx.assert_lease()
+        # **`claim_next` と同じ安全条件を見る。** 第 2 パスは `complete` を扱うので
+        # claim を通らない —— ここで見なければ、無効にした宛先や保管した宛先へ
+        # `POST` / `PUT` を出す（`rename_or_toggle` と `archive` は epoch を進めない）。
         current = self._conn.execute(
             "SELECT r.target_epoch AS epoch FROM upload_destination d"
             " JOIN destination_revision r ON r.id = d.current_revision_id"
-            " WHERE d.id = ?",
+            " WHERE d.id = ? AND d.enabled = 1 AND d.archived_at IS NULL",
             (destination_id,),
         ).fetchone()
         if current is None or current["epoch"] != target_epoch:
-            raise DestinationChanged("宛先の向き先が変わった")
+            raise DestinationChanged("宛先が使えない（向き先が変わった・無効・保管済み）")
         profile = self._conn.execute(
             "SELECT 1 FROM device_profile"
             " WHERE id = (SELECT profile_id FROM profile_revision WHERE id = ?)"

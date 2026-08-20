@@ -282,6 +282,10 @@ class ImmichClient:
         checked = self._identifier(asset_id, "GET /api/assets の asset id")
         body = _as_object(self._request("GET", f"/api/assets/{checked}"), "GET /api/assets")
         returned = self._identifier(_required_str(body, "id", "GET /api/assets"), "GET /api/assets")
+        # **要求した資産と応答が対応することまで見る。** ここを見ないと、相手が
+        # 別の資産を返したときに、その資産のスタックをこちらの組と取り違える。
+        if returned != checked:
+            raise ImmichProtocolError("GET /api/assets が要求と違う資産を返した")
         exif = body.get("exifInfo")
         when = exif.get("dateTimeOriginal") if isinstance(exif, dict) else None
         stack_id, stack_primary = self._stack_field(body, "GET /api/assets")
@@ -296,9 +300,10 @@ class ImmichClient:
     def _stack_field(self, body: dict[str, Any], label: str) -> tuple[str | None, str | None]:
         """`AssetResponseDto.stack` を読む.
 
-        **「キーが無い」と「形が違う」を分ける。** 前者は `stack` を知らない版の
-        相手なので `None`。後者を黙って `None` にすると、**スタック済みの資産を
-        「入っていない」と読んで作り直す**。
+        **「無い」と「形が違う」を分ける。** キーが無い（`stack` を知らない版）のも
+        `null`（スタックに入っていない、実 Immich の正規形）も `None` として扱う。
+        **形が違うものを黙って `None` にはしない** —— スタック済みの資産を
+        「入っていない」と読んで作り直すことになる。
         """
         stack = body.get("stack")
         if stack is None:

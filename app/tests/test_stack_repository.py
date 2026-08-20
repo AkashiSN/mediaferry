@@ -374,3 +374,110 @@ def _advance_profile(db, revision_id):
 
 def _expire_lease(db):
     db.execute("UPDATE job SET lease_expires_at = '2000-01-01T00:00:00+00:00'")
+
+
+def test_the_guard_refuses_a_disabled_destination(world, db):
+    """**claim を使わない経路にも、同じ安全条件が要る。**
+
+    `claim_next` は `enabled = 1 AND archived_at IS NULL` を見る。第 2 パスは
+    `complete` を扱うので claim を通らない —— guard が代わりに見なければ、
+    無効にした宛先へ `POST` / `PUT` を出す。
+    """
+    repo, ctx, destination_id, revision, _ = world
+    members = list(rows(db).values())
+    db.execute("UPDATE upload_destination SET enabled = 0 WHERE id = ?", (destination_id,))
+    with pytest.raises(StackGroupChanged, match="宛先"):
+        repo.guard_stack_group(ctx, members, destination_id, EPOCH, revision)
+
+
+def test_the_guard_refuses_an_archived_destination(world, db):
+    """**`archived_at` だけを見る**（`enabled` は触らない）.
+
+    現行の `archive()` は `enabled = 0` も立てるので、実運用ではどちらの条件でも
+    止まる。ここで条件を分けて見るのは、`claim_next` と同じ安全条件を保つため
+    —— 将来「保管するが無効にしない」書き手ができても閉じている。
+    """
+    repo, ctx, destination_id, revision, _ = world
+    members = list(rows(db).values())
+    db.execute(
+        "UPDATE upload_destination SET archived_at = ? WHERE id = ?",
+        (now_iso(), destination_id),
+    )
+    with pytest.raises(StackGroupChanged, match="宛先"):
+        repo.guard_stack_group(ctx, members, destination_id, EPOCH, revision)
+
+
+def test_marking_refuses_a_disabled_destination(world, db):
+    """記録の側も同じ条件（片方だけ弱くすると抜け道になる）."""
+    repo, ctx, destination_id, revision, records = world
+    members = list(rows(db).values())
+    db.execute("UPDATE upload_destination SET enabled = 0 WHERE id = ?", (destination_id,))
+    with pytest.raises(StackGroupChanged):
+        repo.mark_stacked(ctx, members, destination_id, EPOCH, revision, "stack-1")
+    assert rows(db)[records["JPG"]]["stack_state"] is None
+
+
+def test_a_changed_remote_asset_id_reopens_the_stack(world, db):
+    """**スタックは「その `remote_asset_id` を送った結果」。**
+
+    再確認で資産が消えた（`NULL`）／別 ID になったら、その結果はもう現在の姿を
+    表さない。3 列を未評価へ戻さないと、`unstacked_batch` が拾わず、旧スタックを
+    現在の結果として画面に出し続ける。
+    """
+    from mediaferry.db.uploads import Stamp
+
+    repo, ctx, destination_id, revision, records = world
+    repo.mark_stacked(ctx, list(rows(db).values()), destination_id, EPOCH, revision, "stack-1")
+    record = rows(db)[records["JPG"]]
+
+    repo.stamp_many(
+        ctx,
+        [
+            Stamp(
+                record_id=record["id"],
+                asset_id=None,
+                is_trashed=0,
+                expect_asset_id=record["remote_asset_id"],
+                expect_checked_at=record["remote_checked_at"],
+            )
+        ],
+        now_iso(),
+    )
+
+    after = rows(db)[records["JPG"]]
+    assert after["stack_state"] is None
+    assert after["remote_stack_id"] is None
+
+
+def test_an_unchanged_remote_asset_id_keeps_the_stack(world, db):
+    """同じ ID を再確認しただけなら、結果は現在の姿のまま."""
+    from mediaferry.db.uploads import Stamp
+
+    repo, ctx, destination_id, revision, records = world
+    repo.mark_stacked(ctx, list(rows(db).values()), destination_id, EPOCH, revision, "stack-1")
+    record = rows(db)[records["JPG"]]
+
+    repo.stamp_many(
+        ctx,
+        [
+            Stamp(
+                record_id=record["id"],
+                asset_id=record["remote_asset_id"],
+                is_trashed=0,
+                expect_asset_id=record["remote_asset_id"],
+                expect_checked_at=record["remote_checked_at"],
+            )
+        ],
+        now_iso(),
+    )
+
+    assert rows(db)[records["JPG"]]["stack_state"] == "stacked"
+
+
+def test_stamp_remote_also_reopens_the_stack(world, db):
+    repo, ctx, destination_id, revision, records = world
+    repo.mark_stacked(ctx, list(rows(db).values()), destination_id, EPOCH, revision, "stack-1")
+
+    repo.stamp_remote(records["JPG"], "another-asset", 0, now_iso())
+
+    assert rows(db)[records["JPG"]]["stack_state"] is None

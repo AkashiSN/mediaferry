@@ -81,7 +81,10 @@ def retry_upload(
     with immediate(conn):
         updated = conn.execute(
             "UPDATE upload_record SET state = 'pending', claim_job_id = NULL,"
-            " claim_token = NULL, claim_expires_at = NULL, updated_at = ?"
+            " claim_token = NULL, claim_expires_at = NULL, updated_at = ?,"
+            # **送り直す前に前回の結果を捨てる**（§9.11）。残すと第 2 パスが
+            # 拾わず、新しい資産で組み直せない。
+            " stack_state = NULL, remote_stack_id = NULL, stack_reason = NULL"
             " WHERE id = ? AND state = 'failed' AND invalidated_at IS NULL",
             (now_iso(), record_id),
         )
@@ -112,7 +115,10 @@ def requeue_upload(
     with immediate(conn):
         updated = conn.execute(
             "UPDATE upload_record SET state = 'pending', remote_is_trashed = NULL,"
-            " updated_at = ? WHERE id = ? AND state = 'complete'"
+            " updated_at = ?,"
+            # 送り直す前に前回の結果を捨てる（上と同じ理由）。
+            " stack_state = NULL, remote_stack_id = NULL, stack_reason = NULL"
+            " WHERE id = ? AND state = 'complete'"
             "   AND remote_asset_id IS NULL AND remote_checked_at IS NOT NULL"
             "   AND invalidated_at IS NULL",
             (now_iso(), record_id),

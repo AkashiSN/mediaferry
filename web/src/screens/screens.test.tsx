@@ -852,7 +852,9 @@ describe("スタックの結果（§9.11）", () => {
 
     await waitFor(() =>
       expect(
-        calls.some((call) => call.path === "/uploads?destination_id=d1&stack_state=skipped"),
+        calls.some(
+          (call) => call.path === "/uploads?destination_id=d1&stack_state=skipped&limit=50",
+        ),
       ).toBe(true),
     );
   });
@@ -894,5 +896,48 @@ describe("スタックの結果（§9.11）", () => {
     expect(row).toHaveTextContent("2");
     expect(row).toHaveTextContent("1");
     expect(await screen.findByRole("columnheader", { name: "スタック" })).toBeInTheDocument();
+  });
+});
+
+describe("見送りの打ち切り", () => {
+  const destinations = {
+    destinations: [{ id: "d1", name: "home", enabled: true, base_url: "http://immich.invalid" }],
+  };
+
+  it("打ち切ったことを黙らない", async () => {
+    // **201 件目以降が「存在しない」ように見えるのを避ける。**
+    const records = Array.from({ length: 50 }, (_, index) => ({
+      id: `u${index}`,
+      media_file_id: `m${index}`,
+      stack_state: "skipped",
+      stack_reason: "相方が見つからない",
+    }));
+    stubApi({ "/destinations": destinations, "/uploads": { records } });
+
+    render(
+      <MemoryRouter>
+        <DestinationsScreen />
+      </MemoryRouter>,
+    );
+
+    expect(await screen.findByText(/ほかにもあります/)).toBeInTheDocument();
+  });
+
+  it("収まっているときは何も言わない", async () => {
+    stubApi({
+      "/destinations": destinations,
+      "/uploads": {
+        records: [{ id: "u1", media_file_id: "m1", stack_reason: "相方が見つからない" }],
+      },
+    });
+
+    render(
+      <MemoryRouter>
+        <DestinationsScreen />
+      </MemoryRouter>,
+    );
+
+    await screen.findByText(/相方が見つからない/);
+    expect(screen.queryByText(/ほかにもあります/)).toBeNull();
   });
 });
