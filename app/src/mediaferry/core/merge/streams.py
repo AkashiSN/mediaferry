@@ -40,15 +40,24 @@ def selected_streams(streams: Sequence[dict[str, Any]], keep: KeepStreams) -> li
 
 
 def stream_signature(streams: Sequence[dict[str, Any]]) -> tuple[tuple[str, str, str], ...]:
-    """本数と codec の一致を比べるための署名."""
+    """本数と codec の一致を比べるための署名.
+
+    **欠けた値と `None` を同じに扱う。** ffprobe は持たない欄を落とし、
+    `stream_summary` は `None` で埋める。片方を `"None"` にすると、要約と生の
+    ストリームで署名が食い違い、経路が落としたものの差し引きが黙って効かなくなる。
+    """
     return tuple(
         (
-            str(s.get("codec_type", "")),
-            str(s.get("codec_name", "")),
-            str(s.get("codec_tag_string", "")),
+            _text(s.get("codec_type")),
+            _text(s.get("codec_name")),
+            _text(s.get("codec_tag_string")),
         )
         for s in streams
     )
+
+
+def _text(value: Any) -> str:
+    return "" if value is None else str(value)
 
 
 def map_arguments(streams: Sequence[dict[str, Any]]) -> list[str]:

@@ -13,6 +13,7 @@ inconclusive を返し、**inconclusive は合否に使わない**。
 from __future__ import annotations
 
 import json
+from collections import Counter
 from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Any
@@ -155,19 +156,28 @@ def _streams_check(
     expected = next(iter(signatures))
     if not expected:
         return Check("streams", FAIL, {"reason": "保持対象のストリームが 1 本も無い"})
-    carried = tuple(
-        signature
-        for signature in expected
-        if signature not in {stream_signature([stream])[0] for stream in route_dropped}
-    )
-    actual = stream_signature(selected_streams(merged.streams, keep))
+    # 差し引きは要約（`stream_summary`）の形で来る。正規化は `stream_signature`
+    # が引き受ける（欠けた値と `None` を同じに扱う）。
+    excused = Counter(stream_signature([stream])[0] for stream in route_dropped)
+    carried = Counter(expected) - excused
+    actual = Counter(stream_signature(selected_streams(merged.streams, keep)))
+    # **運べなかったと記録したものが出力に在っても失敗ではない。** concat 経路は
+    # `tmcd` を `-map` しないが、mp4 muxer がコンテナのメタデータから作り直す
+    # （実機で確認）。見るのは「保つはずのものが足りないか」と「期待に無いものが
+    # 増えたか」の 2 つ。
+    missing = carried - actual
+    unexpected = actual - Counter(expected)
     detail: dict[str, Any] = {
-        "expected": [list(s) for s in carried],
-        "actual": [list(s) for s in actual],
+        "expected": [list(s) for s in expected],
+        "actual": [list(s) for s in sorted(actual.elements())],
     }
-    if carried != expected:
-        detail["dropped_by_route"] = [list(s) for s in expected if s not in carried]
-    return Check("streams", PASS if actual == carried else FAIL, detail)
+    if excused:
+        detail["excused_by_route"] = [list(s) for s in sorted(excused.elements())]
+    if missing:
+        detail["missing"] = [list(s) for s in sorted(missing.elements())]
+    if unexpected:
+        detail["unexpected"] = [list(s) for s in sorted(unexpected.elements())]
+    return Check("streams", FAIL if missing or unexpected else PASS, detail)
 
 
 def _frames_check(parts: Sequence[ProbedFile], merged: ProbedFile, keep: KeepStreams) -> Check:

@@ -162,7 +162,9 @@ class JobStore:
         row = self._conn.execute(
             "UPDATE job SET"
             " status = CASE WHEN status = 'cancelling' THEN 'cancelled' ELSE 'succeeded' END,"
-            " finished_at = ?, lease_token = NULL, lease_expires_at = NULL"
+            # 終わったジョブの「いま何をしているか」は無い。**正常終了はこちらを
+            # 通る**ので、`finish` だけ落としても画面には残り続ける。
+            " finished_at = ?, lease_token = NULL, lease_expires_at = NULL, progress_json = NULL"
             " WHERE id = ? AND lease_token = ? AND status IN ('running', 'cancelling')"
             " RETURNING status",
             (iso(utcnow()), job_id, token),

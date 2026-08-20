@@ -230,3 +230,16 @@ def test_finishing_clears_the_progress(db):
     ctx.heartbeat({"phase": "copy", "bytes_done": 5})
     store.finish(ctx.job_id, ctx.lease_token, "succeeded")
     assert store.get(ctx.job_id)["progress_json"] is None
+
+
+def test_the_normal_finish_also_clears_the_progress(db):
+    """**正常終了は `finish` ではなく `finish_claimed` を通る**（`runner.py`）.
+
+    実機で、完了したジョブに「結合中 …」が残り続けて気づいた。
+    """
+    store = JobStore(db)
+    store.enqueue("merge", {})
+    ctx = store.claim_next()
+    ctx.heartbeat({"phase": "merge", "bytes_done": 5})
+    assert store.finish_claimed(ctx.job_id, ctx.lease_token) == "succeeded"
+    assert store.get(ctx.job_id)["progress_json"] is None

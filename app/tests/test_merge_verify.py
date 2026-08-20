@@ -331,3 +331,89 @@ def test_a_stream_that_vanished_without_a_reason_still_fails():
     """経路のせいだと言えないなら、消えたことは失敗のまま."""
     parts = [a_part(extra=[TMCD]), a_part(extra=[TMCD])]
     assert verdicts(verify(parts, a_merged(), KEEP, "concat"))["streams"] == "fail"
+
+
+def test_the_summary_shape_of_a_dropped_stream_still_matches():
+    """**差し引きは `stream_summary` を通した形で来る.**
+
+    アダプタが記録するのは要約（`codec_name` は `None` のことがある）で、
+    パート側の生のストリームは欠けた値を `""` として扱う。正規化が食い違うと
+    差し引きが黙って効かなくなる —— 実機の検証結果に `tmcd` が残っていて
+    気づいた（同じ辞書を両側に渡す試験では一致してしまう）。
+    """
+    from mediaferry.core.merge.streams import stream_summary
+
+    part_stream = {"index": 4, "codec_type": "data", "codec_tag_string": "tmcd"}
+    parts = [a_part(extra=[part_stream]), a_part(extra=[part_stream])]
+    dropped = [stream_summary(part_stream)]
+    assert (
+        verdicts(verify(parts, a_merged(), KEEP, "ts", route_dropped=dropped))["streams"] == "pass"
+    )
+
+
+def test_a_route_dropped_stream_that_survived_is_not_a_failure():
+    """concat 経路は `tmcd` を `-map` しないが、mp4 muxer が作り直す.
+
+    **運べなかったと記録したものが出力に在っても、失敗ではない**（実機で確認）。
+    """
+    part_stream = {"index": 4, "codec_type": "data", "codec_tag_string": "tmcd"}
+    parts = [a_part(extra=[part_stream]), a_part(extra=[part_stream])]
+    merged = a_merged(
+        streams=[
+            {
+                "index": 0,
+                "codec_type": "video",
+                "codec_name": "hevc",
+                "codec_tag_string": "hvc1",
+                "bit_rate": "79924667",
+                "nb_frames": "89999",
+            },
+            {
+                "index": 1,
+                "codec_type": "audio",
+                "codec_name": "aac",
+                "codec_tag_string": "mp4a",
+                "bit_rate": "317374",
+            },
+            {"index": 2, "codec_type": "data", "codec_tag_string": "tmcd"},
+        ]
+    )
+    result = verify(parts, merged, KEEP, "concat", route_dropped=[stream_summary_of(part_stream)])
+    assert verdicts(result)["streams"] == "pass"
+
+
+def test_a_stream_that_appeared_from_nowhere_fails():
+    """期待に無いものが増えているのは、選択が効いていない証拠."""
+    merged = a_merged(
+        streams=[
+            {
+                "index": 0,
+                "codec_type": "video",
+                "codec_name": "hevc",
+                "codec_tag_string": "hvc1",
+                "bit_rate": "79924667",
+                "nb_frames": "89999",
+            },
+            {
+                "index": 1,
+                "codec_type": "audio",
+                "codec_name": "aac",
+                "codec_tag_string": "mp4a",
+                "bit_rate": "317374",
+            },
+            {
+                "index": 2,
+                "codec_type": "audio",
+                "codec_name": "aac",
+                "codec_tag_string": "mp4a",
+                "bit_rate": "317374",
+            },
+        ]
+    )
+    assert verdicts(verify([a_part(), a_part()], merged, KEEP, "concat"))["streams"] == "fail"
+
+
+def stream_summary_of(stream):
+    from mediaferry.core.merge.streams import stream_summary
+
+    return stream_summary(stream)
