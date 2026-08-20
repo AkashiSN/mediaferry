@@ -1,12 +1,14 @@
-# Phase 0 の実測専用。本番構成は compose.yaml を参照。
+# **接続元の UID による拒否が、このホストで効くかを確かめる。**
+# 本番構成は ../compose.yaml を参照（これは検証専用）。
 #
 # 本番と同じ権限条件で測る。app を root で動かすと SO_PEERCRED も
 # ソケットの GID も検証されず、本番でだけ接続できない事態になる。
 #
-# 使い方:
-#   docker compose -f compose.spike.yaml up --build -d mountd
-#   docker compose -f compose.spike.yaml run --rm app            # 通るべき
-#   docker compose -f compose.spike.yaml run --rm app-wrong-uid  # 弾かれるべき
+# 使い方（**リポジトリの根から**。build context が `.` のため）:
+#   docker compose -f tools/compose.broker-check.yaml up --build -d mountd
+#   docker compose -f tools/compose.broker-check.yaml run --rm app            # 通るべき
+#   docker compose -f tools/compose.broker-check.yaml run --rm app-wrong-uid  # 弾かれるべき
+#   docker compose -f tools/compose.broker-check.yaml down -v
 name: mediaferry-spike
 
 x-app-uid: &app-uid "10001"
@@ -15,7 +17,7 @@ x-app-gid: &app-gid "10001"
 services:
   mountd:
     build:
-      context: .
+      context: ..
       dockerfile: mountd/Dockerfile
     privileged: true
     volumes:
@@ -29,7 +31,7 @@ services:
 
   app:
     build:
-      context: .
+      context: ..
       dockerfile: app/Dockerfile
     depends_on:
       - mountd
@@ -52,7 +54,7 @@ services:
   # 拒否がどの層で起きたかを区別するための構成。
   app-wrong-uid:
     build:
-      context: .
+      context: ..
       dockerfile: app/Dockerfile
     depends_on:
       - mountd

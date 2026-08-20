@@ -3,7 +3,7 @@
 環境変数 `MEDIAFERRY_TEST_IMMICH_URL` と `MEDIAFERRY_TEST_IMMICH_KEY` を与えて
 `uv run pytest -m needs_immich` で走らせる。**作った資産は必ず消す。**
 
-Phase 0 のプローブ（`spikes/immich_probe.py`）が確かめていない
+プローブ（`tools/immich_probe.py`）が確かめていない
 「タグの作成・付与」と「日時の更新」をここで確かめる。
 """
 

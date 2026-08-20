@@ -146,6 +146,9 @@ curl http://127.0.0.1:8080/api/health
 （IP と `localhost` は最初から通ります）。名前を許可制にしているのは、外部のサイトに
 仕込まれた名前から内部のアプリを叩かせる攻撃を防ぐためです。
 
+**権限まわりを確かめたい場合**は、[`tools/compose.broker-check.yaml`](../tools/README.md#composebroker-checkyaml--新しいホストで権限を確かめる)
+で「正しい UID なら通り、違う UID なら弾かれる」ことをこのホストで検証できます。
+
 以降の操作は[**使い方ガイド**](user-guide.md)へ。
 
 ## 8. 更新する
@@ -158,6 +161,16 @@ docker compose pull && docker compose up -d
 
 **データベースの移行は起動時に自動で走ります。** 版を戻す（ダウングレードする）
 経路は用意していないので、**更新の前にバックアップを取ってください**。
+
+**Immich の側を上げるときは、先に前提を確かめてください。**
+mediaferry が対象にしているのは v3.1.0 です。
+
+```bash
+export IMMICH_URL=<url> IMMICH_API_KEY=<key>
+uv run tools/immich_probe.py --write --cleanup
+```
+
+何を見ているかは [`tools/README.md`](../tools/README.md) にあります。
 
 ## 9. バックアップ
 

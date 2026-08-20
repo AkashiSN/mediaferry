@@ -414,8 +414,9 @@ uv run pytest -m needs_immich
 アプリの起動は `python -m mediaferry`（`BIND_HOST` の既定は `127.0.0.1`）。
 画面はビルド済み資産を `MEDIAFERRY_WEB_ROOT`（既定 `/srv/web`）から配る。
 開発中は `npm --prefix web run dev`（`/api` をローカルへ proxy する）。
-スパイクの再実行は TrueNAS ホストで。手順は [`history/phase0-findings.md`](history/phase0-findings.md) と
-`compose.spike.yaml` のコメントにある。
+スパイク（いまは [`../tools/`](../tools/README.md) の診断ツール）の再実行は
+TrueNAS ホストで。手順は [`history/phase0-findings.md`](history/phase0-findings.md) と
+[`../tools/README.md`](../tools/README.md) にある。
 
 ---
 

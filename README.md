@@ -40,8 +40,11 @@ Immich 側も、自分が上げたと確かめられない写真には手を出�
 | Canon EOS の実カード | **未了**（プロファイルは仕様から書いており、実データを見ていません） |
 | 配布イメージ | **あります**（`ghcr.io/akashisn/mediaferry` と `-mountd`）。ビルドは要りません |
 
-**対象 Immich は v3.1.0 です。** API の形が変わっていた場合に直す場所は
-`app/src/mediaferry/adapters/immich.py` の 1 ファイルに閉じています。
+**対象 Immich は v3.1.0 です。** それより新しい版へ上げるなら、まず
+[`tools/immich_probe.py`](tools/README.md#immich_probepy--immich-の版を上げたら回す)
+で前提が成り立つかを確かめてください（判定は終了ステータスに返ります）。API の形が
+変わっていた場合に直す場所は `app/src/mediaferry/adapters/immich.py` の 1 ファイルに
+閉じています。
 
 ## 対応している機種
 
@@ -193,6 +196,7 @@ docker build -f mountd/Dockerfile -t mediaferry-mountd .
 | **なぜそうなっているか**（判断と理由） | [`docs/decisions.md`](docs/decisions.md) |
 | **開発する** | [`docs/development.md`](docs/development.md)・[`CLAUDE.md`](CLAUDE.md) |
 | **どう作ったか**（実装計画、レビュー記録） | [`docs/history/`](docs/history/README.md) |
+| **前提を実機で確かめたい** | [`tools/`](tools/README.md) |
 
 **`docs/history/` は開発の記録です。** 現在の姿を知るのに読む必要はありません
 （食い違ったら `design.md` と `decisions.md` が正です）。
