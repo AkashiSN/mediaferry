@@ -1,8 +1,8 @@
 # イメージを ghcr.io へ公開する。
 #
-# **タグを押したときが「配布」で、main への push は先行版**。両方を出すが、
-# `latest` が動くのはリリースタグのときだけにする（`compose.yaml` に
-# `latest` を書いた利用者が、検証していないコミットを掴まないようにする）。
+# **`latest` は `main` の先頭を指す。** まだリリースを出していないので、
+# `compose.yaml` に `latest` を書いた利用者が掴むのは main の最新になる。
+# 版を固定したいときは `:sha-1234567` を書く（タグを押せば版のタグも付く）。
 #
 # amd64 だけを作る。TrueNAS SCALE は x86_64 が前提で、arm64 を足すと
 # QEMU エミュレーションで ffmpeg の導入が数倍遅くなる。
@@ -105,8 +105,8 @@ jobs:
             type=semver,pattern={{major}}.{{minor}}
             type=ref,event=branch
             type=sha,format=short
-            # **`latest` はリリースタグのときだけ。**
-            type=raw,value=latest,enable=${{ startsWith(github.ref, 'refs/tags/v') }}
+            # **`latest` は main の先頭。**
+            type=raw,value=latest,enable={{is_default_branch}}
 
       - name: ビルドして押す
         uses: docker/build-push-action@v7
