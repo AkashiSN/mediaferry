@@ -1086,6 +1086,20 @@ def resolve_group(
             partners.append(candidate)
     if not partners:
         return Refusal("相方が見つからない")
+    # **判定の順序が理由の正しさを決める。** `None` を重複より先に見ないと、
+    # 再確認で両方の資産が消えた `[None, None]` を「重なっている」と表示する
+    # （実装差分レビュー 3 巡目の minor）。
+    identifiers = [member.remote_asset_id for member in (primary, *partners)]
+    if any(identifier is None for identifier in identifiers):
+        return Refusal("組の資産 ID が分からない")
+    if len(set(identifiers)) != len(identifiers):
+        # **相手が両方へ同じ資産 ID を返すことがある**（実装差分レビュー 2 巡目）。
+        # そのまま進むと、作成では `ValueError` がジョブ全体を落とし、回収では
+        # 1 資産のスタックを 2 行へ `stacked` と記録する。
+        return Refusal("相方と資産 ID が重なっている")
+    for member in (primary, *partners):
+        if member.origin != "created_by_us":
+            return Refusal("自分が上げたと証明できない資産が含まれる")
     for partner in partners:
         if partner.profile_id != primary.profile_id:
             # 規則は 1 つに決まっている必要がある（§9.11）。
@@ -1096,10 +1110,6 @@ def resolve_group(
             return Refusal("相方と時刻の根拠が違う（EXIF と mtime を突き合わせない）")
         if not _within(primary.captured_at, partner.captured_at, rule.tolerance_seconds):
             return Refusal("相方と撮影時刻が一致しない")
-        if partner.origin != "created_by_us" or primary.origin != "created_by_us":
-            return Refusal("自分が上げたと証明できない資産が含まれる")
-        if partner.remote_asset_id is None:
-            return Refusal("相方の資産 ID が分からない")
     members = sorted(
         [primary, *partners], key=lambda c: rule.extensions.index(extension_of(c.rel_path))
     )
@@ -2425,6 +2435,31 @@ git commit -m "docs(mediaferry): Phase 6 の実測と引き継ぎを書き戻す
 `advance_owned` / `finish_owned` の `assert_lease` が reopen より先にあること、
 `0016` の拡張・「同じ ID なら戻さない」・組全体のキー・重複 ID の見送り、
 `stack_state = 'stacked'` を冗長と判定したこと。
+
+### 4 巡目（2026-08-20、codex `--fresh`。blocker 0 / major 0 / minor 1）
+
+**実装上の指摘は無し。** 残った 1 件は docs のみで、Task 7 の提示コードが
+2・3 巡目の反映（重複検査の追加、`None` を先に見る順序、理由の文言）に
+追随していなかった。**実装の正しい形へ同期した**（文言が一致することを
+機械的に確かめた）。
+
+**確認された「指摘なし」:** `stamp_many` の事前 SELECT が本体 UPDATE と同じ
+条件で、`BEGIN IMMEDIATE` の中なので割り込めないこと。外れた stamp が
+`written` に入らないこと。`stamp_remote` の早期 return が呼び出し側の期待を
+壊さないこと（戻り値は元から `None`）。理由の文言に画面側の固定依存が無いこと。
+`_locked_cas`・`0016`・組全体の reopen に新しい穴が無いこと。
+
+**判定: docs の minor を直せばマージ可。5 巡目は不要。**
+
+**実装差分レビューの推移**（この案件の傾向どおり、**毎巡「前の巡の対処が作った
+境界」から出た**）:
+
+| 巡 | blocker | major | minor | 出どころ |
+| --- | --- | --- | --- | --- |
+| 1 | 0 | 5 | 3 | 実装して初めて現れた接続部（無効化した宛先、再確認、回収の GET、`PUT` 後の実像） |
+| 2 | 0 | 3 | 0 | 1 巡目の対処が作った境界（組の相方、trigger の穴、資産 ID の重複） |
+| 3 | 0 | 1 | 1 | 2 巡目の対処が作った境界（reopen と CAS の順序、理由の取り違え） |
+| 4 | 0 | 0 | 1 | docs の同期のみ |
 
 ## レビュー記録
 
