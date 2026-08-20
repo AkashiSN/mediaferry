@@ -1,5 +1,8 @@
-# TrueNAS の Apps → Custom App に貼り付けて使う。
+# TrueNAS の Apps → Custom App に貼り付けて使う。手順は docs/setup.md。
 # <...> はデプロイ時に置き換える。環境固有の値はリポジトリに含めない。
+#
+# イメージは ghcr.io で公開している。`latest` はリリースタグのときだけ動くので、
+# **先行版を掴むことはない**。版を固定したいときは `:1.2.3` のように書く。
 #
 # app は mountd のソケットに接続するため、両者の GID を揃える必要がある。
 # MOUNTD_ALLOWED_UIDS に app の UID を指定すると、他プロセスからの接続を拒む。
@@ -7,7 +10,7 @@ name: mediaferry
 
 services:
   mountd:
-    image: ghcr.io/<owner>/mediaferry-mountd:<tag>
+    image: ghcr.io/akashisn/mediaferry-mountd:latest
     restart: unless-stopped
     privileged: true
     volumes:
@@ -24,7 +27,7 @@ services:
       MOUNTD_SOCKET_GID: "<app-gid>"
 
   app:
-    image: ghcr.io/<owner>/mediaferry:<tag>
+    image: ghcr.io/akashisn/mediaferry:latest
     restart: unless-stopped
     depends_on:
       - mountd
@@ -34,6 +37,9 @@ services:
     read_only: true
     volumes:
       - <host-sock-path>:/run/mediaferry:ro   # 接続のみ。unlink・差し替えは不可
+      # **先に library / derived / staging / work / var を作っておく。**
+      # 起動時に「同じファイルシステム上にあること」を確かめるので、無いと落ちる
+      # （staging は link(2) で公開するため library と同じ FS に要る）。
       - <host-dataset-path>:/data
       - app-tmp:/tmp
     environment:
@@ -41,17 +47,20 @@ services:
       MEDIAFERRY_DATA_ROOT: /data
       MEDIAFERRY_BIND_HOST: 127.0.0.1
       MEDIAFERRY_DEFAULT_TIMEZONE: <iana-tz>
+      # 転送先の API キーを暗号化する鍵。**転送先を 1 つでも作るなら必須**。
+      #   python3 -c "import base64,os; print(base64.b64encode(os.urandom(32)).decode())"
+      MEDIAFERRY_SECRET_KEY: <base64-32bytes>
       # 転送先 (Immich の URL と API キー) は環境変数では設定しない。
       # Web 画面で「転送先プロファイル」として登録する。仕様書 §12.3。
-    # Phase 4 で認証と CSRF が入るまで ports を書かない。
+    # **LAN から使うときは 3 つを同時に変える。**
     #
     # コンテナ内で 127.0.0.1 にだけ bind した状態で ports を書いても、Docker の
-    # ポート転送はコンテナの eth0 宛に繋ぐため到達できない。逆に到達させるには
-    # 0.0.0.0 に bind することになり、それは「公開しない」方針と矛盾する。
-    # この段階では `docker compose exec app ...` か内部ネットワークから使う。
+    # ポート転送はコンテナの eth0 宛に繋ぐため到達できない。0.0.0.0 で待ち受け、
+    # かつ**パスワードを設定してから**出すこと（認証が無効なまま非ループバックに
+    # bind していると、起動ログと画面に警告が出る）。
     #
-    # Phase 4 以降、LAN へ出すときは次の 2 つを同時に変える:
     #   MEDIAFERRY_BIND_HOST: 0.0.0.0
+    #   MEDIAFERRY_AUTH_PASSWORD: <password>
     #   ports: ["<host-ip>:<host-port>:8080"]
 
 volumes:

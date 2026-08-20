@@ -1,66 +1,196 @@
 # mediaferry
 
-カメラの SD カードを NAS へ取り込み、分割動画を結合して Immich へ同期する
-TrueNAS カスタムアプリ。
+**カメラの SD カードを NAS に取り込み、分割された動画をつなぎ、Immich へ送るまでを
+1 つの画面で行う TrueNAS のカスタムアプリです。**
 
-| ドキュメント | 内容 |
-| --- | --- |
-| [`docs/HANDOFF.md`](docs/HANDOFF.md) | **まずここ。** 現在地、確定した判断、環境の癖、次にやること |
-| [`CLAUDE.md`](CLAUDE.md) | このリポジトリの規約（コメントと docs の棲み分け、テストの作法） |
-| [`docs/design.md`](docs/design.md) | 設計仕様書（正本） |
-| [`docs/phase0-findings.md`](docs/phase0-findings.md) | Phase 0 の実測結果 |
-| [`docs/phase1-plan.md`](docs/phase1-plan.md) | Phase 1 の実装計画（実行済み） |
-| [`docs/phase1-backup.md`](docs/phase1-backup.md) | バックアップとリストア、再構築できる範囲 |
-| [`docs/phase1-manual-checklist.md`](docs/phase1-manual-checklist.md) | 実 USB での確認手順 |
-| [`docs/phase2-plan.md`](docs/phase2-plan.md) | Phase 2（結合）の実装計画（実行済み） |
-| [`docs/phase3-plan.md`](docs/phase3-plan.md) | Phase 3（Immich 同期）の実装計画（実行済み） |
+カードを挿すと中身を判別し、NAS のデータセットへコピーします。DJI が 4GB ごとに
+分割した動画は 1 本に結合し、Canon の RAW+JPEG は Immich 上で 1 枚に束ねます。
+撮影日時のずれも、機種ごとの規則に沿って直してから送ります。
 
-**Phase 3（Immich 同期）まで完了。** 配布可能なリリースではない
-（認証と CSRF が入る Phase 4 より前に LAN へ公開しない）。
-
-**対象 Immich は v3.1.0**（Phase 0 で実測した版）。API の形が変わっていたら
-`app/src/mediaferry/adapters/immich.py` だけを直せば済むように、呼び出し側は
-`ImmichClient` のメソッドしか触らない。
-
-## 構成
-
-| パッケージ | 役割 |
-| --- | --- |
-| `protocol/` | 2 コンテナが共有するソケットプロトコル |
-| `mountd/` | 特権側。USB を read-only でマウントし dirfd を渡す |
-| `app/` | 非特権側。取り込み・結合・アップロード |
-
-`mountd` はマウントしたファイルシステムを `open_tree(OPEN_TREE_CLONE)` で
-切り離してから元の取り付けを外す。app へ渡すのは切り離されたツリー由来の
-dirfd だけで、その `..` はボリュームルートに固定される。通常のマウントでは
-`openat(dirfd, "..")` がマウントポイントの親へ抜けてしまい、侵害された app が
-mountd の名前空間（ホストから bind した `/dev` を含む）へ到達できる。
-
-## 開発
-
-```bash
-uv sync --all-packages   # ワークスペースメンバーを全て入れる
-uv run pytest
-uv run ruff check .
-uv run ruff format --check .
+```
+SD カード ──► NAS のライブラリ ──► （分割動画の結合） ──► Immich
+   挿す          コピーは自動            画面で確認            送信は手動
 ```
 
-`--all-packages` が要るのは、根の `mediaferry-workspace` がメンバーに
-依存していないため。素の `uv sync` ではメンバーが venv に入らず、
-テストが import に失敗する。
+## できること
 
-root を要するテストは `-m needs_root`、実 Immich を要するテストは
-`-m needs_immich` が付いており、既定では実行されない。
+| | |
+| --- | --- |
+| **取り込み** | カードを挿すと機種を判別してコピーする。**一度承認したカードは、以後は挿すだけ**（初めて見るカードは必ず確認を求めます） |
+| **元の構造を保つ** | `DCIM/100CANON/IMG_0001.JPG` のような**カード上の並びをそのまま**残すので、NAS を直接開いても辿れます |
+| **分割動画の結合** | DJI の 4GB 分割を 1 本に。**結合結果を検証**し、不合格なら元のまま残して選ばせます |
+| **Immich へ送信** | 送信は**常に手動**。複数の Immich へ独立に送れます |
+| **重複を作らない** | 送る前にチェックサムで照合し、既にある写真は上げ直しません（ゴミ箱の中も見ます） |
+| **撮影日時の補正** | DJI のように UTC で書かれる機種は、現地の壁時計へ直してから送ります |
+| **RAW+JPEG の束ね** | 同じシャッターで出た 2 枚を Immich のスタックにまとめます |
+| **タグ付け** | 機種ごとのタグを自動で付けます |
 
-```bash
-uv run pytest -m needs_root     # ユーザ名前空間が使える環境でのみ通る
+**壊さないことを優先しています。** カードは常に読み取り専用で開き、書き込みません。
+Immich 側も、自分が上げたと確かめられない写真には手を出しません。
 
-# 実 Immich に当てる。書き込むので、捨ててよいインスタンスを使うこと
-MEDIAFERRY_TEST_IMMICH_URL=... MEDIAFERRY_TEST_IMMICH_KEY=... \
-  uv run pytest -m needs_immich
-```
+## いまの状態
+
+**動きます。ただし「実機のカードで通しての確認」がまだ残っています。**
+
+| | |
+| --- | --- |
+| 実 Immich での確認 | **済み**（v3.1.0） |
+| 自動テスト | 1343 件（実プロセスとブラウザを使う受け入れ試験を含む） |
+| 実際の SD カードでの確認 | **未了**（[手順](docs/user-guide.md#実機で確かめる)） |
+| Canon EOS の実カード | **未了**（プロファイルは仕様から書いており、実データを見ていません） |
+| 配布イメージ | **あります**（`ghcr.io/akashisn/mediaferry` と `-mountd`）。ビルドは要りません |
+
+**対象 Immich は v3.1.0 です。** API の形が変わっていた場合に直す場所は
+`app/src/mediaferry/adapters/immich.py` の 1 ファイルに閉じています。
+
+## 対応している機種
+
+| プロファイル | 対象 | できること |
+| --- | --- | --- |
+| `dji-osmo` | DJI Osmo Pocket 系 | 取り込み・**4GB 分割の結合**・日時の補正（UTC → 現地） |
+| `canon-eos` | Canon EOS（カードリーダー経由） | 取り込み・**RAW+JPEG のスタック**・EXIF の日時をそのまま使用 |
+| `generic-dcim` | `DCIM` を持つ一般的なカード | 取り込みのみ |
+
+**機種は設定画面から追加・編集できます。** ビルトインは直接編集できませんが、
+複製すれば自分用に変えられます（ファイル名の規則、対象の拡張子、日時の取り方、
+結合するかどうか、スタックの組み方）。詳しくは
+[使い方ガイド](docs/user-guide.md#機種プロファイル)。
+
+## 必要なもの
+
+- **TrueNAS SCALE**（Apps → Custom App を使います）
+- 取り込み先のデータセット
+- **Immich v3.1.0** と、そのアカウントの API キー
+- USB のカードリーダー、または USB マスストレージとして見えるカメラ
+
+## 使いはじめる
+
+1. [**導入手順**](docs/setup.md) — データセットの用意、TrueNAS への配置、初回の起動
+2. [**使い方ガイド**](docs/user-guide.md) — 画面ごとの操作、取り込みから送信まで、困ったとき
+
+導入は「データセットを作る → `compose.yaml` の `<...>` を埋める →
+Custom App に貼る」の 3 段です。イメージは ghcr.io から降ってきます。
+**LAN へ公開する前にパスワードを設定してください**（既定では本体のループバックに
+しか出ません）。
+
+## 画面
+
+| 画面 | 何をするところか |
+| --- | --- |
+| ダッシュボード | 全体の状況。宛先ごとの送信済み・未送信・失敗・スタック数 |
+| デバイス | 挿さっているカード。判別結果と理由、スキャン・取り込み・信頼登録 |
+| ライブラリ | 取り込んだメディアの一覧。絞り込んで選び、宛先を選んで送信 |
+| 結合 | 分割動画の候補、結合の実行、検証結果、手動でのグループ作成 |
+| 転送先 | Immich の登録と接続の検証。スタックの見送り理由もここ |
+| 承認待ち | 日時の書き戻しに承認が要るもの（他人が上げた写真に触る場合） |
+| ジョブ | 実行中・完了したジョブと、その進捗ログ |
+| 設定 | 環境変数の確認、機種プロファイルの編集、撮影日時の再計算 |
 
 ## 設定
 
-環境固有の値はリポジトリに含めない。`compose.yaml` の `<...>` は
-デプロイ時に置き換える。
+環境変数で渡します。**`MEDIAFERRY_` を頭に付けます**（例: `MEDIAFERRY_DATA_ROOT`）。
+
+| 設定 | 既定 | 意味 |
+| --- | --- | --- |
+| `DATA_ROOT` | `/data` | 取り込み先。ここにライブラリと DB が入ります |
+| `BROKER_SOCKET` | `/run/mediaferry/broker.sock` | マウント担当のコンテナとの接続口 |
+| `SECRET_KEY` | 未設定 | Immich の API キーを暗号化する鍵。**転送先を 1 つでも作るなら必須**（32 バイトを base64） |
+| `AUTH_PASSWORD` | 未設定 | 設定すると**ログインが要る**ようになります。LAN へ出すなら設定してください |
+| `BIND_HOST` | `127.0.0.1` | 待ち受けるアドレス。LAN へ出すときだけ `0.0.0.0` にします |
+| `HTTP_PORT` | `8080` | 待ち受けるポート |
+| `TRUSTED_HOSTS` | 空 | 名前でアクセスするとき、その名前を許可します（IP と `localhost` は既定で通ります） |
+| `DEFAULT_TIMEZONE` | 未設定 | 日時の補正に使う地域（例: `Asia/Tokyo`）。**DJI のプロファイルを使うなら必須** |
+| `AUTO_IMPORT` | `trusted` | `trusted` = 承認済みのカードは挿すだけで取り込む / `off` = 常に手動 |
+| `UPLOAD_TIMEOUT_SECONDS` | `86400` | 1 回の送信を待つ上限（大きな動画のため既定は長めです） |
+| `UPLOAD_MAX_ATTEMPTS` | `3` | 送信の再試行の上限 |
+| `LOG_LEVEL` | `info` | `debug` / `info` / `warning` / `error` |
+
+**Immich の URL と API キーは環境変数では設定しません。** 画面から「転送先」として
+登録します（鍵は暗号化して保存され、画面にも API にも出てきません）。
+
+`SECRET_KEY` は次のように作れます。
+
+```bash
+python3 -c "import base64, os; print(base64.b64encode(os.urandom(32)).decode())"
+```
+
+## 安全のための作り
+
+- **カードは読み取り専用でしか開きません。** 書き込む経路がありません
+- **マウントする側とアプリを別のコンテナに分けています。** 特権が要るのはマウント側
+  だけで、アプリ側は権限を落とし、ファイルシステムも読み取り専用で動きます
+- **アプリに渡すのは、切り離したツリー由来のディレクトリだけです。** 通常のマウントを
+  渡すと、そこから親ディレクトリへ抜けられてしまうため（実際に抜けられることを
+  確認したうえでこの方式にしています）
+- **Immich 側で「自分が上げた」と確かめられない写真には触りません。** タグも日時も
+  スタックも、確かめられた場合だけ、または利用者が承認した場合だけ実行します
+- API キーは暗号化して保存し、画面・API 応答・ログ・エラーメッセージのどこにも出しません
+
+## 困ったとき
+
+よくあるものは[使い方ガイドの「困ったとき」](docs/user-guide.md#困ったとき)に
+まとめてあります。
+
+- カードが「対象外」と出る → デバイス画面に**判別できなかった理由**が出ます
+- 送信が始まらない → 転送先が無効・保管済みでないか、`SECRET_KEY` があるかを確認
+- 起動しない → タイムゾーンが要るプロファイルを使っていて `DEFAULT_TIMEZONE` が
+  未設定だと、**取り込みを始める前に止めます**（誤った時刻で確定させないため）
+
+## ライセンス
+
+Apache License 2.0（[LICENSE](LICENSE)）
+
+---
+
+## 開発する
+
+```bash
+uv sync --all-packages   # --all-packages が必須（素の sync ではメンバーが入りません）
+uv run pytest
+uv run ruff check . && uv run ruff format --check .
+
+npm --prefix web ci
+npm --prefix web test
+npm --prefix web run test:e2e   # 実プロセス + 偽ブローカー + 偽 Immich
+```
+
+既定の `pytest` では走らないものがあります。
+
+```bash
+uv run pytest -m needs_root     # ユーザ名前空間が使える環境でのみ
+uv run pytest -m needs_system   # 実プロセスを起動する受け入れ試験
+uv run pytest -m needs_immich   # 実 Immich が要る（書き込むので捨ててよい実例で）
+```
+
+### イメージ
+
+`main` への push と `v*` のタグで ghcr.io へ公開されます（`latest` が動くのは
+タグのときだけ）。手元でビルドするときは**リポジトリの根**を文脈にしてください。
+
+```bash
+docker build -f app/Dockerfile -t mediaferry .
+docker build -f mountd/Dockerfile -t mediaferry-mountd .
+```
+
+### 構成
+
+| パッケージ | 役割 |
+| --- | --- |
+| `protocol/` | 2 つのコンテナが共有するソケットプロトコル |
+| `mountd/` | 特権側。USB を読み取り専用でマウントし、切り離したツリーを渡す |
+| `app/` | 非特権側。取り込み・結合・アップロード・Web UI |
+| `web/` | 画面（React + TypeScript） |
+
+### 内部の記録
+
+**利用者向けではありません。** 設計の根拠と実装の経緯が要るときに読んでください。
+
+| ファイル | 内容 |
+| --- | --- |
+| [`docs/design.md`](docs/design.md) | 設計仕様書（正本） |
+| [`docs/HANDOFF.md`](docs/HANDOFF.md) | 別のセッションが作業を引き継ぐための出発点 |
+| [`CLAUDE.md`](CLAUDE.md) | このリポジトリの規約 |
+| [`docs/phase0-findings.md`](docs/phase0-findings.md) | 実測で覆った設計判断 |
+| `docs/phase1-plan.md` 〜 `docs/phase6-plan.md` | 各フェーズの実装計画とレビュー記録 |
+| [`docs/phase1-backup.md`](docs/phase1-backup.md) | バックアップとリストア、再構築できる範囲 |
+| [`docs/phase1-manual-checklist.md`](docs/phase1-manual-checklist.md) | 実機でしか確かめられない項目 |

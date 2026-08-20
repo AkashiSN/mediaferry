@@ -1,0 +1,110 @@
+# イメージを ghcr.io へ公開する。
+#
+# **タグを押したときが「配布」で、main への push は先行版**。両方を出すが、
+# `latest` が動くのはリリースタグのときだけにする（`compose.yaml` に
+# `latest` を書いた利用者が、検証していないコミットを掴まないようにする）。
+#
+# amd64 だけを作る。TrueNAS SCALE は x86_64 が前提で、arm64 を足すと
+# QEMU エミュレーションで ffmpeg の導入が数倍遅くなる。
+name: images
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  # 手で確かめたいとき（push はしない）。
+  workflow_dispatch:
+
+env:
+  REGISTRY: ghcr.io
+
+jobs:
+  # **イメージを押す前にテストを通す。** 通らないものを配らない。
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: 依存を入れる
+        # --all-packages が要る。素の sync ではワークスペースのメンバーが入らない。
+        run: uv sync --all-packages
+
+      - name: lint
+        run: |
+          uv run ruff check .
+          uv run ruff format --check .
+
+      - name: pytest
+        # `needs_root` / `needs_immich` / `needs_system` は既定で走らない。
+        run: uv run pytest -q
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
+      - name: 画面のテストとビルド
+        run: |
+          npm --prefix web ci
+          npm --prefix web run lint
+          npm --prefix web run typecheck
+          npm --prefix web test
+          npm --prefix web run build
+
+  build:
+    needs: test
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: mediaferry
+            dockerfile: app/Dockerfile
+          - name: mediaferry-mountd
+            dockerfile: mountd/Dockerfile
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: ghcr へログインする
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: タグを決める
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ github.repository_owner }}/${{ matrix.name }}
+          tags: |
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=ref,event=branch
+            type=sha,format=short
+            # **`latest` はリリースタグのときだけ。**
+            type=raw,value=latest,enable=${{ startsWith(github.ref, 'refs/tags/v') }}
+
+      - name: ビルドして押す
+        uses: docker/build-push-action@v6
+        with:
+          # ビルド文脈はリポジトリの根。app のイメージは protocol/ と web/ も要る。
+          context: .
+          file: ${{ matrix.dockerfile }}
+          platforms: linux/amd64
+          # `workflow_dispatch` では押さない（ビルドが通ることの確認だけ）。
+          push: ${{ github.event_name != 'workflow_dispatch' }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha,scope=${{ matrix.name }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.name }}

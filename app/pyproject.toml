@@ -29,7 +29,6 @@ build-backend = "hatchling.build"
 [tool.hatch.build.targets.wheel]
 packages = ["src/mediaferry"]
 
-# .sql と .yaml はソースディストリビューションから漏れやすい。明示的に含める。
-[tool.hatch.build.targets.wheel.force-include]
-"src/mediaferry/db/migrations" = "mediaferry/db/migrations"
-"src/mediaferry/core/profiles/builtin" = "mediaferry/core/profiles/builtin"
+# `packages` が `src/mediaferry` 以下を丸ごと入れるので、`.sql` と `.yaml` も
+# そのまま wheel に入る。**同じものを force-include で足さない** —— hatchling が
+# 「同じパスに 2 つ目のファイルを足そうとした」で失敗する。
