@@ -15,6 +15,19 @@ on:
   # 手で確かめたいとき（push はしない）。
   workflow_dispatch:
 
+# 同じ ref の run を 1 本に絞る。
+#
+# **公開する run は取り消さない。** app と mountd は matrix で並行に押すので、
+# 途中で取り消すと**片方だけが押された状態**（`:main` が app と mountd で別の
+# コミットを指す）になりうる。2 つは `protocol/` を共有していて、版が食い違うと
+# ソケットの契約が合わない。取り消す代わりに**順番待ちにする** —— 後から来た
+# コミットが最後に押すので、待たせても最終状態は正しい。
+#
+# 押さない run（`workflow_dispatch`）は取り消してよい。
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'workflow_dispatch' }}
+
 env:
   REGISTRY: ghcr.io
 
