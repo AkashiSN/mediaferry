@@ -166,4 +166,4 @@ docker compose pull && docker compose up -d
 できますが、Immich への送信状況は分からなくなります。
 
 **取るもの・復元できる範囲・再構築できるもの**は
-[`phase1-backup.md`](phase1-backup.md) にまとめてあります。
+[`backup.md`](backup.md) にまとめてあります。

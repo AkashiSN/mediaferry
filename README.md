@@ -181,16 +181,18 @@ docker build -f mountd/Dockerfile -t mediaferry-mountd .
 | `app/` | 非特権側。取り込み・結合・アップロード・Web UI |
 | `web/` | 画面（React + TypeScript） |
 
-### 内部の記録
+### ドキュメントの地図
 
-**利用者向けではありません。** 設計の根拠と実装の経緯が要るときに読んでください。
-
-| ファイル | 内容 |
+| 知りたいこと | 見る場所 |
 | --- | --- |
-| [`docs/design.md`](docs/design.md) | 設計仕様書（正本） |
-| [`docs/HANDOFF.md`](docs/HANDOFF.md) | 別のセッションが作業を引き継ぐための出発点 |
-| [`CLAUDE.md`](CLAUDE.md) | このリポジトリの規約 |
-| [`docs/phase0-findings.md`](docs/phase0-findings.md) | 実測で覆った設計判断 |
-| `docs/phase1-plan.md` 〜 `docs/phase6-plan.md` | 各フェーズの実装計画とレビュー記録 |
-| [`docs/phase1-backup.md`](docs/phase1-backup.md) | バックアップとリストア、再構築できる範囲 |
-| [`docs/phase1-manual-checklist.md`](docs/phase1-manual-checklist.md) | 実機でしか確かめられない項目 |
+| **導入したい** | [`docs/setup.md`](docs/setup.md) |
+| **使い方** | [`docs/user-guide.md`](docs/user-guide.md) |
+| **バックアップ** | [`docs/backup.md`](docs/backup.md) |
+| **実機で確かめる項目** | [`docs/hardware-checklist.md`](docs/hardware-checklist.md) |
+| **いまどうなっているか**（仕様） | [`docs/design.md`](docs/design.md) |
+| **なぜそうなっているか**（判断と理由） | [`docs/decisions.md`](docs/decisions.md) |
+| **開発する** | [`docs/development.md`](docs/development.md)・[`CLAUDE.md`](CLAUDE.md) |
+| **どう作ったか**（実装計画、レビュー記録） | [`docs/history/`](docs/history/README.md) |
+
+**`docs/history/` は開発の記録です。** 現在の姿を知るのに読む必要はありません
+（食い違ったら `design.md` と `decisions.md` が正です）。

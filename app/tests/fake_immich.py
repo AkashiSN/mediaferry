@@ -8,7 +8,7 @@ ASGI ではなく素の HTTP サーバにしているのは、httpx 0.28 の `AS
 使えない**ため。multipart の wire と redirect の扱いをそのまま確かめる意味でも、
 実際に listen させる方が確実である。
 
-応答の形は `docs/phase0-findings.md` ② の実測に合わせる。
+応答の形は `docs/history/phase0-findings.md` ② の実測に合わせる。
 """
 
 from __future__ import annotations

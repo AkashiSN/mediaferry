@@ -3,9 +3,10 @@
 カメラの SD カードを NAS へ取り込み、分割動画を結合して Immich へ同期する
 TrueNAS カスタムアプリ。
 
-**まず [`docs/HANDOFF.md`](docs/HANDOFF.md) を読む。** 現在地、蒸し返してはいけない
-判断、環境の癖、次にやることがそこにある。設計の正本は
-[`docs/design.md`](docs/design.md)。
+**まず [`docs/development.md`](docs/development.md) を読む。** 環境の癖、開発コマンド、
+テストとレビューの作法がそこにある。設計の正本は [`docs/design.md`](docs/design.md)、
+**そう決めた理由**は [`docs/decisions.md`](docs/decisions.md)、**どう作ったか**の記録は
+[`docs/history/`](docs/history/README.md)。
 
 ## コメントとドキュメントの棲み分け（重要）
 
@@ -42,7 +43,7 @@ TrueNAS カスタムアプリ。
   関数だけを使う。**例外は `media_file.captured_at`**（解決したオフセット付きで保存する。
   UTC へ正規化すると `force_offset` で復元した現地の壁時計が読めなくなる）
 - **DB 接続はスコープごとに 1 本。** トランザクションは接続に属していてスレッドには
-  属さない。詳細は `docs/HANDOFF.md` §3
+  属さない。詳細は `docs/decisions.md`
 
 ## 開発コマンド
 
@@ -61,7 +62,7 @@ uv run ruff format --check .
 - 実装より先に**失敗するテストを書き、失敗を確認してから**最小実装する
 - **変異試験を省かない。** 実装の判断を 1 つずつ壊し、対応するテストが落ちることを
   確認してから戻す。Phase 1 では「通ってはいるが実装の判断を検証していない」テストが
-  30 件以上見つかった。よくある 3 パターンは `docs/HANDOFF.md` §5 にある
+  30 件以上見つかった。よくある 3 パターンは `docs/development.md` にある
 - **変異試験は `PYTHONDONTWRITEBYTECODE=1` を付ける。** 変異の前後でバイト数が変わらない
   書き換え（`>` を `<`、`a or b` を `b or a` 等）では `.pyc` の無効化条件をすり抜けて
   古いバイトコードが使われ、変異が効いているかを読み違える

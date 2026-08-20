@@ -2,7 +2,7 @@
 
 破棄と再結合はどちらも**公開済みの `media_file` を取り残す**。旧グループを
 `superseded_by_id` で向け直す仕組みが要り、それは手動編集と共通なので画面と
-一緒に入れる、と Phase 3 で決めた（`HANDOFF.md` §3）。
+一緒に入れる、と決めた（`docs/decisions.md`）。
 """
 
 from __future__ import annotations

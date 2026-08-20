@@ -229,7 +229,7 @@ Immich 側で完全に削除してから、そのレコードを「送り直す�
 ## 実機で確かめる
 
 **この 16 項目は、実際のカードとハードウェアでしか確かめられません。**
-初めて本番のカードを扱うときは、[`phase1-manual-checklist.md`](phase1-manual-checklist.md)
+初めて本番のカードを扱うときは、[`hardware-checklist.md`](hardware-checklist.md)
 に沿って進めると、想定と違う点を早く見つけられます。
 
 特に次の 2 つは、結果によって設定を変える必要があります。

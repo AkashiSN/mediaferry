@@ -90,4 +90,4 @@ TrueNAS のスナップショットは、DB ファイルの整合を保証しな
 
 - 設計仕様書 §12.3（マスター鍵の境界）
 - 設計仕様書 §9.6（起動時の齟齬回収）
-- [`phase1-manual-checklist.md`](phase1-manual-checklist.md)（実 USB での確認手順）
+- [`hardware-checklist.md`](hardware-checklist.md)（実機での確認手順）

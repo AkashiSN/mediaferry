@@ -3,7 +3,7 @@
 自動テストは実カードを扱えない。マウントは開発コンテナ（入れ子の非特権 LXC）
 では AppArmor に阻まれるので、**TrueNAS ホストで実行する**。
 
-既定シェルは zsh。以下の 2 点で bash と違う（`HANDOFF.md` §4）。
+既定シェルは zsh。以下の 2 点で bash と違う（`development.md` の「環境の癖と罠」）。
 
 - 行内コメント（`cmd  # 説明`）が**無効**。`#` 以降が引数として渡る
 - `tail -1` が `option used in invalid context` になる。`tail -n 1` を使う
@@ -138,7 +138,7 @@ Linux の exfat ドライバは `OffsetFromUtc` の valid bit が立っていれ
 オフセットで UTC へ変換し、立っていないときだけマウントの `time_offset`
 （既定 0）を使う（`fs/exfat/misc.c` の `exfat_get_entry_time`）。
 
-**結果はどちらであっても `phase0-findings.md` に 1 件として残す。**
+**結果はどちらであっても [`history/phase0-findings.md`](history/phase0-findings.md) に 1 件として残す。**
 
 ### 12. 埋め込みサムネイルの disposition を確かめる
 
@@ -204,6 +204,6 @@ TZ=UTC stat -c '%y %n' /path/to/MVI_0001.MOV
 
 ## 関連
 
-- [`phase1-backup.md`](phase1-backup.md)（バックアップとリストア）
-- [`phase0-findings.md`](phase0-findings.md)（実測で覆った設計判断）
-- `HANDOFF.md` §4（TrueNAS ホストと開発コンテナの癖）
+- [`backup.md`](backup.md)（バックアップとリストア）
+- [`decisions.md`](decisions.md)（実測で覆った判断）と [`history/phase0-findings.md`](history/phase0-findings.md)（測った値そのもの）
+- [`development.md`](development.md)（TrueNAS ホストと開発コンテナの癖）

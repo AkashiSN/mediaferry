@@ -11,7 +11,7 @@ mtime の壁時計は UTC 表現から取る。**これは「カードの時刻�
 立っていないときだけマウントの `time_offset`（既定 0）を使う
 （`fs/exfat/misc.c` の `exfat_get_entry_time`）。DJI はファイル名に壁時計を
 埋めるので、両者が一致するかを実機で確かめられる。手順は
-`phase1-manual-checklist.md` にあり、**一致しない機種が出たらここを
+`docs/hardware-checklist.md` にあり、**一致しない機種が出たらここを
 プロファイルの timezone で描画する形へ変える**。
 """
 

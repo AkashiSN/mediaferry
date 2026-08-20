@@ -14,7 +14,7 @@
 
 **技術:** Python 3.12 / SQLite / httpx / FastAPI / React + TypeScript / Playwright。
 
-**仕様の正本:** [`docs/design.md`](design.md) §6「スタッキング（`stack`）」、§8、
+**仕様の正本:** [`docs/design.md`](../design.md) §6「スタッキング（`stack`）」、§8、
 §9.10、§9.11、§12、§20、§21「Phase 6 の設計で確定した事項」。**この計画は仕様から
 論を進めるので、実行者は両方を読む。**
 
