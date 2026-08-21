@@ -9,6 +9,8 @@ from fastapi.responses import FileResponse
 
 from ..adapters.thumbnails import ThumbnailFailed, quantise
 from ..core.listing import DEFAULT_PAGE_SIZE, escape_like, page_bounds
+from ..db.media import MediaRepository
+from ..db.merges import GroupNotEditable
 from .deps import conn as get_conn
 from .deps import state as get_state
 from .errors import ApiError, ErrorCode
@@ -120,6 +122,25 @@ def get_media(media_id: str, conn=Depends(get_conn)) -> dict[str, Any]:  # noqa:
     if row is None:
         raise ApiError(404, ErrorCode.NOT_FOUND, "そのメディアは無い")
     return _media(row)
+
+
+@router.delete("/media/{media_id}")
+def delete_media(  # noqa: ANN201
+    media_id: str,
+    conn=Depends(get_conn),  # noqa: ANN001, B008
+    state=Depends(get_state),  # noqa: ANN001, B008
+):
+    """**古くなった派生物だけ**消す（やり直しの後片付け）.
+
+    元ファイルは消せない。現行のグループの結合結果も、送信の記録が指している
+    ものも消せない。理由は 409 で返す。
+    """
+    repo = MediaRepository(conn, state.settings.data_root)
+    try:
+        rel_path = repo.delete_stale_derived(media_id)
+    except GroupNotEditable as exc:
+        raise ApiError(409, ErrorCode.CONFLICT, str(exc)) from exc
+    return {"status": "ok", "rel_path": rel_path}
 
 
 @router.get("/media/{media_id}/thumbnail")

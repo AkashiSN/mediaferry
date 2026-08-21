@@ -357,6 +357,13 @@ class MergeRepository:
             )
         )
 
+    def output_file(self, media_file_id: str) -> sqlite3.Row | None:
+        """結合結果のファイル. 画面に「何ができたか」を出すのに使う."""
+        return self._conn.execute(
+            "SELECT id, rel_path, size_bytes, missing_at FROM media_file WHERE id = ?",
+            (media_file_id,),
+        ).fetchone()
+
     def list_groups(
         self, status: str | None = None, limit: int = 200, offset: int = 0
     ) -> list[sqlite3.Row]:

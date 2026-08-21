@@ -26,6 +26,7 @@ type Group = {
   input_digest: string;
   verification: { verdict?: string; reason?: string | null } | null;
   superseded_by_id: string | null;
+  output: { media_file_id: string; rel_path: string; size_bytes: number; missing: boolean } | null;
   members: Member[];
 };
 
@@ -94,7 +95,35 @@ export function MergesScreen() {
                   ))}
                 </tbody>
               </table>
-              {group.verification && (
+              {group.output && (
+              <p className="merge-output">
+                できたファイル: <code>{group.output.rel_path}</code>（
+                {formatBytes(group.output.size_bytes)}
+                {group.output.missing ? "・見つかりません" : ""}）
+                {/* **古くなった出力だけ消せる**（やり直しの後片付け）。現行の
+                    グループの結合結果は消せない。 */}
+                {(group.status === "skipped" || group.superseded_by_id !== null) &&
+                  !group.output.missing && (
+                    <button
+                      type="button"
+                      disabled={busy}
+                      onClick={() =>
+                        setConfirmation({
+                          value: {
+                            kind: "delete_stale_derived",
+                            relPath: group.output?.rel_path ?? "",
+                          },
+                          run: () =>
+                            act(`/media/${group.output?.media_file_id}`, undefined, "DELETE"),
+                        })
+                      }
+                    >
+                      このファイルを消す
+                    </button>
+                  )}
+              </p>
+            )}
+            {group.verification && (
                 <p>
                   検証: {group.verification.verdict}
                   {group.verification.reason ? `（${group.verification.reason}）` : ""}

@@ -260,6 +260,18 @@ def _profile(registry: ProfileRegistry, profile_slug: str):  # noqa: ANN202
         ) from exc
 
 
+def _output(repo: MergeRepository, media_file_id: str | None) -> dict[str, Any] | None:
+    row = None if media_file_id is None else repo.output_file(media_file_id)
+    if row is None:
+        return None
+    return {
+        "media_file_id": row["id"],
+        "rel_path": row["rel_path"],
+        "size_bytes": row["size_bytes"],
+        "missing": row["missing_at"] is not None,
+    }
+
+
 def _found(repo: MergeRepository, group_id: str):  # noqa: ANN202
     row = repo.get(group_id)
     if row is None:
@@ -281,6 +293,9 @@ def _group(repo: MergeRepository, row) -> dict[str, Any]:  # noqa: ANN001
         "detected_by": row["detected_by"],
         "input_digest": row["input_digest"],
         "output_media_file_id": row["output_media_file_id"],
+        # **できたファイルを画面に出す。** id だけだと「結合済み」としか分からず、
+        # 何ができたのかはライブラリまで行かないと読めない。
+        "output": _output(repo, row["output_media_file_id"]),
         "adopted_at": row["adopted_at"],
         "superseded_by_id": row["superseded_by_id"],
         "tool_version": row["tool_version"],

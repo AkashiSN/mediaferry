@@ -237,3 +237,26 @@ def test_an_unknown_profile_matches_nothing(client, library):
     got = client.get("/api/media?profile=nope").json()
     assert got["total"] == 0
     assert got["media"] == []
+
+
+def test_a_stale_derived_can_be_deleted_and_an_original_cannot(client, db, data_root):
+    """やり直しの後片付け（§13）. **元ファイルは対象外.**"""
+    from .test_schema_artifacts import a_merge_group
+
+    ref = a_profile(db, slug="delete-test")
+    api_db = db
+    rel = "derived/dji-osmo/DCIM/OLD.MP4"
+    (data_root / rel).parent.mkdir(parents=True, exist_ok=True)
+    (data_root / rel).write_bytes(b"old output")
+    derived = a_media_file(api_db, ref, rel_path=rel, role="derived")
+    group_id = a_merge_group(api_db, ref, "digest-old", status="skipped")
+    api_db.execute(
+        "UPDATE merge_group SET output_media_file_id = ? WHERE id = ?", (derived, group_id)
+    )
+    original = a_media_file(api_db, ref, rel_path="library/dji-osmo/DCIM/KEEP.MP4")
+
+    assert client.delete(f"/api/media/{derived}").status_code == 200
+    assert not (data_root / rel).exists()
+    refused = client.delete(f"/api/media/{original}")
+    assert refused.status_code == 409
+    assert refused.json()["error"]["code"] == "conflict"

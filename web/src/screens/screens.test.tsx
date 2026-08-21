@@ -1088,3 +1088,66 @@ describe("同じ構成でやり直す", () => {
     expect(calls.some((call) => call.method === "PATCH")).toBe(false);
   });
 });
+
+
+describe("結合の出力", () => {
+  const base = {
+    id: "g1",
+    detected_by: "auto",
+    input_digest: "d",
+    verification: null,
+    superseded_by_id: null,
+    members: [{ media_file_id: "m1", rel_path: "library/a.MP4", size_bytes: 1, gap_seconds: null }],
+  };
+
+  it("できたファイルを結合画面に出す", async () => {
+    stubApi({
+      "/merge-groups?status=skipped": { groups: [] },
+      "/merge-groups": {
+        groups: [
+          {
+            ...base,
+            status: "merged",
+            output: {
+              media_file_id: "out1",
+              rel_path: "derived/dji-osmo/DCIM/OUT.MP4",
+              size_bytes: 1024,
+              missing: false,
+            },
+          },
+        ],
+      },
+    });
+    render(<MergesScreen />);
+
+    expect(await screen.findByText("derived/dji-osmo/DCIM/OUT.MP4")).toBeInTheDocument();
+    // 現行のグループの出力は消せない。
+    expect(screen.queryByRole("button", { name: "このファイルを消す" })).toBeNull();
+  });
+
+  it("古くなった出力だけ消せる", async () => {
+    stubApi({
+      "/merge-groups?status=skipped": { groups: [] },
+      "/merge-groups": {
+        groups: [
+          {
+            ...base,
+            status: "merged",
+            superseded_by_id: "g2",
+            output: {
+              media_file_id: "out1",
+              rel_path: "derived/dji-osmo/DCIM/OLD.MP4",
+              size_bytes: 1024,
+              missing: false,
+            },
+          },
+        ],
+      },
+    });
+    render(<MergesScreen />);
+
+    await userEvent.click(await screen.findByRole("button", { name: "このファイルを消す" }));
+    expect(await screen.findByRole("dialog")).toBeInTheDocument();
+    expect(calls.some((call) => call.method === "DELETE")).toBe(false);
+  });
+});

@@ -330,3 +330,28 @@ def test_a_live_group_is_not_deletable(client, api_db):
     response = client.delete(f"/api/merge-groups/{group_id}")
     assert response.status_code == 409
     assert response.json()["error"]["code"] == "conflict"
+
+
+def test_the_group_shows_what_it_produced(client, api_db):
+    """**「結合済み」だけでは何ができたのか分からない**（ライブラリまで行くことになる）."""
+    from .test_schema_artifacts import a_media_file
+
+    profile = ProfileRegistry(api_db).current("dji-osmo")
+    ref = (profile.profile_id, profile.revision_id)
+    output = a_media_file(
+        api_db, ref, rel_path="derived/dji-osmo/DCIM/OUT.MP4", role="derived", size_bytes=42
+    )
+    group_id = a_merge_group(api_db, ref, "digest-out", status="merged")
+    api_db.execute(
+        "UPDATE merge_group SET output_media_file_id = ? WHERE id = ?", (output, group_id)
+    )
+    body = client.get(f"/api/merge-groups/{group_id}").json()
+    assert body["output"]["rel_path"] == "derived/dji-osmo/DCIM/OUT.MP4"
+    assert body["output"]["size_bytes"] == 42
+    assert body["output"]["missing"] is False
+
+
+def test_a_group_without_an_output_says_so(client, api_db):
+    profile = ProfileRegistry(api_db).current("dji-osmo")
+    group_id = a_merge_group(api_db, (profile.profile_id, profile.revision_id), "digest-none")
+    assert client.get(f"/api/merge-groups/{group_id}").json()["output"] is None

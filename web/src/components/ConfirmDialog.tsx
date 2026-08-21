@@ -11,6 +11,7 @@ export type Confirmation =
   | { kind: "archive_destination"; name: string }
   | { kind: "discard_merge_group"; groupLabel: string; publishedCount: number }
   | { kind: "delete_merge_history"; groupLabel: string }
+  | { kind: "delete_stale_derived"; relPath: string }
   | { kind: "remerge_group"; groupLabel: string }
   | { kind: "adopt_failed_merge"; groupLabel: string; reason: string }
   | { kind: "approve_datetime"; current: string | null; proposed: string }
@@ -58,6 +59,16 @@ export function describe(confirmation: Confirmation): { title: string; body: Rea
             {confirmation.groupLabel} の記録を消します。**もう一度「候補を検出する」を
             押すと、この組み合わせがまた出ることがあります**（記録が「作り直さない」の
             根拠になっているため）。ファイルは何も消えません。
+          </p>
+        ),
+      };
+    case "delete_stale_derived":
+      return {
+        title: "この結合物を消しますか",
+        body: (
+          <p>
+            {confirmation.relPath} を消します。**元になったファイルは残ります**。
+            もう現行でないグループの結合結果なので、選択肢には出ていません。
           </p>
         ),
       };
