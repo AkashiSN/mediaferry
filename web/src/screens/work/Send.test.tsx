@@ -67,7 +67,7 @@ describe("送る", () => {
     });
     renderSend(["m1", "m2"]);
     await waitFor(() =>
-      expect(screen.getByRole("radio", { name: /写真の画面で選んだもの/ })).toBeChecked(),
+      expect(screen.getByRole("radio", { name: /選んだもの/ })).toBeChecked(),
     );
   });
 
@@ -171,7 +171,7 @@ describe("対象の解決", () => {
     );
   });
 
-  it("「写真の画面で選んだもの」は 1 件ずつ取得して合計を出す", async () => {
+  it("「選んだもの」は 1 件ずつ取得して合計を出す", async () => {
     stubApi({
       "/destinations": DESTINATIONS,
       "/media/m1": {

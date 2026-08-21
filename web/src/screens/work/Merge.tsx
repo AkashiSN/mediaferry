@@ -1,8 +1,8 @@
 // つなぐ（§13）。**なぜグループ化されたかが分かる**ように、構成・ギャップ・パートサイズを出す。
 //
-// 旧 `Merges.tsx` は生きている候補（このファイル）・破棄した記録・使っていない
-// 出力の 3 つを同じ画面に持っていた。後者 2 つは操作できない記録なので、
-// ここには出さず 設定 › 詳しい情報（`details/MergeHistory.tsx`）へ置く。
+// 操作できない記録（破棄した組み合わせ・使っていない出力）はここに出さない。混ざると
+// 「いま何が起きるのか」が読めなくなるため、設定 › 詳しい情報（`details/MergeHistory.tsx`）
+// に置く。
 
 import { useState } from "react";
 import { useNavigate } from "react-router-dom";
@@ -15,6 +15,7 @@ import { ErrorBanner } from "../../components/ErrorBanner";
 import { Icon } from "../../components/Icon";
 import { useEvents } from "../../hooks/useEvents";
 import { useReloadOnEvents } from "../../hooks/useReloadOnEvents";
+import { formatDateTime } from "../../utils/formatDateTime";
 
 type Member = {
   position: number;
@@ -42,13 +43,23 @@ function ordered(members: Member[]): Member[] {
   return [...members].sort((a, b) => a.position - b.position);
 }
 
-/** パート間でいちばん大きい空白（秒）。**これが「なぜ同じ 1 本と判断したか」の根拠**。 */
-function gapSeconds(members: Member[]): number {
+/**
+ * パート間でいちばん大きい空白（秒）。**これが「なぜ同じ 1 本と判断したか」の根拠**。
+ *
+ * 隣り合うどちらかの長さが読めない（`duration_seconds === null`）と、そのつなぎ目の
+ * 終端が計算できない。**0 として扱わない** —— 0 は「隙間なく続いている」という
+ * 積極的な主張であり、読めなかっただけの部分を「別の撮影ではない」と断定してしまう。
+ * その場合は `null`（分からない）を返す。
+ */
+function gapSeconds(members: Member[]): number | null {
   const sorted = ordered(members);
   let max = 0;
   for (let i = 1; i < sorted.length; i += 1) {
     const previous = sorted[i - 1];
-    const previousEnd = Date.parse(previous.captured_at) + (previous.duration_seconds ?? 0) * 1000;
+    if (previous.duration_seconds === null) {
+      return null;
+    }
+    const previousEnd = Date.parse(previous.captured_at) + previous.duration_seconds * 1000;
     const gapMs = Date.parse(sorted[i].captured_at) - previousEnd;
     max = Math.max(max, gapMs / 1000);
   }
@@ -97,7 +108,7 @@ export function MergeScreen() {
   function renderGroup(group: Group) {
     const members = ordered(group.members);
     const gap = gapSeconds(members);
-    const warn = gap > 0;
+    const warn = gap !== null && gap > 0;
     return (
       <article key={group.id} className={`card pad${warn ? " wn" : ""}`}>
         <div className="rowtop" style={{ flexWrap: "wrap" }}>
@@ -118,16 +129,18 @@ export function MergeScreen() {
               合計 {formatBytes(totalBytes(members))} ・ つなぐと 1 本（約 {totalMinutes(members)} 分）
             </p>
             <p className="small" style={{ marginTop: 3, color: warn ? "var(--warn)" : undefined }}>
-              {warn
-                ? `つなぎ目に ${gap} 秒の空白があります。別の撮影かもしれないので、確かめてから決めてください。`
-                : "連番が続いていて、つなぎ目の空白は 0.0 秒です。だから同じ 1 本と判断しました。"}
+              {gap === null
+                ? "長さが読めないパートがあるので、つなぎ目の空白は分かりません。"
+                : warn
+                  ? `つなぎ目に ${gap} 秒の空白があります。別の撮影かもしれないので、確かめてから決めてください。`
+                  : "連番が続いていて、つなぎ目の空白は 0.0 秒です。だから同じ 1 本と判断しました。"}
             </p>
             <ul style={{ display: "flex", flexDirection: "column", gap: 6, marginTop: 10, listStyle: "none" }}>
               {members.map((member) => (
                 <li key={member.media_file_id} className="row" style={{ justifyContent: "space-between" }}>
                   <span style={{ fontSize: 13 }}>{member.rel_path}</span>
                   <span className="small">
-                    {member.captured_at} ・
+                    {formatBytes(member.size_bytes)} ・ {formatDateTime(member.captured_at)} ・
                     {member.duration_seconds === null ? "—" : ` ${Math.round(member.duration_seconds)} 秒`}
                   </span>
                 </li>
@@ -212,12 +225,12 @@ export function MergeScreen() {
                 同じ構成でやり直す
               </button>
             )}
-            {group.superseded_by_id === null && group.status !== "skipped" && (
+            {group.superseded_by_id === null && (
               <button type="button" className="btn sm" disabled={busy} onClick={() => setRegrouping(group)}>
                 構成を変える
               </button>
             )}
-            {group.superseded_by_id === null && group.status !== "skipped" && (
+            {group.superseded_by_id === null && (
               <button
                 type="button"
                 className="btn sm"
@@ -257,8 +270,9 @@ export function MergeScreen() {
           分かれている動画を 1 本につなぎます
         </h1>
         <p className="muted" style={{ marginTop: 7 }}>
-          カメラは長い動画を 4 GiB ごとに分けて保存します。ここでつないでおくと、Immich には
-          1 本の動画として並びます。つないだあとも、元の分かれたファイルは NAS に残ります。
+          カメラは長い動画を、ある大きさごとに区切って保存します。ここでつないでおくと、
+          Immich には 1 本の動画として並びます。つないだあとも、元の分かれたファイルは
+          NAS に残ります。
         </p>
       </div>
 

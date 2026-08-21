@@ -14,6 +14,7 @@ import { Icon } from "../components/Icon";
 import { MediaTile, type Media, type MediaStatus } from "../components/MediaTile";
 import { useEvents } from "../hooks/useEvents";
 import { useReloadOnEvents } from "../hooks/useReloadOnEvents";
+import { formatDate } from "../utils/formatDateTime";
 
 type MediaPage = { media: Media[]; total: number; page: number; page_size: number };
 type Destination = { id: string; name: string; enabled: boolean };
@@ -77,13 +78,12 @@ export function groupByDate(media: Media[]): { label: string; items: Media[] }[]
   return groups;
 }
 
+/** 撮影日でまとめる見出し。日付部分の書式は `formatDate` を使う。 */
 function dateLabel(capturedAt: string): string {
-  const day = capturedAt.slice(0, 10);
-  if (day.length !== 10) {
+  if (capturedAt.slice(0, 10).length !== 10) {
     return "撮影日時が不明";
   }
-  const [year, month, date] = day.split("-");
-  return `${year}年${Number(month)}月${Number(date)}日`;
+  return formatDate(capturedAt);
 }
 
 export function PhotosScreen() {

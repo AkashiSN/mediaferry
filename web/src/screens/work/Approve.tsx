@@ -1,7 +1,7 @@
 // 確認（§13）。**現在値と変更案を並べて**、1 件ずつのカードで出す。
 //
-// 旧 `Approvals.tsx` の表をカードにする。判断（承認・却下の条件、確認の要否）は
-// 変えない。読めなかった値を空欄にしない（空欄は「変更なし」に見える）。
+// 判断（承認・却下の条件、承認だけ確認を要ること）は変えない。読めなかった値を
+// 空欄にしない（空欄は「変更なし」に見える）。
 
 import { useState } from "react";
 import { useNavigate } from "react-router-dom";
@@ -13,6 +13,7 @@ import { ErrorBanner } from "../../components/ErrorBanner";
 import { Icon } from "../../components/Icon";
 import { useEvents } from "../../hooks/useEvents";
 import { useReloadOnEvents } from "../../hooks/useReloadOnEvents";
+import { formatDateTime } from "../../utils/formatDateTime";
 
 type Record_ = {
   id: string;
@@ -82,8 +83,8 @@ export function ApproveScreen() {
           <article key={record.id} className="card pad">
             <div className="rowtop" style={{ flexWrap: "wrap" }}>
               <div className="grow">
-                <h2 style={{ fontSize: 15, fontWeight: 650 }}>{record.media_file_id}</h2>
-                <div style={{ display: "flex", gap: 22, flexWrap: "wrap", marginTop: 8 }}>
+                {/* 内部の ID をそのまま出さない（§13）。名乗れる名前が無いので見出しは置かない。 */}
+                <div style={{ display: "flex", gap: 22, flexWrap: "wrap" }}>
                   <div>
                     <div className="small">Immich にある日時</div>
                     <div style={{ fontSize: 15, fontWeight: 600, marginTop: 2 }}>
@@ -100,7 +101,7 @@ export function ApproveScreen() {
                   </div>
                 </div>
                 <p className="small" style={{ marginTop: 8 }}>
-                  観測した時刻: {record.remote_checked_at ?? "—"}
+                  観測した時刻: {record.remote_checked_at ? formatDateTime(record.remote_checked_at) : "—"}
                 </p>
               </div>
               <div className="acts">

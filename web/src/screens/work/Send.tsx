@@ -239,7 +239,7 @@ export function SendScreen() {
 
   const presets: { key: Preset; title: string; sub: string }[] = [];
   if (ids && ids.length > 0) {
-    presets.push({ key: "selection", title: "写真の画面で選んだもの", sub: `${ids.length} 件` });
+    presets.push({ key: "selection", title: "選んだもの", sub: `${ids.length} 件` });
   }
   presets.push({
     key: "unsent",
