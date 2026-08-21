@@ -53,7 +53,9 @@ describe("写真の画面", () => {
     await userEvent.click(screen.getByRole("button", { name: /まだ送っていない/ }));
     await waitFor(() =>
       expect(
-        calls().some((c) => c.path.includes("status=unsent") && c.path.includes("destination_id=d1")),
+        calls().some(
+          (c) => c.path === "/media?status=unsent&destination_id=d1" && c.method === "GET",
+        ),
       ).toBe(true),
     );
   });
@@ -141,7 +143,9 @@ describe("写真の画面", () => {
     await userEvent.click(screen.getByRole("button", { name: "職場" }));
     await waitFor(() =>
       expect(
-        calls().some((c) => c.path.includes("status=unsent") && c.path.includes("destination_id=d2")),
+        calls().some(
+          (c) => c.path === "/media?status=unsent&destination_id=d2" && c.method === "GET",
+        ),
       ).toBe(true),
     );
     // 選ばなかった方の宛先では問い合わせない。
