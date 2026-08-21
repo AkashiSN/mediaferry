@@ -1566,6 +1566,7 @@ claim では **(a) を必ず評価し、`selection_rule` に対応する現在�
 | POST | `/merge-groups` | 手動でグループを作成 |
 | PATCH | `/merge-groups/{id}` | 構成変更 / skip / 検証不合格の採用。**構成を変えない組み直しが「やり直し」**（結合の実装を直した後に作り直す） |
 | DELETE | `/merge-groups/{id}` | 破棄の記録を消す。**`skipped` で結合結果を持たないものだけ**。消すと同じ組み合わせが再び検出されうる |
+| GET | `/media/stale-derived` | もう使われていない派生物の一覧。**条件は下の DELETE の前提そのもの**（押しても断られるボタンを並べない）。**`/media/{id}` より前に置く** —— 後ろだと id として飲まれる |
 | DELETE | `/media/{id}` | **古くなった派生物だけ**消す。`role = derived` かつ持ち主のグループがもう現行でない（`skipped` か superseded）かつ送信の記録が指していないこと。**元ファイルは対象外** |
 | POST | `/merge-groups/{id}/merge` | 結合ジョブを開始 |
 | GET | `/destinations` | 転送先の一覧。**API キーは応答に一切出さない**（マスク値も返さない） |

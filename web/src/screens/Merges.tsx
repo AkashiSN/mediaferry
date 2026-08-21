@@ -31,12 +31,19 @@ type Group = {
 };
 
 type Groups = { groups: Group[] };
+/** もう使われていない派生物（やり直しの後片付け）。**構成ではなくファイルの一覧**。 */
+type Stale = {
+  stale: { id: string; rel_path: string; size_bytes: number; captured_at: string; reason: string }[];
+};
 
 export function MergesScreen() {
   const groups = useQuery<Groups>("/merge-groups");
   // 破棄したものは既定の一覧に入らない（API の既定が生きているものだけ）。
   const discarded = useQuery<Groups>("/merge-groups?status=skipped");
   const media = useQuery<{ media: { id: string; rel_path: string }[] }>("/media?page_size=200");
+  // **置き換えられたグループは `/merge-groups` に出ない**ので、その「できたファイル」は
+  // ここからしか辿れない（実機で 66 GiB がそこに残っていた）。
+  const stale = useQuery<Stale>("/media/stale-derived");
   // 手で組むときの選択（**検出が拾えなかった並びを人が組む**）。
   const [picked, setPicked] = useState<Set<string>>(new Set());
   const [regrouping, setRegrouping] = useState<Group | null>(null);
@@ -57,6 +64,7 @@ export function MergesScreen() {
       });
       groups.reload();
       discarded.reload();
+      stale.reload();
     } catch (caught) {
       setError(caught);
     } finally {
@@ -100,27 +108,8 @@ export function MergesScreen() {
                 できたファイル: <code>{group.output.rel_path}</code>（
                 {formatBytes(group.output.size_bytes)}
                 {group.output.missing ? "・見つかりません" : ""}）
-                {/* **古くなった出力だけ消せる**（やり直しの後片付け）。現行の
-                    グループの結合結果は消せない。 */}
-                {(group.status === "skipped" || group.superseded_by_id !== null) &&
-                  !group.output.missing && (
-                    <button
-                      type="button"
-                      disabled={busy}
-                      onClick={() =>
-                        setConfirmation({
-                          value: {
-                            kind: "delete_stale_derived",
-                            relPath: group.output?.rel_path ?? "",
-                          },
-                          run: () =>
-                            act(`/media/${group.output?.media_file_id}`, undefined, "DELETE"),
-                        })
-                      }
-                    >
-                      このファイルを消す
-                    </button>
-                  )}
+                {/* 消すのは下の「もう使われていない出力」から。**判定を 2 か所に
+                    分けない** —— 押しても 409 で断られるボタンが並ぶ。 */}
               </p>
             )}
             {group.verification && (
@@ -295,6 +284,35 @@ export function MergesScreen() {
             ))}
           </ul>
         </details>
+      )}
+      {(stale.data?.stale?.length ?? 0) > 0 && (
+        <section className="stale-derived">
+          <h2>もう使われていない出力（{stale.data?.stale?.length ?? 0} 件）</h2>
+          <p>
+            やり直しや破棄で置き換わった結合結果です。**元ファイルは対象外**で、送信の
+            記録が指しているものもここには出ません。
+          </p>
+          <ul>
+            {(stale.data?.stale ?? []).map((row) => (
+              <li key={row.id}>
+                <code>{row.rel_path}</code>（{formatBytes(row.size_bytes)}・
+                {row.reason === "superseded" ? "組み直しで置き換わった" : "破棄した組"}）
+                <button
+                  type="button"
+                  disabled={busy}
+                  onClick={() =>
+                    setConfirmation({
+                      value: { kind: "delete_stale_derived", relPath: row.rel_path },
+                      run: () => act(`/media/${row.id}`, undefined, "DELETE"),
+                    })
+                  }
+                >
+                  このファイルを消す
+                </button>
+              </li>
+            ))}
+          </ul>
+        </section>
       )}
       {regrouping && (
         <div className="dialog-backdrop" role="presentation">

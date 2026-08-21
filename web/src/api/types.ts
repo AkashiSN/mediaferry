@@ -446,6 +446,29 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/media/stale-derived": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List Stale Derived
+         * @description もう使われていない派生物（やり直しの後片付けの対象）.
+         *
+         *     置き換えられたグループは `GET /merge-groups` に出ないので、その「できた
+         *     ファイル」はここからしか辿れない。
+         */
+        get: operations["list_stale_derived_api_media_stale_derived_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/media/{media_id}": {
         parameters: {
             query?: never;
@@ -457,7 +480,14 @@ export interface paths {
         get: operations["get_media_api_media__media_id__get"];
         put?: never;
         post?: never;
-        delete?: never;
+        /**
+         * Delete Media
+         * @description **古くなった派生物だけ**消す（やり直しの後片付け）.
+         *
+         *     元ファイルは消せない。現行のグループの結合結果も、送信の記録が指している
+         *     ものも消せない。理由は 409 で返す。
+         */
+        delete: operations["delete_media_api_media__media_id__delete"];
         options?: never;
         head?: never;
         patch?: never;
@@ -578,7 +608,15 @@ export interface paths {
         get: operations["get_group_api_merge_groups__group_id__get"];
         put?: never;
         post?: never;
-        delete?: never;
+        /**
+         * Delete Group
+         * @description 破棄の記録を消す（§13）.
+         *
+         *     **消せるのは破棄済みで、何も持っていないものだけ。** 画面では「破棄した
+         *     組み合わせ」から消す。もう一度検出すると同じ組み合わせが出ることがある
+         *     —— それは消したのだから当然で、確認ダイアログにもそう書く。
+         */
+        delete: operations["delete_group_api_merge_groups__group_id__delete"];
         options?: never;
         head?: never;
         /**
@@ -1663,6 +1701,28 @@ export interface operations {
             };
         };
     };
+    list_stale_derived_api_media_stale_derived_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        [key: string]: unknown;
+                    };
+                };
+            };
+        };
+    };
     get_media_api_media__media_id__get: {
         parameters: {
             query?: never;
@@ -1683,6 +1743,37 @@ export interface operations {
                     "application/json": {
                         [key: string]: unknown;
                     };
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    delete_media_api_media__media_id__delete: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                media_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
                 };
             };
             /** @description Validation Error */
@@ -1910,6 +2001,39 @@ export interface operations {
                 content: {
                     "application/json": {
                         [key: string]: unknown;
+                    };
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    delete_group_api_merge_groups__group_id__delete: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                group_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        [key: string]: string;
                     };
                 };
             };

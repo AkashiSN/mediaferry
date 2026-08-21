@@ -116,6 +116,22 @@ def _status_clause(status: str) -> str:
     return f"EXISTS ({existing} AND u.state = '{known[status]}')"  # noqa: S608 - 語彙は上で固定
 
 
+# **`/media/{media_id}` より前に置く。** 後ろだと `media_id = "stale-derived"` として
+# 飲まれ、404 になる（この案件で何度も出た「並びの順で API が飲まれる」）。
+@router.get("/media/stale-derived")
+def list_stale_derived(
+    conn=Depends(get_conn),  # noqa: ANN001, B008
+    state=Depends(get_state),  # noqa: ANN001, B008
+) -> dict[str, Any]:
+    """もう使われていない派生物（やり直しの後片付けの対象）.
+
+    置き換えられたグループは `GET /merge-groups` に出ないので、その「できた
+    ファイル」はここからしか辿れない。
+    """
+    repo = MediaRepository(conn, state.settings.data_root)
+    return {"stale": repo.list_stale_derived()}
+
+
 @router.get("/media/{media_id}")
 def get_media(media_id: str, conn=Depends(get_conn)) -> dict[str, Any]:  # noqa: ANN001, B008
     row = conn.execute("SELECT * FROM media_file WHERE id = ?", (media_id,)).fetchone()

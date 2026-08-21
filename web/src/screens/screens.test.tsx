@@ -1125,21 +1125,20 @@ describe("結合の出力", () => {
     expect(screen.queryByRole("button", { name: "このファイルを消す" })).toBeNull();
   });
 
-  it("古くなった出力だけ消せる", async () => {
+  it("もう使われていない出力を、置き換えられたグループが出なくても消せる", async () => {
+    // **置き換えられたグループは `/merge-groups` に出ない**（API の既定）。
+    // 出るのは残っているファイルの方で、削除ボタンはそこに付く。
     stubApi({
       "/merge-groups?status=skipped": { groups: [] },
-      "/merge-groups": {
-        groups: [
+      "/merge-groups": { groups: [] },
+      "/media/stale-derived": {
+        stale: [
           {
-            ...base,
-            status: "merged",
-            superseded_by_id: "g2",
-            output: {
-              media_file_id: "out1",
-              rel_path: "derived/dji-osmo/DCIM/OLD.MP4",
-              size_bytes: 1024,
-              missing: false,
-            },
+            id: "out1",
+            rel_path: "derived/dji-osmo/DCIM/OLD.MP4",
+            size_bytes: 1024,
+            captured_at: "2026-08-08T12:54:04+09:00",
+            reason: "superseded",
           },
         ],
       },
@@ -1149,5 +1148,17 @@ describe("結合の出力", () => {
     await userEvent.click(await screen.findByRole("button", { name: "このファイルを消す" }));
     expect(await screen.findByRole("dialog")).toBeInTheDocument();
     expect(calls.some((call) => call.method === "DELETE")).toBe(false);
+  });
+
+  it("もう使われていない出力が無ければ、その節を出さない", async () => {
+    stubApi({
+      "/merge-groups?status=skipped": { groups: [] },
+      "/merge-groups": { groups: [] },
+      "/media/stale-derived": { stale: [] },
+    });
+    render(<MergesScreen />);
+
+    expect(await screen.findByText(/結合/)).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "このファイルを消す" })).toBeNull();
   });
 });

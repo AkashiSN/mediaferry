@@ -23,6 +23,30 @@ class MediaRepository:
         self._conn = conn
         self._data_root = data_root
 
+    def list_stale_derived(self) -> list[dict[str, object]]:
+        """もう使われていない派生物を並べる. **条件は削除の前提と同じ.**
+
+        **消せるのに画面から辿れなければ、無いのと同じ。** `list_groups` は
+        `superseded_by_id` を持つ行をどの場合も返さない（置き換えられた構成を
+        一覧に並べる意味が無いため）ので、そのグループの「できたファイル」は
+        結合画面に出ない —— 実機で 66 GiB がそこに残っていた。**出すのは構成
+        ではなく、残っているファイル**。
+
+        条件を `delete_stale_derived` と揃えるのは、**押しても 409 で断られる
+        ボタンを並べない**ため。片方だけ変えたら、もう片方も変える。
+        """
+        rows = self._conn.execute(
+            "SELECT m.id, m.rel_path, m.size_bytes, m.captured_at,"
+            "       CASE WHEN g.superseded_by_id IS NOT NULL THEN 'superseded'"
+            "            ELSE 'skipped' END AS reason"
+            " FROM media_file m JOIN merge_group g ON g.output_media_file_id = m.id"
+            " WHERE m.role = 'derived'"
+            "   AND (g.superseded_by_id IS NOT NULL OR g.status = 'skipped')"
+            "   AND NOT EXISTS (SELECT 1 FROM upload_record u WHERE u.media_file_id = m.id)"
+            " ORDER BY m.rel_path"
+        )
+        return [dict(row) for row in rows]
+
     def delete_stale_derived(self, media_file_id: str) -> str:
         """古くなった派生物を消す. **元ファイルは対象外.**
 

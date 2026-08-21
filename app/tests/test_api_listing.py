@@ -239,6 +239,40 @@ def test_an_unknown_profile_matches_nothing(client, library):
     assert got["media"] == []
 
 
+def test_stale_derived_outputs_are_listed_for_the_screen(client, db, data_root):
+    """置き換えられたグループは `GET /merge-groups` に出ない（`list_groups`）.
+
+    そのグループの「できたファイル」だけを別の経路で出す。**出せなければ
+    削除ボタンにも到達できない** —— 実機で 66 GiB がそこに残っていた。
+    """
+    from .test_schema_artifacts import a_merge_group
+
+    ref = a_profile(db, slug="stale-listing")
+    rel = "derived/dji-osmo/DCIM/SUPERSEDED.MP4"
+    (data_root / rel).parent.mkdir(parents=True, exist_ok=True)
+    (data_root / rel).write_bytes(b"old output")
+    derived = a_media_file(db, ref, rel_path=rel, role="derived")
+    old_group = a_merge_group(db, ref, "digest-old", status="merged")
+    newer = a_merge_group(db, ref, "digest-new")
+    db.execute(
+        "UPDATE merge_group SET output_media_file_id = ?, superseded_by_id = ? WHERE id = ?",
+        (derived, newer, old_group),
+    )
+
+    assert all(g["id"] != old_group for g in client.get("/api/merge-groups").json()["groups"])
+    got = client.get("/api/media/stale-derived").json()["stale"]
+    assert [row["id"] for row in got] == [derived]
+    assert got[0]["reason"] == "superseded"
+    assert got[0]["rel_path"] == rel
+
+
+def test_the_stale_listing_is_not_swallowed_by_the_media_route(client, db):
+    """**並びの順で API が飲まれる。** `/media/{id}` が先だと id 扱いになる."""
+    got = client.get("/api/media/stale-derived")
+    assert got.status_code == 200, got.json()
+    assert "stale" in got.json()
+
+
 def test_a_stale_derived_can_be_deleted_and_an_original_cannot(client, db, data_root):
     """やり直しの後片付け（§13）. **元ファイルは対象外.**"""
     from .test_schema_artifacts import a_merge_group
