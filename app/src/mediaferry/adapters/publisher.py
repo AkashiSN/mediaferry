@@ -20,7 +20,7 @@ import sqlite3
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC
 from pathlib import Path
 from typing import Any, BinaryIO
 from zoneinfo import ZoneInfo
@@ -29,7 +29,7 @@ from ..clock import now_iso
 from ..core import lease_pulse
 from ..core.lease_pulse import with_lease_pulse as _with_lease_pulse
 from ..core.naming import candidate_paths, staging_rel_path
-from ..core.timestamps import CapturedAt
+from ..core.timestamps import CapturedAt, mtime_wall_clock
 from ..db.connection import immediate
 from ..db.jobs import JobContext, LeaseLost
 from ..ids import new_id
@@ -102,6 +102,9 @@ class ArtifactRequest:
     # ので、ファイルを見て決める種類の値はここでしか解決できない（§9.3 手順 5）。
     captured: CapturedAt | None
     mtime_ns: int
+    # mtime が瞬間か壁時計か（`timestamp.mtime_semantics`）。衝突接尾辞の桁は
+    # `captured_at` と同じ規則で作らないと、同じ 1 本で両者が食い違う。
+    mtime_semantics: str
     source_entry_id: str | None
     merge_group_id: str | None
     resolve_captured: Callable[[Path], CapturedAt] | None = None
@@ -264,7 +267,9 @@ class ArtifactPublisher:
                 "mtime_ns": request.mtime_ns,
                 # 衝突時の別名に使う壁時計。ここで確定して永続化する。再開のたびに
                 # 計算し直すと、算出方法を変えた版で別の名前へ落ちる。
-                "collision_stamp": _collision_stamp(request.mtime_ns, captured.tz),
+                "collision_stamp": _collision_stamp(
+                    request.mtime_ns, captured.tz, request.mtime_semantics
+                ),
             }
             self._checkpoint(STEP_METADATA)
 
@@ -543,16 +548,15 @@ class ArtifactPublisher:
         ).fetchone()
 
 
-def _collision_stamp(mtime_ns: int, tz: str | None) -> str:
+def _collision_stamp(mtime_ns: int, tz: str | None, semantics: str) -> str:
     """衝突時の別名に使う、カード上の壁時計.
 
-    **mtime は真の瞬間**なので、`captured_at` を解決したのと同じ TZ で描画する
-    （`timestamps.py`）。UTC で描画すると、`captured_at` の壁時計と接尾辞が
-    オフセットぶんずれる。`tz` が無いのは `timezone_policy: none` のときで、
-    そのときは `captured_at` 自身が UTC 表現の壁時計なので UTC で描画する。
+    桁の作り方は `timestamps.mtime_wall_clock` に合わせる（規則は 1 か所）。
+    `tz` が無いのは `timezone_policy: none` のときで、そのときは `captured_at`
+    自身が UTC 表現の壁時計なので UTC で描画する。
     """
     zone = ZoneInfo(tz) if tz is not None else UTC
-    return datetime.fromtimestamp(mtime_ns / 1e9, tz=zone).strftime("%Y%m%d%H%M%S")
+    return mtime_wall_clock(mtime_ns, zone, semantics).strftime("%Y%m%d%H%M%S")
 
 
 def _is_same_content(path: Path, expected_size: int, expected_sha1: str) -> bool:

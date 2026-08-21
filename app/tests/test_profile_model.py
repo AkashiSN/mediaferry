@@ -91,6 +91,30 @@ def test_timezone_policy_is_constrained():
         parse_definition(a_definition(timestamp=ts))
 
 
+def test_mtime_semantics_is_constrained():
+    ts = a_definition()["timestamp"] | {"mtime_semantics": "epoch"}
+    with pytest.raises(ProfileInvalid, match="mtime_semantics"):
+        parse_definition(a_definition(timestamp=ts))
+
+
+def test_mtime_semantics_defaults_to_wall_clock_when_absent():
+    """**書いていない定義に「瞬間」を仮定しない。**
+
+    mtime が真の瞬間になるのは exFAT の `OffsetFromUtc` を書く媒体だけで、
+    FAT32 や valid bit の立っていない媒体では現地の壁時計を UTC と見なした
+    疑似 epoch になる。宣言の無い既存定義（この欄より前に作られたもの）は、
+    従来どおり壁時計として読む。
+    """
+    ts = a_definition()["timestamp"]
+    assert "mtime_semantics" not in ts
+    assert parse_definition(a_definition(timestamp=ts)).timestamp.mtime_semantics == "wall_clock"
+
+
+def test_mtime_semantics_is_kept_when_declared():
+    ts = a_definition()["timestamp"] | {"mtime_semantics": "instant"}
+    assert parse_definition(a_definition(timestamp=ts)).timestamp.mtime_semantics == "instant"
+
+
 def test_a_filename_source_needs_a_pattern_and_a_format():
     ts = a_definition()["timestamp"] | {"pattern": None}
     with pytest.raises(ProfileInvalid, match="pattern"):
@@ -143,6 +167,8 @@ def test_the_builtin_dji_profile_is_valid_and_has_no_local_timezone():
     assert "dji-osmo" in builtins
     assert builtins["dji-osmo"].timestamp.timezone is None
     assert builtins["dji-osmo"].timestamp.timezone_policy == "force_offset"
+    # DJI は exFAT の OffsetFromUtc を書く（実測。history/hardware-verification.md）。
+    assert builtins["dji-osmo"].timestamp.mtime_semantics == "instant"
 
 
 # ----------------------------------------------------------------------

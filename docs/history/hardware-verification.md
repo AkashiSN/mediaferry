@@ -205,18 +205,36 @@ DJI_20260815155045_0029_D.MP4   長さ 89.5 秒
 持ったまま上げる利用者が出たときは、影響するプロファイルの明示的な再計算と派生物の
 作り直しを手順に書く。
 
-### 残っている前提（`force_offset` の mtime fallback）
+### mtime の意味はプロファイルが宣言する（`mtime_semantics`）
 
 **「mtime は真の瞬間」は、`OffsetFromUtc` を書く媒体でしか成り立たない。** valid bit が
 立っていない媒体では、exfat ドライバはマウントの `time_offset`（既定 0）で epoch を
-合成するので、その値は**現地の壁時計を UTC と見なした疑似 epoch**になる。そういう
-カードを `force_offset` のプロファイルで取り込むと、fallback だけがオフセットぶんずれる。
+合成するので、その値は**現地の壁時計を UTC と見なした疑似 epoch**になる（FAT32 には
+そもそもオフセットの欄が無い）。そういうカードを `force_offset` のプロファイルで
+取り込むと、fallback だけがオフセットぶんずれる。
 
-**いま実害は無い。** ビルトインで `force_offset` なのは `dji-osmo` だけで、それが実測した
-機種そのもの。`canon-eos` と `generic-dcim` は `none` なので影響しない。**別の機種で
-ずれる実データが出たら**、mtime の意味（瞬間 / 壁時計）をプロファイルに持たせる。
-1 機種の実測から全機種の契約にはできない、という指摘（codex のレビュー）を受けての
-明示的な留保。
+**1 機種の実測を全機種の契約にはできない。** API は `POST` / `PUT /profiles` を公開して
+おり、任意のユーザ定義プロファイルが `force_offset` を選べる。しかも**確定済みの公開名と
+派生物の mtime は再計算では直らない**ので、事故が出てから欄を足すと不可逆な部分が残る
+（codex のレビューでの指摘。利用者の判断で、いま足した）。
+
+| 値 | 意味 | 該当する媒体 |
+| --- | --- | --- |
+| `wall_clock`（既定） | 現地の壁時計を UTC と見なした疑似 epoch | FAT32、valid bit の立たない exFAT |
+| `instant` | 真の瞬間 | `OffsetFromUtc` を書く exFAT（実測した DJI） |
+
+**既定を `wall_clock` にした。** 宣言の無い定義（この欄より前に作られたユーザ定義
+プロファイル）に「瞬間」を仮定すると黙ってずれる。ビルトインで明示するのは実測した
+`dji-osmo` だけで、`canon-eos` と `generic-dcim` は `timezone_policy: none` なので
+どちらでも同じ値になる。
+
+**宣言は 3 か所に効く**（`_wall_clock` の fallback・`_collision_stamp`・
+`_recording_end_ns`）。規則は `timestamps.mtime_wall_clock` と `timestamps.mtime_ns_of`
+の 2 つに閉じてあり、3 か所はそれを呼ぶ。
+
+**ビルトインの定義が変わったので、`sync_builtins` が `dji-osmo` の新しいリビジョンを
+作る。** 既存行の `captured_at_revision_id` は前の版を指したままになるので、画面から
+再計算をかける手がかりになる。
 
 **変異試験は 8 件すべて検出**（`tz=zone` を `UTC` に戻す、接尾辞に TZ を渡さない、
 `_recording_end_ns` を旧実装に戻す、naive の保険を外す、など）。素通りは無い。

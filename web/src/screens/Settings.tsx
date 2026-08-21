@@ -52,6 +52,8 @@ const TEMPLATE = {
     fallback: "mtime",
     timezone_policy: "none",
     timezone: null,
+    // mtime が何を表すか。exFAT の OffsetFromUtc を書く機種だけ instant。
+    mtime_semantics: "wall_clock",
   },
   merge: {
     enabled: false,

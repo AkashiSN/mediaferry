@@ -470,7 +470,8 @@ TrueNAS ホストで。手順は [`history/phase0-findings.md`](history/phase0-f
 | **`0005` を版を足さずに書き換えた** | 古い `0005` を適用済みの DB は runner が `MigrationError` で開けない（配布前なので開発用 DB は作り直す前提）。**以後この手は使わない** —— 7 巡目の blocker になった |
 | 認証の既定 | **off のまま**（利用者の判断）。`BIND_HOST` の既定も loopback。`TRUSTED_HOSTS` は IP と `localhost` を既定で通し、ホスト名だけ許可制 |
 | フロントの依存 | `web/package-lock.json` を追跡している。Playwright のブラウザは `npx playwright install chromium` で入れる（CI で回すなら `--with-deps`） |
-| **mtime の解釈** | **決着した（2026-08-21）。** DJI は exFAT の `OffsetFromUtc` を書いており、**mtime は真の瞬間**だった（11 番の実測）。壁時計は解決した TZ で描画する形へ 3 か所を同時に直した（`decisions.md` の「実測で覆った判断」）。**実機で確かめるのはこれから** —— 写真（`PANORAMA/PANO_*.JPG`）を含む再取り込みで見る |
+| **mtime の解釈** | **決着した（2026-08-21）。** DJI は exFAT の `OffsetFromUtc` を書いており、**mtime は真の瞬間**だった（11 番の実測）。3 か所を同時に直し、**意味はプロファイルが宣言する**形にした（`timestamp.mtime_semantics`、既定は `wall_clock`。`decisions.md` の「実測で覆った判断」）。**実機で確かめるのはこれから** —— 写真（`PANORAMA/PANO_*.JPG`）を含む再取り込みで見る |
+| **`mtime_semantics` を足したので `dji-osmo` の版が進む** | ビルトインの定義 JSON が変わるため、次の起動の `sync_builtins` が新しいリビジョンを作る。既存行の `captured_at_revision_id` は前の版を指したままなので、画面が再計算の手がかりを出す。**既存 DB の `captured_at` は自動では直らない**（手で `POST /profiles/{slug}/recompute`）。確定済みの公開名と派生物の実体 mtime は再計算でも直らない |
 | ~~取り込み側のリースの穴~~ | **塞いだ**（Phase 2 の Task 7）。`_with_lease_pulse` が共通の `_publish` に入ったので、16 GiB のコピー後の `os.fsync` と ffprobe も守られる。回帰テストは `test_publisher.py::test_a_slow_fsync_does_not_lose_the_lease` |
 | `_publish` の外の `fsync_dir` | ジョブ用ディレクトリを作った直後の `fsync_dir` は `_with_lease_pulse` の外にある。ディレクトリの fsync はメタデータだけなので実運用では一瞬で終わるが、極端に遅い環境では守られていない |
 | `disposition.attached_pic` | 結合の「最初の映像ストリームのみ」の判定が、埋め込みサムネイルをこれで見分ける。実機の DJI ファイルで立っているかは未確認（`keep_streams.video` が `primary` の間は影響しない）。チェックリスト 12 番で見る |

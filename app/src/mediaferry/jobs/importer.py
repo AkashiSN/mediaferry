@@ -220,6 +220,7 @@ class Importer:
             extension=PurePosixPath(row["rel_path"]).suffix.lstrip(".").upper(),
             captured=captured,
             mtime_ns=row["mtime_ns"],
+            mtime_semantics=profile.definition.timestamp.mtime_semantics,
             source_entry_id=row["id"],
             merge_group_id=None,
             resolve_captured=resolver,

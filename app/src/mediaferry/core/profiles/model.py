@@ -27,6 +27,10 @@ BUILTIN_DIR = Path(__file__).parent / "builtin"
 _SLUG_RE = re.compile(r"^[a-z0-9][a-z0-9-]*$")
 _TIMESTAMP_SOURCES = ("filename", "exif", "mtime")
 _TIMEZONE_POLICIES = ("none", "force_offset")
+# mtime が何を表すか。exFAT の `OffsetFromUtc` を書く媒体なら真の瞬間、
+# 書かない媒体（FAT32、valid bit の立たない exFAT）なら現地の壁時計を UTC と
+# 見なした疑似 epoch になる。**媒体の性質なので、形からは推定できない。**
+_MTIME_SEMANTICS = ("wall_clock", "instant")
 _VIDEO_KEEP = ("primary", "all")
 # 正規表現の長さの上限。書き間違いを早く教えるためのもので、
 # catastrophic backtracking はこれでは防げない（patterns.py を見よ）。
@@ -65,6 +69,8 @@ class TimestampRule:
     fallback: str
     timezone_policy: str
     timezone: str | None
+    # 既定は `wall_clock`。**宣言の無い定義に「瞬間」を仮定しない**（§6）。
+    mtime_semantics: str = "wall_clock"
 
 
 @dataclass(frozen=True)
@@ -255,7 +261,15 @@ def _parse_scan(data: Mapping[str, Any]) -> ScanRule:
 def _parse_timestamp(data: Mapping[str, Any]) -> TimestampRule:
     _reject_unknown(
         data,
-        {"source", "pattern", "format", "fallback", "timezone_policy", "timezone"},
+        {
+            "source",
+            "pattern",
+            "format",
+            "fallback",
+            "timezone_policy",
+            "timezone",
+            "mtime_semantics",
+        },
         "timestamp",
     )
     source = _string(data, "source")
@@ -280,6 +294,11 @@ def _parse_timestamp(data: Mapping[str, Any]) -> TimestampRule:
     timezone = data.get("timezone")
     if timezone is not None and not isinstance(timezone, str):
         raise ProfileInvalid("timestamp.timezone は文字列か null")
+    # **既定は `wall_clock`。** 書いていない定義（この欄より前に作られたもの）に
+    # 「瞬間」を仮定すると、`OffsetFromUtc` を書かない媒体で黙ってずれる。
+    semantics = data.get("mtime_semantics", "wall_clock")
+    if semantics not in _MTIME_SEMANTICS:
+        raise ProfileInvalid(f"timestamp.mtime_semantics は {_MTIME_SEMANTICS} のいずれか")
     return TimestampRule(
         source=source,
         pattern=pattern if isinstance(pattern, str) else None,
@@ -287,6 +306,7 @@ def _parse_timestamp(data: Mapping[str, Any]) -> TimestampRule:
         fallback=fallback,
         timezone_policy=policy,
         timezone=timezone,
+        mtime_semantics=semantics,
     )
 
 

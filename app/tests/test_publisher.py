@@ -65,6 +65,7 @@ def a_request(profile, entry_id, **over):
             note=None,
         ),
         "mtime_ns": 1_700_000_000_000_000_000,
+        "mtime_semantics": "instant",
         "source_entry_id": entry_id,
         "merge_group_id": None,
     }
@@ -381,6 +382,23 @@ def test_the_collision_suffix_is_the_wall_clock_of_the_resolved_timezone(setup, 
     )
     # mtime 1_700_000_000 秒 = 2023-11-14T22:13:20+00:00 = 東京の 11/15 07:13:20
     assert got.rel_path == "library/dji-osmo/DCIM/A_20231115071320.MP4"
+
+
+def test_a_wall_clock_profile_stamps_the_utc_digits(setup, db, data_root):
+    """`wall_clock` の媒体では、UTC 表現の桁がそのままカード上の壁時計.
+
+    `captured_at` の描き方（`timestamps.mtime_wall_clock`）と食い違うと、
+    同じ 1 本について撮影日時と接尾辞が別の壁時計を指す。
+    """
+    publisher, ctx, profile, volume_id = setup
+    over = {"mtime_semantics": "wall_clock"}
+    publisher.publish(
+        ctx, a_request(profile, a_source_entry(db, volume_id), **over), write_payload(b"XX")
+    )
+    got = publisher.publish(
+        ctx, a_request(profile, a_source_entry(db, volume_id), **over), write_payload(b"YY")
+    )
+    assert got.rel_path == "library/dji-osmo/DCIM/A_20231114221320.MP4"
 
 
 def test_a_captured_at_without_a_timezone_stamps_in_utc(setup, db, data_root):

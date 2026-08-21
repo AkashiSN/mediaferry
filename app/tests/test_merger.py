@@ -2,6 +2,7 @@ import json
 import shutil
 import subprocess
 import time
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta, timezone
 
 import pytest
@@ -152,6 +153,33 @@ def test_the_offset_in_captured_at_decides_the_output_mtime(world, data_root, db
     assert (data_root / result.rel_path).stat().st_mtime == pytest.approx(expected, abs=1)
 
 
+def test_a_wall_clock_profile_keeps_the_output_mtime_in_the_old_representation(
+    world, data_root, db
+):
+    """`wall_clock` の媒体では、取り込みの mtime が「壁時計を UTC と読んだ epoch」.
+
+    派生物だけ真の瞬間にすると、同じライブラリの中で `library/` と `derived/` の
+    epoch がオフセットぶんずれる（この案件がまさにそれで壊れていた）。
+    """
+    merger, ctx, profile, _, group_id = world
+    # ビルトインは編集できない（§6）ので、同じ版を指したまま定義だけ差し替える。
+    wall_clock_profile = replace(
+        profile,
+        definition=replace(
+            profile.definition,
+            timestamp=replace(profile.definition.timestamp, mtime_semantics="wall_clock"),
+        ),
+    )
+    db.execute(
+        "UPDATE media_file SET captured_at = replace(captured_at, '+00:00', '+09:00')"
+        " WHERE role = 'original'"
+    )
+    result = merger.run(ctx, group_id, "digest-1", wall_clock_profile)
+    # 壁時計 14:30:04 を UTC として読んだ epoch。オフセットで 9 時間ずらさない。
+    expected = datetime(2026, 8, 17, 14, 30, 4, tzinfo=UTC).timestamp()
+    assert (data_root / result.rel_path).stat().st_mtime == pytest.approx(expected, abs=1)
+
+
 def test_a_captured_at_without_an_offset_is_read_as_utc(monkeypatch):
     """オフセットの無い値を実行環境の TZ で解釈しない.
 
@@ -161,7 +189,9 @@ def test_a_captured_at_without_an_offset_is_read_as_utc(monkeypatch):
     monkeypatch.setenv("TZ", "Asia/Tokyo")
     time.tzset()
     try:
-        got = _recording_end_ns([{"captured_at": "2026-08-17T14:30:02", "duration_seconds": 2.0}])
+        got = _recording_end_ns(
+            [{"captured_at": "2026-08-17T14:30:02", "duration_seconds": 2.0}], "instant"
+        )
     finally:
         monkeypatch.undo()
         time.tzset()

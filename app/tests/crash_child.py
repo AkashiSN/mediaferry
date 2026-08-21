@@ -100,6 +100,7 @@ def main() -> None:
             note=None,
         ),
         mtime_ns=1_700_000_000_000_000_000,
+        mtime_semantics="instant",
         source_entry_id=source_entry_id,
         merge_group_id=merge_group_id,
         resolve_captured=_resolve_from_exif if exif else None,

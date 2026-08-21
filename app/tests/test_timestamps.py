@@ -9,7 +9,12 @@ from .test_profile_model import a_definition
 
 
 def defn(**timestamp_over):
-    ts = a_definition()["timestamp"] | timestamp_over
+    """既定は `mtime_semantics: instant`（実測した DJI と同じ）.
+
+    **`wall_clock` を見る試験は明示的に渡す。** 既定に頼ると、既定を変える回帰で
+    どちらの意味を試していたのか読めなくなる。
+    """
+    ts = a_definition()["timestamp"] | {"mtime_semantics": "instant"} | timestamp_over
     return parse_definition(a_definition(timestamp=ts))
 
 
@@ -70,6 +75,22 @@ def test_files_that_miss_the_pattern_fall_back_to_mtime():
     assert got.source == "mtime"
     assert got.at.isoformat() == "2026-08-17T14:00:00+09:00"
     assert got.at.timestamp() == mtime_ns_of("2026-08-17T05:00:00") / 1e9
+
+
+def test_a_wall_clock_profile_reads_the_mtime_as_a_local_wall_clock():
+    """`OffsetFromUtc` を書かない媒体（FAT32 等）はこちら.
+
+    その epoch は「現地の壁時計を UTC と見なした疑似 epoch」なので、UTC 表現の
+    桁を壁時計として読み、プロファイルのオフセットを付ける。
+    """
+    got = resolve_captured_at(
+        defn(timezone="Asia/Tokyo", mtime_semantics="wall_clock"),
+        "PANORAMA/PANO_0001.JPG",
+        mtime_ns_of("2026-08-17T05:00:00"),
+        None,
+    )
+    assert got.source == "mtime"
+    assert got.at.isoformat() == "2026-08-17T05:00:00+09:00"
 
 
 def test_the_mtime_fallback_uses_the_default_timezone_too():

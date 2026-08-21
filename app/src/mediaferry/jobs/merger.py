@@ -32,7 +32,7 @@ from ..core.merge.grouping import MergePart
 from ..core.merge.output import merged_rel_path
 from ..core.merge.verify import ProbedFile, verify
 from ..core.naming import work_rel_path
-from ..core.timestamps import CapturedAt
+from ..core.timestamps import CapturedAt, mtime_ns_of
 from ..db.jobs import JobContext
 from ..db.merges import MergeRepository
 from ..db.profiles import ProfileRef
@@ -191,7 +191,8 @@ class Merger:
                 source_rel_path=members[0]["rel_path"],
                 extension=extension,
                 captured=_captured_of(members[0]),
-                mtime_ns=_recording_end_ns(members),
+                mtime_ns=_recording_end_ns(members, profile.definition.timestamp.mtime_semantics),
+                mtime_semantics=profile.definition.timestamp.mtime_semantics,
                 source_entry_id=None,
                 merge_group_id=group_id,
             ),
@@ -251,14 +252,11 @@ def _captured_of(row: sqlite3.Row) -> CapturedAt:
     )
 
 
-def _recording_end_ns(members: list[sqlite3.Row]) -> int:
+def _recording_end_ns(members: list[sqlite3.Row], semantics: str) -> int:
     """録画終了時刻（最後のパートの開始 + duration）を mtime にする（§9.8 手順 6）.
 
-    **`captured_at` の瞬間をそのまま使う。** 取り込みの mtime も真の瞬間なので
-    （`timestamps.py`）、ここで UTC と読み替えると `library/` と `derived/` で
-    epoch がオフセットぶんずれる。公開名の衝突接尾辞
-    （`publisher._collision_stamp`）は両方とも同じ TZ で描画するので、壁時計は
-    そろう。
+    **取り込んだファイルと同じ表現にする**（`timestamps.mtime_ns_of`）。片方だけ
+    別の表現にすると、`library/` と `derived/` で epoch がオフセットぶんずれる。
 
     オフセットの無い値はシステムの TZ で読まれてしまうので UTC と見なす。
     """
@@ -267,4 +265,4 @@ def _recording_end_ns(members: list[sqlite3.Row]) -> int:
     if start.tzinfo is None:
         start = start.replace(tzinfo=UTC)
     duration = last["duration_seconds"] or 0.0
-    return int(start.timestamp() * 1e9) + int(duration * 1e9)
+    return mtime_ns_of(start, semantics) + int(duration * 1e9)

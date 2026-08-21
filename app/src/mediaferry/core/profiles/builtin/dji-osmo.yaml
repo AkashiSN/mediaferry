@@ -22,6 +22,9 @@ timestamp:
   # DJI は creation_time を UTC で書きつつオフセットも GPS も書かないので、
   # Immich が撮影地の TZ を判定できない。壁時計にオフセットを付けて書き戻す。
   timezone_policy: force_offset
+  # DJI は exFAT の OffsetFromUtc を書くので、mtime は真の瞬間
+  # （実測: docs/history/hardware-verification.md の 11 番）。
+  mtime_semantics: instant
   # 地域固定の値は持たない。MEDIAFERRY_DEFAULT_TIMEZONE か画面で与える。
   timezone: null
 merge:

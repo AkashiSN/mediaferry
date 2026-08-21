@@ -5,13 +5,16 @@
 GPS も書かないため、Immich が撮影地の TZ を判定できず、UTC の壁時計をそのまま
 localDateTime として採用してしまう問題への対処である。
 
-**mtime だけは壁時計ではなく真の瞬間として扱う。** Linux の exfat ドライバは、
-`OffsetFromUtc` の valid bit が立っていればそのオフセットで UTC へ変換する
-（`fs/exfat/misc.c` の `exfat_get_entry_time`）。DJI はこれを書いているので、
-mtime の epoch は録画終端の正しい瞬間になる。解決した timezone を付けた値を
-そのまま採り、**オフセットを付け直さない** —— naive の壁時計へ落とすと、DST の
-戻りでどちらの 1 時間かを失う。曖昧さの解決（下の `_attach_offset`）は、
-**壁時計から始めた値**にだけ当たる。
+**mtime が何を表すかはプロファイルが宣言する**（`timestamp.mtime_semantics`）。
+Linux の exfat ドライバは、`OffsetFromUtc` の valid bit が立っていればその
+オフセットで UTC へ変換し、立っていなければマウントの `time_offset`（既定 0）を
+使う（`fs/exfat/misc.c` の `exfat_get_entry_time`）。前者なら epoch は真の瞬間
+（`instant`）、後者と FAT32 なら現地の壁時計を UTC と見なした疑似 epoch
+（`wall_clock`）になる。**媒体の性質なので値の形からは見分けられない。**
+
+`instant` のときは解決した timezone を付けた値をそのまま採り、**オフセットを
+付け直さない** —— naive の壁時計へ落とすと、DST の戻りでどちらの 1 時間かを失う。
+曖昧さの解決（下の `_attach_offset`）は、**壁時計から始めた値**にだけ当たる。
 
 `timezone_policy: none` のときは描画に使う timezone が無いので、UTC 表現の壁時計を
 そのまま採る（介入しない方針そのもの）。
@@ -65,7 +68,7 @@ def resolve_captured_at(
         zone = ZoneInfo(name)
 
     wall, source = _wall_clock(defn, rel_path, mtime_ns, exif_wall, zone)
-    if source == "mtime":
+    if source == "mtime" and defn.timestamp.mtime_semantics == "instant":
         # **瞬間から始めた値は fold まで決まっている**ので付け直さない。
         # **見分けるのは source。** 「aware かどうか」で見ると、オフセット付きの
         # EXIF がそのまま通り、`at` と `tz` が食い違う `CapturedAt` ができる。
@@ -105,10 +108,36 @@ def _wall_clock(
     if rule.source == "exif" and exif_wall is not None:
         return exif_wall, "exif"
     # fallback は mtime のみを想定する。EXIF を持たないファイル（Canon の MOV、
-    # タグの無い JPEG）はここへ落ちる。**mtime は真の瞬間**なので、解決した TZ を
-    # 付けた aware な値をそのまま返す —— naive の壁時計へ落とすと、DST の戻りで
-    # どちらの 1 時間かを失い、付け直しで 1 時間ずれる。
-    return datetime.fromtimestamp(mtime_ns / 1e9, tz=zone), "mtime"
+    # タグの無い JPEG）はここへ落ちる。
+    return mtime_wall_clock(mtime_ns, zone, defn.timestamp.mtime_semantics), "mtime"
+
+
+def mtime_wall_clock(mtime_ns: int, zone: tzinfo, semantics: str) -> datetime:
+    """mtime が指すカード上の時刻. **意味の解釈はここ 1 か所に置く.**
+
+    - `instant`: 真の瞬間なので `zone` を付けた aware な値をそのまま返す。
+      naive へ落として付け直すと、DST の戻りでどちらの 1 時間かを失う
+    - `wall_clock`: UTC 表現の桁がそのまま壁時計。naive で返し、オフセットの
+      付与は呼び出し側（`_attach_offset`）に任せる
+
+    `publisher._collision_stamp` も同じ規則で桁を作る。ずれると `library/` と
+    `derived/` で衝突接尾辞の壁時計が食い違う。
+    """
+    if semantics == "instant":
+        return datetime.fromtimestamp(mtime_ns / 1e9, tz=zone)
+    return datetime.fromtimestamp(mtime_ns / 1e9, tz=UTC).replace(tzinfo=None)
+
+
+def mtime_ns_of(at: datetime, semantics: str) -> int:
+    """`captured_at` を、そのプロファイルの mtime 表現へ戻す（`merger` が使う）.
+
+    取り込んだファイルの mtime と同じ表現にしないと、`library/` と `derived/` で
+    epoch がオフセットぶんずれる。
+    """
+    if semantics == "instant":
+        return int(at.timestamp() * 1e9)
+    # 壁時計を UTC として読んだ疑似 epoch。オフセットの無い値はそのまま UTC。
+    return int(at.replace(tzinfo=UTC).timestamp() * 1e9)
 
 
 def _attach_offset(wall: datetime, zone: ZoneInfo) -> tuple[datetime, str | None]:

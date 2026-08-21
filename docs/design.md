@@ -232,6 +232,7 @@ timestamp:
   fallback: mtime                 # pattern に当たらないファイル（PANO_0001.JPG 等）
   timezone_policy: force_offset   # none | force_offset
   timezone: null                  # force_offset なら設定必須（§12.2）
+  mtime_semantics: instant        # wall_clock（既定）| instant
 merge:
   enabled: true
   tolerance_seconds: 5
@@ -289,12 +290,26 @@ GUI での編集は既存定義を書き換えず、**新しいリビジョン�
   付与して `dateTimeOriginal` を書き戻す。DJI が MP4 の `creation_time` を UTC で書きつつ
   オフセットも GPS も書かないため、Immich が撮影地の TZ を判定できず `localDateTime` を
   UTC の壁時計のまま採用してしまう問題への対処。
-  **mtime だけは壁時計ではなく真の瞬間**（exFAT の `OffsetFromUtc` が効いている。実測は
-  [`history/hardware-verification.md`](history/hardware-verification.md)）なので、
-  `timezone` を付けた値をそのまま使い、**オフセットを付け直さない**（naive の壁時計へ
-  落とすと DST の戻りで 1 時間ずれる）。下の「曖昧・存在しない壁時計」の扱いは、
-  ファイル名と EXIF —— **壁時計から始めた値**だけに当たる。`none` のときは描画に使う
-  TZ が無いので、UTC 表現の壁時計をそのまま採る。
+  `none` のときは描画に使う TZ が無いので、UTC 表現の壁時計をそのまま採る。
+
+`mtime_semantics` は **mtime が何を表すか**を宣言する。**媒体の性質であって、値の形からは
+見分けられない。**
+
+- `wall_clock`（既定）: 現地の壁時計を UTC と見なした疑似 epoch。FAT32 と、exFAT でも
+  `OffsetFromUtc` の valid bit が立っていない媒体はこちら（Linux はマウントの
+  `time_offset`、既定 0 で合成する）。UTC 表現の桁を壁時計として読む
+- `instant`: 真の瞬間。exFAT の `OffsetFromUtc` を書く媒体（DJI で実測。
+  [`history/hardware-verification.md`](history/hardware-verification.md)）。`timezone` を
+  付けた値をそのまま使い、**オフセットを付け直さない**（naive の壁時計へ落とすと DST の
+  戻りで 1 時間ずれる）
+
+下の「曖昧・存在しない壁時計」の扱いは、ファイル名と EXIF、それに `wall_clock` の mtime
+—— **壁時計から始めた値**だけに当たる。
+
+**この宣言は 3 か所に効き、3 つは連動する**（片方だけ別の意味で読むと、`library/` と
+`derived/` で衝突接尾辞の壁時計や mtime の epoch がずれる）: `captured_at` の算出
+（`timestamps._wall_clock`）、公開名の衝突接尾辞（`publisher._collision_stamp`）、
+結合出力の mtime（`merger._recording_end_ns`）。
 
 `force_offset` かつ `timezone` が未解決（プロファイルにも `MEDIAFERRY_DEFAULT_TIMEZONE`
 にも値が無い）の場合は**起動時エラー**とし、取り込みを一切開始しない（§12.2）。
