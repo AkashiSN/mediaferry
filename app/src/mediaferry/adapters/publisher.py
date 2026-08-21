@@ -23,6 +23,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, BinaryIO
+from zoneinfo import ZoneInfo
 
 from ..clock import now_iso
 from ..core import lease_pulse
@@ -263,7 +264,7 @@ class ArtifactPublisher:
                 "mtime_ns": request.mtime_ns,
                 # 衝突時の別名に使う壁時計。ここで確定して永続化する。再開のたびに
                 # 計算し直すと、算出方法を変えた版で別の名前へ落ちる。
-                "collision_stamp": _collision_stamp(request.mtime_ns),
+                "collision_stamp": _collision_stamp(request.mtime_ns, captured.tz),
             }
             self._checkpoint(STEP_METADATA)
 
@@ -542,14 +543,16 @@ class ArtifactPublisher:
         ).fetchone()
 
 
-def _collision_stamp(mtime_ns: int) -> str:
+def _collision_stamp(mtime_ns: int, tz: str | None) -> str:
     """衝突時の別名に使う、カード上の壁時計.
 
-    `timestamps.py` と同じ前提に立つ（カードの時刻欄に UTC オフセットが
-    書かれていない）。その前提の下では、プロファイルの `timezone` を付けても
-    表示される桁は変わらない（オフセットの付与は瞬間を移動しない）。
+    **mtime は真の瞬間**なので、`captured_at` を解決したのと同じ TZ で描画する
+    （`timestamps.py`）。UTC で描画すると、`captured_at` の壁時計と接尾辞が
+    オフセットぶんずれる。`tz` が無いのは `timezone_policy: none` のときで、
+    そのときは `captured_at` 自身が UTC 表現の壁時計なので UTC で描画する。
     """
-    return datetime.fromtimestamp(mtime_ns / 1e9, tz=UTC).strftime("%Y%m%d%H%M%S")
+    zone = ZoneInfo(tz) if tz is not None else UTC
+    return datetime.fromtimestamp(mtime_ns / 1e9, tz=zone).strftime("%Y%m%d%H%M%S")
 
 
 def _is_same_content(path: Path, expected_size: int, expected_sha1: str) -> bool:

@@ -254,13 +254,17 @@ def _captured_of(row: sqlite3.Row) -> CapturedAt:
 def _recording_end_ns(members: list[sqlite3.Row]) -> int:
     """録画終了時刻（最後のパートの開始 + duration）を mtime にする（§9.8 手順 6）.
 
-    **壁時計を UTC として解釈した epoch にする。** 取り込みの mtime は
-    カード上の時刻欄をそのまま UTC 表現で読んだ値で（`timestamps.py`）、
-    公開名の衝突接尾辞（`publisher._collision_stamp`）もその表現から作る。
-    オフセット付きの瞬間を使うと、`library/` と `derived/` で接尾辞の壁時計が
-    ずれる。
+    **`captured_at` の瞬間をそのまま使う。** 取り込みの mtime も真の瞬間なので
+    （`timestamps.py`）、ここで UTC と読み替えると `library/` と `derived/` で
+    epoch がオフセットぶんずれる。公開名の衝突接尾辞
+    （`publisher._collision_stamp`）は両方とも同じ TZ で描画するので、壁時計は
+    そろう。
+
+    オフセットの無い値はシステムの TZ で読まれてしまうので UTC と見なす。
     """
     last = members[-1]
-    start = datetime.fromisoformat(last["captured_at"]).replace(tzinfo=UTC)
+    start = datetime.fromisoformat(last["captured_at"])
+    if start.tzinfo is None:
+        start = start.replace(tzinfo=UTC)
     duration = last["duration_seconds"] or 0.0
     return int(start.timestamp() * 1e9) + int(duration * 1e9)

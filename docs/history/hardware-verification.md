@@ -178,6 +178,27 @@ DJI_20260815155045_0029_D.MP4   長さ 89.5 秒
 **リセット後の再取り込みが検証の機会になる。** 直さずに取り込むと、写真を足した
 ときに誤った `captured_at` が入り、再計算をかけることになる。
 
+### 直した（2026-08-21）
+
+3 か所を同時に変えた。**失敗するテストを先に書いて、失敗を確認してから**直している。
+
+| 直したもの | 変えた内容 |
+| --- | --- |
+| `timestamps._wall_clock` | mtime の fallback を、UTC 表現ではなく**解決した TZ で描画**する。TZ の解決を壁時計より先に動かした（`timezone_policy: none` は描画に使う TZ が無いので UTC のまま） |
+| `publisher._collision_stamp` | `captured_at` を解決したのと同じ TZ（`CapturedAt.tz`）で描画する。**配管は増えていない** —— 手順 5 で `captured` が既に手元にある |
+| `merger._recording_end_ns` | `captured_at` の瞬間をそのまま epoch にする（`.replace(tzinfo=UTC)` をやめた）。オフセットの無い値だけ UTC と見なす（放っておくとシステムの TZ で読まれる） |
+
+**再計算（`recompute_timestamps`）にもそのまま効く** —— 入力は `source_entry` に
+記録した `mtime_ns` なので、版を進めれば既存の行も直る。
+
+**変異試験は 8 件すべて検出**（`tz=zone` を `UTC` に戻す、接尾辞に TZ を渡さない、
+`_recording_end_ns` を旧実装に戻す、naive の保険を外す、など）。素通りは無い。
+
+**テストの前提もずらした。** `test_recompute.py` の `ns()` は「カード上の壁時計を
+UTC 表現の epoch にする」ヘルパだったので、**真の瞬間**を書く `ns()` と、
+**その TZ の壁時計**を書く `ns_local()` に分けた。分けないと、`force_offset` の
+fixture と `timezone_policy: none` の fixture が同じヘルパを違う意味で使うことになる。
+
 ## 12 番の実測 —— 合格
 
 ```

@@ -367,6 +367,44 @@ def test_the_published_file_keeps_the_source_mtime(setup, db, data_root):
     assert (data_root / got.rel_path).stat().st_mtime_ns == 1_700_000_000_000_000_000
 
 
+def test_the_collision_suffix_is_the_wall_clock_of_the_resolved_timezone(setup, db, data_root):
+    """接尾辞は「カード上の壁時計」. mtime は真の瞬間なので TZ で描画する.
+
+    UTC で描画すると、`captured_at` の壁時計と接尾辞がオフセットぶんずれる
+    （`docs/history/hardware-verification.md` の 11 番）。
+    """
+    publisher, ctx, profile, volume_id = setup
+    # A.MP4 を別内容で占有させ、2 本目を別名へ追いやる
+    publisher.publish(ctx, a_request(profile, a_source_entry(db, volume_id)), write_payload(b"XX"))
+    got = publisher.publish(
+        ctx, a_request(profile, a_source_entry(db, volume_id)), write_payload(b"YY")
+    )
+    # mtime 1_700_000_000 秒 = 2023-11-14T22:13:20+00:00 = 東京の 11/15 07:13:20
+    assert got.rel_path == "library/dji-osmo/DCIM/A_20231115071320.MP4"
+
+
+def test_a_captured_at_without_a_timezone_stamps_in_utc(setup, db, data_root):
+    """`timezone_policy: none` は壁時計を UTC として持つので、接尾辞もそれに合わせる."""
+    publisher, ctx, profile, volume_id = setup
+    captured = CapturedAt(
+        at=datetime.fromisoformat("2023-11-14T22:13:20+00:00"),
+        source="mtime",
+        tz=None,
+        note=None,
+    )
+    publisher.publish(
+        ctx,
+        a_request(profile, a_source_entry(db, volume_id), captured=captured),
+        write_payload(b"XX"),
+    )
+    got = publisher.publish(
+        ctx,
+        a_request(profile, a_source_entry(db, volume_id), captured=captured),
+        write_payload(b"YY"),
+    )
+    assert got.rel_path == "library/dji-osmo/DCIM/A_20231114221320.MP4"
+
+
 def test_merge_artifacts_use_the_same_protocol(setup, db, data_root):
     from .test_schema_artifacts import a_merge_group
 

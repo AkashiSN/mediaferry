@@ -1,7 +1,8 @@
 import json
 import shutil
 import subprocess
-from datetime import UTC, datetime, timedelta
+import time
+from datetime import UTC, datetime, timedelta, timezone
 
 import pytest
 
@@ -17,6 +18,7 @@ from mediaferry.jobs.merger import (
     MergeInputsChanged,
     Merger,
     NotEnoughSpace,
+    _recording_end_ns,
 )
 
 from .test_schema_artifacts import a_media_file
@@ -134,16 +136,36 @@ def test_the_output_mtime_is_the_recording_end_in_wall_clock(world, data_root):
     assert (data_root / result.rel_path).stat().st_mtime == pytest.approx(expected, abs=1)
 
 
-def test_the_offset_in_captured_at_does_not_move_the_output_mtime(world, data_root, db):
+def test_the_offset_in_captured_at_decides_the_output_mtime(world, data_root, db):
+    """`captured_at` は真の瞬間なので、オフセットを解釈して epoch にする.
+
+    UTC と読み替えると、取り込んだファイル（mtime が真の瞬間）と派生物とで
+    9 時間ずれる（`docs/history/hardware-verification.md` の 11 番）。
+    """
     merger, ctx, profile, _, group_id = world
     db.execute(
         "UPDATE media_file SET captured_at = replace(captured_at, '+00:00', '+09:00')"
         " WHERE role = 'original'"
     )
     result = merger.run(ctx, group_id, "digest-1", profile)
-    # 壁時計は 14:30:04 のまま。オフセットで 9 時間ずらさない。
-    expected = datetime(2026, 8, 17, 14, 30, 4, tzinfo=UTC).timestamp()
+    expected = datetime(2026, 8, 17, 14, 30, 4, tzinfo=timezone(timedelta(hours=9))).timestamp()
     assert (data_root / result.rel_path).stat().st_mtime == pytest.approx(expected, abs=1)
+
+
+def test_a_captured_at_without_an_offset_is_read_as_utc(monkeypatch):
+    """オフセットの無い値を実行環境の TZ で解釈しない.
+
+    `datetime.timestamp()` は naive な値をシステムの TZ で読むので、放っておくと
+    ホストの設定で派生物の mtime が変わる。
+    """
+    monkeypatch.setenv("TZ", "Asia/Tokyo")
+    time.tzset()
+    try:
+        got = _recording_end_ns([{"captured_at": "2026-08-17T14:30:02", "duration_seconds": 2.0}])
+    finally:
+        monkeypatch.undo()
+        time.tzset()
+    assert got == int(datetime(2026, 8, 17, 14, 30, 4, tzinfo=UTC).timestamp() * 1e9)
 
 
 def test_the_work_directory_is_cleaned(world, data_root):

@@ -13,8 +13,9 @@ def defn(**timestamp_over):
     return parse_definition(a_definition(timestamp=ts))
 
 
-def mtime_ns_of(wall_utc: str) -> int:
-    dt = datetime.fromisoformat(wall_utc).replace(tzinfo=UTC)
+def mtime_ns_of(instant_utc: str) -> int:
+    """mtime は**真の瞬間**。UTC で書いた時刻の epoch を返す."""
+    dt = datetime.fromisoformat(instant_utc).replace(tzinfo=UTC)
     return int(dt.timestamp() * 1_000_000_000)
 
 
@@ -54,6 +55,12 @@ def test_force_offset_without_any_timezone_is_an_error():
 
 
 def test_files_that_miss_the_pattern_fall_back_to_mtime():
+    """mtime は真の瞬間なので、壁時計はプロファイルの TZ で描画する.
+
+    DJI は exFAT の `OffsetFromUtc` を書いており、ドライバはそれで UTC へ
+    変換する（`docs/history/hardware-verification.md` の 11 番）。UTC 表現を
+    壁時計として使うと、オフセットぶんずれた `captured_at` が入る。
+    """
     got = resolve_captured_at(
         defn(timezone="Asia/Tokyo"),
         "PANORAMA/PANO_0001.JPG",
@@ -61,8 +68,23 @@ def test_files_that_miss_the_pattern_fall_back_to_mtime():
         None,
     )
     assert got.source == "mtime"
-    # exFAT の mtime はローカル時刻なので、UTC 表現の壁時計にオフセットを付ける
-    assert got.at.isoformat() == "2026-08-17T05:00:00+09:00"
+    assert got.at.isoformat() == "2026-08-17T14:00:00+09:00"
+    assert got.at.timestamp() == mtime_ns_of("2026-08-17T05:00:00") / 1e9
+
+
+def test_the_mtime_fallback_uses_the_default_timezone_too():
+    """プロファイルが TZ を持たないときは既定値で描画する.
+
+    ここが UTC のままだと、既定値を設定した意味が fallback だけ消える。
+    """
+    got = resolve_captured_at(
+        defn(),
+        "PANORAMA/PANO_0001.JPG",
+        mtime_ns_of("2026-08-17T05:00:00"),
+        "Europe/Berlin",
+    )
+    assert got.source == "mtime"
+    assert got.at.isoformat() == "2026-08-17T07:00:00+02:00"
 
 
 def test_policy_none_keeps_the_instant_as_recorded():

@@ -27,6 +27,7 @@
 | **USB の `serial` を一意な識別子にしない** | Linux ガジェットの既定値 `123456789ABCDEF` だった。機体固有の文字列は `product` 側 |
 | **空の `DCIM` でも正当なボリューム** | Osmo の内蔵ストレージは `DCIM` を持つが空だった |
 | **checksum は base64 に統一** | `bulk-upload-check` は hex/base64 両方を受理するが `x-immich-checksum` は base64 |
+| **mtime は真の瞬間。壁時計は解決した TZ で描画する** | 「カードの時刻欄に UTC オフセットは書かれていない」を前提に mtime の UTC 表現を壁時計として使っていたが、**DJI は exFAT の `OffsetFromUtc` を書いていた**（2026-08-21 の実測。mtime を +09:00 で描画すると録画終端と +2 秒、UTC だと 9 時間ずれる）。UTC 表現を壁時計にすると `captured_at` がオフセットぶんずれる。**`_wall_clock` の mtime fallback・`publisher._collision_stamp`・`merger._recording_end_ns` を同時に直した** —— 片方だけだと `library/` と `derived/` で接尾辞の壁時計がずれる。`timezone_policy: none` は描画に使う TZ を持たないので UTC 表現のまま（介入しない方針そのもの）。測った値は [`history/hardware-verification.md`](history/hardware-verification.md) |
 
 ## マウントとデバイスの同定
 
@@ -82,7 +83,7 @@
 | **結合物の公開は `ArtifactPublisher.publish_prepared`（`work` → `staging` を `os.link`）** | `write` コールバックで staging へ書き直すと 30 GiB をもう一度書く。`work/` と `staging/` は同一ファイルシステム（§7）なので link で移せる。11 手順と回収の性質は `publish` と同じ |
 | **EXIF はステージ済みのファイルから読む**（§9.3 手順 4 の後・手順 5 の中） | ソースを 2 度読むと、コピー中に書き換えられた場合に「取り込んだ中身と読んだ EXIF が違う」状態を作れる。前で読むと未完成のファイル、後で読むと `metadata_json` に載らない（レビューで見つかった）。`ArtifactRequest` の `captured` と `resolve_captured` は `__post_init__` でどちらか一方に強制する |
 | **画像以外では EXIF を読みに行かない** | `exifread` は認識できない入力に例外ではなく WARNING を出す（実測）。Canon は MOV も `source: exif` のプロファイルを通るので、呼べば動画 1 本ごとに警告が並ぶ。振り分けは `MediaProbe` と同じ `PHOTO_EXTENSIONS` で行う |
-| ~~**派生物の mtime は「壁時計を UTC として解釈した epoch」**~~ | **前提が実測で覆った（2026-08-21）。** 「取り込みの mtime と同じ表現にする」ためにこうしたが、実機の DJI は exFAT の `OffsetFromUtc` を書いており、**取り込みの mtime は真の瞬間**だった。いまは派生物の方がオフセットぶんずれた epoch を持っている。`_wall_clock` の mtime fallback・`_collision_stamp`・`_recording_end_ns` を**同時に**直す（片方だけだと `library/` と `derived/` で接尾辞の壁時計がずれる）。測った値は [`history/hardware-verification.md`](history/hardware-verification.md) |
+| **派生物の mtime は `captured_at` の瞬間そのまま**（`_recording_end_ns`） | 取り込みの mtime も真の瞬間なので（下の「mtime は真の瞬間」）、ここで UTC と読み替えると `library/` と `derived/` で epoch が 9 時間ずれる。接尾辞の壁時計は、両方を同じ TZ で描画することでそろえる。オフセットの無い値はシステムの TZ で読まれてしまうので UTC と見なす |
 
 ## 撮影日時（`captured_at`）の算出と再計算
 

@@ -5,20 +5,20 @@
 GPS も書かないため、Immich が撮影地の TZ を判定できず、UTC の壁時計をそのまま
 localDateTime として採用してしまう問題への対処である。
 
-mtime の壁時計は UTC 表現から取る。**これは「カードの時刻欄に UTC オフセットが
-書かれていない」ことを前提にしている。** Linux の exfat ドライバは、
-`OffsetFromUtc` の valid bit が立っていればそのオフセットで UTC へ変換し、
-立っていないときだけマウントの `time_offset`（既定 0）を使う
-（`fs/exfat/misc.c` の `exfat_get_entry_time`）。DJI はファイル名に壁時計を
-埋めるので、両者が一致するかを実機で確かめられる。手順は
-`docs/hardware-checklist.md` にあり、**一致しない機種が出たらここを
-プロファイルの timezone で描画する形へ変える**。
+**mtime は真の瞬間として扱う。** Linux の exfat ドライバは、`OffsetFromUtc` の
+valid bit が立っていればそのオフセットで UTC へ変換する（`fs/exfat/misc.c` の
+`exfat_get_entry_time`）。DJI はこれを書いているので、mtime の epoch は録画終端の
+正しい瞬間になる。したがって fallback の壁時計は、UTC 表現ではなく解決した
+timezone で描画する。
+
+`timezone_policy: none` のときは描画に使う timezone が無いので、UTC 表現の壁時計を
+そのまま採る（介入しない方針そのもの）。
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime, timedelta, tzinfo
 from pathlib import PurePosixPath
 from zoneinfo import ZoneInfo
 
@@ -51,14 +51,17 @@ def resolve_captured_at(
     読む対象（ステージ済みのファイル）はここからは見えない（§9.3 手順 5）。
     値を注入する形にすることで、判断は純粋関数のままにできる。
     """
-    wall, source = _wall_clock(defn, rel_path, mtime_ns, exif_wall)
     if defn.timestamp.timezone_policy == "none":
+        wall, source = _wall_clock(defn, rel_path, mtime_ns, exif_wall, UTC)
         return CapturedAt(at=wall.replace(tzinfo=UTC), source=source, tz=None, note=None)
 
+    # **TZ の解決を壁時計より先に行う。** mtime の fallback がこの TZ で描画する。
     name = defn.timestamp.timezone or default_timezone
     if name is None:
         raise TimezoneUnresolved(f"プロファイル {defn.slug} は force_offset だが timezone が未設定")
-    at, note = _attach_offset(wall, ZoneInfo(name))
+    zone = ZoneInfo(name)
+    wall, source = _wall_clock(defn, rel_path, mtime_ns, exif_wall, zone)
+    at, note = _attach_offset(wall, zone)
     return CapturedAt(at=at, source=source, tz=name, note=note)
 
 
@@ -67,7 +70,9 @@ def _wall_clock(
     rel_path: str,
     mtime_ns: int,
     exif_wall: datetime | None,
+    zone: tzinfo,
 ) -> tuple[datetime, str]:
+    """`zone` は mtime の epoch を壁時計へ描画するための TZ."""
     rule = defn.timestamp
     if rule.source == "filename" and rule.pattern is not None and rule.format is not None:
         try:
@@ -85,8 +90,9 @@ def _wall_clock(
     if rule.source == "exif" and exif_wall is not None:
         return exif_wall, "exif"
     # fallback は mtime のみを想定する。EXIF を持たないファイル（Canon の MOV、
-    # タグの無い JPEG）はここへ落ちる。
-    return datetime.fromtimestamp(mtime_ns / 1e9, tz=UTC).replace(tzinfo=None), "mtime"
+    # タグの無い JPEG）はここへ落ちる。**mtime は真の瞬間**なので、壁時計は
+    # 解決した TZ で描画する。
+    return datetime.fromtimestamp(mtime_ns / 1e9, tz=zone).replace(tzinfo=None), "mtime"
 
 
 def _attach_offset(wall: datetime, zone: ZoneInfo) -> tuple[datetime, str | None]:

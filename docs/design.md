@@ -289,6 +289,10 @@ GUI での編集は既存定義を書き換えず、**新しいリビジョン�
   付与して `dateTimeOriginal` を書き戻す。DJI が MP4 の `creation_time` を UTC で書きつつ
   オフセットも GPS も書かないため、Immich が撮影地の TZ を判定できず `localDateTime` を
   UTC の壁時計のまま採用してしまう問題への対処。
+  **mtime は真の瞬間**（exFAT の `OffsetFromUtc` が効いている。実測は
+  [`history/hardware-verification.md`](history/hardware-verification.md)）なので、
+  壁時計は `timezone` で描画してから付与する。`none` のときは描画に使う TZ が無いので、
+  UTC 表現の壁時計をそのまま採る。
 
 `force_offset` かつ `timezone` が未解決（プロファイルにも `MEDIAFERRY_DEFAULT_TIMEZONE`
 にも値が無い）の場合は**起動時エラー**とし、取り込みを一切開始しない（§12.2）。
@@ -914,6 +918,9 @@ dirfd 起点で `scan.roots` 配下から `scan.extensions` に一致するフ�
    不合格の場合は `adopted_at = NULL` のままにし、既定の選択肢から外す。
    `work/` に残すとリース失効時の掃除で消えてしまうため、durable な場所へ出す。
 6. 出力の mtime を録画終了時刻（最後のパートの開始時刻 + duration）に揃える。
+   `captured_at` はオフセット付きなので、**その瞬間をそのまま** epoch にする
+   （取り込みの mtime も真の瞬間なので、ここで UTC と読み替えると `library/` と
+   `derived/` でずれる）。
 7. 公開の直前にキャンセルトークンとジョブリースを再確認する。
 
 #### 保持するストリームを明示的に決める

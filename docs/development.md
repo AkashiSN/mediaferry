@@ -433,23 +433,15 @@ TrueNAS ホストで。手順は [`history/phase0-findings.md`](history/phase0-f
 ある（実測値、実機でしか出なかった不具合 9 件、ffmpeg の実挙動）。以下は
 **まだ残っているもの**。
 
-0. **`captured_at` の mtime fallback を直す。実測で前提が崩れた（2026-08-21）。**
-   DJI は exFAT の `OffsetFromUtc` を書いており、mtime の UTC 表現は壁時計では
-   ない。**`_wall_clock` の mtime fallback・`publisher._collision_stamp`・
-   `merger._recording_end_ns` を同時に直す**（片方だけだと `library/` と
-   `derived/` で衝突接尾辞の壁時計がずれる）。測った値と影響は
-   [`history/hardware-verification.md`](history/hardware-verification.md)。
-   **検証環境をリセットして再取り込みする前に直す**（直さずに取り込むと、写真を
-   足したときに誤った `captured_at` が入る）。
-
 1. **Immich への送信（Phase 3・6）。いちばん大きい未検証。** 転送先の登録、
    `origin` の判別、タグ、日時の書き戻し、RAW/JPEG のスタッキングまで、
    **一度も動かしていない**。ライブラリに実データが揃っている状態でやる方が
    安い（取り込みに 30 分かかる）。
 2. **チェックリストの残り。** 5 番（抜く。修正後の踏み直し）と 8 番（キャンセル）。
    **リセット後の最初の取り込みでやると楽**（全件が未取り込みになるので、120 GiB の
-   途中で好きなところで止められる）。10・11・12 番は済んだ（11 番は不合格で、
-   上の 0 番がその対処）。
+   途中で好きなところで止められる）。10・11・12 番は済んだ（11 番は不合格。
+   **対処は入れた**ので、リセット後の再取り込みが確認の機会になる —— 写真を
+   足して `captured_at` が現地の壁時計になることを見る）。
 3. **Canon EOS 70D の実カード（13〜17 番）。** プロファイルは仕様と知識から
    書いており、**実データを一度も見ていない**。**17 番は Phase 6 で増えた項目**
    （RAW+JPEG の組が実カードで成立するか。`exifread` が実機の CR2 から
@@ -471,7 +463,7 @@ TrueNAS ホストで。手順は [`history/phase0-findings.md`](history/phase0-f
 | **`0005` を版を足さずに書き換えた** | 古い `0005` を適用済みの DB は runner が `MigrationError` で開けない（配布前なので開発用 DB は作り直す前提）。**以後この手は使わない** —— 7 巡目の blocker になった |
 | 認証の既定 | **off のまま**（利用者の判断）。`BIND_HOST` の既定も loopback。`TRUSTED_HOSTS` は IP と `localhost` を既定で通し、ホスト名だけ許可制 |
 | フロントの依存 | `web/package-lock.json` を追跡している。Playwright のブラウザは `npx playwright install chromium` で入れる（CI で回すなら `--with-deps`） |
-| mtime の解釈 | `timestamps.py` は「カードの時刻欄に UTC オフセットが無い」前提。チェックリスト 11 番で実測する。**派生物の mtime も同じ前提に乗る** |
+| **mtime の解釈** | **決着した（2026-08-21）。** DJI は exFAT の `OffsetFromUtc` を書いており、**mtime は真の瞬間**だった（11 番の実測）。壁時計は解決した TZ で描画する形へ 3 か所を同時に直した（`decisions.md` の「実測で覆った判断」）。**実機で確かめるのはこれから** —— 写真（`PANORAMA/PANO_*.JPG`）を含む再取り込みで見る |
 | ~~取り込み側のリースの穴~~ | **塞いだ**（Phase 2 の Task 7）。`_with_lease_pulse` が共通の `_publish` に入ったので、16 GiB のコピー後の `os.fsync` と ffprobe も守られる。回帰テストは `test_publisher.py::test_a_slow_fsync_does_not_lose_the_lease` |
 | `_publish` の外の `fsync_dir` | ジョブ用ディレクトリを作った直後の `fsync_dir` は `_with_lease_pulse` の外にある。ディレクトリの fsync はメタデータだけなので実運用では一瞬で終わるが、極端に遅い環境では守られていない |
 | `disposition.attached_pic` | 結合の「最初の映像ストリームのみ」の判定が、埋め込みサムネイルをこれで見分ける。実機の DJI ファイルで立っているかは未確認（`keep_streams.video` が `primary` の間は影響しない）。チェックリスト 12 番で見る |

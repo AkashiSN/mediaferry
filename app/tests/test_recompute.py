@@ -7,6 +7,7 @@
 
 from dataclasses import replace
 from datetime import UTC, datetime
+from zoneinfo import ZoneInfo
 
 import pytest
 
@@ -26,9 +27,20 @@ from .test_schema_uploads import a_destination, an_upload
 TOKYO = "Asia/Tokyo"
 
 
-def ns(wall: str) -> int:
-    """カード上の壁時計を UTC 表現の epoch ナノ秒にする（`timestamps.py` の前提）."""
-    return int(datetime.fromisoformat(wall).replace(tzinfo=UTC).timestamp() * 1_000_000_000)
+def ns(instant_utc: str) -> int:
+    """真の瞬間（UTC で書く）を epoch ナノ秒にする. mtime はこの形で持つ."""
+    return int(datetime.fromisoformat(instant_utc).replace(tzinfo=UTC).timestamp() * 1_000_000_000)
+
+
+def ns_local(wall: str, tz: str = TOKYO) -> int:
+    """その TZ の壁時計に当たる瞬間の epoch ナノ秒.
+
+    **mtime は真の瞬間**（exFAT の `OffsetFromUtc` が効いている）。カード上の
+    壁時計を書きたいところではこちらを使う。
+    """
+    return int(
+        datetime.fromisoformat(wall).replace(tzinfo=ZoneInfo(tz)).timestamp() * 1_000_000_000
+    )
 
 
 def a_user_profile(db, source_slug, slug, **timestamp):
@@ -87,7 +99,7 @@ def dji(db, data_root):
         profile,
         volume,
         source_rel="DCIM/DJI_0001_D.MP4",
-        mtime_ns=ns("2026-08-17T14:30:00"),
+        mtime_ns=ns_local("2026-08-17T14:30:00"),
         captured_at="2026-08-17T14:30:00+09:00",
         captured_at_source="mtime",
         captured_at_tz=TOKYO,
@@ -97,7 +109,7 @@ def dji(db, data_root):
         profile,
         volume,
         source_rel="DCIM/DJI_20260817150000_0002_D.MP4",
-        mtime_ns=ns("2026-08-17T15:00:02"),
+        mtime_ns=ns_local("2026-08-17T15:00:02"),
         captured_at="2026-08-17T15:00:00+09:00",
         captured_at_source="filename",
         captured_at_tz=TOKYO,
@@ -106,7 +118,7 @@ def dji(db, data_root):
         db,
         (profile.profile_id, profile.revision_id),
         rel_path="library/my-dji/DCIM/DJI_20260101000000_0009_D.MP4",
-        mtime_ns=ns("2026-01-01T00:00:00"),
+        mtime_ns=ns_local("2026-01-01T00:00:00"),
         captured_at="2026-01-01T00:00:00+09:00",
         captured_at_tz=TOKYO,
     )
@@ -146,10 +158,16 @@ def captured(db, media_id):
 
 
 def test_changing_the_timezone_moves_the_captured_at(dji, db, data_root):
+    """**mtime とファイル名とで動き方が違う。**
+
+    mtime は真の瞬間なので、TZ を変えると同じ瞬間の別の壁時計になる
+    （14:30+09:00 = 07:30+02:00）。ファイル名の壁時計は数字がそのまま残り、
+    付くオフセットだけが変わる。
+    """
     profile, _, part1, part2, _ = dji
     outcome = run(db, data_root, to_berlin(db, profile))
 
-    assert captured(db, part1)["captured_at"] == "2026-08-17T14:30:00+02:00"
+    assert captured(db, part1)["captured_at"] == "2026-08-17T07:30:00+02:00"
     assert captured(db, part2)["captured_at"] == "2026-08-17T15:00:00+02:00"
     assert outcome.changed == 2
 
@@ -167,7 +185,7 @@ def test_other_profiles_are_left_alone(dji, db, data_root):
         db,
         other,
         rel_path="library/untouched/DCIM/DJI_0007_D.MP4",
-        mtime_ns=ns("2026-08-17T14:30:00"),
+        mtime_ns=ns_local("2026-08-17T14:30:00"),
         captured_at="2026-08-17T14:30:00+09:00",
         captured_at_source="mtime",
         captured_at_tz=TOKYO,
@@ -176,7 +194,7 @@ def test_other_profiles_are_left_alone(dji, db, data_root):
         "INSERT INTO source_entry (id, volume_instance_id, rel_path, size_bytes, mtime_ns,"
         " quick_fingerprint, fingerprint_version, media_file_id, state, observed_at)"
         " VALUES (?, ?, 'DCIM/DJI_0007_D.MP4', 10, ?, 'abc', 1, ?, 'published', ?)",
-        (new_id(), other_volume, ns("2026-08-17T14:30:00"), stranger, now_iso()),
+        (new_id(), other_volume, ns_local("2026-08-17T14:30:00"), stranger, now_iso()),
     )
     run(db, data_root, to_berlin(db, profile))
 
@@ -314,7 +332,7 @@ def test_a_derived_inherits_from_the_first_active_member(dji, db, data_root):
         role="derived",
         rel_path="derived/my-dji/DCIM/DJI_20260817143000_0001-0002_MERGED.MP4",
         # 録画終了時刻（§9.8 手順 6）。member の撮影開始とは違う。
-        mtime_ns=ns("2026-08-17T15:00:05"),
+        mtime_ns=ns_local("2026-08-17T15:00:05"),
         captured_at="2026-08-17T14:30:00+09:00",
         captured_at_source="mtime",
         captured_at_tz=TOKYO,
@@ -327,8 +345,9 @@ def test_a_derived_inherits_from_the_first_active_member(dji, db, data_root):
     run(db, data_root, new_profile)
 
     row = captured(db, output)
-    # 先頭 member の**再計算後の**値。順序が逆なら +09:00 のまま残る。
-    assert row["captured_at"] == "2026-08-17T14:30:00+02:00"
+    # 先頭 member の**再計算後の**値（mtime の瞬間を Berlin で描画した壁時計）。
+    # 順序が逆なら +09:00 のまま残る。
+    assert row["captured_at"] == "2026-08-17T07:30:00+02:00"
     assert row["captured_at"] == captured(db, part1)["captured_at"]
     # 出力名に当てれば filename、自分の mtime を使えば 15:00:05 になる。
     assert row["captured_at_source"] == "mtime"
@@ -400,7 +419,7 @@ def test_a_sent_record_whose_time_did_not_change_stays_complete(dji, db, data_ro
         profile,
         volume,
         source_rel="DCIM/DJI_20260817160000_0003_D.MP4",
-        mtime_ns=ns("2026-08-17T16:00:02"),
+        mtime_ns=ns_local("2026-08-17T16:00:02"),
         captured_at="2026-08-17T16:00:00+09:00",
         captured_at_source="filename",
         captured_at_tz=TOKYO,
@@ -573,7 +592,7 @@ def test_a_superseded_groups_output_is_not_re_derived(dji, db, data_root):
         (profile.profile_id, profile.revision_id),
         role="derived",
         rel_path="derived/my-dji/DCIM/DJI_20260817143000_0001-0002_MERGED.MP4",
-        mtime_ns=ns("2026-08-17T15:00:05"),
+        mtime_ns=ns_local("2026-08-17T15:00:05"),
         captured_at="2026-08-17T14:30:00+09:00",
         captured_at_source="mtime",
         captured_at_tz=TOKYO,
@@ -707,7 +726,7 @@ def test_a_derived_is_skipped_when_its_member_could_not_be_recomputed(dji, db, d
         (profile.profile_id, profile.revision_id),
         role="derived",
         rel_path="derived/my-dji/DCIM/DJI_20260817143000_0001-0002_MERGED.MP4",
-        mtime_ns=ns("2026-08-17T15:00:05"),
+        mtime_ns=ns_local("2026-08-17T15:00:05"),
         captured_at="2026-08-17T14:30:00+09:00",
         captured_at_source="mtime",
         captured_at_tz=TOKYO,
@@ -873,7 +892,7 @@ def test_a_regroup_between_the_read_and_the_write_stops_the_derived(
         (profile.profile_id, profile.revision_id),
         role="derived",
         rel_path="derived/my-dji/DCIM/DJI_20260817143000_0001-0002_MERGED.MP4",
-        mtime_ns=ns("2026-08-17T15:00:05"),
+        mtime_ns=ns_local("2026-08-17T15:00:05"),
         captured_at="2026-08-17T14:30:00+09:00",
         captured_at_source="mtime",
         captured_at_tz=TOKYO,
@@ -927,7 +946,7 @@ def test_nothing_can_regroup_between_the_resolve_and_the_write(
         (profile.profile_id, profile.revision_id),
         role="derived",
         rel_path="derived/my-dji/DCIM/DJI_20260817143000_0001-0002_MERGED.MP4",
-        mtime_ns=ns("2026-08-17T15:00:05"),
+        mtime_ns=ns_local("2026-08-17T15:00:05"),
         captured_at="2026-08-17T14:30:00+09:00",
         captured_at_source="mtime",
         captured_at_tz=TOKYO,
