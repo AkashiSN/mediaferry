@@ -79,6 +79,38 @@ describe("作業の履歴", () => {
     expect(screen.queryByText(/コピー中|結合中/)).toBeNull();
   });
 
+  it("進捗が無い（終わった）ジョブには、届いた最後のイベントの文言を添える", async () => {
+    stubApi({
+      "/jobs": {
+        jobs: [
+          {
+            id: "j1",
+            type: "merge",
+            status: "succeeded",
+            created_at: "2026-08-21T00:00:00+00:00",
+            started_at: "2026-08-21T00:00:00+00:00",
+            progress: null,
+          },
+        ],
+      },
+    });
+    render(
+      <MemoryRouter>
+        <JobHistoryScreen />
+      </MemoryRouter>,
+    );
+    await screen.findByText("完了");
+    emitJob({
+      job_id: "j1",
+      seq: 1,
+      level: "info",
+      message: "継ぎ目を検証しています",
+      data: null,
+      at: "2026-08-21T00:00:00+00:00",
+    });
+    expect(await screen.findByText("継ぎ目を検証しています")).toBeInTheDocument();
+  });
+
   it("終わった作業には、終わった日時を出す（設定の入口が約束している）", async () => {
     stubApi({
       "/jobs": {
