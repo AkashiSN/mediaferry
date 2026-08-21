@@ -234,62 +234,9 @@ describe("送信の結果を隠さない", () => {
   });
 });
 
-describe("選んだものの合計", () => {
-  it("**絞り込みで隠れても、選択と合計は保つ**", async () => {
-    const first = {
-      media: [
-        { id: "m1", rel_path: "library/big.MP4", kind: "video", captured_at: "2026-08-17", size_bytes: 30 * 1024 ** 3 },
-      ],
-      total: 1,
-      page: 1,
-      page_size: 50,
-    };
-    const second = {
-      media: [
-        { id: "m2", rel_path: "library/small.MP4", kind: "video", captured_at: "2026-08-18", size_bytes: 1024 ** 2 },
-      ],
-      total: 1,
-      page: 1,
-      page_size: 50,
-    };
-    let page = first;
-    stubApi({ "/destinations": { destinations: [{ id: "d1", name: "home", enabled: true }] } });
-    vi.stubGlobal(
-      "fetch",
-      vi.fn((input: string) => {
-        const path = input.replace(/^\/api/, "");
-        if (path.startsWith("/media")) {
-          return Promise.resolve(new Response(JSON.stringify(page), { status: 200 }));
-        }
-        return Promise.resolve(
-          new Response(
-            JSON.stringify({ destinations: [{ id: "d1", name: "home", enabled: true }] }),
-            { status: 200 },
-          ),
-        );
-      }),
-    );
-
-    render(
-      <MemoryRouter>
-        <LibraryScreen />
-      </MemoryRouter>,
-    );
-
-    await userEvent.click(await screen.findByLabelText("library/big.MP4 を選ぶ"));
-    // 絞り込みを変えて、選んだ行を隠す（条件が変わらないと取り直さない）。
-    page = second;
-    await userEvent.type(screen.getByLabelText("名前"), "small");
-    await userEvent.click(screen.getByRole("button", { name: "絞り込む" }));
-    await userEvent.click(await screen.findByLabelText("library/small.MP4 を選ぶ"));
-    await userEvent.click(screen.getByRole("checkbox", { name: "home" }));
-    await userEvent.click(screen.getByRole("button", { name: /送信する/ }));
-
-    // 隠した 30 GiB を数え落とさない。
-    expect(await screen.findByText(/合計 30 GiB/)).toBeInTheDocument();
-    expect(screen.getByText("2 件")).toBeInTheDocument();
-  });
-});
+// 「選んだものは絞り込みで隠れても合計を保つ」は `Photos.test.tsx` が写真の
+// グリッドに対して検証する。旧ライブラリの表（行のチェックボックス・「名前」の
+// テキスト絞り込み）とは形が違うので、ここには持たない。
 
 describe("プロファイルの編集", () => {
   const builtin = {
