@@ -8,6 +8,7 @@ from typing import Any
 
 from fastapi import APIRouter, Depends
 
+from ..core.listing import SENDABLE_CLAUSE
 from ..core.profiles.model import ProfileInvalid, parse_definition
 from ..db.jobs import JobStore
 from ..db.profiles import (
@@ -97,8 +98,6 @@ def _destination_summary(conn, row) -> dict[str, Any]:  # noqa: ANN001
         "failed": counts["failed"],
         "awaiting_approval": counts["awaiting_datetime_approval"],
         "pending": counts["pending"],
-        # **「まだ送っていない」＝ この宛先の記録がまだ無いもの。** 失敗や承認待ちは
-        # 既に記録があるので別に数える（画面はそれぞれ違う操作を出す）。
         # スタックの結果（§9.11）。**無効化された記録は数えない。**
         #
         # **`stacked` は「組の数」。** 1 つのスタックに 2 件以上のレコードが属する
@@ -114,10 +113,14 @@ def _destination_summary(conn, row) -> dict[str, Any]:  # noqa: ANN001
             " WHERE destination_id = ? AND stack_state = 'skipped' AND invalidated_at IS NULL",
             (row["id"],),
         ).fetchone()["n"],
+        # **「まだ送っていない」＝ この宛先の有効な記録がまだ無く、いま送れるもの。**
+        # 失敗や承認待ちは既に記録があるので別に数える（画面はそれぞれ違う操作を出す）。
+        # `/media?status=unsent`（`routes_media._status_clause`）と同じ定義を使う。
         "unsent": conn.execute(
-            "SELECT count(*) AS n FROM media_file m WHERE NOT EXISTS ("
+            "SELECT count(*) AS n FROM media_file m WHERE NOT EXISTS ("  # noqa: S608
             " SELECT 1 FROM upload_record u WHERE u.media_file_id = m.id"
-            "  AND u.destination_id = ? AND u.invalidated_at IS NULL)",
+            "  AND u.destination_id = ? AND u.invalidated_at IS NULL)"
+            f" AND {SENDABLE_CLAUSE}",
             (row["id"],),
         ).fetchone()["n"],
     }

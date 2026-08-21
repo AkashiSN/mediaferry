@@ -10,7 +10,7 @@ import pytest
 
 from mediaferry.core.listing import escape_like, page_bounds
 
-from .test_schema_artifacts import a_media_file
+from .test_schema_artifacts import a_media_file, a_merge_group
 from .test_schema_sources import a_profile
 from .test_schema_uploads import a_destination, an_upload
 
@@ -294,3 +294,77 @@ def test_a_stale_derived_can_be_deleted_and_an_original_cannot(client, db, data_
     refused = client.delete(f"/api/media/{original}")
     assert refused.status_code == 409
     assert refused.json()["error"]["code"] == "conflict"
+
+
+# ------------------------------------------------------------- 「まだ送っていない」（§10）
+def test_unsent_means_no_record_at_all(client, db):
+    """**`failed` は「まだ送っていない」ではない**（再試行は別の操作、§10）."""
+    profile = a_profile(db, slug="unsent-test")
+    media = a_media_file(db, profile, rel_path="library/unsent/A.JPG")
+    destination = a_destination(db, name="unsent-test")
+    an_upload(db, destination, media, state="failed")
+
+    body = client.get(f"/api/media?destination_id={destination[0]}&status=unsent").json()
+    assert body["total"] == 0
+
+
+def test_unsent_excludes_members_of_a_live_merge_group(client, db):
+    """**構成ファイルは送る候補に出ない**（§10）. 出すと POST /uploads が断る."""
+    profile = a_profile(db, slug="unsent-members")
+    part = a_media_file(db, profile, rel_path="library/unsent/PART1.MP4")
+    group = a_merge_group(db, profile, "digest-1", status="detected")
+    db.execute(
+        "INSERT INTO merge_member (merge_group_id, media_file_id, position, active)"
+        " VALUES (?, ?, 0, 1)",
+        (group, part),
+    )
+    destination = a_destination(db, name="unsent-members")
+
+    body = client.get(f"/api/media?destination_id={destination[0]}&status=unsent").json()
+    assert body["total"] == 0
+
+
+def test_unsent_includes_the_output_of_a_merged_group(client, db):
+    profile = a_profile(db, slug="unsent-output")
+    output = a_media_file(db, profile, rel_path="derived/unsent/OUT.MP4", role="derived")
+    group = a_merge_group(db, profile, "digest-2", status="merged")
+    db.execute(
+        "UPDATE merge_group SET output_media_file_id = ?, verification_json = ? WHERE id = ?",
+        (output, '{"passed": true}', group),
+    )
+    destination = a_destination(db, name="unsent-output")
+
+    body = client.get(f"/api/media?destination_id={destination[0]}&status=unsent").json()
+    assert [row["id"] for row in body["media"]] == [output]
+
+
+def test_unsent_excludes_a_derived_that_failed_verification(client, db):
+    """**検証に落ちた結合結果は、採用するまで候補に出ない**（§10）."""
+    profile = a_profile(db, slug="unsent-failed-verify")
+    output = a_media_file(db, profile, rel_path="derived/unsent/BAD.MP4", role="derived")
+    group = a_merge_group(db, profile, "digest-3", status="merged")
+    db.execute(
+        "UPDATE merge_group SET output_media_file_id = ?, verification_json = ? WHERE id = ?",
+        (output, '{"passed": false}', group),
+    )
+    destination = a_destination(db, name="unsent-failed-verify")
+
+    body = client.get(f"/api/media?destination_id={destination[0]}&status=unsent").json()
+    assert body["total"] == 0
+
+
+def test_the_dashboard_counts_unsent_the_same_way(client, db):
+    """**2 箇所で意味を変えない**（ホームと写真で数が食い違う）."""
+    profile = a_profile(db, slug="unsent-dashboard")
+    part = a_media_file(db, profile, rel_path="library/unsent/PART2.MP4")
+    group = a_merge_group(db, profile, "digest-4", status="detected")
+    db.execute(
+        "INSERT INTO merge_member (merge_group_id, media_file_id, position, active)"
+        " VALUES (?, ?, 0, 1)",
+        (group, part),
+    )
+    destination = a_destination(db, name="unsent-dashboard")
+
+    listed = client.get(f"/api/media?destination_id={destination[0]}&status=unsent").json()["total"]
+    summary = client.get("/api/dashboard").json()["destinations"][0]["unsent"]
+    assert summary == listed == 0

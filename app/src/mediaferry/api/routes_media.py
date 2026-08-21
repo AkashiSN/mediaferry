@@ -8,7 +8,7 @@ from fastapi import APIRouter, Depends, Request, Response
 from fastapi.responses import FileResponse
 
 from ..adapters.thumbnails import ThumbnailFailed, quantise
-from ..core.listing import DEFAULT_PAGE_SIZE, escape_like, page_bounds
+from ..core.listing import DEFAULT_PAGE_SIZE, SENDABLE_CLAUSE, escape_like, page_bounds
 from ..db.media import MediaRepository
 from ..db.merges import GroupNotEditable
 from .deps import conn as get_conn
@@ -104,7 +104,9 @@ def _status_clause(status: str) -> str:
         " AND u.destination_id = ? AND u.invalidated_at IS NULL"
     )
     if status == "unsent":
-        return f"NOT EXISTS ({existing} AND u.state = 'complete')"
+        # **「まだ送っていない」＝ この宛先の有効な記録がまだ無く、いま送れるもの。**
+        # `failed` は再試行という別の操作、`pending` は既に積んである。
+        return f"NOT EXISTS ({existing}) AND {SENDABLE_CLAUSE}"  # noqa: S608 - 定数のみ
     known = {
         "sent": "complete",
         "failed": "failed",
