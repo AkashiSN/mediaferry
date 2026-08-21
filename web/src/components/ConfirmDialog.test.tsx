@@ -2,7 +2,7 @@ import { render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
 
-import { ConfirmDialog, describe as describeConfirmation, formatBytes } from "./ConfirmDialog";
+import { ConfirmDialog, describe as describeConfirmation } from "./ConfirmDialog";
 import type { Confirmation } from "./ConfirmDialog";
 import { FORBIDDEN } from "../test/vocabulary";
 
@@ -163,10 +163,86 @@ const EVERY_KIND: Confirmation[] = [
   { kind: "trust_volume", label: "a", state: "blocked", reason: "設定が off な" },
 ];
 
-describe("大きさの表示", () => {
-  it("人が読める単位にする", () => {
-    expect(formatBytes(512)).toBe("512 B");
-    expect(formatBytes(1536)).toBe("1.5 KiB");
-    expect(formatBytes(30 * 1024 ** 3)).toBe("30 GiB");
+
+// **取り消せない操作の確認なので、キーボードだけで扱えること。** `aria-modal="true"`
+// を名乗る以上、背後は無いことになっている —— そこへ焦点が抜けると、読み上げでは
+// 何も無い場所を触ることになる。
+describe("キーボードだけで扱える", () => {
+  const UPLOAD: Confirmation = {
+    kind: "upload",
+    count: 1,
+    totalBytes: 1024,
+    destinationNames: ["home"],
+  };
+
+  it("Escape で閉じる", async () => {
+    const onCancel = vi.fn();
+    render(<ConfirmDialog confirmation={UPLOAD} onConfirm={() => {}} onCancel={onCancel} />);
+
+    await userEvent.keyboard("{Escape}");
+
+    expect(onCancel).toHaveBeenCalledTimes(1);
+  });
+
+  it("実行中は Escape でも閉じない（「やめる」も押せない状態と揃える）", async () => {
+    const onCancel = vi.fn();
+    render(<ConfirmDialog confirmation={UPLOAD} onConfirm={() => {}} onCancel={onCancel} busy />);
+
+    await userEvent.keyboard("{Escape}");
+
+    expect(onCancel).not.toHaveBeenCalled();
+  });
+
+  it("開いたら焦点がダイアログの中に入る", () => {
+    render(<ConfirmDialog confirmation={UPLOAD} onConfirm={() => {}} onCancel={() => {}} />);
+
+    expect(screen.getByRole("dialog")).toContainElement(document.activeElement as HTMLElement);
+  });
+
+  it("Tab を押し続けても、背後の要素へ抜けない", async () => {
+    render(
+      <>
+        <button type="button">背後のボタン</button>
+        <ConfirmDialog confirmation={UPLOAD} onConfirm={() => {}} onCancel={() => {}} />
+      </>,
+    );
+    const dialog = screen.getByRole("dialog");
+
+    for (let press = 0; press < 5; press += 1) {
+      await userEvent.tab();
+      expect(dialog).toContainElement(document.activeElement as HTMLElement);
+    }
+    await userEvent.tab({ shift: true });
+    expect(dialog).toContainElement(document.activeElement as HTMLElement);
+  });
+
+  it("末尾から Tab で先頭へ、先頭から Shift+Tab で末尾へ回る", async () => {
+    render(<ConfirmDialog confirmation={UPLOAD} onConfirm={() => {}} onCancel={() => {}} />);
+    const cancel = screen.getByRole("button", { name: "やめる" });
+    const confirm = screen.getByRole("button", { name: "実行する" });
+
+    // 開いた直後は先頭（「やめる」）。
+    expect(document.activeElement).toBe(cancel);
+    await userEvent.tab();
+    expect(document.activeElement).toBe(confirm);
+    // **末尾からは先頭へ回る**（背後へ抜けない）。
+    await userEvent.tab();
+    expect(document.activeElement).toBe(cancel);
+    // **先頭からは末尾へ回る。**
+    await userEvent.tab({ shift: true });
+    expect(document.activeElement).toBe(confirm);
+  });
+
+  it("閉じたら、開く前に触っていたところへ焦点が戻る", () => {
+    render(<button type="button">開いたボタン</button>);
+    const opener = screen.getByRole("button", { name: "開いたボタン" });
+    opener.focus();
+
+    const dialog = render(
+      <ConfirmDialog confirmation={UPLOAD} onConfirm={() => {}} onCancel={() => {}} />,
+    );
+    dialog.unmount();
+
+    expect(document.activeElement).toBe(opener);
   });
 });

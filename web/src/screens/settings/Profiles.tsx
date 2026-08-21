@@ -15,7 +15,7 @@ import { Link } from "react-router-dom";
 import { request } from "../../api/client";
 import { useQuery } from "../../api/hooks";
 import { ConfirmDialog, type Confirmation } from "../../components/ConfirmDialog";
-import { ErrorBanner } from "../../components/ErrorBanner";
+import { ErrorBanner, UserFacingError } from "../../components/ErrorBanner";
 import { Icon } from "../../components/Icon";
 import { volumeLabel } from "../work/CardDetail";
 
@@ -123,10 +123,16 @@ export function ProfilesScreen() {
       definition = load(editing.text);
     } catch (caught) {
       const line = caught instanceof YAMLException ? (caught.mark?.line ?? 0) + 1 : 0;
+      // **1 か所にだけ出す。** 同じ文を `notice`（`role="status"`）にも出すと、
+      // 失敗が 2 度読み上げられる。**失敗はバナー側**（`role="alert"`）に置く。
+      // 素の `Error` だと `ErrorBanner` が定型文へ潰して行番号が消えるので、
+      // 「画面が書いた文言」として包む。
       setError(
-        new Error(`YAML として読めません（${line} 行目）。字下げと引用符を確かめてください。`),
+        new UserFacingError(
+          `YAML として読めません（${line} 行目）。字下げと引用符を確かめてください。`,
+        ),
       );
-      setNotice(`YAML として読めません（${line} 行目）。字下げと引用符を確かめてください。`);
+      setNotice(null);
       return;
     }
     setBusy(true);

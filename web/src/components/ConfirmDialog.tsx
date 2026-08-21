@@ -4,7 +4,10 @@
 // 宛先名だが、送り先の退役やつなぐ組み合わせの破棄にそれらは無い。型で取り違えを防ぐ
 // ため、種類ごとの直和にする（計画レビューの指摘）。
 
+import { useEffect, useRef } from "react";
 import type { ReactNode } from "react";
+
+import { formatBytes } from "../utils/formatBytes";
 
 export type Confirmation =
   | { kind: "upload"; count: number; totalBytes: number; destinationNames: string[] }
@@ -163,19 +166,11 @@ export function describe(confirmation: Confirmation): { title: string; body: Rea
   }
 }
 
-export function formatBytes(bytes: number): string {
-  const units = ["B", "KiB", "MiB", "GiB", "TiB"];
-  let value = bytes;
-  let unit = 0;
-  while (value >= 1024 && unit < units.length - 1) {
-    value /= 1024;
-    unit += 1;
-  }
-  // 端数が無ければ小数点を出さない（「3.0 GiB」より「3 GiB」の方が読みやすい）。
-  const shown =
-    value >= 10 || unit === 0 ? String(Math.round(value)) : value.toFixed(1).replace(/\.0$/, "");
-  return `${shown} ${units[unit]}`;
-}
+/** ダイアログの中で焦点を持てるもの。**押せないボタンは飛ばす**（`busy` の間、
+ * 「やめる」と「実行する」はどちらも `disabled` になる）。 */
+const FOCUSABLE =
+  'button:not([disabled]), a[href], input:not([disabled]), select:not([disabled]),' +
+  ' textarea:not([disabled]), [tabindex]:not([tabindex="-1"])';
 
 export function ConfirmDialog({
   confirmation,
@@ -189,9 +184,66 @@ export function ConfirmDialog({
   busy?: boolean;
 }) {
   const { title, body } = describe(confirmation);
+  const dialog = useRef<HTMLDivElement>(null);
+
+  // **いちばん新しい `onCancel` と `busy` を、購読を張り直さずに読む。** 呼び出し側は
+  // どちらも毎回の描画で作り直すので、依存に入れると開いている間ずっと登録し直しに
+  // なり、そのたびに焦点が先頭のボタンへ跳ね返る。
+  const latest = useRef({ onCancel, busy });
+  useEffect(() => {
+    latest.current = { onCancel, busy };
+  });
+
+  // **キーボードだけで閉じられ、背後へ焦点が抜けない**（§13。`aria-modal="true"` を
+  // 名乗る以上、背後は「無い」ことになっている）。開いたら中へ焦点を移し、閉じたら
+  // 開く前に触っていたところへ戻す。
+  useEffect(() => {
+    const node = dialog.current;
+    if (node === null) {
+      return;
+    }
+    const opener = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    const focusable = (): HTMLElement[] => [...node.querySelectorAll<HTMLElement>(FOCUSABLE)];
+    focusable()[0]?.focus();
+
+    function onKeyDown(event: KeyboardEvent) {
+      if (event.key === "Escape") {
+        // **実行中は閉じない。** 「やめる」が押せない状態と揃える（押した操作が
+        // 走っている最中に確認だけ消えると、何が起きたのか分からなくなる）。
+        if (!latest.current.busy) {
+          latest.current.onCancel();
+        }
+        return;
+      }
+      if (event.key !== "Tab" || node === null) {
+        return;
+      }
+      const items = focusable();
+      if (items.length === 0) {
+        event.preventDefault();
+        return;
+      }
+      const active = document.activeElement;
+      const outside = active === null || !node.contains(active);
+      if (event.shiftKey && (outside || active === items[0])) {
+        event.preventDefault();
+        items[items.length - 1].focus();
+      } else if (!event.shiftKey && (outside || active === items[items.length - 1])) {
+        event.preventDefault();
+        items[0].focus();
+      }
+    }
+
+    document.addEventListener("keydown", onKeyDown);
+    return () => {
+      document.removeEventListener("keydown", onKeyDown);
+      opener?.focus();
+    };
+  }, []);
+
   return (
     <div className="dialog-backdrop" role="presentation">
-      <div className="dialog" role="dialog" aria-modal="true" aria-label={title}>
+      <div className="dialog" ref={dialog} role="dialog" aria-modal="true" aria-label={title}>
         <h2>{title}</h2>
         {body}
         <div className="dialog-actions">

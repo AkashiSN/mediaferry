@@ -98,7 +98,7 @@ describe("送る", () => {
   });
 
   it("確認の前に API を叩かない", async () => {
-    // **押しただけでは送らない**（screens.test.tsx が各画面に課していた規則）。
+    // **押しただけでは送らない**（§13。取り消せない操作は確認を経てから）。
     const { calls } = stubApi({
       "/destinations": DESTINATIONS,
       "/media": { media: [{ id: "m1", rel_path: "a.JPG", kind: "photo", captured_at: "", size_bytes: 1024 }], total: 1, page: 1, page_size: 50 },
@@ -137,14 +137,14 @@ describe("送った結果の 1 文", () => {
     expect(summarise(3, [{ reason: "結合中" }], ["旅行用"], 1)).toContain("旅行用");
   });
 
-  // レビュー指摘（Critical #2）: 案内は実在する導線を指すこと。設定 › 送り先の
-  // カードに「送り直す」がある。
+  // **案内は実在する導線を指す。** 設定 › 送り先のカードに「送り直す」がある
+  // （`settings/Destinations.tsx`）。
   it("開始できなかったときは、実在する導線を案内する", () => {
     expect(summarise(1, [], ["旅行用"], 0)).toContain("設定 › 送り先の「送り直す」");
   });
 
-  // `screens.test.tsx` から移した（Ruling 2）。`LibraryScreen` を描画するテストでは
-  // ないので、`Library.tsx` の回帰試験とは別にここへ置く。
+  // **黙っているのも 1 つの結果。** 断られた組も失敗した宛先も無いときに、
+  // 余計な但し書きを付け足さない。
   it("何も問題が無ければ、余計なことを言わない", () => {
     const message = summarise(2, [], [], 2);
     expect(message).toBe("2 組を作り、2 宛先で送信を始めました。");
@@ -270,8 +270,7 @@ describe("対象の解決", () => {
     expect(await screen.findByText("写真の画面")).toBeInTheDocument();
   });
 
-  // レビュー指摘（Important #2）: 「すべて」と名乗る対象が、応答の上限（200 件）で
-  // 黙って切れないこと。
+  // **「すべて」と名乗る対象が、応答の上限（200 件）で黙って切れない**（裁定 20）。
   it("『すべて』が上限で切れているときは、残りがあることを言う", async () => {
     stubApi({
       "/destinations": DESTINATIONS,
@@ -291,8 +290,8 @@ describe("対象の解決", () => {
     expect(await screen.findByText(/残り 499 件は次にもう一度/)).toBeInTheDocument();
   });
 
-  // レビュー指摘（Important #3）: `isMedia` を落とした後も、1 件読めなくても
-  // 残りは対象にできること（`Promise.allSettled` で拾う）。
+  // **1 件読めなくても、残りは対象にする**（`Promise.allSettled` で拾う）。
+  // 1 件でも 404 だと全体が reject する作りだと、**1 件も送れなくなる**。
   it("選んだうち 1 件が読めなくても、残りは対象にする", async () => {
     const m1 = {
       id: "m1",
@@ -325,8 +324,8 @@ describe("対象の解決", () => {
   });
 });
 
-// レビュー指摘（Important #1）: 宛先を 2 つ選ぶと、対象が 1 宛先ぶんしか
-// 引かれず「まだ送っていないもの、すべて」が嘘になる。
+// **宛先ごとに引く。** 1 宛先ぶんしか引かないと、「まだ送っていないもの、すべて」が
+// もう片方の宛先について嘘になる。
 describe("宛先を複数選んだときの対象", () => {
   const TWO = {
     destinations: [
@@ -441,8 +440,7 @@ describe("宛先を複数選んだときの対象", () => {
   });
 });
 
-// レビュー指摘（Important #2）: 写真の画面から戻ったときに、選んでいた宛先が
-// 巻き戻らないこと。
+// **写真の画面から戻ったときに、選んでいた宛先を巻き戻さない。**
 describe("写真の画面から戻ったとき", () => {
   it("持ち帰った宛先を選んだ状態で始める", async () => {
     stubApi({
@@ -573,8 +571,8 @@ describe("送信そのもの", () => {
     expect(await screen.findByTestId("sending-note")).toHaveTextContent("送れない組が 1 件");
   });
 
-  // `stubApi` は応答を常に 200 で返すので、ここだけ `fetch` を自前で差し替える
-  // （`screens.test.tsx` 冒頭のコメントにある「`stubProfiles` と同じやり方」）。
+  // `stubApi` は応答を常に 200 で返すので、**宛先ごとに成否を変えたいここだけ**
+  // `fetch` を自前で差し替える。
   it("一部の宛先で開始に失敗しても、成功した分は進める", async () => {
     const destinations = {
       destinations: [

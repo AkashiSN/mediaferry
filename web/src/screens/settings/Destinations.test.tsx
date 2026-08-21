@@ -1,7 +1,7 @@
 // 送り先（§12.3 / §13）。**送れなかったものを、ここから送り直せる。**
 //
-// レビュー指摘（Critical #2）: 「設定 › 送り先から送り直せます」と案内しておきながら、
-// この画面に送り直す操作が無かった。案内が指す先に実物を置く。
+// **案内が指す先に、実物がある。** `work/Send.tsx` と `docs/user-guide.md` が
+// 「設定 › 送り先の『送り直す』」を案内するので、この画面がその操作を持つ。
 
 import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";

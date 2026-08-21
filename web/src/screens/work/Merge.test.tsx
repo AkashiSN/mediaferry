@@ -8,10 +8,9 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { stubApi } from "../../test/api";
 import { failureReason, MergeScreen } from "./Merge";
 
-// **2 パートのサイズをわざと変える。** 両方 4 GiB だと、パートごとの表示が 2 要素とも
-// 同じ文字列になり `getByText` が「複数一致」で落ちる（かつては導入文の固定の
-// 「4 GiB」を誤って拾っていた—— 導入文から数字を抜いた今回の直しで、この GROUP の
-// サイズがテストの実データになっている）。
+// **2 パートのサイズをわざと変える。** 両方同じ大きさだと、パートごとの表示が
+// 2 要素とも同じ文字列になり `getByText` が「複数一致」で落ちる。この GROUP の
+// サイズが、パートサイズの表示を確かめる実データになっている。
 const GROUP = {
   id: "g1",
   status: "detected",
@@ -507,6 +506,42 @@ describe("つなぐ", () => {
     );
     const sent = bodies.find((b) => b.path === "/merge-groups/g21?action=regroup");
     expect(sent?.body).toEqual({ media_ids: ["m1"] });
+  });
+
+  // **二重送信を止めているのは「押した瞬間に閉じる」こと。** ここに
+  // `disabled={busy}` を置いても一度も真にならない（`busy` が立つ時点では
+  // ダイアログが既に消えている）ので、押せなさではなく消えることを見る。
+  it("「この構成にする」を押した時点で、ダイアログが消える", async () => {
+    const target = { ...GROUP, id: "g22" };
+    stubApiWithBodies({ ...ROUTES, "/merge-groups": { groups: [target] } });
+    render(
+      <MemoryRouter>
+        <MergeScreen />
+      </MemoryRouter>,
+    );
+    await userEvent.click(await screen.findByRole("button", { name: "構成を変える" }));
+    const dialog = await screen.findByRole("dialog", { name: "構成を変える" });
+
+    await userEvent.click(within(dialog).getByRole("button", { name: "この構成にする" }));
+
+    expect(screen.queryByRole("dialog", { name: "構成を変える" })).toBeNull();
+  });
+
+  it("「やめる」でもダイアログが消える", async () => {
+    const target = { ...GROUP, id: "g23" };
+    const { calls } = stubApiWithBodies({ ...ROUTES, "/merge-groups": { groups: [target] } });
+    render(
+      <MemoryRouter>
+        <MergeScreen />
+      </MemoryRouter>,
+    );
+    await userEvent.click(await screen.findByRole("button", { name: "構成を変える" }));
+    const dialog = await screen.findByRole("dialog", { name: "構成を変える" });
+
+    await userEvent.click(within(dialog).getByRole("button", { name: "やめる" }));
+
+    expect(screen.queryByRole("dialog", { name: "構成を変える" })).toBeNull();
+    expect(calls().some((c) => c.method === "PATCH")).toBe(false);
   });
 
   it("2 件未満では手動グループを作れない（ガード）", async () => {

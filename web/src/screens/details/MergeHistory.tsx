@@ -10,12 +10,13 @@ import { Link } from "react-router-dom";
 
 import { request } from "../../api/client";
 import { useQuery } from "../../api/hooks";
-import { ConfirmDialog, formatBytes } from "../../components/ConfirmDialog";
+import { ConfirmDialog } from "../../components/ConfirmDialog";
 import type { Confirmation } from "../../components/ConfirmDialog";
 import { ErrorBanner } from "../../components/ErrorBanner";
 import { Icon } from "../../components/Icon";
 import { useEvents } from "../../hooks/useEvents";
 import { useReloadOnEvents } from "../../hooks/useReloadOnEvents";
+import { formatBytes } from "../../utils/formatBytes";
 
 type Member = { media_file_id: string; rel_path: string };
 type DiscardedGroup = { id: string; members: Member[] };

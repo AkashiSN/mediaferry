@@ -9,12 +9,13 @@ import { useNavigate } from "react-router-dom";
 
 import { request } from "../../api/client";
 import { useQuery } from "../../api/hooks";
-import { ConfirmDialog, formatBytes } from "../../components/ConfirmDialog";
+import { ConfirmDialog } from "../../components/ConfirmDialog";
 import type { Confirmation } from "../../components/ConfirmDialog";
 import { ErrorBanner } from "../../components/ErrorBanner";
 import { Icon } from "../../components/Icon";
 import { useEvents } from "../../hooks/useEvents";
 import { useReloadOnEvents } from "../../hooks/useReloadOnEvents";
+import { formatBytes } from "../../utils/formatBytes";
 import { formatDateTime } from "../../utils/formatDateTime";
 
 type Member = {
@@ -266,7 +267,7 @@ export function MergeScreen() {
               </button>
             )}
             {group.status === "failed" && (
-              // Ruling 12: 結合に失敗した組は §10 の既定の一覧から外れ、送る手段が無い。
+              // 裁定 12: 結合に失敗した組は §10 の既定の一覧から外れ、送る手段が無い。
               // ここから member を対象にした送るへ進めるようにする。
               <button
                 type="button"
@@ -449,13 +450,18 @@ export function MergeScreen() {
                 </li>
               ))}
             </ul>
+            {/* **効かないガードは置かない。** ここに `disabled={busy}` を書いても
+                一度も真にならない —— このダイアログを開く「構成を変える」自体が
+                `busy` の間は押せず、開いている間に `busy` を真にできる経路も無い
+                （どちらのボタンも `setRegrouping(null)` を先に呼ぶので、`busy` が
+                立つ時点でダイアログは消えている）。**二重送信を止めているのは
+                「押した瞬間に閉じる」こと**で、押せなさではない。 */}
             <div className="dialog-actions">
-              <button type="button" onClick={() => setRegrouping(null)} disabled={busy}>
+              <button type="button" onClick={() => setRegrouping(null)}>
                 やめる
               </button>
               <button
                 type="button"
-                disabled={busy}
                 onClick={() => {
                   const checked = [
                     ...document.querySelectorAll<HTMLInputElement>('input[name="member"]:checked'),

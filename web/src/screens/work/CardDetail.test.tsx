@@ -561,12 +561,17 @@ describe("カードの信頼登録", () => {
     expect(dialog).not.toHaveTextContent(/いま入っている中身も含めて/);
   });
 
-  it("AUTO_IMPORT が off なら、その旨と設定への導線を出す", async () => {
+  it("自動取り込みが切ってあれば、設定と同じ言葉で書いて導線を出す", async () => {
     stubDevices([base], "off");
     renderCardDetail();
 
-    expect(await screen.findByText(/自動取り込みは無効/)).toBeInTheDocument();
-    expect(screen.getByRole("link", { name: /設定/ })).toBeInTheDocument();
+    // **内部の設定キーを画面に出さない**（§13）。`Settings.tsx` の項目名と
+    // 同じ言葉で書き、同じものが 3 通りの呼ばれ方をしないようにする。
+    expect(
+      await screen.findByText(/「信頼したカードを自動で取り込む」が切ってあります/),
+    ).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "設定を開く" })).toHaveAttribute("href", "/settings");
+    expect(document.body.textContent).not.toContain("AUTO_IMPORT");
   });
 
   it("設定を読めていない間は、始まると断言せず信頼も押させない", async () => {
@@ -591,6 +596,6 @@ describe("カードの信頼登録", () => {
     renderCardDetail();
 
     expect(await screen.findByText(/挿すと自動で取り込みます/)).toBeInTheDocument();
-    expect(screen.queryByText(/自動取り込みは無効/)).toBeNull();
+    expect(screen.queryByText(/が切ってあります/)).toBeNull();
   });
 });

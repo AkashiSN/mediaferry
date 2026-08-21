@@ -17,9 +17,9 @@ let app: Running;
 const PASSWORD = "correct horse";
 
 // 巡る画面。**ナビに出ないページも全部入れる** —— 作業ページ 5 つと設定の下位
-// 5 つは、ナビからは開けないぶん見落としやすい（`/sending` の「いま送信している
-// ジョブはありません」がそれで生き残っていた）。禁止語の一覧は
-// `src/test/vocabulary.ts` にあり、確認ダイアログのテストと共有する。
+// 5 つは、ナビからは開けないぶん、禁止語も小さすぎるボタンも見落とされやすい。
+// 禁止語の一覧は `src/test/vocabulary.ts` にあり、確認ダイアログのテストと
+// 共有する。
 const SCREENS = [
   "/",
   "/photos",
@@ -50,6 +50,36 @@ async function signIn(page: Page, path = "/"): Promise<void> {
   await page.getByLabel("パスワード").fill(PASSWORD);
   await page.getByRole("button", { name: "ログイン" }).click();
   await expect(page.getByRole("navigation")).toBeVisible();
+}
+
+/**
+ * 押せるものの網（§13「押せる領域は 44px 以上」）。
+ *
+ * **`<a>` を外さない。** 画面の移動はほとんどがリンクで、`main button` だけを
+ * 見ると本文にあるリンクが 1 つも測られない（実測で対象の 3 分の 1 が網の外に
+ * あった）。
+ */
+const TAPPABLE = "main button, main a, nav a";
+
+/**
+ * 画面が描き終わるのを待つ。
+ *
+ * **`goto` の直後は測れない。** 本文のほとんどは API の応答が返ってから生えるので、
+ * そこで数えると「まだ無いもの」を見逃す。押せるものの数が 2 回続けて同じになった
+ * ところを描き終わりとみなす（`nav` の 3 項目があるので 0 にはならない）。
+ * SSE の接続が開いたままなので、`networkidle` は使えない。
+ */
+async function settled(page: Page): Promise<void> {
+  await expect(page.locator("main")).toBeVisible();
+  let previous = -1;
+  for (let attempt = 0; attempt < 40; attempt += 1) {
+    const count = await page.locator(TAPPABLE).count();
+    if (count === previous) {
+      return;
+    }
+    previous = count;
+    await page.waitForTimeout(250);
+  }
 }
 
 test("空の DB から、ホーム起点の主要動線が通る", async ({ page }) => {
@@ -197,6 +227,7 @@ test("内部の名前と Markdown の記号を画面に出さない", async ({ p
   await signIn(page);
   for (const path of SCREENS) {
     await page.goto(app.url + path);
+    await settled(page);
     const body = await page.locator("main").innerText();
     for (const word of FORBIDDEN) {
       expect(body, `${path} に「${word}」が出ている`).not.toContain(word);
@@ -210,10 +241,13 @@ test("内部の名前と Markdown の記号を画面に出さない", async ({ p
 test("狭い画面のボタンは 44px 以上", async ({ page }) => {
   await page.setViewportSize({ width: 390, height: 844 });
   await signIn(page);
+  // **最初の 1 件で止めない。** 落ちるたびに 1 つずつ直すと、次に何が待って
+  // いるかが分からないまま何度も回すことになる。全画面ぶんを集めてから見せる。
+  const tooSmall: string[] = [];
   for (const path of SCREENS) {
     await page.goto(app.url + path);
-    await expect(page.locator("main")).toBeVisible();
-    for (const button of await page.locator("main button, nav a").all()) {
+    await settled(page);
+    for (const button of await page.locator(TAPPABLE).all()) {
       // **隠れているものは対象外。** 閉じた `<details>` の中身は `boundingBox()`
       // が `null` ではなく 0×0 を返すので、可視かどうかで先に切る。
       if (!(await button.isVisible())) {
@@ -223,10 +257,13 @@ test("狭い画面のボタンは 44px 以上", async ({ page }) => {
       if (box === null) {
         continue;
       }
-      const label = (await button.innerText()).slice(0, 20);
-      expect(box.height, `${path} の「${label}」が ${box.height}px`).toBeGreaterThanOrEqual(44);
+      if (box.height < 44) {
+        const label = (await button.innerText()).slice(0, 20);
+        tooSmall.push(`${path} の「${label}」が ${box.height}px`);
+      }
     }
   }
+  expect(tooSmall, tooSmall.join(" / ")).toEqual([]);
 });
 
 for (const colorScheme of ["light", "dark"] as const) {

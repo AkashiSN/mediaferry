@@ -728,7 +728,11 @@ describe("カメラの種類", () => {
     fireEvent.change(editor, { target: { value: "slug: my-camera\n  name: [壊れた" } });
     await userEvent.click(screen.getByRole("button", { name: "保存する" }));
 
-    expect(await screen.findByText(/2 行目/)).toBeInTheDocument();
+    // **1 か所にだけ出す。** 同じ文をバナーと `role="status"` の両方へ出すと、
+    // 失敗が 2 度読み上げられる。行番号を持つ側（バナー）だけを残す。
+    expect(await screen.findByRole("alert")).toHaveTextContent("YAML として読めません（2 行目）");
+    expect(screen.getAllByText(/2 行目/)).toHaveLength(1);
+    expect(screen.queryByText(/予期しないエラー/)).toBeNull();
     expect(api.sent().some((call) => call.method === "PUT")).toBe(false);
   });
 

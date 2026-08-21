@@ -18,8 +18,9 @@ export type Media = {
   status?: MediaStatus;
 };
 
-/** `rel_path` の末尾（ファイル名）。ボタンの `aria-label` に使う。 */
-function fileName(relPath: string): string {
+/** `rel_path` の末尾（ファイル名）。**内部の相対パスを画面に出さない**（§13）ので、
+ * タイルの `aria-label` も、ホームの「さっき取り込んだもの」もここを通す。 */
+export function fileName(relPath: string): string {
   const parts = relPath.split("/");
   return parts[parts.length - 1];
 }

@@ -1,10 +1,10 @@
 // ホーム（§13）。いま挿さっているカードの帯、やること、進行中の作業、
 // 送り先ごとの状況、最近の取り込みを上から順に置く。
 //
-// 旧ダッシュボードは宛先ごとの 6 列の数字を出すだけで、家族が読んで次の一手を
-// 決められる形ではなかった。ここでは「次に何をすればいいか」を先に出す。
+// **数字より先に、次の一手を出す。** 宛先ごとの件数だけを並べても、読んだ人が
+// 何をすればいいかは決まらない。「やること」を上に置き、件数はその下に添える。
 
-import { useEffect, useState } from "react";
+import { useState } from "react";
 import { Link } from "react-router-dom";
 
 import { request } from "../api/client";
@@ -13,23 +13,16 @@ import { ConfirmDialog, type Confirmation } from "../components/ConfirmDialog";
 import { ErrorBanner } from "../components/ErrorBanner";
 import { Icon } from "../components/Icon";
 import { JobCard } from "../components/JobCard";
+import { fileName } from "../components/MediaTile";
 import type { Job } from "../components/JobProgress";
 import { autoImportOutlook, autoImportState, profileDisplayName, volumeLabel } from "./work/CardDetail";
+import type { Volume } from "./work/CardDetail";
 import { useEvents } from "../hooks/useEvents";
+import { isLive, useJobPulse } from "../hooks/useJobPulse";
 import { useReloadOnEvents } from "../hooks/useReloadOnEvents";
 import { tasksFrom } from "../hooks/useTasks";
 import type { Task } from "../hooks/useTasks";
-
-type Volume = {
-  volume_instance_id: string;
-  // API は空文字を返す（`None` にはならない）。ラベルの有無は `""` で見る。
-  fs_label: string;
-  profile_slug: string | null;
-  identity_confidence: string | null;
-  provisional: boolean;
-  trusted: boolean;
-  reason: string | null;
-};
+import { formatDateTime } from "../utils/formatDateTime";
 
 type Devices = { volumes: Volume[] };
 type Profile = { slug: string; name: string };
@@ -64,9 +57,6 @@ type Dashboard = {
 type Jobs = { jobs: Job[] };
 type Setting = { key: string; value: string | null };
 type Settings = { settings: Setting[] };
-
-// 進捗を持ちうる状態（`routes_system._LIVE_STATUSES` と揃える）。
-const LIVE_STATUSES = ["queued", "running", "cancelling"];
 
 export function HomeScreen() {
   const dashboard = useQuery<Dashboard>("/dashboard");
@@ -160,37 +150,8 @@ export function HomeScreen() {
   const dashboardData = dashboard.data;
   const tasks: Task[] = dashboardData === null ? [] : tasksFrom(dashboardData);
 
-  const running = (jobs.data?.jobs ?? []).find((job) => LIVE_STATUSES.includes(job.status));
-
-  // 「いま」も取り直しと同じ拍で進める。**描画中に `Date.now()` は呼べない**
-  // （呼ぶと、たまたま起きた再描画で値が変わる）。`Jobs.tsx` の作り方をそのまま
-  // 持ってくる。
-  const [now, setNow] = useState(0);
-  const reloadJobs = jobs.reload;
-  const isRunning = running !== undefined;
-  useEffect(() => {
-    if (!isRunning) {
-      return;
-    }
-    const tick = () => {
-      setNow(Date.now());
-      reloadJobs();
-    };
-    tick();
-    const timer = setInterval(tick, 2000);
-    return () => clearInterval(timer);
-  }, [isRunning, reloadJobs]);
-
-  // **速度は開始からの平均。** 2 点の差分は state か ref が要り、どちらも
-  // 描画中には触れない。長い処理では平均の方が値も落ち着く。
-  function averageRate(job: Job): number | null {
-    const done = job.progress?.bytes_done_all ?? job.progress?.bytes_done;
-    if (!job.started_at || done === undefined || done <= 0) {
-      return null;
-    }
-    const seconds = (now - Date.parse(job.started_at)) / 1000;
-    return seconds > 1 ? done / seconds : null;
-  }
+  const running = (jobs.data?.jobs ?? []).find(isLive);
+  const averageRate = useJobPulse(running !== undefined, jobs.reload);
 
   return (
     <section aria-label="ホーム">
@@ -290,11 +251,10 @@ export function HomeScreen() {
           <section className="card pad">
             <div className="sechead" style={{ marginBottom: 12 }}>
               <h2 style={{ fontSize: 14 }}>さっき取り込んだもの</h2>
-              <Link
-                to="/photos"
-                className="btn sm quiet"
-                style={{ marginLeft: "auto", height: 26, padding: "0 8px" }}
-              >
+              {/* **高さをインラインで指定しない。** `styles.css` は狭い画面で
+                  `.btn.sm` を 44px に戻すが、インラインの `height` はそれを
+                  上回るので §13「押せる領域は 44px 以上」を割ってしまう。 */}
+              <Link to="/photos" className="btn sm quiet" style={{ marginLeft: "auto" }}>
                 すべて
               </Link>
             </div>
@@ -302,9 +262,11 @@ export function HomeScreen() {
               <p className="small">まだありません。</p>
             ) : (
               <ul style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+                {/* **内部の表現をそのまま出さない**（§13）。相対パスはファイル名に、
+                    `captured_at` の ISO 文字列は読める日時に写す。 */}
                 {(dashboard.data?.recent_imports ?? []).map((media) => (
                   <li key={media.id} className="small">
-                    {media.rel_path}（{media.captured_at}）
+                    {fileName(media.rel_path)}（{formatDateTime(media.captured_at)}）
                   </li>
                 ))}
               </ul>

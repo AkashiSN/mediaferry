@@ -76,6 +76,23 @@ describe("ルート表", () => {
   });
 });
 
+describe("知らないパス", () => {
+  // **本文が空のまま止まらない**（§13「何が起きて次に何をすべきか」）。ルート表に
+  // 無いパスは `Layout` だけが描かれ、中身が何も出ないまま終わる。
+  it("その画面が無いことを書き、ホームへ戻る道を置く", async () => {
+    stubApi(BASE_ROUTES);
+    window.history.pushState({}, "", "/no-such-page");
+    render(<App />);
+    expect(await screen.findByRole("region", { name: "その画面はありません" })).toBeInTheDocument();
+    // **読み上げの名前と、見えている見出しは別の式。** 片方だけ直しても気づける
+    // ように、両方を見る。
+    expect(
+      screen.getByRole("heading", { level: 1, name: "その画面はありません" }),
+    ).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "ホームへ戻る" })).toHaveAttribute("href", "/");
+  });
+});
+
 describe("ナビの現在地（App の配線として）", () => {
   // `Layout.test.tsx` は `Layout` を直に描くので、`App` 側でそのルートが実在
   // することまでは見ていない。ここでは実際のルート経由で確かめる。
@@ -155,8 +172,8 @@ describe("ログイン前は叩かない", () => {
   });
 });
 
-// レビュー指摘（Important #6）: ナビのバッジと警告バナーが、セッション中に
-// 一度も取り直されなかった。**画面を再読み込みせずに進む**（§13）。
+// **枠も進捗で取り直す**（§13「画面を再読み込みせずに進む」）。ナビのバッジと
+// 警告バナーは `BrowserRouter` の外側にあり、画面を移っても再マウントしない。
 //
 // `emitJob` は 1 タブに 1 本だけ開く共有の接続（`hooks/useEvents.ts`）へ配るので、
 // 枠と画面の両方が同じイベントを受け取る。

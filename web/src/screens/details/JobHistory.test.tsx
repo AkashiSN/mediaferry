@@ -76,7 +76,7 @@ describe("作業の履歴", () => {
     );
 
     expect(await screen.findByText("完了")).toBeInTheDocument();
-    expect(screen.queryByText(/コピー中|結合中/)).toBeNull();
+    expect(screen.queryByText(/コピー中|つないでいます/)).toBeNull();
   });
 
   it("進捗が無い（終わった）ジョブには、届いた最後のイベントの文言を添える", async () => {

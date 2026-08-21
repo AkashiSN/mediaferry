@@ -1,8 +1,8 @@
-// `stubApi` のパス解決。レビュー指摘（Task 7 修正ラウンド 1・Important #3）。
+// `stubApi` のパス解決。
 //
 // **厳密一致を優先し、無ければ前方一致。** 前方一致だけだと、`/media`（一覧）の
-// 鍵が `/media/m1`（詳細）のような別の資源まで拾ってしまう（`Send.tsx` が実際に
-// 踏んだ）。登録の順番に依存しないことをここで確かめる。
+// 鍵が `/media/m1`（詳細）のような別の資源まで拾ってしまう（`work/Send.tsx` は
+// 個別に `GET /media/{id}` を叩く）。登録の順番に依存しないことをここで確かめる。
 
 import { afterEach, describe, expect, it, vi } from "vitest";
 

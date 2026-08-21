@@ -32,12 +32,13 @@ describe("送信中", () => {
     expect(screen.getByRole("button", { name: "閉じる" })).toBeInTheDocument();
   });
 
-  // レビュー指摘（Important #3）: 「やること」は残っている仕事しか出さないので、
-  // 送り終えると空になる。結果があるのは 設定 › 詳しい情報 › 作業の履歴。
+  // 「やること」は残っている仕事しか出さないので、送り終えると空になる。結果が
+  // あるのは 設定 › 詳しい情報 › 作業の履歴で、そこへの行き先を**文の途中の
+  // リンクではなくボタンで**置く（§13「押せる領域は 44px 以上」）。
   it("結果を見る先は、実在する画面を指す", async () => {
     stubApi({ "/jobs": { jobs: [] } });
     renderSending({ jobIds: ["j1"] });
-    const link = screen.getByRole("link", { name: "作業の履歴" });
+    const link = screen.getByRole("link", { name: "作業の履歴を見る" });
     expect(link).toHaveAttribute("href", "/settings/jobs");
     expect(screen.queryByText(/「やること」から結果/)).toBeNull();
   });
@@ -104,8 +105,7 @@ describe("送信中", () => {
     expect(screen.queryByRole("button", { name: "送るのをやめる" })).toBeNull();
   });
 
-  // レビュー指摘（Minor→Important #5）: 「閉じても送信は続く」と書いてある以上、
-  // 「閉じる」を押してもジョブを止めてはいけない。
+  // **「閉じても送信は続く」と書いてある以上、「閉じる」で止めてはいけない**（§13）。
   it("「閉じる」を押しても、キャンセルは呼ばれない", async () => {
     const { calls } = stubApi({
       "/jobs": {

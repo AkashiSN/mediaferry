@@ -51,6 +51,29 @@ describe("ホーム", () => {
     expect(screen.queryByText(/確認があります/)).not.toBeInTheDocument();
   });
 
+  // §13「内部の名前をそのまま出さない」「日時は人が読める形で出す」。相対パスも
+  // 生の ISO 文字列も内部の表現で、どちらも画面に出すものではない。
+  it("さっき取り込んだものは、ファイル名と読める日時で出す", async () => {
+    stubApi({
+      "/dashboard": {
+        ...EMPTY_DASHBOARD,
+        recent_imports: [
+          { id: "m1", rel_path: "2026/08/21/DJI_0043.MP4", captured_at: "2026-08-21T14:05:33+09:00" },
+        ],
+      },
+      "/devices": { volumes: [] },
+      "/jobs": { jobs: [] },
+    });
+    renderHome();
+    await waitFor(() =>
+      expect(screen.getByText("DJI_0043.MP4（2026年8月21日 14:05）")).toBeInTheDocument(),
+    );
+    expect(screen.queryByText(/2026\/08\/21\/DJI_0043\.MP4/)).toBeNull();
+    expect(screen.queryByText(/14:05:33/)).toBeNull();
+    // 「すべて」は写真の画面へ行く。
+    expect(screen.getByRole("link", { name: "すべて" })).toHaveAttribute("href", "/photos");
+  });
+
   it("やることが 1 つも無ければ、無いと書く", async () => {
     stubApi({ "/dashboard": EMPTY_DASHBOARD, "/devices": { volumes: [] }, "/jobs": { jobs: [] } });
     renderHome();
@@ -145,10 +168,10 @@ describe("ホーム", () => {
     expect(await screen.findByText("unknown-cam のカードのようです。")).toBeInTheDocument();
   });
 
-  // `Home.tsx` の `CardBanner` は `Devices.tsx` の `act` とほぼ同じ配線を
-  // 複製している。`Devices.tsx` 側のクリック試験は `screens.test.tsx` に
-  // あるが、Home 側の配線だけに入った書き間違い（例えば `import` を `scan`
-  // と書き違える）はそちらのテストでは検出できない。
+  // **押した先の配線を、押して確かめる。** `CardBanner` のボタンは
+  // `work/CardDetail.tsx` と同じ 4 つの操作（`trust` / `scan` / `import` /
+  // `close`）を叩くが、**この画面だけに入った書き間違い**（`import` を `scan` と
+  // 書き違える等）は、そちらの試験では捕まらない。
   const actionableVolume = {
     volume_instance_id: "v1",
     fs_label: "OSMO",
@@ -240,9 +263,9 @@ describe("ホーム", () => {
     ).toBeInTheDocument();
   });
 
-  it("「中身を見る」を押すと、カードの中身のページへ行く（Ruling 30）", async () => {
-    // ホームのカードの帯からカードの中身へ行ける（§13）。`/card` のルートは
-    // まだ無いので（Task 12 が生やす）、遷移先だけを直に確かめる。
+  it("「中身を見る」を押すと、カードの中身のページへ行く（裁定 30）", async () => {
+    // ホームのカードの帯からカードの中身へ行ける（§13）。**ここは帯の配線だけを
+    // 見る** —— ルート表そのものは `App.test.tsx` が受け持つ。
     stubApi({
       "/dashboard": EMPTY_DASHBOARD,
       "/devices": { volumes: [actionableVolume] },
@@ -292,7 +315,7 @@ describe("ホーム", () => {
     expect(screen.getByText(/DJI_0043\.MP4/)).toBeInTheDocument();
   });
 
-  // Ruling 8: 積んだまま送信が始まっていない `pending` は「まだ送っていない」から
+  // 裁定 8: 積んだまま送信が始まっていない `pending` は「まだ送っていない」から
   // 消えたので、止まった送信に気づけるよう送り先の行に別枠で出す。
   it("宛先に積んだまま止まっているものを「送信中」で出す", async () => {
     stubApi({
@@ -320,7 +343,8 @@ describe("ホーム", () => {
     await waitFor(() => expect(screen.getByText(/送信中 3 件/)).toBeInTheDocument());
   });
 
-  // レビュー指摘（Critical #2）: `failed` はホームのどこにも出ていなかった。
+  // **送れなかったものは、ここに出さないとどの画面にも出ない。**「まだ送って
+  // いない」にも「送信済み」にも入らない（`docs/design.md` §10）。
   it("送れなかったものがあれば、送り先の行に件数を出す", async () => {
     stubApi({
       "/dashboard": {
@@ -374,8 +398,8 @@ describe("ホーム", () => {
     expect(screen.queryByText(/送れなかった/)).toBeNull();
   });
 
-  // レビュー指摘（Important #8）: 孤立・見つからないファイルの報告が画面から
-  // 消えていた（`docs/decisions.md`「孤立ファイルは報告するだけ」の *報告*）。
+  // `docs/decisions.md` の「孤立ファイルは報告するだけ」の **報告** にあたる。
+  // 消す操作は置かないが、黙ってもいけない。
   it("行き場の無いファイルと、見つからないファイルを報告する", async () => {
     stubApi({
       "/dashboard": { ...EMPTY_DASHBOARD, orphans: 3, missing: 1 },

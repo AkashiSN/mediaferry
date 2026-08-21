@@ -238,8 +238,8 @@ h1.page.lg { font-size: 24px; }
   width: min(560px, 100%); max-height: 88vh; overflow: auto;
   border-radius: 16px; background: var(--surface); box-shadow: var(--shadow-lg); padding: 26px 26px 22px;
 }
-/* `ConfirmDialog.tsx` と `Merges.tsx` の構成を変えるダイアログが使うクラス名
- * （`.backdrop` / `.dialog` と中身は同じで、名前だけ違う）。 */
+/* `components/ConfirmDialog.tsx` と `screens/work/Merge.tsx` の「構成を変える」
+ * ダイアログが使うクラス名（`.backdrop` / `.dialog` と中身は同じで、名前だけ違う）。 */
 .dialog-backdrop {
   position: fixed; inset: 0; background: var(--scrim); z-index: 40;
   display: grid; place-items: center; padding: 20px;

@@ -16,7 +16,9 @@ import { ConfirmDialog, type Confirmation } from "../../components/ConfirmDialog
 import { ErrorBanner } from "../../components/ErrorBanner";
 import { Icon } from "../../components/Icon";
 
-type Volume = {
+/** カード 1 枚（`GET /devices` の 1 要素）。**判定関数がここにあるので、型もここに
+ * 1 つだけ置く**（ホームの帯も同じものを描く）。 */
+export type Volume = {
   volume_instance_id: string;
   // API は空文字を返す（`None` にはならない）。ラベルの有無は `""` で見る。
   fs_label: string;
@@ -113,7 +115,9 @@ export function autoImportOutlook(volume: Volume, autoImport: string | null): Ou
     return { state: "blocked", reason: "設定をまだ読めていない" };
   }
   if (autoImport !== "trusted") {
-    return { state: "blocked", reason: "AUTO_IMPORT が off な" };
+    // **内部の設定キーを理由に出さない**（§13）。この文字列は画面にも確認
+    // ダイアログにもそのまま出る。`Settings.tsx` の項目名に合わせる。
+    return { state: "blocked", reason: "「信頼したカードを自動で取り込む」が切ってある" };
   }
   if (volume.provisional) {
     return { state: "blocked", reason: "対象の中身がまだ見つかっていない" };
@@ -201,11 +205,24 @@ export function CardDetailScreen() {
         onDismiss={() => setError(null)}
       />
 
+      {/* **内部の設定キーを画面に出さない**（§13）。`Settings.tsx` の項目名と
+          同じ言葉で書く —— 同じものが画面ごとに違う名前で出ると、どれとどれが
+          同じ設定なのか読む側には分からない。
+
+          **行き先はボタンで置く。** 文の途中のリンクは行の高さしか無く、
+          §13「押せる領域は 44px 以上」を満たせない。 */}
       {autoImport === "off" && (
-        <p role="note">
-          自動取り込みは無効です（AUTO_IMPORT = off）。信頼済みのカードを挿しても
-          取り込みは始まりません。<Link to="/settings">設定</Link>で変えられます。
-        </p>
+        <>
+          <p role="note">
+            「信頼したカードを自動で取り込む」が切ってあります。信頼済みのカードを
+            挿しても取り込みは始まりません。
+          </p>
+          <div className="acts">
+            <Link to="/settings" className="btn sm">
+              設定を開く
+            </Link>
+          </div>
+        </>
       )}
 
       {volumes.length === 0 ? (

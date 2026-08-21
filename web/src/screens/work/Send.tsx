@@ -6,10 +6,11 @@ import { useLocation, useNavigate } from "react-router-dom";
 
 import { request } from "../../api/client";
 import { useQuery } from "../../api/hooks";
-import { ConfirmDialog, formatBytes } from "../../components/ConfirmDialog";
+import { ConfirmDialog } from "../../components/ConfirmDialog";
 import { ErrorBanner } from "../../components/ErrorBanner";
 import { Icon } from "../../components/Icon";
 import { MediaTile, type Media } from "../../components/MediaTile";
+import { formatBytes } from "../../utils/formatBytes";
 
 type Destination = { id: string; name: string; enabled: boolean };
 type Destinations = { destinations: Destination[] };
@@ -221,7 +222,7 @@ export function SendScreen() {
         if (!cancelled) {
           setTargetMedia(mergeMedia(pages));
           // **応答の `total` を読む。** 200 件の上限で切れていても黙らない
-          // （Ruling 20）。宛先が 2 つ以上あると総数を足せないので、そのときは
+          // （裁定 20）。宛先が 2 つ以上あると総数を足せないので、そのときは
           // 「切れている」ことだけを持つ。
           setTargetTotal(targetIds.length === 1 ? pages[0].total : null);
           setTargetTruncated(pages.some((page) => page.total > page.media.length));
@@ -444,7 +445,7 @@ export function SendScreen() {
             {targetMedia.length} 件 ・ {formatBytes(totalBytes)}
           </div>
           <div className="small">送り先：{chosen.map((d) => d.name).join(" / ") || "（選んでください）"}</div>
-          {/* **「すべて」が黙って上限で切れない**（Ruling 20）。1 度に読むのは
+          {/* **「すべて」が黙って上限で切れない**（裁定 20）。1 度に読むのは
               200 件までなので、それより多ければ正直に言う。宛先が 2 つ以上の
               ときは、残りを数で言うと同じ写真を重複して数えることになる。 */}
           {targetTruncated && (

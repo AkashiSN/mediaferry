@@ -1,19 +1,19 @@
 // 写真（§13）。日付でまとめたグリッドにして、1 枚ごとに宛先ごとの状態を印で出す。
 //
-// 旧ライブラリ（`Library.tsx`）は 64px のサムネイルを表のセルに入れていたので、
-// 写真を選ぶ画面として機能していなかった。ここでは日付でまとめたグリッドにし、
-// 状態の印には凡例を添える（色と形だけで意味を伝えない）。
+// **写真を選ぶ画面なので、写真が見える大きさで並べる。** 表のセルに収まる大きさの
+// サムネイルでは、どれを選ぶかが決められない。状態の印には凡例を添える（色と形だけで
+// 意味を伝えない）。
 
 import { useMemo, useState } from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
 
 import { useQuery } from "../api/hooks";
-import { formatBytes } from "../components/ConfirmDialog";
 import { ErrorBanner } from "../components/ErrorBanner";
 import { Icon } from "../components/Icon";
 import { MediaTile, type Media, type MediaStatus } from "../components/MediaTile";
 import { useEvents } from "../hooks/useEvents";
 import { useReloadOnEvents } from "../hooks/useReloadOnEvents";
+import { formatBytes } from "../utils/formatBytes";
 import { formatDate } from "../utils/formatDateTime";
 
 type MediaPage = { media: Media[]; total: number; page: number; page_size: number };
@@ -102,8 +102,7 @@ export function PhotosScreen() {
   const [params, setParams] = useSearchParams();
   const navigate = useNavigate();
   // **選んだものは、隠れても覚えておく。** 大きさも一緒に持つ —— 表示中の行から
-  // 計算すると、絞り込みで隠した分が合計から抜けて、確認の数字が実際と食い違う
-  // （旧 `Library.tsx` のやり方を引き継ぐ）。
+  // 計算すると、絞り込みで隠した分が合計から抜けて、確認の数字が実際と食い違う。
   const [selected, setSelected] = useState<Map<string, number>>(new Map());
 
   const destinations = useQuery<Destinations>("/destinations");

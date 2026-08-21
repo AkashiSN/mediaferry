@@ -10,8 +10,8 @@ export type Call = { path: string; method: string };
 /**
  * **厳密一致を優先し、無ければ前方一致。** 前方一致だけだと、`/media`（一覧）が
  * `/media/m1`（詳細）のような別の資源まで拾ってしまい、一覧の本文が詳細の代わりに
- * 返る（`Send.tsx` が個別に `GET /media/{id}` を叩く実装で実際に踏んだ）。**後方
- * 互換**: 厳密一致の鍵が無ければ、今までどおり前方一致（最初に登録した鍵）を返す。
+ * 返る（`work/Send.tsx` は個別に `GET /media/{id}` を叩く）。**前方一致も残す**:
+ * 厳密一致の鍵が無ければ、前方一致（最初に登録した鍵）を返す。
  */
 function matchRoute(path: string, routes: Record<string, unknown>): string | undefined {
   const keys = Object.keys(routes);

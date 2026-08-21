@@ -90,8 +90,8 @@ describe("つないだ動画の記録", () => {
       </MemoryRouter>,
     );
     await waitFor(() => expect(screen.getByText("library/a.MP4")).toBeInTheDocument());
-    // **記録の一覧に操作ボタンを混ぜない**（screens.test.tsx の回帰。ここは
-    // つなぐ・別々にする対象を選ぶ画面ではなく、過去の記録を見る場所）。
+    // **記録の一覧に操作ボタンを混ぜない。** ここはつなぐ・別々にする対象を
+    // 選ぶ画面ではなく、過去の記録を見る場所（§13「詳しい情報」）。
     expect(screen.queryByRole("button", { name: /つなぐ|これは別々/ })).toBeNull();
     await userEvent.click(screen.getByRole("button", { name: "消す：library/a.MP4" }));
     // 消す対象が分かるように、その組の 1 つ目のファイル名を確認に出す。

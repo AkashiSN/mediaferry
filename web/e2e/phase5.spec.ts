@@ -9,11 +9,20 @@
 // **`DEFAULT_TIMEZONE` を env に置かない状態で立てる。** env にあると `locked` に
 // なって画面から変えられず、5 の筋書き（設定を変えてから直す）が経路として通らない。
 
-import { expect, test } from "@playwright/test";
+import { expect, test, type Page } from "@playwright/test";
 
 import { start, type Running } from "./harness";
 
 let app: Running;
+
+/** DJI の取り込み分について、`captured_at` の末尾（解決済みのオフセット）を集める。 */
+async function djiOffsets(page: Page): Promise<string[]> {
+  const response = await page.request.get(app.url + "/api/media?page_size=200");
+  const body = (await response.json()) as { media: { rel_path: string; captured_at: string }[] };
+  return body.media
+    .filter((media) => media.rel_path.includes("dji-osmo"))
+    .map((media) => media.captured_at.slice(-6));
+}
 
 test.beforeAll(async () => {
   app = await start(undefined, ["--timezone-from-db"]);
@@ -23,10 +32,13 @@ test.afterAll(() => {
   app?.stop();
 });
 
-/** ホームの「さっき取り込んだもの」の 1 行（`rel_path`（`captured_at`））。 */
-function recentRow(text: string): { relPath: string; capturedAt: string } {
-  const [relPath, rest] = text.split("（");
-  return { relPath, capturedAt: (rest ?? "").replace("）", "") };
+/** ホームの「さっき取り込んだもの」の 1 行（`ファイル名（撮影日時）`）。
+ *
+ * **画面は内部の相対パスも生の ISO 文字列も出さない**（§13）ので、ここで読めるのは
+ * ファイル名と、解決済みのオフセットで書いた**現地の壁時計**だけ。 */
+function recentRow(text: string): { fileName: string; capturedAt: string } {
+  const [fileName, rest] = text.split("（");
+  return { fileName, capturedAt: (rest ?? "").replace("）", "") };
 }
 
 test("汎用化の受け入れが画面から通る", async ({ page }) => {
@@ -73,18 +85,21 @@ test("汎用化の受け入れが画面から通る", async ({ page }) => {
 
   // ホームの「さっき取り込んだもの」に、取り込んだ順に出る。
   await nav.getByRole("link", { name: "ホーム" }).click();
-  const dji = page.getByText(/^library\/dji-osmo\//).first();
+  const dji = page.getByText(/^DJI_\d+_\d+_D\.MP4（/).first();
   await expect(dji).toBeVisible({ timeout: 90_000 });
   const before = recentRow((await dji.textContent()) ?? "");
-  expect(before.capturedAt).toContain("+09:00");
+  expect(before.capturedAt).not.toBe("");
+  const beforeOffsets = await djiOffsets(page);
+  expect(beforeOffsets.length).toBeGreaterThan(0);
 
   // 1（続き）. **Canon 風のカードも取り込める。** `timestamp.source: exif` なので、
   // 撮影日時は公開済みファイルの EXIF から来る（`timezone_policy: none` で +00:00）。
   await page.goto(app.url + "/card");
   await page.getByRole("button", { name: "EOS_DIGITAL を取り込む" }).click();
   await page.getByRole("button", { name: "ホームへ" }).click();
-  await expect(page.getByText(/^library\/canon-eos\//).first()).toBeVisible({ timeout: 90_000 });
-  await expect(page.getByText(/2026-02-03T04:05:06\+00:00/)).toBeVisible();
+  await expect(page.getByText(/^IMG_0001\.JPG（/)).toBeVisible({ timeout: 90_000 });
+  // `timezone_policy: none` なので、EXIF の壁時計がそのまま出る。
+  await expect(page.getByText(/^IMG_0001\.JPG（2026年2月3日 04:05）$/)).toBeVisible();
 
   // 4. 複製して編集 → 新しい版 → 試した判定が変わる。
   await nav.getByRole("link", { name: "設定" }).click();
@@ -120,11 +135,16 @@ test("汎用化の受け入れが画面から通る", async ({ page }) => {
   await page.getByRole("button", { name: "撮影日時を再計算する：DJI Osmo Pocket" }).click();
   await expect(page.getByRole("link", { name: "作業の進み具合を見る" })).toBeVisible();
 
+  // **DJI の撮影日時はファイル名の壁時計から来る**ので、タイムゾーンを変えても
+  // 動くのは解決済みのオフセットだけで、壁時計そのものは変わらない。画面は
+  // オフセットを出さない（`utils/formatDateTime.ts` は現地の壁時計だけを出す）
+  // ので、**そこだけは API の値で見る。**
+  await expect.poll(() => djiOffsets(page), { timeout: 60_000 }).not.toEqual(beforeOffsets);
+
   await nav.getByRole("link", { name: "ホーム" }).click();
-  const after = page.getByText(/^library\/dji-osmo\/.*\+02:00/).first();
-  await expect(after).toBeVisible({ timeout: 60_000 });
   // ライブラリのパスは `captured_at` を含まない（§7）ので、名前は 1 つも動かない。
-  expect(recentRow((await after.textContent()) ?? "").relPath).toBe(before.relPath);
+  await expect(dji).toBeVisible({ timeout: 60_000 });
+  expect(recentRow((await dji.textContent()) ?? "").fileName).toBe(before.fileName);
 
   expect(crashes).toEqual([]);
 });

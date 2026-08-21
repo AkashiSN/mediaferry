@@ -1,7 +1,7 @@
 // 画面の入口。認証が要るかを最初に確かめ、要るならログインを出す。
 
 import { useCallback, useEffect, useState } from "react";
-import { BrowserRouter, Route, Routes } from "react-router-dom";
+import { BrowserRouter, Link, Route, Routes } from "react-router-dom";
 
 import { request } from "./api/client";
 import { useQuery } from "./api/hooks";
@@ -64,9 +64,30 @@ function AuthedApp() {
           <Route path="/settings/general" element={<GeneralScreen />} />
           <Route path="/settings/jobs" element={<JobHistoryScreen />} />
           <Route path="/settings/merge-history" element={<MergeHistoryScreen />} />
+          {/* **知らないパスで本文を空にしない**（§13）。ルート表に無いパスは
+              `Layout` だけが描かれ、何が起きたのかも次に何をすべきかも出ない。 */}
+          <Route path="*" element={<NotFoundScreen />} />
         </Routes>
       </Layout>
     </BrowserRouter>
+  );
+}
+
+/** ルート表に無いパス（§13）。**内部のパスをそのまま出さない**ので、開こうとした
+ * URL は載せずに、戻る道だけを置く。 */
+function NotFoundScreen() {
+  return (
+    <section aria-label="その画面はありません" className="wrap">
+      <h1 className="page lg">その画面はありません</h1>
+      <p className="muted">
+        住所が変わったか、書き間違いかもしれません。ホームから開き直してください。
+      </p>
+      <div className="acts">
+        <Link to="/" className="btn primary">
+          ホームへ戻る
+        </Link>
+      </div>
+    </section>
   );
 }
 
