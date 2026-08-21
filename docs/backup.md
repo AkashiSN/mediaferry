@@ -1,5 +1,7 @@
 # バックアップとリストア（Phase 1）
 
+**2026-08-21 に実機で一通り実測した**（[`history/hardware-verification.md`](history/hardware-verification.md)）。
+
 設計仕様書 §18-4 で「Phase 1 で、ライブラリからどこまで再構築できるかを明記し、
 定期バックアップ手順を用意する」と決めた項目。ここで閉じる。
 
@@ -33,6 +35,21 @@
 コピーすると互いに整合しない瞬間を掴みうる。SQLite に整合した 1 ファイルを
 作らせる。
 
+**素朴なコピーは「壊れる」のではなく「黙って別の過去に戻る」。** 実機で測った
+（2026-08-21。WAL が 535 KB、本体が 421 KB という状態）。
+
+| | `.backup` | 本体だけを `cp` | 生きている DB |
+| --- | --- | --- | --- |
+| `media_file` | 32 | **31** | 32 |
+| `merge_group` | 3 | **4** | 3 |
+| `job` | 11 | **10** | 11 |
+| `PRAGMA integrity_check` | ok | **ok** | —— |
+| ファイルサイズ | 421,888 | **421,888** | —— |
+
+**検査もサイズも同じ**なので、取り違えても気づけない。中身は「派生物が 1 つ
+足りず、**消したはずのグループが 1 つ生き返り**、ジョブが 1 つ足りない」状態で、
+これで戻すと消したはずの候補が復活する。
+
 ```bash
 sqlite3 /path/to/data/var/mediaferry.sqlite3 ".backup /path/to/backup/mediaferry.sqlite3"
 ```
@@ -48,6 +65,9 @@ sqlite3 /path/to/data/var/mediaferry.sqlite3 "VACUUM INTO '/path/to/backup/media
 ```bash
 chmod 600 /path/to/backup/mediaferry.sqlite3
 ```
+
+**`DATA_ROOT` の中（`var/` など）に置かない。** アプリが `/data` として読み書き
+できる領域なので、アプリが侵害されたときにバックアップごと触れる。
 
 ## マスター鍵の置き場所
 
@@ -71,9 +91,21 @@ TrueNAS のスナップショットは、DB ファイルの整合を保証しな
 ## リストア
 
 1. アプリを停止する
-2. `var/mediaferry.sqlite3` を戻す（`-wal` / `-shm` は戻さない。`.backup` の
-   出力は単一ファイルで整合している）
-3. アプリを起動する
+2. `var/mediaferry.sqlite3` を戻す
+3. **`-wal` と `-shm` を消す。** 戻さないだけでは足りない —— 残すと「古い DB に
+   新しい WAL」の組み合わせになる
+4. **所有者と権限を戻す。** root で `cp` すると `root:root` になり、非 root の
+   アプリが書けなくなる（`chown <app-uid>:<app-gid>` と `chmod 600`）
+5. アプリを起動する
+
+```bash
+docker stop <app のコンテナ>
+cp /path/to/backup/mediaferry.sqlite3 <dataset>/var/mediaferry.sqlite3
+rm -f <dataset>/var/mediaferry.sqlite3-wal <dataset>/var/mediaferry.sqlite3-shm
+chown <app-uid>:<app-gid> <dataset>/var/mediaferry.sqlite3
+chmod 600 <dataset>/var/mediaferry.sqlite3
+docker start <app のコンテナ>
+```
 
 起動時の reconciliation が、ファイルと DB の齟齬を回収する。
 
@@ -85,6 +117,21 @@ TrueNAS のスナップショットは、DB ファイルの整合を保証しな
 
 バックアップ時点より後に取り込んだファイルは、この孤立の一覧に出る。取り込み
 直すか、そのまま置いておくかはユーザが決める。
+
+**回収の結果は起動ログに 1 行出る。** 実機で確かめたときの出力（2026-08-21）。
+
+```
+起動時の回収: {'missing': 1, 'cleaned_dirs': 2}
+孤立 1 件、自動で回収できない staging 0 件。画面で判断が要る
+```
+
+退避したファイルを戻して起動し直すと解除される。
+
+```
+起動時の回収: {'restored': 1}
+```
+
+**孤立は 1 件のまま残る**（実体を消さないので）。
 
 ## 関連
 
