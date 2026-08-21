@@ -1,6 +1,7 @@
 // ホーム（§13）。**やることが無いときは、無いと書く。**
 
 import { render, screen, waitFor } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import { MemoryRouter } from "react-router-dom";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -86,6 +87,56 @@ describe("ホーム", () => {
     renderHome();
     await waitFor(() => expect(screen.getByText("初めて見るカードです")).toBeInTheDocument());
     expect(screen.getByRole("button", { name: "このカードを信頼する" })).toBeInTheDocument();
+  });
+
+  // `Home.tsx` の `CardBanner` は `Devices.tsx` の `act` とほぼ同じ配線を
+  // 複製している。`Devices.tsx` 側のクリック試験は `screens.test.tsx` に
+  // あるが、Home 側の配線だけに入った書き間違い（例えば `import` を `scan`
+  // と書き違える）はそちらのテストでは検出できない。
+  const actionableVolume = {
+    volume_instance_id: "v1",
+    fs_label: "OSMO",
+    profile_slug: "dji-osmo",
+    identity_confidence: "high",
+    provisional: false,
+    trusted: true,
+    reason: "DCIM がある",
+  };
+
+  it("「いま取り込む」を押すと、そのカードの取り込みを始める", async () => {
+    const api = stubApi({
+      "/dashboard": EMPTY_DASHBOARD,
+      "/devices": { volumes: [actionableVolume] },
+      "/jobs": { jobs: [] },
+      "/settings": { settings: [{ key: "AUTO_IMPORT", value: "trusted" }], warnings: [] },
+    });
+    renderHome();
+
+    await userEvent.click(await screen.findByRole("button", { name: "いま取り込む" }));
+
+    await waitFor(() =>
+      expect(
+        api.calls().some((call) => call.path === "/volumes/v1/import" && call.method === "POST"),
+      ).toBe(true),
+    );
+  });
+
+  it("「取り外す」を押すと、そのカードを取り外す", async () => {
+    const api = stubApi({
+      "/dashboard": EMPTY_DASHBOARD,
+      "/devices": { volumes: [actionableVolume] },
+      "/jobs": { jobs: [] },
+      "/settings": { settings: [{ key: "AUTO_IMPORT", value: "trusted" }], warnings: [] },
+    });
+    renderHome();
+
+    await userEvent.click(await screen.findByRole("button", { name: "取り外す" }));
+
+    await waitFor(() =>
+      expect(
+        api.calls().some((call) => call.path === "/volumes/v1/close" && call.method === "POST"),
+      ).toBe(true),
+    );
   });
 
   it("進行中の作業があれば、ファイル名と件数で出す", async () => {

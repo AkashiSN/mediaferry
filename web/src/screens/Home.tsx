@@ -111,10 +111,13 @@ export function HomeScreen() {
     }
   }
 
-  // **やることは画面が持つ一覧ではなく、状態から毎回導く。** `dashboard.data` が
+  // **やることは画面が持つ一覧ではなく、状態から毎回導く。** `dashboardData` が
   // 無い間は「読み込み中…」を出し、「やることはありません」とは書かない
-  // （直後に件数が現れて驚かせないため）。
-  const tasks: Task[] = dashboard.data === null ? [] : tasksFrom(dashboard.data);
+  // （直後に件数が現れて驚かせないため）。`const` に取ってから narrowing する
+  // ——`dashboard.data` を式のあちこちで直に見ると、`null` チェックの後でも
+  // 型が絞られず `as` に頼ることになる。
+  const dashboardData = dashboard.data;
+  const tasks: Task[] = dashboardData === null ? [] : tasksFrom(dashboardData);
 
   const running = (jobs.data?.jobs ?? []).find((job) => LIVE_STATUSES.includes(job.status));
 
@@ -187,7 +190,7 @@ export function HomeScreen() {
           <JobCard job={running} rate={averageRate(running)} onCancel={(id) => void cancelJob(id)} />
         )}
 
-        {dashboard.data === null ? (
+        {dashboardData === null ? (
           <p>読み込み中…</p>
         ) : tasks.length === 0 ? (
           <EmptyState />
@@ -198,7 +201,7 @@ export function HomeScreen() {
               <span className="small">{tasks.length} 件</span>
             </div>
             {tasks.map((task) => (
-              <TaskCard key={task.kind} task={task} dashboard={dashboard.data as Dashboard} />
+              <TaskCard key={task.kind} task={task} dashboard={dashboardData} />
             ))}
           </section>
         )}
