@@ -52,15 +52,22 @@ def resolve_captured_at(
     値を注入する形にすることで、判断は純粋関数のままにできる。
     """
     if defn.timestamp.timezone_policy == "none":
-        wall, source = _wall_clock(defn, rel_path, mtime_ns, exif_wall, UTC)
-        return CapturedAt(at=wall.replace(tzinfo=UTC), source=source, tz=None, note=None)
+        name, zone = None, UTC
+    else:
+        # **TZ の解決を壁時計より先に行う。** mtime の fallback がこの TZ で描画する。
+        name = defn.timestamp.timezone or default_timezone
+        if name is None:
+            raise TimezoneUnresolved(
+                f"プロファイル {defn.slug} は force_offset だが timezone が未設定"
+            )
+        zone = ZoneInfo(name)
 
-    # **TZ の解決を壁時計より先に行う。** mtime の fallback がこの TZ で描画する。
-    name = defn.timestamp.timezone or default_timezone
-    if name is None:
-        raise TimezoneUnresolved(f"プロファイル {defn.slug} は force_offset だが timezone が未設定")
-    zone = ZoneInfo(name)
     wall, source = _wall_clock(defn, rel_path, mtime_ns, exif_wall, zone)
+    if wall.tzinfo is not None:
+        # mtime。**瞬間から始めた値は fold まで決まっている**ので付け直さない。
+        return CapturedAt(at=wall, source=source, tz=name, note=None)
+    if name is None:
+        return CapturedAt(at=wall.replace(tzinfo=UTC), source=source, tz=None, note=None)
     at, note = _attach_offset(wall, zone)
     return CapturedAt(at=at, source=source, tz=name, note=note)
 
@@ -72,7 +79,11 @@ def _wall_clock(
     exif_wall: datetime | None,
     zone: tzinfo,
 ) -> tuple[datetime, str]:
-    """`zone` は mtime の epoch を壁時計へ描画するための TZ."""
+    """`zone` は mtime の epoch に付ける TZ.
+
+    **返す値は mtime のときだけ aware。** ファイル名と EXIF は naive の壁時計で、
+    オフセットの付与は呼び出し側が行う（`_attach_offset`）。
+    """
     rule = defn.timestamp
     if rule.source == "filename" and rule.pattern is not None and rule.format is not None:
         try:
@@ -90,9 +101,10 @@ def _wall_clock(
     if rule.source == "exif" and exif_wall is not None:
         return exif_wall, "exif"
     # fallback は mtime のみを想定する。EXIF を持たないファイル（Canon の MOV、
-    # タグの無い JPEG）はここへ落ちる。**mtime は真の瞬間**なので、壁時計は
-    # 解決した TZ で描画する。
-    return datetime.fromtimestamp(mtime_ns / 1e9, tz=zone).replace(tzinfo=None), "mtime"
+    # タグの無い JPEG）はここへ落ちる。**mtime は真の瞬間**なので、解決した TZ を
+    # 付けた aware な値をそのまま返す —— naive の壁時計へ落とすと、DST の戻りで
+    # どちらの 1 時間かを失い、付け直しで 1 時間ずれる。
+    return datetime.fromtimestamp(mtime_ns / 1e9, tz=zone), "mtime"
 
 
 def _attach_offset(wall: datetime, zone: ZoneInfo) -> tuple[datetime, str | None]:

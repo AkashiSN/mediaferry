@@ -87,6 +87,40 @@ def test_the_mtime_fallback_uses_the_default_timezone_too():
     assert got.at.isoformat() == "2026-08-17T07:00:00+02:00"
 
 
+def test_the_mtime_fallback_keeps_the_instant_across_the_dst_fold():
+    """**mtime は瞬間なので fold まで決まっている。** 壁時計へ落として付け直さない.
+
+    Europe/Berlin の 2026-10-25T01:30:00Z は 02:30+01:00（DST の戻りの 2 回目）。
+    naive の壁時計に落として `_attach_offset` に通すと「先に来る方」が選ばれ、
+    epoch が 1 時間ずれる。曖昧なのは**壁時計から始めたとき**の話で、瞬間から
+    始めた値に当ててはいけない。
+    """
+    instant = datetime(2026, 10, 25, 1, 30, tzinfo=UTC)
+    got = resolve_captured_at(
+        defn(timezone="Europe/Berlin"),
+        "PANORAMA/PANO_0001.JPG",
+        int(instant.timestamp() * 1_000_000_000),
+        None,
+    )
+    assert got.source == "mtime"
+    assert got.at.isoformat() == "2026-10-25T02:30:00+01:00"
+    assert got.at.timestamp() == instant.timestamp()
+    assert got.note is None, "瞬間から決めた値に「曖昧」の断りは要らない"
+
+
+def test_the_same_wall_clock_before_the_fold_keeps_its_own_instant():
+    """1 時間前（fold の 1 回目）は同じ壁時計で別の瞬間. どちらも動かさない."""
+    instant = datetime(2026, 10, 25, 0, 30, tzinfo=UTC)
+    got = resolve_captured_at(
+        defn(timezone="Europe/Berlin"),
+        "PANORAMA/PANO_0001.JPG",
+        int(instant.timestamp() * 1_000_000_000),
+        None,
+    )
+    assert got.at.isoformat() == "2026-10-25T02:30:00+02:00"
+    assert got.at.timestamp() == instant.timestamp()
+
+
 def test_policy_none_keeps_the_instant_as_recorded():
     """Canon は EXIF にローカル時刻を書くので介入しない."""
     got = resolve_captured_at(

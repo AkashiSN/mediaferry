@@ -184,12 +184,39 @@ DJI_20260815155045_0029_D.MP4   長さ 89.5 秒
 
 | 直したもの | 変えた内容 |
 | --- | --- |
-| `timestamps._wall_clock` | mtime の fallback を、UTC 表現ではなく**解決した TZ で描画**する。TZ の解決を壁時計より先に動かした（`timezone_policy: none` は描画に使う TZ が無いので UTC のまま） |
+| `timestamps._wall_clock` | mtime の fallback を、UTC 表現ではなく**解決した TZ を付けた aware な値**にする。TZ の解決を壁時計より先に動かした（`timezone_policy: none` は描画に使う TZ が無いので UTC のまま）。**naive の壁時計へ落とさない** —— 落として `_attach_offset` で付け直すと、DST の戻りでどちらの 1 時間かを失う（Europe/Berlin の `2026-10-25T01:30:00Z` が 1 時間ずれた。codex のレビューで見つかった） |
 | `publisher._collision_stamp` | `captured_at` を解決したのと同じ TZ（`CapturedAt.tz`）で描画する。**配管は増えていない** —— 手順 5 で `captured` が既に手元にある |
 | `merger._recording_end_ns` | `captured_at` の瞬間をそのまま epoch にする（`.replace(tzinfo=UTC)` をやめた）。オフセットの無い値だけ UTC と見なす（放っておくとシステムの TZ で読まれる） |
 
-**再計算（`recompute_timestamps`）にもそのまま効く** —— 入力は `source_entry` に
-記録した `mtime_ns` なので、版を進めれば既存の行も直る。
+**再計算（`recompute_timestamps`）の入力は `media_file.mtime_ns`**（公開した実体に
+固定された値）で、`source_entry` から引くのは**カード上の原名だけ**。後で再スキャン
+しても値が動かないので、この形でよい。
+
+**ただし既存 DB は自動では直らない。** プロファイルの定義（JSON）は変わっていないので
+`ProfileRegistry._upsert_revision` は新しい版を作らず、既存行の
+`captured_at_revision_id` は「現行版で算出済み」のまま残る。**手で
+`POST /profiles/{slug}/recompute` を叩けば**同じ版でも全行を巡るので `original` の
+`captured_at` は直る。**直らないもの**（再計算は日時の 5 列しか触らない）:
+
+- 旧 `_recording_end_ns` で付けた**派生物の実ファイルの mtime と `media_file.mtime_ns`**
+- 旧 `_collision_stamp` で**すでに確定した公開名**（ライブラリは不変。§7）
+
+**検証環境はリセットして取り直す前提**なので、その環境ではここで閉じる。実データを
+持ったまま上げる利用者が出たときは、影響するプロファイルの明示的な再計算と派生物の
+作り直しを手順に書く。
+
+### 残っている前提（`force_offset` の mtime fallback）
+
+**「mtime は真の瞬間」は、`OffsetFromUtc` を書く媒体でしか成り立たない。** valid bit が
+立っていない媒体では、exfat ドライバはマウントの `time_offset`（既定 0）で epoch を
+合成するので、その値は**現地の壁時計を UTC と見なした疑似 epoch**になる。そういう
+カードを `force_offset` のプロファイルで取り込むと、fallback だけがオフセットぶんずれる。
+
+**いま実害は無い。** ビルトインで `force_offset` なのは `dji-osmo` だけで、それが実測した
+機種そのもの。`canon-eos` と `generic-dcim` は `none` なので影響しない。**別の機種で
+ずれる実データが出たら**、mtime の意味（瞬間 / 壁時計）をプロファイルに持たせる。
+1 機種の実測から全機種の契約にはできない、という指摘（codex のレビュー）を受けての
+明示的な留保。
 
 **変異試験は 8 件すべて検出**（`tz=zone` を `UTC` に戻す、接尾辞に TZ を渡さない、
 `_recording_end_ns` を旧実装に戻す、naive の保険を外す、など）。素通りは無い。

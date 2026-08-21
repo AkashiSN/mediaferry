@@ -291,8 +291,10 @@ GUI での編集は既存定義を書き換えず、**新しいリビジョン�
   UTC の壁時計のまま採用してしまう問題への対処。
   **mtime は真の瞬間**（exFAT の `OffsetFromUtc` が効いている。実測は
   [`history/hardware-verification.md`](history/hardware-verification.md)）なので、
-  壁時計は `timezone` で描画してから付与する。`none` のときは描画に使う TZ が無いので、
-  UTC 表現の壁時計をそのまま採る。
+  `timezone` を付けた値をそのまま使い、**オフセットを付け直さない**（naive の壁時計へ
+  落とすと DST の戻りで 1 時間ずれる）。下の「曖昧・存在しない壁時計」の扱いは、
+  ファイル名と EXIF —— **壁時計から始めた値**だけに当たる。`none` のときは描画に使う
+  TZ が無いので、UTC 表現の壁時計をそのまま採る。
 
 `force_offset` かつ `timezone` が未解決（プロファイルにも `MEDIAFERRY_DEFAULT_TIMEZONE`
 にも値が無い）の場合は**起動時エラー**とし、取り込みを一切開始しない（§12.2）。

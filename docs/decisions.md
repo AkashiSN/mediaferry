@@ -27,7 +27,7 @@
 | **USB の `serial` を一意な識別子にしない** | Linux ガジェットの既定値 `123456789ABCDEF` だった。機体固有の文字列は `product` 側 |
 | **空の `DCIM` でも正当なボリューム** | Osmo の内蔵ストレージは `DCIM` を持つが空だった |
 | **checksum は base64 に統一** | `bulk-upload-check` は hex/base64 両方を受理するが `x-immich-checksum` は base64 |
-| **mtime は真の瞬間。壁時計は解決した TZ で描画する** | 「カードの時刻欄に UTC オフセットは書かれていない」を前提に mtime の UTC 表現を壁時計として使っていたが、**DJI は exFAT の `OffsetFromUtc` を書いていた**（2026-08-21 の実測。mtime を +09:00 で描画すると録画終端と +2 秒、UTC だと 9 時間ずれる）。UTC 表現を壁時計にすると `captured_at` がオフセットぶんずれる。**`_wall_clock` の mtime fallback・`publisher._collision_stamp`・`merger._recording_end_ns` を同時に直した** —— 片方だけだと `library/` と `derived/` で接尾辞の壁時計がずれる。`timezone_policy: none` は描画に使う TZ を持たないので UTC 表現のまま（介入しない方針そのもの）。測った値は [`history/hardware-verification.md`](history/hardware-verification.md) |
+| **mtime は真の瞬間。TZ を付けた aware な値をそのまま使う** | 「カードの時刻欄に UTC オフセットは書かれていない」を前提に mtime の UTC 表現を壁時計として使っていたが、**DJI は exFAT の `OffsetFromUtc` を書いていた**（2026-08-21 の実測。mtime を +09:00 で描画すると録画終端と +2 秒、UTC だと 9 時間ずれる）。UTC 表現を壁時計にすると `captured_at` がオフセットぶんずれる。**`_wall_clock` の mtime fallback・`publisher._collision_stamp`・`merger._recording_end_ns` を同時に直した** —— 片方だけだと `library/` と `derived/` で接尾辞の壁時計がずれる。`timezone_policy: none` は描画に使う TZ を持たないので UTC 表現のまま（介入しない方針そのもの）。**naive の壁時計へ落として付け直さない** —— 落とすと DST の戻りでどちらの 1 時間かを失い、`_attach_offset` が「先に来る方」を選んで 1 時間ずれる。曖昧さの解決は**壁時計から始めた値**（ファイル名・EXIF）だけの話。**この前提が成り立つのは `OffsetFromUtc` を書く媒体だけ**で、書かない媒体を `force_offset` で扱うプロファイルが出たら mtime の意味をプロファイルに持たせる（`history/hardware-verification.md` の「残っている前提」）。測った値は [`history/hardware-verification.md`](history/hardware-verification.md) |
 
 ## マウントとデバイスの同定
 
