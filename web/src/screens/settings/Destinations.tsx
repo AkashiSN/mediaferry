@@ -150,7 +150,7 @@ function StackSkips({ destinationId }: { destinationId: string }) {
       {skipped.error !== null && skipped.error !== undefined && (
         <ErrorBanner error={skipped.error} />
       )}
-      {skipped.data === undefined ? (
+      {skipped.data === null ? (
         <p className="small">読み込み中…</p>
       ) : records.length === 0 ? (
         <p className="small">見送りはありません。</p>
@@ -170,6 +170,94 @@ function StackSkips({ destinationId }: { destinationId: string }) {
           )}
         </>
       )}
+    </section>
+  );
+}
+
+/**
+ * 接続の設定（§12.3）。**`base_url` を必ず送るので、押すたびに新しいリビジョンが
+ * 増える。** `name` と `enabled` だけの本文はリビジョンを作らない短絡路に入るため、
+ * `0007` の回復手順（保存し直すと今の観測がリビジョンに入る）がそこでは動かない。
+ *
+ * **API キーは常に空から始める。** 読み出しの API を作らないので画面に既存の値は
+ * 無く、空のまま保存したときは `api_key` を送らない（＝いまの鍵を変えない）。
+ */
+function ConnectionForm({
+  destination,
+  busy,
+  onSave,
+}: {
+  destination: Destination;
+  busy: boolean;
+  onSave: (destination: Destination, event: React.FormEvent<HTMLFormElement>) => Promise<void>;
+}) {
+  return (
+    <section style={{ marginTop: 12 }}>
+      <div className="sechead">
+        <h3 style={{ fontSize: "13.5px", fontWeight: 600 }}>接続の設定</h3>
+      </div>
+      <form
+        aria-label={`接続の設定：${destination.name}`}
+        onSubmit={(event) => void onSave(destination, event)}
+      >
+        <div style={{ display: "flex", flexDirection: "column", gap: 12, marginTop: 8 }}>
+          <label className="formrow">
+            接続先 URL
+            <input
+              className="field"
+              name="base_url"
+              aria-label={`接続先 URL：${destination.name}`}
+              defaultValue={destination.base_url}
+              required
+            />
+          </label>
+          <label className="formrow">
+            表示用 URL（任意）
+            <input
+              className="field"
+              name="public_url"
+              aria-label={`表示用 URL：${destination.name}`}
+              defaultValue={destination.public_url ?? ""}
+            />
+          </label>
+          <label className="formrow">
+            新しい API キー（変えないときは空のまま）
+            {/* **既存の値は出さない**（§12.3。読み出しの API を作らない）。 */}
+            <input
+              className="field"
+              name="api_key"
+              type="password"
+              autoComplete="new-password"
+              aria-label={`新しい API キー：${destination.name}`}
+            />
+          </label>
+          <label className="formrow">
+            向き先が同じライブラリかどうか
+            {/* 接続先のホストが変わって `remote_user_id` が同じときだけ、
+                サーバがこの答えを求める（§12.3 の `target_epoch`）。 */}
+            <select
+              className="field"
+              name="same_library"
+              aria-label={`向き先が同じライブラリかどうか：${destination.name}`}
+              defaultValue=""
+            >
+              <option value="">決めていない</option>
+              <option value="yes">同じライブラリ（送信済みの記録を引き継ぐ）</option>
+              <option value="no">別のライブラリ（送信済みの記録を引き継がない）</option>
+            </select>
+          </label>
+        </div>
+        <div className="acts" style={{ marginTop: 12 }}>
+          <button
+            type="submit"
+            className="btn sm"
+            aria-label={`接続の設定を保存する：${destination.name}`}
+            disabled={busy}
+          >
+            保存する
+          </button>
+        </div>
+      </form>
     </section>
   );
 }
@@ -226,6 +314,45 @@ export function DestinationsScreen() {
     } finally {
       setBusy(false);
       setArchiving(null);
+    }
+  }
+
+  /**
+   * 接続の設定を保存する。**接続に関わる欄を必ず送る**ので、値を変えずに押しても
+   * 新しいリビジョンが増え、そこに今の観測（`remote_user_id`）が入る。
+   */
+  async function saveConnection(
+    destination: Destination,
+    event: React.FormEvent<HTMLFormElement>,
+  ) {
+    event.preventDefault();
+    // **待つ前に掴んでおく。** `await` の後の `currentTarget` は null になる。
+    const element = event.currentTarget;
+    const form = new FormData(element);
+    const apiKey = String(form.get("api_key") ?? "");
+    const sameLibrary = String(form.get("same_library") ?? "");
+    const body: Record<string, unknown> = {
+      base_url: String(form.get("base_url") ?? ""),
+      public_url: form.get("public_url") ? String(form.get("public_url")) : null,
+    };
+    if (apiKey !== "") {
+      // 空欄は「変えない」。送ると鍵を空にしてしまう。
+      body.api_key = apiKey;
+    }
+    if (sameLibrary !== "") {
+      body.same_library = sameLibrary === "yes";
+    }
+    setBusy(true);
+    setError(null);
+    try {
+      await request(`/destinations/${destination.id}`, { method: "PATCH", body });
+      // **鍵を画面に残さない。**
+      element.reset();
+      destinations.reload();
+    } catch (caught) {
+      setError(caught);
+    } finally {
+      setBusy(false);
     }
   }
 
@@ -293,7 +420,9 @@ export function DestinationsScreen() {
         <div className="sechead" style={{ marginBottom: 12 }}>
           <h2>送り先を追加する</h2>
         </div>
-        <form onSubmit={(event) => void submit(event)}>
+        {/* **名前を付ける。** 既にある送り先の「接続の設定」にも同じ見出しの欄が
+            並ぶので、どちらの form かを読み上げでも区別できるようにする。 */}
+        <form aria-label="送り先を追加する" onSubmit={(event) => void submit(event)}>
           <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
             <label className="formrow">
               名前
@@ -347,6 +476,7 @@ export function DestinationsScreen() {
               )}
             </div>
           </div>
+          <ConnectionForm destination={destination} busy={busy} onSave={saveConnection} />
           <Resend destination={destination} busy={busy} onResend={resend} />
           <StackSkips destinationId={destination.id} />
           <div className="acts" style={{ marginTop: 14 }}>

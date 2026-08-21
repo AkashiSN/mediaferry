@@ -40,7 +40,8 @@ test("RAW+JPEG が 1 スタックになり、見送りの理由も画面に出�
   // 1. 送り先を 1 件作る。
   await nav.getByRole("link", { name: "設定" }).click();
   await page.getByRole("link", { name: "送り先を管理する" }).click();
-  const form = page.locator("form");
+  // 追加の欄に限る（既にある送り先の「接続の設定」にも同じ見出しの欄がある）。
+  const form = page.getByRole("form", { name: "送り先を追加する" });
   await form.getByLabel("名前").fill("immich-1");
   await form.getByLabel("接続先 URL").fill(app.immich[0]);
   await form.getByLabel("API キー").fill("test-api-key");

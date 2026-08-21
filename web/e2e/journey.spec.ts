@@ -90,9 +90,9 @@ test("空の DB から、ホーム起点の主要動線が通る", async ({ page
   // 2. 送り先を 2 件作る（**空の DB から画面だけで作れること**）。
   await nav.getByRole("link", { name: "設定" }).click();
   await page.getByRole("link", { name: "送り先を管理する" }).click();
-  // 「名前」は追加の欄と、既にある送り先の「名前を変える」の両方に当たるので、
-  // 追加の form に限る。
-  const form = page.locator("form");
+  // 「名前」も「接続先 URL」も、追加の欄と既にある送り先の「接続の設定」の
+  // 両方に当たるので、追加の form に限る。
+  const form = page.getByRole("form", { name: "送り先を追加する" });
   for (const [index, url] of app.immich.entries()) {
     await form.getByLabel("名前").fill(`immich-${index + 1}`);
     await form.getByLabel("接続先 URL").fill(url);

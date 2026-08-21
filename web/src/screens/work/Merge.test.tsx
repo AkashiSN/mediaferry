@@ -6,7 +6,7 @@ import { MemoryRouter, Route, Routes, useLocation } from "react-router-dom";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { stubApi } from "../../test/api";
-import { MergeScreen } from "./Merge";
+import { failureReason, MergeScreen } from "./Merge";
 
 // **2 パートのサイズをわざと変える。** 両方 4 GiB だと、パートごとの表示が 2 要素とも
 // 同じ文字列になり `getByText` が「複数一致」で落ちる（かつては導入文の固定の
@@ -40,6 +40,33 @@ const GROUP = {
   ],
 };
 
+/**
+ * 実際の `core/merge/verify.py` の `to_json` が返す形（`passed` / `route` /
+ * `checks[]`）。**トップレベルに `verdict` も `reason` も無い。** 画面が読むのは
+ * `passed` と `checks[]` で、`db/selection.py` の `SENDABLE_CLAUSE` が見ているのも
+ * `passed` である。
+ */
+function verification(
+  passed: boolean,
+  verdicts: [string, string, string, string],
+  routeDropped: unknown[] = [],
+) {
+  const names = ["duration", "streams", "frames", "size"];
+  return {
+    passed,
+    route: "concat",
+    pipeline_version: 1,
+    checks: names.map((name, index) => ({
+      name,
+      verdict: verdicts[index],
+      detail: {},
+    })),
+    dropped_streams: [],
+    route_dropped_streams: routeDropped,
+    seam_offsets: [600.0],
+  };
+}
+
 const ROUTES = {
   "/merge-groups?status=skipped": { groups: [] },
   "/media": { media: [] },
@@ -70,6 +97,16 @@ beforeEach(() => {
 afterEach(() => vi.restoreAllMocks());
 
 describe("つなぐ", () => {
+  it("画面の名前は「つなぐ」（内部の名前を出さない）", async () => {
+    stubApi({ ...ROUTES, "/merge-groups": { groups: [] } });
+    render(
+      <MemoryRouter>
+        <MergeScreen />
+      </MemoryRouter>,
+    );
+    expect(await screen.findByRole("region", { name: "つなぐ" })).toBeInTheDocument();
+  });
+
   it("なぜこの並びなのかを、構成とギャップで出す", async () => {
     stubApi({ ...ROUTES, "/merge-groups": { groups: [GROUP] } });
     render(
@@ -235,7 +272,7 @@ describe("つなぐ", () => {
       id: "g8",
       status: "merged",
       output: { media_file_id: "mo1", rel_path: "library/OUT.MP4", size_bytes: 2147483648, missing: false },
-      verification: { verdict: "pass", reason: null },
+      verification: verification(true, ["pass", "pass", "inconclusive", "inconclusive"]),
     };
     stubApi({ ...ROUTES, "/merge-groups": { groups: [withOutput] } });
     render(
@@ -245,7 +282,15 @@ describe("つなぐ", () => {
     );
     await waitFor(() => expect(screen.getByText(/library\/OUT\.MP4/)).toBeInTheDocument());
     expect(screen.getByText(/2 GiB/)).toBeInTheDocument();
-    expect(screen.getByText(/検証: pass/)).toBeInTheDocument();
+    expect(screen.getByText(/検証: 合格/)).toBeInTheDocument();
+    // **検査ごとに読める形で出す**（内部の名前をそのまま出さない。§13）。
+    expect(screen.getByText("長さ: 合っています")).toBeInTheDocument();
+    expect(screen.getByText("中身の構成: 合っています")).toBeInTheDocument();
+    expect(screen.getByText("コマ数: 確かめられませんでした")).toBeInTheDocument();
+    expect(screen.getByText("ファイルの大きさ: 確かめられませんでした")).toBeInTheDocument();
+    expect(screen.queryByText(/duration|streams|frames|size/)).toBeNull();
+    // 合格した組に採用の操作は要らない（採用は不合格のものを救う手段）。
+    expect(screen.queryByRole("button", { name: "中身を見て、これを使う" })).toBeNull();
     // 現行のグループの出力は消せない（消せるのは details/MergeHistory.tsx の
     // 使っていない出力だけ）。
     expect(screen.queryByRole("button", { name: /このファイルを消す/ })).toBeNull();
@@ -294,6 +339,15 @@ describe("つなぐ", () => {
     expect(dialog).toHaveTextContent("公開済みのファイル");
     expect(dialog).toHaveTextContent("ファイル0 件");
     expect(calls().some((c) => c.method === "PATCH")).toBe(false);
+    // **破棄と採用を取り違えない。** 採用は「検証に落ちた出力を使う」で、
+    // 破棄は「別々の動画として扱う」—— 意味が逆になる。
+    await userEvent.click(screen.getByRole("button", { name: "実行する" }));
+    await waitFor(() =>
+      expect(
+        calls().some((c) => c.path === "/merge-groups/g1?action=discard" && c.method === "PATCH"),
+      ).toBe(true),
+    );
+    expect(calls().some((c) => c.path.includes("action=adopt"))).toBe(false);
   });
 
   it("結合済みの組を「これは別々」にすると、公開済み 1 件と出す", async () => {
@@ -379,7 +433,22 @@ describe("つなぐ", () => {
     const { calls } = stubApi({
       ...ROUTES,
       "/merge-groups": {
-        groups: [{ ...GROUP, id: "g3", status: "merged", verification: { verdict: "fail", reason: "継ぎ目が不自然" } }],
+        groups: [
+          {
+            ...GROUP,
+            id: "g3",
+            status: "merged",
+            adopted_at: null,
+            // 結合が終わった組には必ず出力がある（`_group` の `output`）。
+            output: {
+              media_file_id: "mo3",
+              rel_path: "library/OUT3.MP4",
+              size_bytes: 2147483648,
+              missing: false,
+            },
+            verification: verification(false, ["fail", "pass", "fail", "inconclusive"]),
+          },
+        ],
       },
     });
     render(
@@ -389,7 +458,8 @@ describe("つなぐ", () => {
     );
     const adopt = await screen.findByRole("button", { name: "中身を見て、これを使う" });
     await userEvent.click(adopt);
-    expect(screen.getByRole("dialog")).toHaveTextContent("継ぎ目が不自然");
+    // 不合格だった検査の名前を、そのまま理由にする。
+    expect(screen.getByRole("dialog")).toHaveTextContent("長さ / コマ数が合いません");
     expect(calls().some((c) => c.method === "PATCH")).toBe(false);
     await userEvent.click(screen.getByRole("button", { name: "実行する" }));
     await waitFor(() =>
@@ -426,6 +496,8 @@ describe("つなぐ", () => {
     );
     await userEvent.click(await screen.findByRole("button", { name: "構成を変える" }));
     const dialog = await screen.findByRole("dialog", { name: "構成を変える" });
+    // 読み上げの名前（`aria-label`）と、見えている題は別の式。
+    expect(within(dialog).getByRole("heading", { name: "構成を変える" })).toBeInTheDocument();
     const checkboxes = within(dialog).getAllByRole("checkbox");
     expect(checkboxes).toHaveLength(2);
     await userEvent.click(checkboxes[1]); // position 1（m2）のチェックを外す
@@ -464,5 +536,271 @@ describe("つなぐ", () => {
     await waitFor(() =>
       expect(calls().some((c) => c.path === "/merge-groups" && c.method === "POST")).toBe(true),
     );
+  });
+});
+
+// 画面は実際の応答（`passed` と `checks[]`）を読む。`core/merge/verify.py` の
+// `to_json` はトップレベルに `verdict` も `reason` も書かない。**`passed` が偽の
+// ときに「中身を見て、これを使う」を出す**のがここの要（§10 の `adopted_derived`。
+// これが無いと、検証に落ちた出力を送る手段が画面から消える）。
+describe("検証の結果", () => {
+  function renderWith(group: unknown) {
+    stubApi({ ...ROUTES, "/merge-groups": { groups: [group] } });
+    return render(
+      <MemoryRouter>
+        <MergeScreen />
+      </MemoryRouter>,
+    );
+  }
+
+  const MERGED = {
+    ...GROUP,
+    id: "gv",
+    status: "merged",
+    adopted_at: null,
+    output: {
+      media_file_id: "mo1",
+      rel_path: "library/OUT.MP4",
+      size_bytes: 2147483648,
+      missing: false,
+    },
+  };
+
+  it("不合格のときは、どの検査が合わなかったかを出す", async () => {
+    renderWith({
+      ...MERGED,
+      verification: verification(false, ["pass", "fail", "inconclusive", "fail"]),
+    });
+    await waitFor(() => expect(screen.getByText(/検証: 不合格/)).toBeInTheDocument());
+    expect(screen.getByText("長さ: 合っています")).toBeInTheDocument();
+    expect(screen.getByText("中身の構成: 合いません")).toBeInTheDocument();
+    expect(screen.getByText("コマ数: 確かめられませんでした")).toBeInTheDocument();
+    expect(screen.getByText("ファイルの大きさ: 合いません")).toBeInTheDocument();
+  });
+
+  it("`passed` が偽なら、採用の操作を出す（`verdict` という欄は無い）", async () => {
+    renderWith({
+      ...MERGED,
+      verification: verification(false, ["fail", "pass", "pass", "pass"]),
+    });
+    expect(
+      await screen.findByRole("button", { name: "中身を見て、これを使う" }),
+    ).toBeInTheDocument();
+  });
+
+  it("採用済みの組には、もう採用の操作を出さない", async () => {
+    renderWith({
+      ...MERGED,
+      adopted_at: "2026-08-20T00:00:00Z",
+      verification: verification(false, ["fail", "pass", "pass", "pass"]),
+    });
+    await waitFor(() => expect(screen.getByText(/検証: 不合格/)).toBeInTheDocument());
+    expect(screen.queryByRole("button", { name: "中身を見て、これを使う" })).toBeNull();
+    expect(screen.getByText(/中身を見て採用しました/)).toBeInTheDocument();
+  });
+
+  it("組み直された組には、採用の操作を出さない（API が 409 で断る）", async () => {
+    renderWith({
+      ...MERGED,
+      superseded_by_id: "g99",
+      verification: verification(false, ["fail", "pass", "pass", "pass"]),
+    });
+    await waitFor(() => expect(screen.getByText(/検証: 不合格/)).toBeInTheDocument());
+    expect(screen.queryByRole("button", { name: "中身を見て、これを使う" })).toBeNull();
+  });
+
+  it("経路の都合で運べなかったものがあれば、件数を出す", async () => {
+    renderWith({
+      ...MERGED,
+      verification: verification(false, ["pass", "fail", "pass", "pass"], [
+        { codec_type: "data", codec_name: "none" },
+      ]),
+    });
+    await waitFor(() =>
+      expect(
+        screen.getByText(/つなぎ方の都合で運べなかったものが 1 件あります/),
+      ).toBeInTheDocument(),
+    );
+  });
+
+  it("知らない検査が増えても、内部の名前は出さない", async () => {
+    // `verify.py` に検査が足されたときの受け口。**名前をそのまま出さない**（§13）。
+    renderWith({
+      ...MERGED,
+      verification: {
+        passed: true,
+        route: "concat",
+        pipeline_version: 1,
+        checks: [{ name: "container_overhead", verdict: "pass", detail: {} }],
+        dropped_streams: [],
+        route_dropped_streams: [],
+        seam_offsets: [],
+      },
+    });
+    await waitFor(() =>
+      expect(screen.getByText("そのほかの検査: 合っています")).toBeInTheDocument(),
+    );
+    expect(screen.queryByText(/container_overhead/)).toBeNull();
+  });
+
+  it("検証の記録が無い組には、検証の行を出さない", async () => {
+    renderWith({ ...MERGED, verification: null });
+    await waitFor(() => expect(screen.getByText(/library\/OUT\.MP4/)).toBeInTheDocument());
+    expect(screen.queryByText(/検証:/)).toBeNull();
+  });
+});
+
+describe("不合格の理由の 1 文", () => {
+  it("合わなかった検査を並べる", () => {
+    expect(
+      failureReason({
+        passed: false,
+        checks: [
+          { name: "duration", verdict: "fail" },
+          { name: "streams", verdict: "pass" },
+          { name: "frames", verdict: "inconclusive" },
+          { name: "size", verdict: "fail" },
+        ],
+        route_dropped_streams: [],
+      }),
+    ).toBe("長さ / ファイルの大きさが合いません");
+  });
+
+  it("判定不能は理由に数えない（合否に使わないため）", () => {
+    expect(
+      failureReason({
+        passed: false,
+        checks: [{ name: "frames", verdict: "inconclusive" }],
+        route_dropped_streams: [],
+      }),
+    ).toBe("検証に通っていません");
+  });
+});
+
+// **`busy` を `false` に倒しても落ちないテストしか無いガードは、無いガードと同じ**
+// （押し続けると同じ操作が何度も飛ぶ）。失敗を握り潰していないことも同じように見る。
+describe("飛んでいる間と、失敗したとき", () => {
+  /** `path` への応答だけを握って止める `fetch`。 */
+  function heldFetch(path: string, routes: Record<string, unknown>) {
+    let release!: () => void;
+    const held = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: string) => {
+        const target = input.replace(/^\/api/, "");
+        if (target === path) {
+          await held;
+          return new Response(JSON.stringify({ status: "ok" }), { status: 200 });
+        }
+        const keys = Object.keys(routes);
+        const key = keys.find((k) => k === target) ?? keys.find((k) => target.startsWith(k));
+        return new Response(JSON.stringify(key === undefined ? {} : routes[key]), { status: 200 });
+      }),
+    );
+    return release;
+  }
+
+  const MERGED_FAILING = {
+    ...GROUP,
+    id: "g30",
+    status: "merged",
+    adopted_at: null,
+    output: {
+      media_file_id: "mo30",
+      rel_path: "library/OUT30.MP4",
+      size_bytes: 2147483648,
+      missing: false,
+    },
+    verification: verification(false, ["fail", "pass", "pass", "pass"]),
+  };
+
+  it("1 つの操作が飛んでいる間は、どの操作も押せない", async () => {
+    const release = heldFetch("/merge-groups/detect", {
+      ...ROUTES,
+      "/merge-groups": {
+        groups: [GROUP, { ...GROUP, id: "g31", status: "failed" }, MERGED_FAILING],
+      },
+    });
+    render(
+      <MemoryRouter>
+        <MergeScreen />
+      </MemoryRouter>,
+    );
+    const names = [
+      "つなぐ",
+      "再試行する",
+      "個別に送る",
+      "中身を見て、これを使う",
+      "同じ構成でやり直す",
+      "分かれた動画を探す",
+    ];
+    for (const name of names) {
+      expect(await screen.findByRole("button", { name })).toBeEnabled();
+    }
+    expect(screen.getAllByRole("button", { name: "構成を変える" })[0]).toBeEnabled();
+    expect(screen.getAllByRole("button", { name: "これは別々" })[0]).toBeEnabled();
+
+    await userEvent.click(screen.getByRole("button", { name: "分かれた動画を探す" }));
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: "分かれた動画を探す" })).toBeDisabled(),
+    );
+    for (const name of names) {
+      expect(screen.getByRole("button", { name })).toBeDisabled();
+    }
+    for (const button of screen.getAllByRole("button", { name: "構成を変える" })) {
+      expect(button).toBeDisabled();
+    }
+    for (const button of screen.getAllByRole("button", { name: "これは別々" })) {
+      expect(button).toBeDisabled();
+    }
+    release();
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: "分かれた動画を探す" })).toBeEnabled(),
+    );
+  });
+
+  it("確認のあと飛んでいる間は、確認の「実行する」も押せない", async () => {
+    const release = heldFetch("/merge-groups/g1?action=discard", {
+      ...ROUTES,
+      "/merge-groups": { groups: [GROUP] },
+    });
+    render(
+      <MemoryRouter>
+        <MergeScreen />
+      </MemoryRouter>,
+    );
+    await userEvent.click(await screen.findByRole("button", { name: "これは別々" }));
+    const run = screen.getByRole("button", { name: "実行する" });
+    await userEvent.click(run);
+    await waitFor(() => expect(run).toBeDisabled());
+    release();
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+  });
+
+  it("失敗を握り潰さない（バナーに出す）", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn((input: string) => {
+        const target = input.replace(/^\/api/, "");
+        if (target === "/merge-groups/detect") {
+          return Promise.resolve(
+            new Response(
+              JSON.stringify({ error: { code: "internal", detail: "", meta: {} } }),
+              { status: 500 },
+            ),
+          );
+        }
+        return Promise.resolve(new Response(JSON.stringify({ groups: [] }), { status: 200 }));
+      }),
+    );
+    render(
+      <MemoryRouter>
+        <MergeScreen />
+      </MemoryRouter>,
+    );
+    await userEvent.click(await screen.findByRole("button", { name: "分かれた動画を探す" }));
+    expect(await screen.findByRole("alert")).toBeInTheDocument();
   });
 });

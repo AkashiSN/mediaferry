@@ -512,7 +512,7 @@ TrueNAS ホストで。手順は [`history/phase0-findings.md`](history/phase0-f
 | 項目 | 状況 |
 | --- | --- |
 | 実 USB での確認 | `phase1-manual-checklist.md` に手順を用意済み。未実施 |
-| **`0007` が既存 DB に再検証を要求する** | 相手由来の観測（`remote_user_id` / `server_instance_id` / `remote_asset_id`）を捨てるので、開いた直後はどの宛先も「向き先の記録が無い」で**閉じる**（送信は始まらない）。**宛先を保存し直す（PATCH）と新しいリビジョンに今の観測が入って直る。** 送信済みレコードの識別子は宛先ごとの再確認がチェックサム照合で戻す |
+| **`0007` が既存 DB に再検証を要求する** | 相手由来の観測（`remote_user_id` / `server_instance_id` / `remote_asset_id`）を捨てるので、開いた直後はどの宛先も「向き先の記録が無い」で**閉じる**（送信は始まらない）。**宛先を保存し直すと新しいリビジョンに今の観測が入って直る**（設定 › 送り先 › 「接続の設定」で、値を変えずに「保存する」を押す。画面は `base_url` を必ず送るので、`name` と `enabled` だけの短絡路には入らない）。 送信済みレコードの識別子は宛先ごとの再確認がチェックサム照合で戻す |
 | **`0005` を版を足さずに書き換えた** | 古い `0005` を適用済みの DB は runner が `MigrationError` で開けない（配布前なので開発用 DB は作り直す前提）。**以後この手は使わない** —— 7 巡目の blocker になった |
 | 認証の既定 | **off のまま**（利用者の判断）。`BIND_HOST` の既定も loopback。`TRUSTED_HOSTS` は IP と `localhost` を既定で通し、ホスト名だけ許可制 |
 | フロントの依存 | `web/package-lock.json` を追跡している。Playwright のブラウザは `npx playwright install chromium` で入れる（CI で回すなら `--with-deps`） |

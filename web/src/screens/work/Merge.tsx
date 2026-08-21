@@ -25,16 +25,95 @@ type Member = {
   duration_seconds: number | null;
   captured_at: string;
 };
+/**
+ * 検証の 1 項目（`core/merge/verify.py` の `Check`）。`verdict` は
+ * `pass` / `fail` / `inconclusive` のいずれか。
+ */
+type VerificationCheck = { name: string; verdict: string };
+/**
+ * 結合結果の検証（§9.8）。**合否は `passed` に入る。**
+ * トップレベルの `verdict` や `reason` は存在しない —— `db/selection.py` の
+ * `SENDABLE_CLAUSE` が送れるかどうかを判断するのも `passed` である。
+ */
+export type Verification = {
+  passed: boolean;
+  checks: VerificationCheck[];
+  // 経路のコンテナが運べずに外したストリーム（TS 経路の `tmcd` など）。
+  route_dropped_streams: unknown[];
+};
 type Group = {
   id: string;
   status: string;
   detected_by: string;
   input_digest: string;
-  verification: { verdict?: string; reason?: string | null } | null;
+  verification: Verification | null;
+  adopted_at: string | null;
   superseded_by_id: string | null;
   output: { media_file_id: string; rel_path: string; size_bytes: number; missing: boolean } | null;
   members: Member[];
 };
+
+/** 検査の名前を画面の言葉にする（内部の名前をそのまま出さない。§13）。 */
+function checkLabel(name: string): string {
+  switch (name) {
+    case "duration":
+      return "長さ";
+    case "streams":
+      return "中身の構成";
+    case "frames":
+      return "コマ数";
+    case "size":
+      return "ファイルの大きさ";
+    default:
+      return "そのほかの検査";
+  }
+}
+
+/** 検査の結果を画面の言葉にする。判定不能は合否に使わないので、そう書く。 */
+function verdictLabel(verdict: string): string {
+  if (verdict === "pass") {
+    return "合っています";
+  }
+  if (verdict === "fail") {
+    return "合いません";
+  }
+  return "確かめられませんでした";
+}
+
+/**
+ * 不合格の理由を 1 文にする（採用の確認に渡す）。
+ *
+ * **判定不能は理由に数えない。** 合否に使っていないものを理由にすると、
+ * 「合わなかった」と読める文が実際には合っていた検査を指してしまう。
+ */
+export function failureReason(verification: Verification): string {
+  const failed = (verification.checks ?? [])
+    .filter((check) => check.verdict === "fail")
+    .map((check) => checkLabel(check.name));
+  return failed.length === 0 ? "検証に通っていません" : `${failed.join(" / ")}が合いません`;
+}
+
+/** 検証の結果。**採用の判断ができるように、検査ごとに出す**（§13「検証結果」）。 */
+function VerificationResult({ verification }: { verification: Verification }) {
+  const dropped = verification.route_dropped_streams ?? [];
+  return (
+    <div className="small" style={{ marginTop: 6 }}>
+      <p>検証: {verification.passed ? "合格" : "不合格"}</p>
+      <ul style={{ listStyle: "none", padding: 0, marginTop: 3 }}>
+        {(verification.checks ?? []).map((check) => (
+          <li key={check.name}>
+            {checkLabel(check.name)}: {verdictLabel(check.verdict)}
+          </li>
+        ))}
+      </ul>
+      {dropped.length > 0 && (
+        <p style={{ marginTop: 3 }}>
+          つなぎ方の都合で運べなかったものが {dropped.length} 件あります。
+        </p>
+      )}
+    </div>
+  );
+}
 
 type Groups = { groups: Group[] };
 
@@ -73,6 +152,21 @@ function totalBytes(members: Member[]): number {
 function totalMinutes(members: Member[]): number {
   const seconds = members.reduce((sum, member) => sum + (member.duration_seconds ?? 0), 0);
   return Math.round(seconds / 60);
+}
+
+/**
+ * 採用できる組か（`db/merges.py` の `adopt` が受け付ける条件と揃える）。
+ * 組み直された組と、既に採用した組には出さない —— 押しても 409 か無反応になる。
+ */
+function adoptable(group: Group): boolean {
+  return (
+    group.status === "merged" &&
+    group.superseded_by_id === null &&
+    group.adopted_at === null &&
+    group.output !== null &&
+    group.verification !== null &&
+    !group.verification.passed
+  );
 }
 
 export function MergeScreen() {
@@ -153,10 +247,10 @@ export function MergeScreen() {
                 {group.output.missing ? "・見つかりません" : ""}）
               </p>
             )}
-            {group.verification && (
-              <p className="small">
-                検証: {group.verification.verdict}
-                {group.verification.reason ? `（${group.verification.reason}）` : ""}
+            {group.verification && <VerificationResult verification={group.verification} />}
+            {group.adopted_at !== null && (
+              <p className="small" style={{ marginTop: 3 }}>
+                中身を見て採用しました。
               </p>
             )}
           </div>
@@ -185,7 +279,10 @@ export function MergeScreen() {
                 個別に送る
               </button>
             )}
-            {group.verification?.verdict === "fail" && (
+            {adoptable(group) && (
+              // §10 の `adopted_derived`。**検証に落ちた出力は、人が中身を見て
+              // 採用しない限り送る候補に出ない**（`SENDABLE_CLAUSE` は
+              // `passed` か `adopted_at` を見る）。ここがその唯一の入口。
               <button
                 type="button"
                 className="btn sm"
@@ -195,7 +292,7 @@ export function MergeScreen() {
                     value: {
                       kind: "adopt_failed_merge",
                       groupLabel: members[0]?.rel_path ?? group.id,
-                      reason: group.verification?.reason ?? "検証に不合格",
+                      reason: failureReason(group.verification as Verification),
                     },
                     run: () => act(`/merge-groups/${group.id}?action=adopt`),
                   })

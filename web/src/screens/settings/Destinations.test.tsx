@@ -3,7 +3,7 @@
 // レビュー指摘（Critical #2）: 「設定 › 送り先から送り直せます」と案内しておきながら、
 // この画面に送り直す操作が無かった。案内が指す先に実物を置く。
 
-import { render, screen, waitFor } from "@testing-library/react";
+import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { MemoryRouter } from "react-router-dom";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -207,5 +207,290 @@ describe("送れなかったものを送り直す", () => {
     const posts = (globalThis.fetch as unknown as { mock: { calls: [string, RequestInit?][] } }).mock
       .calls;
     expect(posts.some(([path]) => path.includes("/destinations/d1/upload"))).toBe(false);
+  });
+});
+
+// 退役の確認は不可逆な操作の入口。**`busy` を `false` に倒しても落ちないなら、
+// 確認の「実行する」を連打できる。**
+describe("退役の確認", () => {
+  it("飛んでいる間は、確認の「実行する」も押せない", async () => {
+    let release!: () => void;
+    const held = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: string) => {
+        const path = input.replace(/^\/api/, "");
+        if (path === "/destinations/d1/archive") {
+          await held;
+          return new Response(JSON.stringify({ status: "ok" }), { status: 200 });
+        }
+        const body = routes([])[path as keyof ReturnType<typeof routes>] ?? {};
+        return new Response(JSON.stringify(body), { status: 200 });
+      }),
+    );
+    renderDestinations();
+    await userEvent.click(
+      await screen.findByRole("button", { name: "退役させる：家の Immich" }),
+    );
+    const run = screen.getByRole("button", { name: "実行する" });
+    await userEvent.click(run);
+    await waitFor(() => expect(run).toBeDisabled());
+    release();
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+  });
+});
+
+// **読み込み中かどうかは `null` で見る。** `useQuery` は `null` で始まるので、
+// `undefined` と比べる判定は常に偽になり、取得が終わる前から「見送りはありません。」
+// と断言することになる（§9.11「見送りを黙らない」に反する）。
+describe("スタックの見送り", () => {
+  /** `SKIPPED_PATH` の応答だけを握って止める `fetch`。 */
+  function heldSkips(records: unknown[]) {
+    let release!: () => void;
+    const held = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: string) => {
+        const path = input.replace(/^\/api/, "");
+        if (path === SKIPPED_PATH) {
+          await held;
+          return new Response(JSON.stringify({ records }), { status: 200 });
+        }
+        const body = routes([])[path as keyof ReturnType<typeof routes>] ?? {};
+        return new Response(JSON.stringify(body), { status: 200 });
+      }),
+    );
+    return release;
+  }
+
+  /** 「スタックの見送り」の節だけを見る（「読み込み中…」は他の節にも出る）。 */
+  function skipsSection(): HTMLElement {
+    const heading = screen.getByRole("heading", { name: "スタックの見送り" });
+    const section = heading.closest("section");
+    if (section === null) {
+      throw new Error("スタックの見送りの節が無い");
+    }
+    return section;
+  }
+
+  it("読み込みが終わるまで、見送りが無いと断言しない", async () => {
+    const release = heldSkips([{ id: "s1", media_file_id: "m1", stack_reason: "組が送信中" }]);
+    renderDestinations();
+    await waitFor(() => expect(within(skipsSection()).getByText("読み込み中…")).toBeInTheDocument());
+    expect(within(skipsSection()).queryByText("見送りはありません。")).toBeNull();
+    release();
+    await waitFor(() => expect(screen.getByText(/組が送信中/)).toBeInTheDocument());
+  });
+
+  it("読み終えて 0 件なら、無いと書く", async () => {
+    const release = heldSkips([]);
+    renderDestinations();
+    release();
+    expect(await screen.findByText("見送りはありません。")).toBeInTheDocument();
+  });
+});
+
+// 送り先の接続設定（`base_url` / `public_url` / `api_key` / `same_library`）を
+// ここから入れ直せる。**`name` と `enabled` だけの本文はリビジョンを作らない短絡路**
+// なので、画面は接続の欄を必ず送る —— `docs/development.md` の `0007` の回復手順
+// （宛先を保存し直すと新しい観測がリビジョンに入る）が動く唯一の入口である。
+describe("接続の設定を変える", () => {
+  /** 要求の本文を記録する `stubApi` の代役。 */
+  function stubWithBodies(overrides: Record<string, unknown> = {}) {
+    const bodies: { path: string; method: string; body: Record<string, unknown> }[] = [];
+    const api = stubApi({ ...routes([]), ...overrides }, (path, init) => {
+      if (init?.body) {
+        bodies.push({
+          path,
+          method: init.method ?? "GET",
+          body: JSON.parse(init.body as string) as Record<string, unknown>,
+        });
+      }
+    });
+    return { ...api, bodies };
+  }
+
+  async function save() {
+    await userEvent.click(
+      await screen.findByRole("button", { name: "接続の設定を保存する：家の Immich" }),
+    );
+  }
+
+  it("ボタンには、読み上げにも表示にも「保存する」と出す", async () => {
+    stubWithBodies();
+    renderDestinations();
+    const button = await screen.findByRole("button", {
+      name: "接続の設定を保存する：家の Immich",
+    });
+    expect(button).toHaveTextContent("保存する");
+  });
+
+  it("欄の見出しを画面にも出す（読み上げの名前とは別の式）", async () => {
+    stubWithBodies();
+    renderDestinations();
+    const section = (await screen.findByRole("heading", { name: "接続の設定" })).closest("section");
+    if (section === null) {
+      throw new Error("接続の設定の節が無い");
+    }
+    expect(within(section).getByText("接続先 URL")).toBeInTheDocument();
+    expect(within(section).getByText(/新しい API キー（変えないときは空のまま）/)).toBeInTheDocument();
+  });
+
+  it("form には送り先ごとの名前が付く（追加の form と読み上げで見分く）", async () => {
+    stubWithBodies();
+    renderDestinations();
+    expect(
+      await screen.findByRole("form", { name: "接続の設定：家の Immich" }),
+    ).toBeInTheDocument();
+  });
+
+  it("同じライブラリだと決めても送れる", async () => {
+    const { bodies } = stubWithBodies();
+    renderDestinations();
+    await userEvent.selectOptions(
+      await screen.findByLabelText("向き先が同じライブラリかどうか：家の Immich"),
+      "yes",
+    );
+    await save();
+    await waitFor(() => expect(bodies.some((call) => call.method === "PATCH")).toBe(true));
+    expect(bodies.find((call) => call.method === "PATCH")?.body.same_library).toBe(true);
+  });
+
+  it("何も変えずに保存しても、接続の欄を送る（短絡路に入らない）", async () => {
+    const { bodies } = stubWithBodies();
+    renderDestinations();
+    await save();
+    await waitFor(() => expect(bodies.some((call) => call.method === "PATCH")).toBe(true));
+    const patch = bodies.find((call) => call.method === "PATCH");
+    expect(patch?.path).toBe("/destinations/d1");
+    expect(patch?.body.base_url).toBe("http://immich.invalid");
+    expect(Object.keys(patch?.body ?? {}).some((key) => key === "name" || key === "enabled")).toBe(
+      false,
+    );
+  });
+
+  it("入れ直した接続先と鍵を送る", async () => {
+    const { bodies } = stubWithBodies();
+    renderDestinations();
+    const baseUrl = await screen.findByLabelText("接続先 URL：家の Immich");
+    await userEvent.clear(baseUrl);
+    await userEvent.type(baseUrl, "http://immich.example.invalid:2283");
+    await userEvent.type(screen.getByLabelText("表示用 URL：家の Immich"), "https://photos.example.invalid");
+    await userEvent.type(screen.getByLabelText("新しい API キー：家の Immich"), "s3cret");
+    await save();
+    await waitFor(() => expect(bodies.some((call) => call.method === "PATCH")).toBe(true));
+    expect(bodies.find((call) => call.method === "PATCH")?.body).toEqual({
+      base_url: "http://immich.example.invalid:2283",
+      public_url: "https://photos.example.invalid",
+      api_key: "s3cret",
+    });
+  });
+
+  it("API キーの欄は空から始まる（既存の鍵を画面に出さない）", async () => {
+    stubWithBodies();
+    renderDestinations();
+    const key = await screen.findByLabelText("新しい API キー：家の Immich");
+    expect(key).toHaveValue("");
+    expect(key).toHaveAttribute("type", "password");
+  });
+
+  it("空のままなら鍵は送らない（＝いまの鍵を変えない）", async () => {
+    const { bodies } = stubWithBodies();
+    renderDestinations();
+    await save();
+    await waitFor(() => expect(bodies.some((call) => call.method === "PATCH")).toBe(true));
+    expect(Object.keys(bodies.find((call) => call.method === "PATCH")?.body ?? {})).not.toContain(
+      "api_key",
+    );
+  });
+
+  it("保存に成功したら、鍵の欄を空に戻す", async () => {
+    stubWithBodies();
+    renderDestinations();
+    const key = await screen.findByLabelText("新しい API キー：家の Immich");
+    await userEvent.type(key, "s3cret");
+    expect(key).toHaveValue("s3cret");
+    await save();
+    await waitFor(() => expect(key).toHaveValue(""));
+  });
+
+  it("同じライブラリかどうかを決めて送れる（§12.3 の epoch の分かれ目）", async () => {
+    const { bodies } = stubWithBodies();
+    renderDestinations();
+    await userEvent.selectOptions(
+      await screen.findByLabelText("向き先が同じライブラリかどうか：家の Immich"),
+      "no",
+    );
+    await save();
+    await waitFor(() => expect(bodies.some((call) => call.method === "PATCH")).toBe(true));
+    expect(bodies.find((call) => call.method === "PATCH")?.body.same_library).toBe(false);
+  });
+
+  it("決めていなければ same_library を送らない（サーバに聞かせる）", async () => {
+    const { bodies } = stubWithBodies();
+    renderDestinations();
+    await save();
+    await waitFor(() => expect(bodies.some((call) => call.method === "PATCH")).toBe(true));
+    expect(Object.keys(bodies.find((call) => call.method === "PATCH")?.body ?? {})).not.toContain(
+      "same_library",
+    );
+  });
+
+  it("失敗はバナーに出す。鍵は出さない", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn((input: string, init?: RequestInit) => {
+        const path = input.replace(/^\/api/, "");
+        if (path === "/destinations/d1" && init?.method === "PATCH") {
+          return Promise.resolve(
+            new Response(
+              JSON.stringify({
+                error: { code: "same_library_undecided", detail: "", meta: {} },
+              }),
+              { status: 409 },
+            ),
+          );
+        }
+        const body = routes([])[path as keyof ReturnType<typeof routes>] ?? {};
+        return Promise.resolve(new Response(JSON.stringify(body), { status: 200 }));
+      }),
+    );
+    renderDestinations();
+    await userEvent.type(await screen.findByLabelText("新しい API キー：家の Immich"), "s3cret");
+    await save();
+    const banner = await screen.findByRole("alert");
+    expect(banner).toHaveTextContent("同じライブラリを指しているかどうかを選んでください。");
+    expect(banner.textContent).not.toContain("s3cret");
+  });
+
+  it("飛んでいる間は押させない（二重に保存しない）", async () => {
+    let release!: () => void;
+    const held = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: string, init?: RequestInit) => {
+        const path = input.replace(/^\/api/, "");
+        if (path === "/destinations/d1" && init?.method === "PATCH") {
+          await held;
+          return new Response(JSON.stringify({ id: "d1" }), { status: 200 });
+        }
+        const body = routes([])[path as keyof ReturnType<typeof routes>] ?? {};
+        return new Response(JSON.stringify(body), { status: 200 });
+      }),
+    );
+    renderDestinations();
+    const button = await screen.findByRole("button", {
+      name: "接続の設定を保存する：家の Immich",
+    });
+    await userEvent.click(button);
+    await waitFor(() => expect(button).toBeDisabled());
+    release();
+    await waitFor(() => expect(button).toBeEnabled());
   });
 });

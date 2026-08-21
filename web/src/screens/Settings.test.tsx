@@ -915,6 +915,11 @@ describe("送り先", () => {
     );
   }
 
+  /** 「送り先を追加する」の form。既にある送り先の「接続の設定」と欄の見出しが同じ。 */
+  function addForm(): HTMLElement {
+    return screen.getByRole("form", { name: "送り先を追加する" });
+  }
+
   it("設定へ戻れる", async () => {
     stubApi({ "/destinations": { destinations: [] } });
     renderDestinations();
@@ -1146,10 +1151,10 @@ describe("送り先", () => {
     renderDestinations();
 
     fireEvent.change(await screen.findByLabelText("名前"), { target: { value: "新しい送り先" } });
-    fireEvent.change(screen.getByLabelText("接続先 URL"), {
+    fireEvent.change(within(addForm()).getByLabelText("接続先 URL"), {
       target: { value: "http://immich.invalid" },
     });
-    fireEvent.change(screen.getByLabelText(/API キー/), { target: { value: "秘密" } });
+    fireEvent.change(within(addForm()).getByLabelText("API キー"), { target: { value: "秘密" } });
     await userEvent.click(screen.getByRole("button", { name: /接続を検証して追加する/ }));
 
     expect(await screen.findByRole("alert")).toHaveTextContent(/送り先に接続できません/);
@@ -1229,13 +1234,17 @@ describe("送り先", () => {
     });
     renderDestinations();
 
-    const key = await screen.findByLabelText(/API キー/);
+    const key = within(await screen.findByRole("form", { name: "送り先を追加する" })).getByLabelText(
+      "API キー",
+    );
     // **読み出しの API が無い**ので、欄は常に空から始まる（§12.3）。
     expect(key).toHaveValue("");
     expect(key).toHaveAttribute("type", "password");
 
-    fireEvent.change(screen.getByLabelText("名前"), { target: { value: "新しい送り先" } });
-    fireEvent.change(screen.getByLabelText("接続先 URL"), {
+    fireEvent.change(within(addForm()).getByLabelText("名前"), {
+      target: { value: "新しい送り先" },
+    });
+    fireEvent.change(within(addForm()).getByLabelText("接続先 URL"), {
       target: { value: "http://immich.invalid" },
     });
     fireEvent.change(key, { target: { value: "秘密" } });
@@ -1273,13 +1282,13 @@ describe("送り先", () => {
     renderDestinations();
 
     fireEvent.change(await screen.findByLabelText("名前"), { target: { value: "送り先" } });
-    fireEvent.change(screen.getByLabelText("接続先 URL"), {
+    fireEvent.change(within(addForm()).getByLabelText("接続先 URL"), {
       target: { value: "http://immich.invalid" },
     });
-    fireEvent.change(screen.getByLabelText("表示用 URL（任意）"), {
+    fireEvent.change(within(addForm()).getByLabelText("表示用 URL（任意）"), {
       target: { value: "http://immich.invalid/see" },
     });
-    fireEvent.change(screen.getByLabelText(/API キー/), { target: { value: "秘密" } });
+    fireEvent.change(within(addForm()).getByLabelText("API キー"), { target: { value: "秘密" } });
     await userEvent.click(screen.getByRole("button", { name: /接続を検証して追加する/ }));
 
     await waitFor(() =>

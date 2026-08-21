@@ -158,8 +158,8 @@ describe("ログイン前は叩かない", () => {
 // レビュー指摘（Important #6）: ナビのバッジと警告バナーが、セッション中に
 // 一度も取り直されなかった。**画面を再読み込みせずに進む**（§13）。
 //
-// `/settings` を開いておくのは、その画面が進捗を購読しないから
-// （`emitJob` は最後に開いた接続へ配るので、対象を 1 本に絞る）。
+// `emitJob` は 1 タブに 1 本だけ開く共有の接続（`hooks/useEvents.ts`）へ配るので、
+// 枠と画面の両方が同じイベントを受け取る。
 describe("進捗が届いたら、枠も取り直す", () => {
   /** 応答を差し替えられる `fetch`。 */
   function stubMutable(state: { dashboard: unknown; settings: unknown }) {
