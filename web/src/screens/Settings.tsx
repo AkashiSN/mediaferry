@@ -19,9 +19,20 @@ type Destinations = { destinations: Destination[] };
 type Profile = { slug: string; name: string; archived: boolean };
 type Profiles = { profiles: Profile[] };
 
-/** ふだんは見ないが、困ったときに要る画面（§13「詳しい情報」）。 */
+/** ふだんは見ないが、困ったときに要る画面（§13「詳しい情報」）。
+ *
+ * **「つなぐ」への常設の入口をここに置く。** ホームの「やること」に出るのは
+ * 現行の候補があるときだけなので、候補が 1 つも見つかっていない状態では
+ * つなぐ画面へ入る道が無くなる（ナビは 3 つで、`/merge` への導線は他に無い）。
+ * 手でグループを作るのも、閾値を変えて探し直すのも、その画面にしかない。
+ */
 const DETAILS: readonly { to: string; title: string; note: string }[] = [
   { to: "/settings/jobs", title: "作業の履歴", note: "取り込みや送信がいつ終わったか" },
+  {
+    to: "/merge",
+    title: "つなぐ",
+    note: "分かれた動画を探して 1 本にする。手で組むこともできます",
+  },
   {
     to: "/settings/merge-history",
     title: "つないだ動画の記録",

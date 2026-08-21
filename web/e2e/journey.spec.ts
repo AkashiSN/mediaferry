@@ -10,21 +10,31 @@
 import { expect, test, type Page } from "@playwright/test";
 
 import { start, type Running } from "./harness";
+import { FORBIDDEN } from "../src/test/vocabulary";
 
 let app: Running;
 
 const PASSWORD = "correct horse";
 
-// **内部の名前を画面に出さない**（§13 の「画面に出す言葉」）。画面をまたぐ規則
-// なので、画面ごとのテストでは守れない。
-//
-// **「破棄」は入れない。** 確認の本文が「この破棄の記録」と書いており、そこは
-// 記録の説明なので正しい。禁じるのはボタンのラベルとしての「破棄する」だけで、
-// それは `work/Merge.tsx` のテストが見ている。
-const FORBIDDEN = ["ジョブ", "転送先", "承認待ち", "ボリューム", "プロファイル", "マージ"];
-
-// 巡る画面。作業ページはナビに出ないので、パスで開く。
-const SCREENS = ["/", "/photos", "/settings", "/merge", "/approve", "/send", "/card"];
+// 巡る画面。**ナビに出ないページも全部入れる** —— 作業ページ 5 つと設定の下位
+// 5 つは、ナビからは開けないぶん見落としやすい（`/sending` の「いま送信している
+// ジョブはありません」がそれで生き残っていた）。禁止語の一覧は
+// `src/test/vocabulary.ts` にあり、確認ダイアログのテストと共有する。
+const SCREENS = [
+  "/",
+  "/photos",
+  "/settings",
+  "/card",
+  "/merge",
+  "/approve",
+  "/send",
+  "/sending",
+  "/settings/destinations",
+  "/settings/profiles",
+  "/settings/jobs",
+  "/settings/merge-history",
+  "/settings/general",
+];
 
 test.beforeAll(async () => {
   app = await start(PASSWORD);
@@ -114,10 +124,14 @@ test("空の DB から、ホーム起点の主要動線が通る", async ({ page
     timeout: 60_000,
   });
 
-  // 5. つなぐ。**合成カードの動画は 100 バイト**で、`min_part_size_gib` に遠く
-  //    及ばないため検出は候補を作らない。手で組んでから、ホームの「やること」に
-  //    出た導線を押して入る（作業ページはホームの下位にある。§13）。
-  await page.goto(app.url + "/merge");
+  // 5. つなぐ。**候補が 0 件でも入れることを、画面の導線で確かめる。**
+  //    合成カードの動画は 100 バイトで `min_part_size_gib`（15 GiB）に遠く及ばず、
+  //    検出は候補を 1 つも作らない。このとき「やること」につなぐは出ないので、
+  //    設定 › 詳しい情報の常設の入口から入る（ここが無いと、候補を作る画面へ
+  //    入る道が無くなる）。
+  await nav.getByRole("link", { name: "設定" }).click();
+  await page.getByRole("link", { name: /^つなぐ/ }).click();
+  await expect(page.getByRole("heading", { name: "つなぐものはありません" })).toBeVisible();
   await page.getByRole("group").first().click(); // 「手でグループを作る」を開く
   const parts = page.getByRole("checkbox");
   await expect(parts.first()).toBeVisible({ timeout: 60_000 });
@@ -126,6 +140,7 @@ test("空の DB から、ホーム起点の主要動線が通る", async ({ page
   await page.getByRole("button", { name: /選んだ 2 件でグループを作る/ }).click();
   await page.getByRole("button", { name: "ホームへ" }).click();
 
+  // 候補ができたので、**ホームの「やること」からも**入れる（§13 の主要動線）。
   const toMerge = page.getByRole("link", { name: "つなぐ", exact: true });
   await expect(toMerge).toBeVisible({ timeout: 60_000 });
   await toMerge.click();

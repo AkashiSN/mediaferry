@@ -1,7 +1,7 @@
 // 不可逆な操作の確認（§13）。
 //
 // **操作の種類ごとに、確認に出すものが違う。** アップロードは件数・合計サイズ・
-// 宛先名だが、宛先の退役や結合グループの破棄にそれらは無い。型で取り違えを防ぐ
+// 宛先名だが、送り先の退役やつなぐ組み合わせの破棄にそれらは無い。型で取り違えを防ぐ
 // ため、種類ごとの直和にする（計画レビューの指摘）。
 
 import type { ReactNode } from "react";
@@ -33,7 +33,7 @@ export function describe(confirmation: Confirmation): { title: string; body: Rea
       };
     case "archive_destination":
       return {
-        title: "この転送先を退役させますか",
+        title: "この送り先を退役させますか",
         body: (
           <p>
             {confirmation.name} を退役させます。送信済みの記録は残りますが、以後この宛先へは
@@ -43,7 +43,7 @@ export function describe(confirmation: Confirmation): { title: string; body: Rea
       };
     case "discard_merge_group":
       return {
-        title: "この結合グループを破棄しますか",
+        title: "このつなぐ組み合わせを破棄しますか",
         body: (
           <p>
             {confirmation.groupLabel} を破棄します。公開済みのファイル
@@ -66,11 +66,11 @@ export function describe(confirmation: Confirmation): { title: string; body: Rea
       };
     case "delete_stale_derived":
       return {
-        title: "この結合物を消しますか",
+        title: "このつないだファイルを消しますか",
         body: (
           <p>
             {confirmation.relPath} を消します。<strong>元になったファイルは残ります</strong>。
-            もう現行でないグループの結合結果なので、選択肢には出ていません。
+            もう現行でないグループをつないだ結果なので、選択肢には出ていません。
           </p>
         ),
       };
@@ -80,14 +80,14 @@ export function describe(confirmation: Confirmation): { title: string; body: Rea
         body: (
           <p>
             {confirmation.groupLabel} と同じ構成で新しい候補を作ります。
-            <strong>いまの結合物は消えません</strong>
-            （古いグループに残ります）。結合の実装が変わったときに、作り直すための操作です。
+            <strong>いまつないだファイルは消えません</strong>
+            （古いグループに残ります）。つなぎ方が変わったときに、作り直すための操作です。
           </p>
         ),
       };
     case "adopt_failed_merge":
       return {
-        title: "検証に通っていない結合物を採用しますか",
+        title: "検証に通っていないファイルを採用しますか",
         body: (
           <p>
             {confirmation.groupLabel} は「{confirmation.reason}」で不合格です。採用すると
@@ -151,12 +151,12 @@ export function describe(confirmation: Confirmation): { title: string; body: Rea
       };
     case "archive_profile":
       return {
-        title: "このプロファイルを候補から外しますか",
+        title: "このカメラの種類を候補から外しますか",
         body: (
           <p>
             {confirmation.slug} を候補から外します。取り込み済みのファイルと過去の
             リビジョンは残りますが、
-            <strong>以後このプロファイルは新しいカードの判定に使われなくなります</strong>。
+            <strong>以後このカメラの種類は新しいカードの判定に使われなくなります</strong>。
           </p>
         ),
       };

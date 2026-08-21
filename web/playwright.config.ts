@@ -5,7 +5,9 @@ import { defineConfig } from "@playwright/test";
 // 通らない。
 export default defineConfig({
   testDir: "e2e",
-  // 主要動線は取り込み・つなぐ・送るを通すので、1 本が長い。
+  // **spec の中の待ちより長くする。** いちばん遅いテストでも 10 秒で終わるが、
+  // `{ timeout: 60_000 }` の待ちが 1 本でも満了すると 60 秒の予算に収まらず、
+  // 「どの待ちで詰まったか」ではなく「テストが時間切れ」としか出なくなる。
   timeout: 120_000,
   expect: { timeout: 10_000 },
   use: { trace: "off" },

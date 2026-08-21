@@ -39,7 +39,7 @@ export function summarise(
     parts.push(`送れない組が ${rejected.length} 件ありました（${reasons.join(" / ")}）。`);
   }
   if (failures.length > 0) {
-    parts.push(`開始できなかった宛先: ${failures.join(" / ")}。転送先の画面から再試行できます。`);
+    parts.push(`開始できなかった宛先: ${failures.join(" / ")}。設定 › 送り先から再試行できます。`);
   }
   return parts.join("");
 }

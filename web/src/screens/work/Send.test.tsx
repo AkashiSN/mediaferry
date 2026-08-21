@@ -415,7 +415,7 @@ describe("送信そのもの", () => {
           return Promise.resolve(new Response(JSON.stringify({ job_id: "job-1" }), { status: 200 }));
         }
         if (path === "/destinations/d2/upload") {
-          // d2 は開始に失敗する（例: 転送先が応答しない）。
+          // d2 は開始に失敗する（例: 送り先が応答しない）。
           return Promise.resolve(new Response(JSON.stringify({ message: "unreachable" }), { status: 502 }));
         }
         if (path === "/uploads") {

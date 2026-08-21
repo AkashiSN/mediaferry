@@ -471,13 +471,36 @@ TrueNAS ホストで。手順は [`history/phase0-findings.md`](history/phase0-f
    書いており、**実データを一度も見ていない**。**17 番は Phase 6 で増えた項目**
    （RAW+JPEG の組が実カードで成立するか。`exifread` が実機の CR2 から
    `DateTimeOriginal` を読めるかが要）。
-6. **自動取り込み（§12.1）。** 承認したら「いま挿してあるカードの中身が数秒後に
-   取り込まれる」を実機で見ていない。**watcher が積むのは `import` だけで、
-   `scan` を積まない**（`jobs/watcher.py` の `_enqueue_ready`）。取り込みのジョブは
-   前のスキャンが残した `source_entry` を公開するだけなので、一度も数えていない
-   カードでは**ジョブは成功のまま 1 件も取り込まない**。画面から一度取り込めば
-   （ホームの「いま取り込む」は数えてからコピーする）以後は増分が積まれる。
-   Task 13 の E2E で見つけた。**直していない**（§12.1 の意味づけに関わる）。
+6. **自動取り込み（§12.1）は、いま成立していない。** 承認したら「いま挿してある
+   カードの中身が数秒後に取り込まれる」を実機で見ていない。**見ていなかったのは
+   正しく、動かない**（Task 13 の E2E で見つけた）。
+
+   **watcher が積むのは `import` だけで、`scan` を積まない**
+   （`jobs/watcher.py` の `_enqueue_ready`）。取り込みのジョブは前のスキャンが
+   残した `source_entry` を公開するだけなので、**ジョブは成功のまま 1 件も
+   取り込まない**。
+
+   **一度取り込んだカードでも直らない。** 根拠は 3 つ:
+
+   - `source_entry` の行を作るのは `jobs/scan.py` の `_reconcile_entry` **だけ**
+   - `volume_instance` は `(fs_uuid, fs_type, size_bytes)` の一意索引を持つ
+     **同一性**のテーブルなので（`0002_profiles_and_sources.sql`）、
+     `source_entry` はカードを挿し直しても残る
+   - `watcher` の `CANDIDATES` が見るのは `volume_presence.auto_import_at IS NULL`
+     ＝**接続ごと**で、**未取り込みの行があるかは条件に入っていない**
+
+   つまり、**信頼したカードに新しく撮った写真を足して挿し直しても、`import` は
+   走るが `source_entry` に行が無いので 0 件で成功する。** §12.1 の「以後そのカードは
+   挿すだけで取り込まれる」は満たされていない。
+
+   **直していない。** 判断が要るため:
+   信頼の確認ダイアログの文面は「**いま入っている中身も含めて**、以後このカードを
+   挿すだけで NAS へコピーされます」なので、**むしろ `scan` を積む方が文面どおり**。
+   ただし watcher に `scan` を足すと、同意の対象（「いま入っている中身」）と実際に
+   歩く範囲の対応が変わるので、§12.1 の意味づけを決め直したうえで、専用の試験と
+   一緒に入れる。**画面側の応急処置は入れてある** —— ホームの「いま取り込む」は
+   数えてからコピーする（`web/src/screens/Home.tsx` の `importNow`）ので、
+   **挿し直すたびにこれを押せば取り込める**。
 
 **バックアップとリストアは 2026-08-21 に実測して閉じた**（`backup.md` に反映済み）。
 
@@ -503,6 +526,10 @@ TrueNAS ホストで。手順は [`history/phase0-findings.md`](history/phase0-f
 | 5 パート連続録画（70 GiB 級）のアップロード | 28.36 GiB は完走した。同じ経路で扱える見込みだが未実測。タイムアウトは比例して伸びる |
 | Canon EOS 70D のプロファイル | **書いたが実データを一度も見ていない**（Task 4）。E2E で通しているのは `require` から組み立てた合成カードまで。`merge` は無効、`hints.usb_ids` は空。実カードでの確認は `phase1-manual-checklist.md` の 13〜16 番 |
 | **`0011`（`captured_at_revision_id`）** | **入れた**（Task 6）。既存 DB へは `profile_revision_id` の写しで埋め戻る。trigger 2 本が「必ず値を持つ」「同じプロファイルの版である」を守る |
+| **`/merge` へ入る道**（Phase 7 / Task 13） | **常設の入口を設定 › 詳しい情報に置いた**（`web/src/screens/Settings.tsx` の `DETAILS`）。ホームの「やること」に出るのは `merge_candidates > 0` のときだけで、候補を作るのは `/merge` の「分かれた動画を探す」だけなので、**候補が 0 件だと候補を作る画面へ入れない**という循環になっていた。取り込みの直後に検出を積む応急処置（`Home.tsx` の `importNow`）も入れたが、**それだけでは切れない** —— 検出が 0 件のとき（Canon は `merge` 無効、DJI もパートが `min_part_size_gib` 未満なら候補は出ない）と、自動取り込みの経路（上の 6 番）が残る。**「候補が無いときこそ手で組みたい」ので、入口は数に依存させない** |
+| **`web/e2e/` が `tsc` にも `eslint` にも掛かっていない** | `tsconfig.json` の `include` は `src` だけ、`npm run lint` は `eslint src`。Playwright は esbuild で型検査せずに走らせるので、**spec の型の誤りは実行時まで出ない**。**E2E はいま §13 の画面横断規則（内部の名前・44px・ライト/ダーク・確認ダイアログが前面に重なること）の唯一の錠**なので、黙って無効化されうる。直すには `@types/node` の追加と別 tsconfig が要る（`e2e/harness.ts` だけで `TS2307`/`TS2580` が 9 件出る）。**Task 13 では入れないと決めた** |
+| **E2E では結合の検出が候補を作れない** | `dji-osmo.yaml` の `min_part_size_gib` は 15 で、合成カードの動画は 100 バイト。**検出を押しても候補は 0 件**なので、E2E は「手でグループを作る」で候補を用意している（`web/e2e/journey.spec.ts`）。検出そのものの試験は Python 側（`app/tests/`）。実カードと同じ筋を通すなら、設定 › カメラの種類で複製して `min_part_size_gib` を下げる手がある |
+| **`/settings/destinations` が `media_file_id` を生で出している** | スタックの見送りの一覧（`web/src/screens/settings/Destinations.tsx`）が内部 ID をそのまま並べる。§13 の「内部の名前をそのまま出さない」に触れるが、禁止語の一覧（`web/src/test/vocabulary.ts`）は語しか見ないので E2E では落ちない。**名乗れる名前**（`rel_path` の末尾）に替えるには `/uploads` の応答に足すか、画面から `/media/{id}` を引く必要がある |
 | **`0012`（再計算の抽出用の索引）** | **入れた**（実装差分レビュー 4 巡目）。`source_entry (media_file_id, observed_at, id)` と `merge_group (output_media_file_id)`。無いと `media_file` 1 行ごとに `SCAN` が走り、**最初の `assert_lease` に届く前にリースが切れる** |
 | **`0013`（ページ送りの駆動索引）** | **入れた**（実装差分レビュー 5 巡目）。`media_file (profile_id, role, rel_path)`。`LIMIT` は**返す件数しか縛らない** —— 無いと別プロファイルの全行を走査しうる。**`0012` を書き換えずに版を足した**（§7 の `0005` の教訓） |
 | **`0014`（一覧の索引）と `IN` → `=`** | **入れた**（実装差分レビュー 6 巡目）。`0013` を足したら、プロファイルで絞った一覧が `media_file_captured_at` を辿る経路から外れ、**全行を拾ってから並べ替える**ようになった。`media_file (profile_id, captured_at DESC, id DESC)` を足し、`_filters` の `IN (SELECT ...)` を `= (SELECT ...)` へ変えた（`IN` だと複数の値を取りうると見なされ、索引があっても並べ替えを外せない）。**索引を足したら、他の問い合わせの EXPLAIN も見る** |

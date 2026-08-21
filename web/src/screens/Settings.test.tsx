@@ -262,6 +262,9 @@ describe("設定のトップ", () => {
       [/カメラの種類/, "/settings/profiles"],
       [/詳しい設定/, "/settings/general"],
       [/作業の履歴/, "/settings/jobs"],
+      // **つなぐへの常設の入口。** ホームの「やること」に出るのは現行の候補が
+      // あるときだけなので、候補が 0 件だとつなぐ画面へ入る道が無くなる。
+      [/^つなぐ/, "/merge"],
       [/つないだ動画の記録/, "/settings/merge-history"],
       // 裁定 42: 押した側がどちらの節に着いたか分かるよう、節の錨（#stale）へ飛ばす。
       [/使っていないファイル/, "/settings/merge-history#stale"],
@@ -271,6 +274,15 @@ describe("設定のトップ", () => {
       expect(await screen.findByRole("link", { name })).toHaveAttribute("href", href);
     }
     expect(screen.getByText(/ふだんは見なくて大丈夫です/)).toBeInTheDocument();
+  });
+
+  it("つなぐへの入口は、候補が 1 つも無くても出る", async () => {
+    // ホームの「やること」は `merge_candidates > 0` のときしか出ないので、
+    // **候補を作る画面へ入る道が消える。** ここは数を見ずに常設する。
+    stubApi({ ...ROUTES, "/dashboard": { merge_candidates: 0 } });
+    renderTop();
+
+    expect(await screen.findByRole("link", { name: /^つなぐ/ })).toHaveAttribute("href", "/merge");
   });
 });
 
@@ -1140,7 +1152,7 @@ describe("送り先", () => {
     fireEvent.change(screen.getByLabelText(/API キー/), { target: { value: "秘密" } });
     await userEvent.click(screen.getByRole("button", { name: /接続を検証して追加する/ }));
 
-    expect(await screen.findByRole("alert")).toHaveTextContent(/転送先に接続できません/);
+    expect(await screen.findByRole("alert")).toHaveTextContent(/送り先に接続できません/);
   });
 
   it("退役を始めるときは、古い失敗の表示を消す", async () => {

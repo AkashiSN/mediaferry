@@ -93,7 +93,7 @@ export function SendingScreen() {
 
       {jobs.length === 0 ? (
         <div className="card pad empty">
-          <p className="muted">いま送信しているジョブはありません。</p>
+          <p className="muted">いま送っているものはありません。</p>
         </div>
       ) : (
         jobs.map((job) => (

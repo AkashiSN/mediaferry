@@ -116,22 +116,24 @@ export function HomeScreen() {
    * ジョブは成功のまま 1 件も取り込まない。
    *
    * **探すところまでやる。** ホームの「やること」は現行の結合候補の数から導く
-   * ので、取り込んだあとに探しておかないと「つなぐ」が出ず、つなぐ画面へ入る道が
-   * 無い（ナビは 3 つだけで、作業ページはやることからしか開かない）。
+   * ので、取り込んだあとに探しておかないと「つなぐ」が出ない（入口そのものは
+   * 設定 › 詳しい情報に常設してある）。カメラの種類がつながない設定なら、
+   * 探すジョブは「結合しない」と記録して何もしない。
    *
    * ジョブは積んだ順に 1 本ずつ走るので、探すのは取り込みが終わったあとになる。
+   *
+   * `profileSlug` は必ず値を持つ。**このボタンは対象と判定できたカードにしか
+   * 出ない**（`CardBanner` の `actionable`）。
    */
-  async function importNow(volumeId: string, profileSlug: string | null) {
+  async function importNow(volumeId: string, profileSlug: string) {
     setBusy(`${volumeId}:import`);
     setError(null);
     try {
       await request(`/volumes/${volumeId}/scan`, { method: "POST" });
       await request(`/volumes/${volumeId}/import`, { method: "POST" });
-      if (profileSlug !== null) {
-        await request(`/merge-groups/detect?profile_slug=${encodeURIComponent(profileSlug)}`, {
-          method: "POST",
-        });
-      }
+      await request(`/merge-groups/detect?profile_slug=${encodeURIComponent(profileSlug)}`, {
+        method: "POST",
+      });
       devices.reload();
       jobs.reload();
     } catch (caught) {
@@ -331,10 +333,14 @@ function CardBanner({
   autoImport: string | null;
   busy: string | null;
   onAct: (volumeId: string, action: "trust" | "scan" | "import" | "close") => void;
-  onImport: (volumeId: string, profileSlug: string | null) => void;
+  onImport: (volumeId: string, profileSlug: string) => void;
   onAskTrust: (label: string, outlook: ReturnType<typeof autoImportOutlook>) => void;
 }) {
-  const actionable = volume.profile_slug !== null;
+  // **`slug` を先に取り出す。** `actionable` から narrowing を効かせるには、
+  // 別名が `const` である必要がある（そうしないと「いま取り込む」に渡す型が
+  // `string | null` のままになる）。
+  const slug = volume.profile_slug;
+  const actionable = slug !== null;
   return (
     <section className="card pad hl">
       <div className="rowtop">
@@ -371,7 +377,7 @@ function CardBanner({
               type="button"
               className="btn primary"
               disabled={busy !== null}
-              onClick={() => onImport(volume.volume_instance_id, volume.profile_slug)}
+              onClick={() => onImport(volume.volume_instance_id, slug)}
             >
               いま取り込む
             </button>

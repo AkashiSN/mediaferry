@@ -4,6 +4,7 @@ import { describe, expect, it, vi } from "vitest";
 
 import { ConfirmDialog, describe as describeConfirmation, formatBytes } from "./ConfirmDialog";
 import type { Confirmation } from "./ConfirmDialog";
+import { FORBIDDEN } from "../test/vocabulary";
 
 describe("不可逆な操作の確認", () => {
   it("送信は件数・合計サイズ・宛先名を出す（§13）", () => {
@@ -90,14 +91,7 @@ describe("不可逆な操作の確認", () => {
   });
 
   it("種類ごとに、必ず題と本文がある", () => {
-    const all: Confirmation[] = [
-      { kind: "upload", count: 1, totalBytes: 1, destinationNames: ["a"] },
-      { kind: "archive_destination", name: "a" },
-      { kind: "discard_merge_group", groupLabel: "a", publishedCount: 0 },
-      { kind: "adopt_failed_merge", groupLabel: "a", reason: "サイズ" },
-      { kind: "approve_datetime", current: "a", proposed: "b" },
-    ];
-    for (const confirmation of all) {
+    for (const confirmation of EVERY_KIND) {
       const { title, body } = describeConfirmation(confirmation);
       expect(title.length).toBeGreaterThan(0);
       expect(body).toBeTruthy();
@@ -126,20 +120,45 @@ describe("不可逆な操作の確認", () => {
       unmount();
     }
   });
+
+  // **内部の名前を出さない**（§13）。E2E は全画面を巡るが、**ダイアログは開くまで
+  // 描かれない**ので、確認の本文にはここでしか届かない。一覧は E2E と共有する。
+  it("本文に内部の名前が出ていない", () => {
+    for (const confirmation of EVERY_KIND) {
+      const { unmount } = render(
+        <ConfirmDialog confirmation={confirmation} onConfirm={() => {}} onCancel={() => {}} />,
+      );
+      const text = screen.getByRole("dialog").textContent ?? "";
+      for (const word of FORBIDDEN) {
+        expect(text, `${confirmation.kind} に「${word}」が出ている`).not.toContain(word);
+      }
+      unmount();
+    }
+  });
 });
 
-/** `Confirmation` の全種類。**1 つでも欠けると、その本文は誰も読まない。** */
+/**
+ * `Confirmation` の全種類。**1 つでも欠けると、その本文は誰も読まない。**
+ *
+ * `Record<Confirmation["kind"], …>` にしてあるので、**union に種類を足すと
+ * ここが型エラーになる**（一覧だと黙って抜ける）。
+ */
+const BY_KIND: Record<Confirmation["kind"], Confirmation> = {
+  upload: { kind: "upload", count: 1, totalBytes: 1, destinationNames: ["a"] },
+  archive_destination: { kind: "archive_destination", name: "a" },
+  discard_merge_group: { kind: "discard_merge_group", groupLabel: "a", publishedCount: 1 },
+  delete_merge_history: { kind: "delete_merge_history", groupLabel: "a" },
+  delete_stale_derived: { kind: "delete_stale_derived", relPath: "derived/a.MP4" },
+  remerge_group: { kind: "remerge_group", groupLabel: "a" },
+  adopt_failed_merge: { kind: "adopt_failed_merge", groupLabel: "a", reason: "サイズ" },
+  approve_datetime: { kind: "approve_datetime", current: "a", proposed: "b" },
+  archive_profile: { kind: "archive_profile", slug: "a" },
+  trust_volume: { kind: "trust_volume", label: "a", state: "starts", reason: null },
+};
+
+// `trust_volume` は state で本文が丸ごと入れ替わるので、残り 2 つも巡る。
 const EVERY_KIND: Confirmation[] = [
-  { kind: "upload", count: 1, totalBytes: 1, destinationNames: ["a"] },
-  { kind: "archive_destination", name: "a" },
-  { kind: "discard_merge_group", groupLabel: "a", publishedCount: 1 },
-  { kind: "delete_merge_history", groupLabel: "a" },
-  { kind: "delete_stale_derived", relPath: "derived/a.MP4" },
-  { kind: "remerge_group", groupLabel: "a" },
-  { kind: "adopt_failed_merge", groupLabel: "a", reason: "サイズ" },
-  { kind: "approve_datetime", current: "a", proposed: "b" },
-  { kind: "archive_profile", slug: "a" },
-  { kind: "trust_volume", label: "a", state: "starts", reason: null },
+  ...Object.values(BY_KIND),
   { kind: "trust_volume", label: "a", state: "pending", reason: "確かめられた場合" },
   { kind: "trust_volume", label: "a", state: "blocked", reason: "設定が off な" },
 ];
