@@ -89,6 +89,61 @@ describe("ホーム", () => {
     expect(screen.getByRole("button", { name: "このカードを信頼する" })).toBeInTheDocument();
   });
 
+  it("カメラの種類は、生の slug ではなく表示名を出す（§13）", async () => {
+    // `work/CardDetail.tsx` の `profileDisplayName` と同じ引き当てを使う。
+    stubApi({
+      "/dashboard": EMPTY_DASHBOARD,
+      "/devices": {
+        volumes: [
+          {
+            volume_instance_id: "v1",
+            fs_label: "OSMO",
+            profile_slug: "dji-osmo",
+            identity_confidence: "high",
+            provisional: true,
+            trusted: false,
+            reason: "DCIM がある",
+          },
+        ],
+      },
+      "/jobs": { jobs: [] },
+      "/settings": { settings: [{ key: "AUTO_IMPORT", value: "trusted" }], warnings: [] },
+      "/profiles": { profiles: [{ slug: "dji-osmo", name: "DJI Osmo Pocket" }] },
+    });
+    renderHome();
+
+    expect(await screen.findByText("DJI Osmo Pocket のカードのようです。")).toBeInTheDocument();
+    expect(
+      await screen.findByText("DJI Osmo Pocket の対象ですが、取り込む中身がまだありません。"),
+    ).toBeInTheDocument();
+    expect(screen.queryByText(/dji-osmo/)).toBeNull();
+  });
+
+  it("カメラの種類は、登録が無い slug だけフォールバックで出す", async () => {
+    stubApi({
+      "/dashboard": EMPTY_DASHBOARD,
+      "/devices": {
+        volumes: [
+          {
+            volume_instance_id: "v1",
+            fs_label: "OSMO",
+            profile_slug: "unknown-cam",
+            identity_confidence: "high",
+            provisional: false,
+            trusted: false,
+            reason: "DCIM がある",
+          },
+        ],
+      },
+      "/jobs": { jobs: [] },
+      "/settings": { settings: [{ key: "AUTO_IMPORT", value: "trusted" }], warnings: [] },
+      "/profiles": { profiles: [{ slug: "dji-osmo", name: "DJI Osmo Pocket" }] },
+    });
+    renderHome();
+
+    expect(await screen.findByText("unknown-cam のカードのようです。")).toBeInTheDocument();
+  });
+
   // `Home.tsx` の `CardBanner` は `Devices.tsx` の `act` とほぼ同じ配線を
   // 複製している。`Devices.tsx` 側のクリック試験は `screens.test.tsx` に
   // あるが、Home 側の配線だけに入った書き間違い（例えば `import` を `scan`

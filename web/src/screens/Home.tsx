@@ -14,7 +14,7 @@ import { ErrorBanner } from "../components/ErrorBanner";
 import { Icon } from "../components/Icon";
 import { JobCard } from "../components/JobCard";
 import type { Job } from "../components/JobProgress";
-import { autoImportOutlook, autoImportState, volumeLabel } from "./work/CardDetail";
+import { autoImportOutlook, autoImportState, profileDisplayName, volumeLabel } from "./work/CardDetail";
 import { useEvents } from "../hooks/useEvents";
 import { useReloadOnEvents } from "../hooks/useReloadOnEvents";
 import { tasksFrom } from "../hooks/useTasks";
@@ -32,6 +32,8 @@ type Volume = {
 };
 
 type Devices = { volumes: Volume[] };
+type Profile = { slug: string; name: string };
+type Profiles = { profiles: Profile[] };
 
 type DestinationSummary = {
   destination_id: string;
@@ -71,11 +73,13 @@ export function HomeScreen() {
   const devices = useQuery<Devices>("/devices");
   const jobs = useQuery<Jobs>("/jobs");
   const settings = useQuery<Settings>("/settings");
+  const profiles = useQuery<Profiles>("/profiles");
   const { received } = useEvents();
   useReloadOnEvents(received, dashboard.reload);
   useReloadOnEvents(received, devices.reload);
   useReloadOnEvents(received, jobs.reload);
   useReloadOnEvents(received, settings.reload);
+  useReloadOnEvents(received, profiles.reload);
 
   const [error, setError] = useState<unknown>(null);
   const [busy, setBusy] = useState<string | null>(null);
@@ -167,7 +171,7 @@ export function HomeScreen() {
         </div>
 
         <ErrorBanner
-          error={error ?? dashboard.error ?? devices.error ?? jobs.error ?? settings.error}
+          error={error ?? dashboard.error ?? devices.error ?? jobs.error ?? settings.error ?? profiles.error}
           onDismiss={() => setError(null)}
         />
 
@@ -178,6 +182,9 @@ export function HomeScreen() {
             // **一覧全体を渡す。** ラベルが無いカードが複数あると同じ既定名に
             // なるので、連番で見分けるには他のカードも見える必要がある。
             label={volumeLabel(devices.data?.volumes ?? [], volume)}
+            // **カメラの種類は `work/CardDetail.tsx` と同じ引き当てを使う**
+            // （§13。生の slug を出さない。写像は 1 か所にだけ持つ）。
+            profileName={profileDisplayName(volume.profile_slug, profiles.data?.profiles ?? [])}
             autoImport={autoImport}
             busy={busy}
             onAct={act}
@@ -272,6 +279,7 @@ export function HomeScreen() {
 function CardBanner({
   volume,
   label,
+  profileName,
   autoImport,
   busy,
   onAct,
@@ -279,6 +287,7 @@ function CardBanner({
 }: {
   volume: Volume;
   label: string;
+  profileName: string;
   autoImport: string | null;
   busy: string | null;
   onAct: (volumeId: string, action: "trust" | "scan" | "import" | "close") => void;
@@ -297,7 +306,7 @@ function CardBanner({
           </h2>
           {!volume.trusted && actionable && (
             <p className="muted" style={{ marginTop: 4 }}>
-              {volume.profile_slug} のカードのようです。
+              {profileName} のカードのようです。
             </p>
           )}
           {actionable ? (
@@ -311,7 +320,7 @@ function CardBanner({
           )}
           {volume.provisional && (
             <p role="note" className="small" style={{ marginTop: 4 }}>
-              {volume.profile_slug} の対象ですが、取り込む中身がまだありません。
+              {profileName} の対象ですが、取り込む中身がまだありません。
             </p>
           )}
         </div>
