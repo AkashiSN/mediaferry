@@ -160,6 +160,27 @@ def test_a_queued_job_uses_the_profile_revision_it_was_queued_with(db):
     assert profile.definition.merge.tolerance_seconds == 5
 
 
+def test_the_app_starts_on_an_empty_dataset(tmp_path, broker_factory, monkeypatch):
+    """**手順書の mkdir を無くす。** データセットを作って chown しただけで起動する.
+
+    これが通らないと、5 つのディレクトリを手で作る手順が消せない（同一
+    ファイルシステムの検査が `stat` で落ちる）。
+    """
+    root = tmp_path / "dataset"
+    root.mkdir()
+    monkeypatch.setenv("MEDIAFERRY_DATA_ROOT", str(root))
+    monkeypatch.setenv("MEDIAFERRY_DEFAULT_TIMEZONE", "Asia/Tokyo")
+    with TestClient(create_app(broker_factory=broker_factory), base_url="http://127.0.0.1:8080"):
+        pass
+    assert sorted(p.name for p in root.iterdir()) == [
+        "derived",
+        "library",
+        "staging",
+        "var",
+        "work",
+    ]
+
+
 def test_shutdown_waits_for_the_running_handler(data_root, broker, monkeypatch):
     """to_thread のハンドラは task の cancel では止まらない.
 

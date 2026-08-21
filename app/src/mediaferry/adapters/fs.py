@@ -13,6 +13,8 @@ from collections.abc import Iterable, Iterator
 from dataclasses import dataclass
 from pathlib import Path
 
+from ..db.connection import DIR_MODE as DB_DIR_MODE
+
 # macOS が書く AppleDouble の残骸。本体と同じ拡張子を持つので、名前で弾く。
 APPLE_DOUBLE_PREFIX = "._"
 
@@ -23,6 +25,10 @@ class EscapeAttempt(ValueError):
 
 class CrossDeviceLayout(RuntimeError):
     """staging と公開先が別のファイルシステムにある."""
+
+
+class LayoutNotWritable(RuntimeError):
+    """DATA_ROOT にディレクトリを作れない（たいていは所有者が違う）."""
 
 
 @dataclass(frozen=True)
@@ -148,6 +154,36 @@ def fsync_dir(path: Path) -> None:
         os.fsync(fd)
     finally:
         os.close(fd)
+
+
+def ensure_layout(data_root: Path) -> None:
+    """§7 の 5 つのディレクトリを用意する. **手順書に mkdir を書かせない.**
+
+    手で作らせていたのは、起動時の `assert_same_filesystem` が `stat` するため
+    だった（無いと `FileNotFoundError` で落ち、原因も読めない）。実際の書き込み
+    先はどれも `parents=True` で作られるので、ここで先に揃えれば手順が 1 つ減る。
+
+    **`chown` はアプリにはできない** —— 自分に権限を与えることになる。作れない
+    ときは、何を実行すればよいかを言って止まる。
+
+    `var/` だけ `0o700`（API キーの暗号文と DB が入る。`db.connection` と同じ）。
+    """
+    for name in ("library", "derived", "staging", "work"):
+        _make_dir(data_root / name, None)
+    _make_dir(data_root / "var", DB_DIR_MODE)
+
+
+def _make_dir(path: Path, mode: int | None) -> None:
+    try:
+        if mode is None:
+            path.mkdir(parents=True, exist_ok=True)
+        else:
+            path.mkdir(parents=True, exist_ok=True, mode=mode)
+    except PermissionError as exc:
+        raise LayoutNotWritable(
+            f"{path} を作れない。データセットの所有者をアプリの UID に合わせる: "
+            f"chown {os.geteuid()}:{os.getegid()} <dataset>"
+        ) from exc
 
 
 def assert_same_filesystem(*paths: Path) -> None:

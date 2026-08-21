@@ -24,7 +24,7 @@ from fastapi import Depends, FastAPI
 
 from ..adapters.broker_client import BrokerClient
 from ..adapters.ffprobe import MediaProbe
-from ..adapters.fs import assert_same_filesystem
+from ..adapters.fs import assert_same_filesystem, ensure_layout
 from ..adapters.publisher import ArtifactPublisher
 from ..adapters.thumbnails import ThumbnailCache
 from ..core.auth import hash_password
@@ -114,6 +114,9 @@ def create_app(
             settings = SettingsService(startup, env).snapshot()
             for warning in startup_warnings(settings):
                 logger.warning("%s", warning)
+            # **レイアウトは自分で用意する**（手順書に mkdir を書かせない）。
+            # 下の検査は stat するので、無いと FileNotFoundError で落ちる。
+            ensure_layout(settings.data_root)
             # 公開は os.link なので、staging と公開先が別デバイスだと必ず失敗する。
             assert_same_filesystem(
                 settings.data_root / "staging",

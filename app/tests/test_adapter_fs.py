@@ -1,4 +1,5 @@
 import os
+import stat
 from pathlib import Path
 
 import pytest
@@ -7,7 +8,9 @@ from mediaferry.adapters.fs import (
     CrossDeviceLayout,
     DirfdTree,
     EscapeAttempt,
+    LayoutNotWritable,
     assert_same_filesystem,
+    ensure_layout,
     iter_media_files,
     open_beneath,
 )
@@ -113,3 +116,63 @@ def test_same_filesystem_check_reports_a_split_layout(data_root, monkeypatch):
     monkeypatch.setattr(Path, "stat", fake_stat)
     with pytest.raises(CrossDeviceLayout):
         assert_same_filesystem(data_root / "staging", data_root / "library")
+
+
+# ----------------------------------------------------------------------
+# レイアウトの用意（§7）
+#
+# **手で作らせない。** 手順書の `mkdir -p <dataset>/{library,...}` は、起動時の
+# 同一ファイルシステム検査を通すためだけに存在していた（無いと `stat` が
+# `FileNotFoundError` で落ち、原因も読めない）。所有者の付与（`chown`）だけは
+# アプリにはできない —— 自分に権限を与えることになるため。
+
+
+def test_the_layout_is_created_under_an_empty_dataset(tmp_path):
+    root = tmp_path / "dataset"
+    root.mkdir()
+    ensure_layout(root)
+    assert sorted(p.name for p in root.iterdir()) == [
+        "derived",
+        "library",
+        "staging",
+        "var",
+        "work",
+    ]
+
+
+def test_creating_the_layout_twice_keeps_what_is_there(tmp_path):
+    """再起動のたびに走る。既にあるものに触らない."""
+    root = tmp_path / "dataset"
+    (root / "library" / "dji-osmo").mkdir(parents=True)
+    (root / "library" / "dji-osmo" / "A.MP4").write_bytes(b"x")
+    ensure_layout(root)
+    ensure_layout(root)
+    assert (root / "library" / "dji-osmo" / "A.MP4").read_bytes() == b"x"
+
+
+def test_the_database_directory_is_not_world_readable(tmp_path):
+    """`var/` には API キーの暗号文が入る（`db.connection` と同じ 0o700）."""
+    root = tmp_path / "dataset"
+    root.mkdir()
+    ensure_layout(root)
+    assert stat.S_IMODE((root / "var").stat().st_mode) == 0o700
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root は権限で弾かれない")
+def test_a_dataset_the_app_cannot_write_says_what_to_run(tmp_path):
+    """**原因の読めない PermissionError で止めない。**
+
+    実運用でいちばん起こるのは「データセットの所有者がアプリの UID でない」で、
+    直し方は `chown` の 1 行。それを言わずに落ちると手順書を読み直すことになる。
+    """
+    root = tmp_path / "dataset"
+    root.mkdir(mode=0o555)
+    try:
+        with pytest.raises(LayoutNotWritable) as caught:
+            ensure_layout(root)
+    finally:
+        root.chmod(0o755)
+    message = str(caught.value)
+    assert str(root) in message
+    assert "chown" in message
+    assert f"{os.geteuid()}:{os.getegid()}" in message
