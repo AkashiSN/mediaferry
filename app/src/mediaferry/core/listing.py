@@ -25,21 +25,3 @@ def escape_like(raw: str) -> str:
     （後にすると、直前に足した `\\` をもう一度置き換えてしまう）。
     """
     return raw.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
-
-
-# §10「既定で選択肢に出すもの」を SQL で表したもの. **`media_file` の別名は `m`.**
-#
-# digest の一致（§10 の derived 条件の最後の 1 つ）はここに入れない。現行の構成と
-# プロファイルから計算し直す必要があり、SQL では書けない（`SelectionService`）。
-# その結果、設定を変えた後の古い派生物が数に残ることがある。
-SENDABLE_CLAUSE = (
-    "m.missing_at IS NULL AND ("
-    " (m.role = 'original' AND NOT EXISTS ("
-    "   SELECT 1 FROM merge_member mm WHERE mm.media_file_id = m.id AND mm.active = 1))"
-    " OR (m.role = 'derived' AND EXISTS ("
-    "   SELECT 1 FROM merge_group g WHERE g.output_media_file_id = m.id"
-    "    AND g.superseded_by_id IS NULL AND g.status = 'merged'"
-    "    AND (g.adopted_at IS NOT NULL"
-    "         OR json_extract(g.verification_json, '$.passed') = 1)))"
-    ")"
-)

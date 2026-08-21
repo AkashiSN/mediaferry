@@ -8,7 +8,6 @@ from typing import Any
 
 from fastapi import APIRouter, Depends
 
-from ..core.listing import SENDABLE_CLAUSE
 from ..core.profiles.model import ProfileInvalid, parse_definition
 from ..db.jobs import JobStore
 from ..db.profiles import (
@@ -18,6 +17,7 @@ from ..db.profiles import (
     ProfileRegistry,
     UnknownProfile,
 )
+from ..db.selection import SENDABLE_CLAUSE
 from ..settings import SettingInvalid, SettingLocked, SettingsService, startup_warnings
 from .deps import conn as get_conn
 from .deps import state as get_state

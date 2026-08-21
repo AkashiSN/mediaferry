@@ -368,3 +368,55 @@ def test_the_dashboard_counts_unsent_the_same_way(client, db):
     listed = client.get(f"/api/media?destination_id={destination[0]}&status=unsent").json()["total"]
     summary = client.get("/api/dashboard").json()["destinations"][0]["unsent"]
     assert summary == listed == 0
+
+
+def test_unsent_excludes_a_superseded_groups_derived_output(client, db):
+    """supersede されたグループの派生物は候補に出ない（§10）.
+
+    supersede した旧グループはまだ `status = merged` のままなので、
+    `superseded_by_id IS NULL` を見ないと候補に戻ってしまう。
+    """
+    profile = a_profile(db, slug="unsent-superseded")
+    output = a_media_file(db, profile, rel_path="derived/unsent/SUPERSEDED.MP4", role="derived")
+    old_group = a_merge_group(db, profile, "digest-old-superseded", status="merged")
+    db.execute(
+        "UPDATE merge_group SET output_media_file_id = ?, verification_json = ? WHERE id = ?",
+        (output, '{"passed": true}', old_group),
+    )
+    newer_group = a_merge_group(db, profile, "digest-new-superseded")
+    db.execute("UPDATE merge_group SET superseded_by_id = ? WHERE id = ?", (newer_group, old_group))
+    destination = a_destination(db, name="unsent-superseded")
+
+    body = client.get(f"/api/media?destination_id={destination[0]}&status=unsent").json()
+    assert body["total"] == 0
+
+
+def test_unsent_includes_an_adopted_derived_that_failed_verification(client, db):
+    """採用済みなら検証不合格でも候補に出る（§10）."""
+    profile = a_profile(db, slug="unsent-adopted")
+    output = a_media_file(db, profile, rel_path="derived/unsent/ADOPTED.MP4", role="derived")
+    group = a_merge_group(db, profile, "digest-adopted", status="merged")
+    db.execute(
+        "UPDATE merge_group SET output_media_file_id = ?, verification_json = ?,"
+        " adopted_at = ? WHERE id = ?",
+        (output, '{"passed": false}', "2026-08-17T00:00:00+00:00", group),
+    )
+    destination = a_destination(db, name="unsent-adopted")
+
+    body = client.get(f"/api/media?destination_id={destination[0]}&status=unsent").json()
+    assert [row["id"] for row in body["media"]] == [output]
+
+
+def test_unsent_excludes_a_missing_original(client, db):
+    """`missing_at` が入ったファイルは候補に出ない（§10）."""
+    profile = a_profile(db, slug="unsent-missing")
+    a_media_file(
+        db,
+        profile,
+        rel_path="library/unsent/MISSING.MP4",
+        missing_at="2026-08-17T00:00:00+00:00",
+    )
+    destination = a_destination(db, name="unsent-missing")
+
+    body = client.get(f"/api/media?destination_id={destination[0]}&status=unsent").json()
+    assert body["total"] == 0

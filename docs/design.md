@@ -1435,7 +1435,8 @@ primary は `POST` の応答を見て、`extensions` の先頭側でなければ
 
 | 表示 | `state` |
 | --- | --- |
-| 未送信 | レコードが無い、または `pending` |
+| 未送信 | レコードが無い |
+| 積み済み | `pending`。既にキューに入っている（未送信＝「押せば送れるもの」とは区別する） |
 | 要確認 | `needs_recheck`。リモートに存在する可能性があり、次回 `checking` で照合する |
 | 進行中 | `checking` 〜 `fixing_datetime` |
 | 承認待ち | `awaiting_datetime_approval` |
