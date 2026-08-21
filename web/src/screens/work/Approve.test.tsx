@@ -142,6 +142,34 @@ describe("確認", () => {
     await waitFor(() => expect(screen.getByText("—")).toBeInTheDocument());
   });
 
+  // カードの表示（「—」）と揃える。空文字のままだと確認ダイアログが
+  // 「変更後 」で途切れる。
+  it("直したい日時が読めなくても、確認ダイアログが途切れない", async () => {
+    stubApi({
+      "/uploads?state=awaiting_datetime_approval": {
+        records: [
+          {
+            id: "r1",
+            destination_id: "d1",
+            media_file_id: "m1",
+            origin: "pre_existing",
+            remote_current: "2026-08-14 10:00",
+            proposed: null,
+            remote_checked_at: null,
+            identical: false,
+          },
+        ],
+      },
+    });
+    render(
+      <MemoryRouter>
+        <ApproveScreen />
+      </MemoryRouter>,
+    );
+    await userEvent.click(await screen.findByRole("button", { name: "承認する" }));
+    expect(screen.getByRole("dialog")).toHaveTextContent("変更後 —");
+  });
+
   it("内部の ID を見出しに出さない", async () => {
     stubApi({
       "/uploads?state=awaiting_datetime_approval": {

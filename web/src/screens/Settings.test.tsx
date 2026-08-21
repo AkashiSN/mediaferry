@@ -172,6 +172,21 @@ describe("設定のトップ", () => {
     expect(within(rowOf("物置の控え")).getByText(/休止中/)).toBeInTheDocument();
   });
 
+  // **`data === null` で読み込み中を判定すると、取得が失敗したときも真のまま
+  // 残り、「読み込み中…」がバナーと同時に出て永久に消えない。** `loading` を
+  // 見れば、失敗してもいずれ「読み込み中…」が消える。
+  it("送り先の読み込みに失敗したら、読み込み中のままにしない", async () => {
+    stubRoutes((path) => (path === "/destinations" ? [500, {}] : undefined), { ...ROUTES });
+    renderTop();
+
+    await waitFor(() => expect(screen.getByRole("alert")).toBeInTheDocument());
+    const section = screen.getByRole("heading", { name: "送り先" }).closest("section");
+    if (section === null) {
+      throw new Error("送り先の節が無い");
+    }
+    expect(within(section).queryByText("読み込み中…")).toBeNull();
+  });
+
   it("カメラの種類は表示名で出し、候補から外したものは出さない", async () => {
     stubApi({
       ...ROUTES,

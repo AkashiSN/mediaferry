@@ -105,12 +105,21 @@ function Resend({
       </div>
       {failed.error !== null && failed.error !== undefined && <ErrorBanner error={failed.error} />}
       <p className="small">
-        {failed.data === null
+        {failed.loading
           ? "読み込み中…"
           : records.length === 0
             ? "送れなかったものはありません。"
             : `送れなかったもの ${records.length} 件`}
       </p>
+      {!failed.loading && records.length === 0 && (
+        // **「送れなかったものはありません」で行き止まりに読ませない。** `送る`
+        // 画面の「開始できなかった宛先」の案内はここへ誘導するが、そちらは
+        // 失敗ゼロでも `pending` のまま止まった送信がある場合の話なので、
+        // ボタンがまだ効くことを添える。
+        <p className="small">
+          失敗が無くても、止まっている送信をここから始め直せます。
+        </p>
+      )}
       {records.length === RETRY_PAGE && (
         <p role="note" className="small">
           一度に送り直せるのは {RETRY_PAGE} 件までです（ほかにもあります）。
@@ -150,7 +159,7 @@ function StackSkips({ destinationId }: { destinationId: string }) {
       {skipped.error !== null && skipped.error !== undefined && (
         <ErrorBanner error={skipped.error} />
       )}
-      {skipped.data === null ? (
+      {skipped.loading ? (
         <p className="small">読み込み中…</p>
       ) : records.length === 0 ? (
         <p className="small">見送りはありません。</p>

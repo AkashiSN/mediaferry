@@ -11,7 +11,7 @@ import { useQuery } from "../../api/hooks";
 import { ConfirmDialog } from "../../components/ConfirmDialog";
 import { ErrorBanner } from "../../components/ErrorBanner";
 import { Icon } from "../../components/Icon";
-import { MediaTile, type Media } from "../../components/MediaTile";
+import { fileName, MediaTile, type Media } from "../../components/MediaTile";
 import { useEvents } from "../../hooks/useEvents";
 import { useReloadOnEvents } from "../../hooks/useReloadOnEvents";
 import { formatDateTime, formatSystemDateTime } from "../../utils/formatDateTime";
@@ -30,12 +30,6 @@ type Record_ = {
 type Records = { records: Record_[] };
 type Destination = { id: string; name: string };
 type Destinations = { destinations: Destination[] };
-
-/** `rel_path` の末尾（ファイル名）。**内部の ID を見出しにしない**（§13）。 */
-function fileName(relPath: string): string {
-  const parts = relPath.split("/");
-  return parts[parts.length - 1];
-}
 
 export function ApproveScreen() {
   const records = useQuery<Records>("/uploads?state=awaiting_datetime_approval");
@@ -194,7 +188,8 @@ export function ApproveScreen() {
             // 確認にも読める形で出す（画面の表示と同じ言い方にする）。
             current:
               approving.remote_current === null ? null : formatDateTime(approving.remote_current),
-            proposed: approving.proposed === null ? "" : formatDateTime(approving.proposed),
+            // カードの表示（「—」）と揃える。空文字だと「変更後 」で文が途切れる。
+            proposed: approving.proposed === null ? "—" : formatDateTime(approving.proposed),
           }}
           busy={busy}
           onCancel={() => setApproving(null)}

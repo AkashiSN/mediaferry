@@ -142,11 +142,13 @@ export function HomeScreen() {
     }
   }
 
-  // **やることは画面が持つ一覧ではなく、状態から毎回導く。** `dashboardData` が
-  // 無い間は「読み込み中…」を出し、「やることはありません」とは書かない
-  // （直後に件数が現れて驚かせないため）。`const` に取ってから narrowing する
+  // **やることは画面が持つ一覧ではなく、状態から毎回導く。** 読み込み中は
+  // 「読み込み中…」を出し、「やることはありません」とは書かない
+  // （直後に件数が現れて驚かせないため）。読み込み中かどうかは `dashboard.loading`
+  // で見る（`dashboardData === null` は失敗のときも真になり、失敗しても
+  // 「読み込み中…」が消えなくなる）。`const` に取ってから narrowing するのは
   // ——`dashboard.data` を式のあちこちで直に見ると、`null` チェックの後でも
-  // 型が絞られず `as` に頼ることになる。
+  // 型が絞られず `as` に頼ることになるため。
   const dashboardData = dashboard.data;
   const tasks: Task[] = dashboardData === null ? [] : tasksFrom(dashboardData);
 
@@ -203,8 +205,12 @@ export function HomeScreen() {
           <JobCard job={running} rate={averageRate(running)} onCancel={(id) => void cancelJob(id)} />
         )}
 
-        {dashboardData === null ? (
+        {dashboard.loading ? (
           <p>読み込み中…</p>
+        ) : dashboardData === null ? (
+          // 失敗はすぐ上のバナーで知らせるので、ここには何も書かない
+          // （`読み込み中…` を出し続けると、失敗しても消えない）。
+          null
         ) : tasks.length === 0 ? (
           <EmptyState />
         ) : (

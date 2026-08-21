@@ -89,6 +89,30 @@ describe("ホーム", () => {
     expect(screen.queryByText("いま、やることはありません")).not.toBeInTheDocument();
   });
 
+  // **`data === null` で読み込み中を判定すると、取得が失敗したときも真のまま
+  // 残り、「読み込み中…」がバナーと同時に出て永久に消えない。** `loading` を
+  // 見れば、失敗してもいずれ「読み込み中…」が消える。
+  it("読み込みに失敗したら、読み込み中のままにしない", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn((input: string) => {
+        const path = input.replace(/^\/api/, "");
+        if (path === "/dashboard") {
+          return Promise.resolve(new Response(JSON.stringify({}), { status: 500 }));
+        }
+        const body =
+          {
+            "/devices": { volumes: [] },
+            "/jobs": { jobs: [] },
+          }[path] ?? {};
+        return Promise.resolve(new Response(JSON.stringify(body), { status: 200 }));
+      }),
+    );
+    renderHome();
+    await waitFor(() => expect(screen.getByRole("alert")).toBeInTheDocument());
+    expect(screen.queryByText("読み込み中…")).toBeNull();
+  });
+
   it("挿さっているカードを、信頼していなければそう書く", async () => {
     stubApi({
       "/dashboard": EMPTY_DASHBOARD,

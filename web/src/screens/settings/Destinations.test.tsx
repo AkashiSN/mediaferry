@@ -60,6 +60,16 @@ describe("送り直した結果の 1 文", () => {
 });
 
 describe("送れなかったものを送り直す", () => {
+  /** 「送れなかったもの」の節だけを見る（「読み込み中…」は他の節にも出る）。 */
+  function failedSection(): HTMLElement {
+    const heading = screen.getByRole("heading", { name: "送れなかったもの" });
+    const section = heading.closest("section");
+    if (section === null) {
+      throw new Error("送れなかったものの節が無い");
+    }
+    return section;
+  }
+
   it("失敗した記録の件数を出す", async () => {
     stubApi(routes([{ id: "u1" }, { id: "u2" }]));
     renderDestinations();
@@ -79,6 +89,37 @@ describe("送れなかったものを送り直す", () => {
     stubApi(routes([]));
     renderDestinations();
     expect(await screen.findByText("送れなかったものはありません。")).toBeInTheDocument();
+  });
+
+  // **「送れなかったものはありません」だけだと行き止まりに読める。** `送る`
+  // 画面の「開始できなかった宛先…『送り直す』で始め直せます」の案内が指す先
+  // なので、失敗ゼロでもボタンが効くことをここに書く。
+  it("失敗が無くても、ここから始め直せると書く", async () => {
+    stubApi(routes([]));
+    renderDestinations();
+    expect(
+      await screen.findByText("失敗が無くても、止まっている送信をここから始め直せます。"),
+    ).toBeInTheDocument();
+  });
+
+  // **`data === null` で読み込み中を判定すると、取得が失敗したときも真のまま
+  // 残り、「読み込み中…」がバナーと同時に出て永久に消えない。** `loading` を
+  // 見れば、失敗してもいずれ「読み込み中…」が消える。
+  it("読み込みに失敗したら、読み込み中のままにしない", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn((input: string) => {
+        const path = input.replace(/^\/api/, "");
+        if (path === FAILED_PATH) {
+          return Promise.resolve(new Response(JSON.stringify({}), { status: 500 }));
+        }
+        const body = routes([])[path as keyof ReturnType<typeof routes>] ?? {};
+        return Promise.resolve(new Response(JSON.stringify(body), { status: 200 }));
+      }),
+    );
+    renderDestinations();
+    expect(await screen.findByRole("alert")).toBeInTheDocument();
+    expect(within(failedSection()).queryByText("読み込み中…")).toBeNull();
   });
 
   it("押すと、失敗した記録を戻してから送信を始め直す", async () => {
@@ -242,9 +283,10 @@ describe("退役の確認", () => {
   });
 });
 
-// **読み込み中かどうかは `null` で見る。** `useQuery` は `null` で始まるので、
-// `undefined` と比べる判定は常に偽になり、取得が終わる前から「見送りはありません。」
-// と断言することになる（§9.11「見送りを黙らない」に反する）。
+// **読み込み中かどうかは `useQuery` の `loading` で見る。** `data === null` で
+// 見ると、失敗したときも真になり続けるので「読み込み中…」が消えなくなる
+// （§9.11「見送りを黙らない」に反する。取得が終わる前に「見送りはありません。」
+// と断言することも避けたい）。
 describe("スタックの見送り", () => {
   /** `SKIPPED_PATH` の応答だけを握って止める `fetch`。 */
   function heldSkips(records: unknown[]) {
@@ -291,6 +333,28 @@ describe("スタックの見送り", () => {
     renderDestinations();
     release();
     expect(await screen.findByText("見送りはありません。")).toBeInTheDocument();
+  });
+
+  // **`data === null` で読み込み中を判定すると、取得が失敗したときも真のまま
+  // 残り、「読み込み中…」がバナーと同時に出て永久に消えない。** `loading` を
+  // 見れば、失敗してもいずれ「読み込み中…」が消える。
+  it("読み込みに失敗したら、読み込み中のままにしない", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn((input: string) => {
+        const path = input.replace(/^\/api/, "");
+        if (path === SKIPPED_PATH) {
+          return Promise.resolve(new Response(JSON.stringify({}), { status: 500 }));
+        }
+        const body = routes([])[path as keyof ReturnType<typeof routes>] ?? {};
+        return Promise.resolve(new Response(JSON.stringify(body), { status: 200 }));
+      }),
+    );
+    renderDestinations();
+    await waitFor(() =>
+      expect(within(skipsSection()).getByRole("alert")).toBeInTheDocument(),
+    );
+    expect(within(skipsSection()).queryByText("読み込み中…")).toBeNull();
   });
 });
 

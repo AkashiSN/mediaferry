@@ -70,7 +70,10 @@ def test_the_primary_follows_the_rule_not_the_caller():
 
 def test_a_disabled_rule_refuses_everything():
     refusal = resolve_group(a_jpg(), [a_jpg(), a_cr2()], replace(RULE, enabled=False))
-    assert "スタックを使わない" in refusal.reason
+    # **全文一致。** 部分一致（`in`）だと、§13 の禁止語（`web/src/test/vocabulary.ts`
+    # の「プロファイル」）へ巻き戻しても「スタックを使わない」だけで通ってしまい、
+    # この文字列を検出する錠が無くなる。
+    assert refusal.reason == "カメラの種類がスタックを使わない"
 
 
 def test_an_extension_outside_the_rule_is_not_a_target():

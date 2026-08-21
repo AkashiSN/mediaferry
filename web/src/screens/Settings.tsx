@@ -130,8 +130,12 @@ export function SettingsScreen() {
             送り先を管理する
           </Link>
         </div>
-        {destinations.data === null ? (
+        {destinations.loading ? (
           <p className="small">読み込み中…</p>
+        ) : destinations.data === null ? (
+          // 失敗はすぐ上のバナーで知らせるので、ここには何も書かない
+          // （`読み込み中…` を出し続けると、失敗しても消えない）。
+          null
         ) : destinations.data.destinations.length === 0 ? (
           <p className="small">送り先はまだありません。</p>
         ) : (
