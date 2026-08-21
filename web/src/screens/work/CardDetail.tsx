@@ -18,7 +18,8 @@ import { Icon } from "../../components/Icon";
 
 type Volume = {
   volume_instance_id: string;
-  fs_label: string | null;
+  // API は空文字を返す（`None` にはならない）。ラベルの有無は `""` で見る。
+  fs_label: string;
   profile_slug: string | null;
   identity_confidence: string | null;
   provisional: boolean;
@@ -29,6 +30,61 @@ type Volume = {
 type Devices = { volumes: Volume[] };
 type Setting = { key: string; value: string | null };
 type Settings = { settings: Setting[] };
+type Profile = { slug: string; name: string };
+type Profiles = { profiles: Profile[] };
+
+/** カードの表示名。**内部の UUID を画面に出さない**（§13）。
+ *
+ * API の `fs_label` は空文字であって `null` ではないので、`??` は素通りする
+ * （`??` を使うと常にラベルが勝ち、フォールバックが一度も効かない）。ラベルが
+ * 無いカードには人間向けの既定名を使う。複数枚が同時にラベル無しだと同じ名前に
+ * なるので、そのときだけ連番で見分けられるようにする（UUID は使わない）。
+ */
+export function volumeLabel(
+  volumes: readonly { volume_instance_id: string; fs_label: string }[],
+  volume: { volume_instance_id: string; fs_label: string },
+): string {
+  if (volume.fs_label !== "") {
+    return volume.fs_label;
+  }
+  const unnamed = volumes.filter((candidate) => candidate.fs_label === "");
+  if (unnamed.length <= 1) {
+    return "名前の無いカード";
+  }
+  const position = unnamed.findIndex(
+    (candidate) => candidate.volume_instance_id === volume.volume_instance_id,
+  );
+  return `名前の無いカード ${position + 1}`;
+}
+
+/** カメラの種類の表示名。**slug をそのまま画面に出さない**（§13）。
+ *
+ * `/profiles` から引いた表示名を出し、**見つからない（未登録・まだ読めていない）
+ * ときだけ** slug にフォールバックする。 */
+export function profileDisplayName(
+  slug: string | null,
+  profiles: readonly Profile[],
+): string {
+  if (slug === null) {
+    return "対象外";
+  }
+  return profiles.find((profile) => profile.slug === slug)?.name ?? slug;
+}
+
+/** 同定の確度を利用者向けの日本語にする（§8）。
+ *
+ * **実際に取りうる値は `high` と `low` の 2 つだけ**（`_identity_confidence`）。
+ * それ以外（読めていない等）では何も出さない。 */
+export function confidenceLabel(identityConfidence: string | null): string | null {
+  switch (identityConfidence) {
+    case "high":
+      return "確かめられています";
+    case "low":
+      return "まだ確かめられていません";
+    default:
+      return null;
+  }
+}
 
 /** 自動取り込みの見通し。**`watcher.py` の `CANDIDATES` と同じ条件を見る。**
  *
@@ -98,6 +154,7 @@ export function autoImportState(volume: Volume, autoImport: string | null): stri
 export function CardDetailScreen() {
   const devices = useQuery<Devices>("/devices");
   const settings = useQuery<Settings>("/settings");
+  const profiles = useQuery<Profiles>("/profiles");
   const [error, setError] = useState<unknown>(null);
   const [busy, setBusy] = useState<string | null>(null);
   const [confirming, setConfirming] = useState<{ confirmation: Confirmation; id: string } | null>(
@@ -127,6 +184,7 @@ export function CardDetailScreen() {
   }
 
   const volumes = devices.data?.volumes ?? [];
+  const profileList = profiles.data?.profiles ?? [];
 
   return (
     <section aria-label="カードの中身" className="wrap">
@@ -136,12 +194,10 @@ export function CardDetailScreen() {
           ホームへ
         </button>
       </div>
-      <h1 className="page" style={{ fontSize: 24 }}>
-        カードの中身
-      </h1>
+      <h1 className="page lg">カードの中身</h1>
 
       <ErrorBanner
-        error={error ?? devices.error ?? settings.error}
+        error={error ?? devices.error ?? settings.error ?? profiles.error}
         onDismiss={() => setError(null)}
       />
 
@@ -158,7 +214,9 @@ export function CardDetailScreen() {
         </div>
       ) : (
         volumes.map((volume) => {
-          const label = volume.fs_label ?? volume.volume_instance_id;
+          const label = volumeLabel(volumes, volume);
+          const profileName = profileDisplayName(volume.profile_slug, profileList);
+          const confidence = confidenceLabel(volume.identity_confidence);
           const actionable = volume.profile_slug !== null;
           return (
             <section key={volume.volume_instance_id} className="card pad">
@@ -169,8 +227,8 @@ export function CardDetailScreen() {
                 <div className="grow">
                   <h2 style={{ fontSize: 16, fontWeight: 650 }}>{label}</h2>
                   <p className="small" style={{ marginTop: 4 }}>
-                    判定: {volume.profile_slug ?? "対象外"}
-                    {volume.identity_confidence ? `（確度 ${volume.identity_confidence}）` : ""}
+                    判定: {profileName}
+                    {confidence !== null ? `（確度：${confidence}）` : ""}
                   </p>
                   {/* **理由は常に出す**（§13）。対象外なら「なぜ外れたか」、一致なら
                       「なぜそのプロファイルに決まったか」で、どちらもプロファイルを
@@ -182,7 +240,7 @@ export function CardDetailScreen() {
                   {/* **「対象だが中身が無い」は対象外ではない**（§6 / Phase 0 の発見 B）。 */}
                   {volume.provisional && (
                     <p role="note" className="small" style={{ marginTop: 4 }}>
-                      {volume.profile_slug} の対象ですが、取り込む中身がまだありません。
+                      {profileName} の対象ですが、取り込む中身がまだありません。
                     </p>
                   )}
                 </div>

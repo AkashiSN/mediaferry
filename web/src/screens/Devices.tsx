@@ -22,7 +22,9 @@ import { autoImportOutlook, autoImportState } from "./work/CardDetail";
 
 type Volume = {
   volume_instance_id: string;
-  fs_label: string | null;
+  // `work/CardDetail.tsx` の `autoImportOutlook` / `autoImportState` と
+  // 同じ型（API は `fs_label` を空文字で返す。`null` にはならない）。
+  fs_label: string;
   profile_slug: string | null;
   identity_confidence: string | null;
   provisional: boolean;

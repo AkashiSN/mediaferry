@@ -14,7 +14,7 @@ import { ErrorBanner } from "../components/ErrorBanner";
 import { Icon } from "../components/Icon";
 import { JobCard } from "../components/JobCard";
 import type { Job } from "../components/JobProgress";
-import { autoImportOutlook, autoImportState } from "./work/CardDetail";
+import { autoImportOutlook, autoImportState, volumeLabel } from "./work/CardDetail";
 import { useEvents } from "../hooks/useEvents";
 import { useReloadOnEvents } from "../hooks/useReloadOnEvents";
 import { tasksFrom } from "../hooks/useTasks";
@@ -22,7 +22,8 @@ import type { Task } from "../hooks/useTasks";
 
 type Volume = {
   volume_instance_id: string;
-  fs_label: string | null;
+  // API は空文字を返す（`None` にはならない）。ラベルの有無は `""` で見る。
+  fs_label: string;
   profile_slug: string | null;
   identity_confidence: string | null;
   provisional: boolean;
@@ -174,6 +175,9 @@ export function HomeScreen() {
           <CardBanner
             key={volume.volume_instance_id}
             volume={volume}
+            // **一覧全体を渡す。** ラベルが無いカードが複数あると同じ既定名に
+            // なるので、連番で見分けるには他のカードも見える必要がある。
+            label={volumeLabel(devices.data?.volumes ?? [], volume)}
             autoImport={autoImport}
             busy={busy}
             onAct={act}
@@ -267,18 +271,19 @@ export function HomeScreen() {
 /** いま挿さっているカードの帯（§13）。**理由は常に出す**（判定に外れたカードも）。 */
 function CardBanner({
   volume,
+  label,
   autoImport,
   busy,
   onAct,
   onAskTrust,
 }: {
   volume: Volume;
+  label: string;
   autoImport: string | null;
   busy: string | null;
   onAct: (volumeId: string, action: "trust" | "scan" | "import" | "close") => void;
   onAskTrust: (label: string, outlook: ReturnType<typeof autoImportOutlook>) => void;
 }) {
-  const label = volume.fs_label ?? volume.volume_instance_id;
   const actionable = volume.profile_slug !== null;
   return (
     <section className="card pad hl">

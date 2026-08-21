@@ -266,7 +266,7 @@ export function MergeScreen() {
         </button>
       </div>
       <div>
-        <h1 className="page" style={{ fontSize: 24 }}>
+        <h1 className="page lg">
           分かれている動画を 1 本につなぎます
         </h1>
         <p className="muted" style={{ marginTop: 7 }}>

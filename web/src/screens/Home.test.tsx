@@ -139,10 +139,33 @@ describe("ホーム", () => {
     );
   });
 
+  it("ラベルが無いカードが複数あると、見出しを連番で見分けられるようにする", async () => {
+    // `CardBanner` は `work/CardDetail.tsx` の `volumeLabel` を使う。一覧全体を
+    // 渡さないと、複数枚が同時にラベル無しのとき見分けが付かない。
+    stubApi({
+      "/dashboard": EMPTY_DASHBOARD,
+      "/devices": {
+        volumes: [
+          { ...actionableVolume, fs_label: "" },
+          { ...actionableVolume, volume_instance_id: "v2", fs_label: "" },
+        ],
+      },
+      "/jobs": { jobs: [] },
+      "/settings": { settings: [{ key: "AUTO_IMPORT", value: "trusted" }], warnings: [] },
+    });
+    renderHome();
+
+    expect(
+      await screen.findByText("名前の無いカード 1 のカードが挿さっています"),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText("名前の無いカード 2 のカードが挿さっています"),
+    ).toBeInTheDocument();
+  });
+
   it("「中身を見る」を押すと、カードの中身のページへ行く（Ruling 30）", async () => {
-    // プロトタイプのカードの帯には「中身を見る」があるが、Home にはまだ入口が
-    // 無かった。作業ページ（Task 9）を作っても辿り着けないので、ここに足す。
-    // ルートを生やすのは Task 12 なので、ここでは遷移先を直に確かめる。
+    // ホームのカードの帯からカードの中身へ行ける（§13）。`/card` のルートは
+    // まだ無いので（Task 12 が生やす）、遷移先だけを直に確かめる。
     stubApi({
       "/dashboard": EMPTY_DASHBOARD,
       "/devices": { volumes: [actionableVolume] },

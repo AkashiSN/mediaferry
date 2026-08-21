@@ -1,12 +1,9 @@
-// カードの中身（§13）。判定結果と確度、信頼登録、スキャン、取り込み。
-//
-// 旧 `screens/Devices.tsx` の「デバイスの信頼登録」describe をそのまま移す
-// （Task 9）。アサーションは変えていない —— 見出しとボタンのラベルの体裁だけ
-// プロトタイプの `cardScreen()` に合わせた。
+// カードの中身（§13）。判定結果・確度・信頼登録の同意を、複数ボリュームが
+// 並ぶ前提で見る。
 
 import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { MemoryRouter } from "react-router-dom";
+import { MemoryRouter, Route, Routes } from "react-router-dom";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { CardDetailScreen } from "./CardDetail";
@@ -32,7 +29,12 @@ describe("カードの信頼登録", () => {
 
   let calls: { path: string; method: string }[] = [];
 
-  function stubDevices(volumes: unknown[], autoImport = "trusted", settingsStatus = 200) {
+  function stubDevices(
+    volumes: unknown[],
+    autoImport = "trusted",
+    settingsStatus = 200,
+    profiles: unknown[] = [],
+  ) {
     calls = [];
     vi.stubGlobal(
       "fetch",
@@ -63,7 +65,9 @@ describe("カードの信頼登録", () => {
               }
             : path === "/devices"
               ? { volumes }
-              : {};
+              : path === "/profiles"
+                ? { profiles }
+                : {};
         return Promise.resolve(new Response(JSON.stringify(body), { status: 200 }));
       }),
     );
@@ -183,6 +187,263 @@ describe("カードの信頼登録", () => {
 
     expect(await screen.findByText(/^対象外の理由:/)).toBeInTheDocument();
     expect(screen.queryByText(/^判定の理由:/)).toBeNull();
+  });
+
+  it("確度は日本語で書く（内部の値をそのまま出さない）", async () => {
+    // 実際に取りうる値は high / low の 2 つだけ（`_identity_confidence`）。
+    // 値ごとに文言が違うことを確かめる。
+    stubDevices([
+      { ...base, identity_confidence: "high" },
+      { ...base, volume_instance_id: "v2", fs_label: "Pocket4", identity_confidence: "low" },
+    ]);
+    renderCardDetail();
+
+    // 閉じ括弧までを含めて確かめる。**末尾に何か付け足す変異**（文言の一部だけを
+    // 変えて残す）だと、開き側だけの緩い正規表現では検出できない。
+    expect(await screen.findByText(/（確度：確かめられています）/)).toBeInTheDocument();
+    expect(screen.getByText(/（確度：まだ確かめられていません）/)).toBeInTheDocument();
+    // 内部の値そのもの（"high" / "low"）は出さない。
+    expect(screen.queryByText(/確度：high/)).toBeNull();
+    expect(screen.queryByText(/確度：low/)).toBeNull();
+  });
+
+  it("カメラの種類は表示名を出し、見つからないときだけ slug にフォールバックする", async () => {
+    stubDevices(
+      [
+        { ...base, profile_slug: "dji-osmo" },
+        { ...base, volume_instance_id: "v2", fs_label: "Pocket4", profile_slug: "unknown-cam" },
+      ],
+      "trusted",
+      200,
+      [{ slug: "dji-osmo", name: "DJI Osmo Pocket" }],
+    );
+    renderCardDetail();
+
+    expect(await screen.findByText(/判定: DJI Osmo Pocket/)).toBeInTheDocument();
+    // 登録されている slug は、生のまま出さない。
+    expect(screen.queryByText(/判定: dji-osmo/)).toBeNull();
+    // 登録が無い slug だけ、フォールバックで出す。
+    expect(screen.getByText(/判定: unknown-cam/)).toBeInTheDocument();
+  });
+
+  it("「対象だが中身が無い」は、カメラの種類の表示名を使う", async () => {
+    stubDevices(
+      [{ ...base, provisional: true }],
+      "trusted",
+      200,
+      [{ slug: "dji-osmo", name: "DJI Osmo Pocket" }],
+    );
+    renderCardDetail();
+
+    expect(
+      await screen.findByText("DJI Osmo Pocket の対象ですが、取り込む中身がまだありません。"),
+    ).toBeInTheDocument();
+  });
+
+  it("ラベルが無いカードには、UUID の代わりに既定名を出す", async () => {
+    stubDevices([{ ...base, fs_label: "" }]);
+    renderCardDetail();
+
+    expect(await screen.findByText("名前の無いカード")).toBeInTheDocument();
+    expect(screen.queryByText("v1")).toBeNull();
+    expect(
+      screen.getByRole("button", { name: "名前の無いカード を取り外す" }),
+    ).toBeInTheDocument();
+  });
+
+  it("ラベルが無いカードが複数あると、連番で見分けられるようにする", async () => {
+    stubDevices([
+      { ...base, fs_label: "" },
+      { ...base, volume_instance_id: "v2", fs_label: "" },
+    ]);
+    renderCardDetail();
+
+    await userEvent.click(
+      await screen.findByRole("button", { name: "名前の無いカード 2 をスキャン" }),
+    );
+
+    await waitFor(() => {
+      expect(calls.some((call) => call.path === "/volumes/v2/scan")).toBe(true);
+    });
+    expect(calls.some((call) => call.path === "/volumes/v1/scan")).toBe(false);
+  });
+
+  it("カードが 1 枚も無いときは、そう書く", async () => {
+    stubDevices([]);
+    renderCardDetail();
+
+    expect(await screen.findByText("接続中のカードはありません")).toBeInTheDocument();
+  });
+
+  it("「ホームへ」を押すと、ホームへ戻る", async () => {
+    stubDevices([]);
+    render(
+      <MemoryRouter initialEntries={["/card"]}>
+        <Routes>
+          <Route path="/card" element={<CardDetailScreen />} />
+          <Route path="/" element={<div>ホームのページ</div>} />
+        </Routes>
+      </MemoryRouter>,
+    );
+
+    await userEvent.click(await screen.findByRole("button", { name: "ホームへ" }));
+
+    expect(await screen.findByText("ホームのページ")).toBeInTheDocument();
+  });
+
+  it("操作が失敗したら、その旨を画面に出す", async () => {
+    calls = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn((input: string, init?: RequestInit) => {
+        const path = input.replace(/^\/api/, "");
+        const method = init?.method ?? "GET";
+        calls.push({ path, method });
+        if (path === "/volumes/v1/scan" && method === "POST") {
+          return Promise.resolve(
+            new Response(JSON.stringify({ error: { code: "internal", detail: "" } }), {
+              status: 500,
+            }),
+          );
+        }
+        const body =
+          path === "/settings"
+            ? {
+                warnings: [],
+                settings: [
+                  {
+                    key: "AUTO_IMPORT",
+                    value: "trusted",
+                    source: "default",
+                    locked: false,
+                    tier: "runtime",
+                    writable: true,
+                  },
+                ],
+              }
+            : path === "/devices"
+              ? { volumes: [base] }
+              : {};
+        return Promise.resolve(new Response(JSON.stringify(body), { status: 200 }));
+      }),
+    );
+    renderCardDetail();
+
+    await userEvent.click(await screen.findByRole("button", { name: "SD_Card をスキャン" }));
+
+    expect(await screen.findByRole("alert")).toBeInTheDocument();
+  });
+
+  it("操作中は、ほかの操作もダイアログのボタンも押せなくする", async () => {
+    let resolveScan: ((value: Response) => void) | undefined;
+    const pending = new Promise<Response>((resolve) => {
+      resolveScan = resolve;
+    });
+    calls = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn((input: string, init?: RequestInit) => {
+        const path = input.replace(/^\/api/, "");
+        const method = init?.method ?? "GET";
+        calls.push({ path, method });
+        if (path === "/volumes/v1/scan" && method === "POST") {
+          return pending;
+        }
+        const body =
+          path === "/settings"
+            ? {
+                warnings: [],
+                settings: [
+                  {
+                    key: "AUTO_IMPORT",
+                    value: "trusted",
+                    source: "default",
+                    locked: false,
+                    tier: "runtime",
+                    writable: true,
+                  },
+                ],
+              }
+            : path === "/devices"
+              ? { volumes: [{ ...base, trusted: false }] }
+              : {};
+        return Promise.resolve(new Response(JSON.stringify(body), { status: 200 }));
+      }),
+    );
+    render(
+      <MemoryRouter>
+        <CardDetailScreen />
+      </MemoryRouter>,
+    );
+
+    const scanButton = await screen.findByRole("button", { name: "SD_Card をスキャン" });
+    await userEvent.click(scanButton);
+
+    // 進行中は、同じカードの他の操作（信頼する・取り込む・取り外す）も押せない。
+    await waitFor(() => expect(scanButton).toBeDisabled());
+    expect(screen.getByRole("button", { name: "SD_Card を取り込む" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "SD_Card を取り外す" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "SD_Card を信頼する" })).toBeDisabled();
+
+    resolveScan?.(new Response(JSON.stringify({}), { status: 200 }));
+    await waitFor(() => expect(scanButton).not.toBeDisabled());
+  });
+
+  it("確認ダイアログのボタンも、操作中は押せなくする。終わるとダイアログを閉じる", async () => {
+    let resolveTrust: ((value: Response) => void) | undefined;
+    const pending = new Promise<Response>((resolve) => {
+      resolveTrust = resolve;
+    });
+    calls = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn((input: string, init?: RequestInit) => {
+        const path = input.replace(/^\/api/, "");
+        const method = init?.method ?? "GET";
+        calls.push({ path, method });
+        if (path === "/volumes/v1/trust" && method === "POST") {
+          return pending;
+        }
+        const body =
+          path === "/settings"
+            ? {
+                warnings: [],
+                settings: [
+                  {
+                    key: "AUTO_IMPORT",
+                    value: "trusted",
+                    source: "default",
+                    locked: false,
+                    tier: "runtime",
+                    writable: true,
+                  },
+                ],
+              }
+            : path === "/devices"
+              ? { volumes: [{ ...base, trusted: false }] }
+              : {};
+        return Promise.resolve(new Response(JSON.stringify(body), { status: 200 }));
+      }),
+    );
+    render(
+      <MemoryRouter>
+        <CardDetailScreen />
+      </MemoryRouter>,
+    );
+
+    await userEvent.click(await screen.findByRole("button", { name: "SD_Card を信頼する" }));
+    await userEvent.click(await screen.findByRole("button", { name: "実行する" }));
+
+    await waitFor(() => expect(screen.getByRole("button", { name: "実行する" })).toBeDisabled());
+    expect(screen.getByRole("button", { name: "やめる" })).toBeDisabled();
+
+    resolveTrust?.(new Response(JSON.stringify({}), { status: 200 }));
+    await waitFor(() => {
+      expect(calls.some((call) => call.path === "/volumes/v1/trust" && call.method === "POST")).toBe(
+        true,
+      );
+    });
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
   });
 
   it("承認は確認を経てから。ダイアログに信頼の限界を書く", async () => {
