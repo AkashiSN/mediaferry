@@ -428,39 +428,26 @@ TrueNAS ホストで。手順は [`history/phase0-findings.md`](history/phase0-f
 
 ## まだ確かめられていないこと
 
-**この環境（入れ子の非特権 LXC）では確かめられない。** 実機が要る。
-手順は [`hardware-checklist.md`](hardware-checklist.md)。
+**2026-08-20〜21 に実機（TrueNAS の Custom App）で検証を始めた。** そのときの
+記録は [`history/hardware-verification.md`](history/hardware-verification.md) に
+ある（実測値、実機でしか出なかった不具合 9 件、ffmpeg の実挙動）。以下は
+**まだ残っているもの**。
 
-1. **実 USB での手動確認（[`hardware-checklist.md`](hardware-checklist.md) の 12 項目）。**
-   開発コンテナ（入れ子の非特権 LXC）ではマウントが AppArmor に阻まれるので、
-   TrueNAS ホストで実行する必要がある。
-
-   特に **11 番（mtime の解釈の実測）は実装の前提の確認**。前提が崩れていれば
-   `timestamps.py` の `_wall_clock` と `publisher._collision_stamp` を直す。
-   Phase 2 の派生物の mtime（`merger._recording_end_ns`）も同じ前提に乗っている。
-   **12 番（`attached_pic`）は Phase 2 で足した項目**（`streams._is_thumbnail`）。
-2. **実データでの TS フォールバックの確認。** テストは lavfi のクリップで両経路を
-   通しているが、実 DJI では Phase 0 の時点で concat 経路が通っており、TS 経路は
-   まだ実データで走っていない。
-
-3. **Canon EOS 70D の実カードでの確認。** `canon-eos` のプロファイルは仕様と
-   知識から書いており、**実データを一度も見ていない**。E2E で通しているのは、
-   その `require` から組み立てた合成カードまで。手順は
-   [`hardware-checklist.md`](hardware-checklist.md) の 13〜16 番にある。
-
-   **Phase 6 で確認項目が 1 つ増えた**（17 番相当。チェックリストへ足す）:
-   **RAW+JPEG の組が実カードで成立するか**。4 条件のうち「同じ stem」と
-   「`captured_at` が秒まで一致」「`captured_at_source` が同じ」は実データ依存で、
-   特に **`exifread` が実機の CR2 から `DateTimeOriginal` を読めるか**が要。
-   読めなければ JPG は `exif`・CR2 は `mtime` fallback になり、**理由つきの
-   見送りとして画面に出る**（黙って誤動作はしない）。
-   - 13: `DCIM/100CANON/` の構成とボリュームラベルが想定どおりか
-   - 14: **4GB 分割が連番から判別できるか**（`merge.enabled` を有効化してよいかの判断）
-   - 15: **MOV の `creation_time` が壁時計か UTC か**（第 4 の timestamp source を足すかの判断）
-   - 16: **CR2 を Immich が受け取るか**（弾かれると `upload_record` が失敗のまま溜まる）
-
-**1〜3 はいずれも「この環境では確かめられない」もの**（1 は TrueNAS ホスト、
-2 は実 DJI、3 は実 Canon のデータが要る）。**Phase 5 のコードは Task 0〜9 まで揃っている。**
+1. **Immich への送信（Phase 3・6）。いちばん大きい未検証。** 転送先の登録、
+   `origin` の判別、タグ、日時の書き戻し、RAW/JPEG のスタッキングまで、
+   **一度も動かしていない**。ライブラリに実データが揃っている状態でやる方が
+   安い（取り込みに 30 分かかる）。
+2. **チェックリストの残り。** 5 番（抜く。修正後の踏み直し）、8 番（キャンセル）、
+   10 番（取り外し）、11 番（mtime の解釈）、12 番（`attached_pic`）。
+   **5・8 番はカードに大きなファイルが 1 つ要る**（既存はすべて取り込み済みで、
+   途中で止める余地が無い）。
+3. **Canon EOS 70D の実カード（13〜17 番）。** プロファイルは仕様と知識から
+   書いており、**実データを一度も見ていない**。**17 番は Phase 6 で増えた項目**
+   （RAW+JPEG の組が実カードで成立するか。`exifread` が実機の CR2 から
+   `DateTimeOriginal` を読めるかが要）。
+4. **バックアップとリストア（[`backup.md`](backup.md)）。** 手順は書いてあるが未実測。
+5. **自動取り込み（§12.1）。** 承認したら「いま挿してあるカードの中身が数秒後に
+   取り込まれる」を実機で見ていない。
 
 ## 持ち越している判断
 

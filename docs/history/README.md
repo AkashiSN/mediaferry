@@ -15,6 +15,7 @@
 | `phase4-plan.md` | Web UI。認証・CSRF・SSE・8 画面・E2E |
 | `phase5-plan.md` | 汎用化。Canon、プロファイル編集、複数デバイス |
 | `phase6-plan.md` | RAW/JPEG のスタッキング、`UPLOAD_CONCURRENCY` の撤去 |
+| `hardware-verification.md` | **実機検証の記録**（2026-08-20〜21）。実測した値、実機でしか出なかった不具合 9 件、ffmpeg の実挙動 |
 
 ## なぜ捨てないのか
 
