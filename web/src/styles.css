@@ -267,9 +267,31 @@ h1.page.lg { font-size: 24px; }
 .switch {
   width: 50px; height: 30px; border-radius: 15px; border: none; padding: 3px;
   background: var(--track); display: flex; align-items: center; transition: background .15s;
+  flex: 0 0 auto;
 }
 .switch[aria-checked="true"] { background: var(--accent); justify-content: flex-end; }
 .switch i { display: block; width: 24px; height: 24px; border-radius: 50%; background: #fff; box-shadow: 0 1px 3px rgba(0, 0, 0, .3); }
+.switch:disabled { opacity: .45; cursor: not-allowed; }
+/* **押せる領域は 44px 以上**（§13）。広い画面では 30px のままでよい。 */
+@media (max-width: 899px) {
+  .switch { width: 66px; height: 44px; border-radius: 22px; padding: 5px; }
+  .switch i { width: 34px; height: 34px; }
+}
+
+/* 入力欄。**高さは押せる大きさに揃える**（§13）。 */
+.field {
+  width: 100%; height: 44px; padding: 0 12px;
+  border: 1px solid var(--line); border-radius: 9px;
+  background: var(--surface); color: var(--ink);
+  font-family: inherit; font-size: 14px;
+}
+.field:disabled { background: var(--surface-2); color: var(--ink-2); cursor: not-allowed; }
+textarea.field {
+  height: auto; padding: 10px 12px; line-height: 1.55;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 13px;
+}
+/* 見出しと入力欄を縦に並べる 1 組（`label` がそのまま欄の名前になる）。 */
+.formrow { display: flex; flex-direction: column; gap: 6px; font-size: 13px; color: var(--ink-2); }
 
 .parts { display: flex; gap: 4px; flex: 0 0 auto; }
 .parts > div { width: 52px; height: 52px; border-radius: 3px; display: flex; align-items: center; justify-content: center; color: rgba(128, 128, 128, .6); }
