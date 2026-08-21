@@ -16,6 +16,7 @@
 | `phase5-plan.md` | 汎用化。Canon、プロファイル編集、複数デバイス |
 | `phase6-plan.md` | RAW/JPEG のスタッキング、`UPLOAD_CONCURRENCY` の撤去 |
 | `phase7-plan.md` | 画面の作り直し。3 つのタブと「やること」、送る動線、旧 8 画面の行き先 |
+| `phase7-rulings.md` | **Phase 7 の裁定の番号の索引**。コードのコメントが引いている「裁定 N」が何を決めたのか。番号の一覧はここにしか無い |
 | `phase7-prototype.html` | **Phase 7 の見た目の参照物**（自己完結。ブラウザで開いて押せる）。色・間隔・文言・アイコンはここから取る |
 | `hardware-verification.md` | **実機検証の記録**（2026-08-20〜21）。実測した値、実機でしか出なかった不具合 9 件、ffmpeg の実挙動 |
 
