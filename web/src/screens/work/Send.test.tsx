@@ -57,7 +57,14 @@ describe("送る", () => {
   });
 
   it("写真の画面から来たときは、その選択が既定", async () => {
-    stubApi({ "/destinations": DESTINATIONS, "/media": { media: [], total: 48, page: 1, page_size: 50 } });
+    // `/media/m1` `/media/m2`（詳細）は `/media`（一覧）と別の資源なので、
+    // `stubApi` の厳密一致で正しい形を返せるように個別に登録しておく。
+    stubApi({
+      "/destinations": DESTINATIONS,
+      "/media/m1": { id: "m1", rel_path: "a.JPG", kind: "photo", captured_at: "", size_bytes: 1024 },
+      "/media/m2": { id: "m2", rel_path: "b.JPG", kind: "photo", captured_at: "", size_bytes: 1024 },
+      "/media": { media: [], total: 48, page: 1, page_size: 50 },
+    });
     renderSend(["m1", "m2"]);
     await waitFor(() =>
       expect(screen.getByRole("radio", { name: /写真の画面で選んだもの/ })).toBeChecked(),
@@ -229,6 +236,60 @@ describe("対象の解決", () => {
     await waitFor(() => expect(screen.getByRole("button", { name: /旅行用 Immich/ })).toBeDisabled());
     await userEvent.click(screen.getByRole("radio", { name: /写真を自分で選ぶ/ }));
     expect(await screen.findByText("写真の画面")).toBeInTheDocument();
+  });
+
+  // レビュー指摘（Important #2）: 「すべて」と名乗る対象が、応答の上限（200 件）で
+  // 黙って切れないこと。
+  it("『すべて』が上限で切れているときは、残りがあることを言う", async () => {
+    stubApi({
+      "/destinations": DESTINATIONS,
+      "/media": {
+        media: [
+          { id: "m1", rel_path: "a.JPG", kind: "photo", captured_at: "2026-08-18T10:00:00+09:00", size_bytes: 1024 },
+        ],
+        // サーバ側には 500 件あるが、1 度に読めるのは 200 件まで（ここでは
+        // スタブの都合で 1 件しか返していないが、`total` はそのまま読む）。
+        total: 500,
+        page: 1,
+        page_size: 200,
+      },
+    });
+    renderSend();
+    await waitFor(() => expect(screen.getByRole("button", { name: /内容を確かめる/ })).toBeEnabled());
+    expect(await screen.findByText(/残り 499 件は次にもう一度/)).toBeInTheDocument();
+  });
+
+  // レビュー指摘（Important #3）: `isMedia` を落とした後も、1 件読めなくても
+  // 残りは対象にできること（`Promise.allSettled` で拾う）。
+  it("選んだうち 1 件が読めなくても、残りは対象にする", async () => {
+    const m1 = {
+      id: "m1",
+      rel_path: "a.JPG",
+      kind: "photo",
+      captured_at: "2026-08-18T10:00:00+09:00",
+      size_bytes: 1024,
+    };
+    vi.stubGlobal(
+      "fetch",
+      vi.fn((input: string) => {
+        const path = input.replace(/^\/api/, "");
+        if (path === "/media/m1") {
+          return Promise.resolve(new Response(JSON.stringify(m1), { status: 200 }));
+        }
+        if (path === "/media/m2") {
+          // m2 は選んだ後に消えた（または読めない）想定。
+          return Promise.resolve(new Response(JSON.stringify({ message: "not found" }), { status: 404 }));
+        }
+        if (path.startsWith("/destinations")) {
+          return Promise.resolve(new Response(JSON.stringify(DESTINATIONS), { status: 200 }));
+        }
+        return Promise.resolve(new Response("{}", { status: 200 }));
+      }),
+    );
+    renderSend(["m1", "m2"]);
+    await waitFor(() => expect(screen.getByRole("button", { name: /内容を確かめる/ })).toBeEnabled());
+    expect(screen.getByText(/1 件のうち、はじめの 1 件/)).toBeInTheDocument();
+    expect(await screen.findByText(/1 件は見つからないので外しました/)).toBeInTheDocument();
   });
 });
 

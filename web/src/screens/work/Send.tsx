@@ -26,17 +26,6 @@ type PairResult = { pairs: Pair[] };
 /** 何を送るか（§13「送る」の 2 段目）。`pick` だけは選ぶと写真の画面へ移る。 */
 type Preset = "selection" | "unsent" | "day0" | "pick";
 
-/** 最低限の形を持つ `Media` かどうか。**プレビューの描画で落ちないための最後の砦。** */
-function isMedia(value: unknown): value is Media {
-  const candidate = value as Partial<Media> | null;
-  return (
-    candidate !== null &&
-    typeof candidate === "object" &&
-    typeof candidate.id === "string" &&
-    typeof candidate.rel_path === "string"
-  );
-}
-
 /** 送信の結果を 1 文にする（**断られた組と、開始に失敗した宛先を隠さない**）。 */
 export function summarise(
   total: number,
@@ -67,8 +56,13 @@ export function SendScreen() {
   const [confirming, setConfirming] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<unknown>(null);
+  // 対象の解決で一部だけ外れたときの断り書き（隠さない。§13）。
+  const [note, setNote] = useState<string | null>(null);
 
   const [targetMedia, setTargetMedia] = useState<Media[]>([]);
+  // サーバ側の総数。`targetMedia` は 1 度に読む上限（200 件）で切れることがあるので、
+  // 「すべて」と名乗る対象がそれより多いときに気付けるよう別に持つ。
+  const [targetTotal, setTargetTotal] = useState(0);
   const [targetLoading, setTargetLoading] = useState(false);
 
   const destinationsQuery = useQuery<Destinations>("/destinations");
@@ -113,22 +107,35 @@ export function SendScreen() {
       }
       if (preset === "selection" && (!ids || ids.length === 0)) {
         setTargetMedia([]);
+        setTargetTotal(0);
         return;
       }
       if (preset !== "selection" && primaryDestinationId === null) {
         setTargetMedia([]);
+        setTargetTotal(0);
         return;
       }
 
       setTargetLoading(true);
       setError(null);
+      setNote(null);
       try {
         if (preset === "selection") {
-          const items = await Promise.all((ids ?? []).map((id) => request<Media>(`/media/${id}`)));
-          // **形が崩れているものは対象から外す。** 選んでから消えた場合や、テストの
-          // 代役 API が別の形を返した場合に、プレビューの描画で落ちないようにする。
+          const settled = await Promise.allSettled(
+            (ids ?? []).map((id) => request<Media>(`/media/${id}`)),
+          );
+          // **1 件が読めなくても、残りは送れる**（宛先の一部が開始に失敗しても
+          // 進める、というこの画面の判断と同じ考え方）。外れた分は隠さず 1 文で言う。
+          const found = settled
+            .filter((result): result is PromiseFulfilledResult<Media> => result.status === "fulfilled")
+            .map((result) => result.value);
+          const missing = settled.length - found.length;
           if (!cancelled) {
-            setTargetMedia(items.filter(isMedia));
+            setTargetMedia(found);
+            setTargetTotal(found.length);
+            if (missing > 0) {
+              setNote(`${missing} 件は見つからないので外しました。`);
+            }
           }
           return;
         }
@@ -146,6 +153,7 @@ export function SendScreen() {
           if (top === undefined) {
             if (!cancelled) {
               setTargetMedia([]);
+              setTargetTotal(0);
             }
             return;
           }
@@ -157,11 +165,15 @@ export function SendScreen() {
         const page = await request<MediaPage>(`/media?${query.toString()}`);
         if (!cancelled) {
           setTargetMedia(page.media);
+          // **応答の `total` を読む。** 200 件の上限で切れていても黙らない
+          // （Ruling 20）。
+          setTargetTotal(page.total);
         }
       } catch (caught) {
         if (!cancelled) {
           setError(caught);
           setTargetMedia([]);
+          setTargetTotal(0);
         }
       } finally {
         if (!cancelled) {
@@ -263,6 +275,7 @@ export function SendScreen() {
       <h1 className="page">Immich へ送る</h1>
 
       <ErrorBanner error={error ?? destinationsQuery.error} onDismiss={() => setError(null)} />
+      {note && <p role="status">{note}</p>}
 
       <section>
         <div className="sechead">
@@ -371,6 +384,13 @@ export function SendScreen() {
             {targetMedia.length} 件 ・ {formatBytes(totalBytes)}
           </div>
           <div className="small">送り先：{chosen.map((d) => d.name).join(" / ") || "（選んでください）"}</div>
+          {/* **「すべて」が黙って上限で切れない**（Ruling 20）。1 度に読むのは
+              200 件までなので、それより多ければ正直に言う。 */}
+          {targetTotal > targetMedia.length && (
+            <div className="small">
+              残り {targetTotal - targetMedia.length} 件は次にもう一度送ってください。
+            </div>
+          )}
         </div>
         <button
           type="button"

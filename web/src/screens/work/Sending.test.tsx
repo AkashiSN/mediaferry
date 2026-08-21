@@ -93,4 +93,17 @@ describe("送信中", () => {
     expect(await screen.findByText("完了")).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "送るのをやめる" })).toBeNull();
   });
+
+  // レビュー指摘（Minor→Important #5）: 「閉じても送信は続く」と書いてある以上、
+  // 「閉じる」を押してもジョブを止めてはいけない。
+  it("「閉じる」を押しても、キャンセルは呼ばれない", async () => {
+    const { calls } = stubApi({
+      "/jobs": {
+        jobs: [{ id: "j1", type: "upload", status: "running", created_at: "2026-08-18T00:00:00+00:00" }],
+      },
+    });
+    renderSending({ jobIds: ["j1"] });
+    await userEvent.click(await screen.findByRole("button", { name: "閉じる" }));
+    expect(calls().some((c) => c.path === "/jobs/j1/cancel")).toBe(false);
+  });
 });

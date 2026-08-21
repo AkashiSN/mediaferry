@@ -135,6 +135,18 @@ ul { margin: 0; }
   border-radius: 11px; padding: 12px 16px; margin-bottom: 16px;
 }
 
+/* `.warning-banner` と同じ作りで、色だけ danger 系にする（`ErrorBanner.tsx`）。 */
+.error-banner {
+  display: flex; align-items: center; gap: 12px;
+  border: 1px solid var(--danger-line); background: var(--surface); color: var(--danger);
+  border-radius: 11px; padding: 12px 16px; margin-bottom: 16px;
+}
+.error-banner span { flex: 1; }
+.error-banner button {
+  flex: 0 0 auto; height: 36px; padding: 0 14px; border-radius: 8px;
+  border: 1px solid var(--danger-line); background: transparent; color: var(--danger); font-size: 13px;
+}
+
 .btn {
   display: inline-flex; align-items: center; justify-content: center; gap: 8px;
   height: 44px; padding: 0 18px; border: 1px solid var(--line); border-radius: 9px;
@@ -224,6 +236,21 @@ h1.page { font-size: 21px; font-weight: 650; }
   width: min(560px, 100%); max-height: 88vh; overflow: auto;
   border-radius: 16px; background: var(--surface); box-shadow: var(--shadow-lg); padding: 26px 26px 22px;
 }
+/* `ConfirmDialog.tsx` と `Merges.tsx` の構成を変えるダイアログが使うクラス名
+ * （`.backdrop` / `.dialog` と中身は同じで、名前だけ違う）。 */
+.dialog-backdrop {
+  position: fixed; inset: 0; background: var(--scrim); z-index: 40;
+  display: grid; place-items: center; padding: 20px;
+}
+.dialog-actions { display: flex; gap: 10px; margin-top: 22px; }
+.dialog-actions button {
+  height: 44px; padding: 0 18px; border: 1px solid var(--line); border-radius: 9px;
+  background: var(--surface); color: var(--ink); font-size: 14px;
+}
+.dialog-actions button:last-child {
+  flex: 1; border-color: var(--accent); background: var(--accent); color: var(--accent-ink); font-weight: 650;
+}
+.dialog-actions button:disabled { opacity: .45; cursor: not-allowed; }
 .factlist { border: 1px solid var(--line); border-radius: 12px; overflow: hidden; }
 .factlist > div { display: flex; align-items: center; gap: 14px; padding: 13px 16px; border-bottom: 1px solid var(--line-2); }
 .factlist > div:last-child { border-bottom: none; background: var(--surface-2); }
@@ -255,6 +282,8 @@ h1.page { font-size: 21px; font-weight: 650; }
   .acts { width: 100%; }
   .acts > .btn { flex: 1 1 auto; }
   .rowtop > .grow, .row > .grow { flex: 1 1 60%; }
+  /* **押せる領域は 44px 以上**（§13）。広い画面では 36px のままでよい。 */
+  .btn.sm { height: 44px; }
 }
 
 .sendbar { position: sticky; bottom: 12px; }
