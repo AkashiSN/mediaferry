@@ -1,8 +1,9 @@
-// つないだ動画の記録（§13「詳しい情報」）。破棄した組み合わせと、使っていない出力は
-// どちらも操作できない記録なので、つなぐ画面（`work/Merge.tsx`）には出さずここへ置く。
+// つないだ動画の記録（§13「詳しい情報」）。別々のままにした組み合わせと、使っていない
+// 出力は、どちらも操作できない記録なので、つなぐ画面（`work/Merge.tsx`）には出さずここへ
+// 置く。
 //
-// **使っていない出力の一覧は消さない**（`id="stale"`）。実機では、置き換えられて
-// `/merge-groups` から見えなくなった出力が 66 GiB 残っていた経路がここだけだった。
+// **使っていない出力の一覧は消さない**（`id="stale"`）。置き換えられて `/merge-groups`
+// から見えなくなった出力は、ここからしか辿れない。
 
 import { useState } from "react";
 import { Link } from "react-router-dom";
@@ -28,6 +29,11 @@ type StaleItem = {
   reason: string;
 };
 type Stale = { stale: StaleItem[] };
+
+/** 一覧・確認・`aria-label` のどこでも同じ名乗りにする（§13「内部の名前をそのまま出さない」）。 */
+function groupLabel(group: DiscardedGroup): string {
+  return group.members[0]?.rel_path ?? group.id;
+}
 
 export function MergeHistoryScreen() {
   const discarded = useQuery<DiscardedGroups>("/merge-groups?status=skipped");
@@ -59,6 +65,7 @@ export function MergeHistoryScreen() {
 
   const discardedGroups = discarded.data?.groups ?? [];
   const staleItems = stale.data?.stale ?? [];
+  const staleBytes = staleItems.reduce((sum, item) => sum + item.size_bytes, 0);
 
   return (
     <section aria-label="つないだ動画の記録" className="wrap">
@@ -77,14 +84,15 @@ export function MergeHistoryScreen() {
 
       <section className="card pad">
         <div className="sechead" style={{ marginBottom: 12 }}>
-          <h2>破棄した組み合わせ</h2>
+          <h2>別々のままにした組み合わせ</h2>
+          <span className="small">{discardedGroups.length} 件</span>
         </div>
         {discardedGroups.length === 0 ? (
-          <p className="small">破棄した組み合わせはありません。</p>
+          <p className="small">別々のままにした組み合わせはありません。</p>
         ) : (
           <ul style={{ display: "flex", flexDirection: "column", gap: 14, listStyle: "none", padding: 0 }}>
             {discardedGroups.map((group) => (
-              <li key={group.id} className="row" style={{ alignItems: "flex-start" }}>
+              <li key={group.id} className="rowtop">
                 <ul className="grow" style={{ listStyle: "none", padding: 0 }}>
                   {group.members.map((member) => (
                     <li key={member.media_file_id} className="small">
@@ -95,13 +103,11 @@ export function MergeHistoryScreen() {
                 <button
                   type="button"
                   className="btn sm quiet"
+                  aria-label={`消す：${groupLabel(group)}`}
                   disabled={busy}
                   onClick={() =>
                     setConfirmation({
-                      value: {
-                        kind: "delete_merge_history",
-                        groupLabel: group.members[0]?.rel_path ?? group.id,
-                      },
+                      value: { kind: "delete_merge_history", groupLabel: groupLabel(group) },
                       run: () => act(`/merge-groups/${group.id}`),
                     })
                   }
@@ -114,27 +120,34 @@ export function MergeHistoryScreen() {
         )}
       </section>
 
-      {staleItems.length > 0 && (
-        <section id="stale" className="card pad">
-          <div className="sechead" style={{ marginBottom: 12 }}>
-            <h2>使っていない出力</h2>
-          </div>
-          <p className="small" style={{ marginBottom: 12 }}>
-            やり直しや破棄で置き換わった結合結果です。元になったファイルはここには出ません。
-          </p>
+      <section id="stale" className="card pad">
+        <div className="sechead" style={{ marginBottom: 12 }}>
+          <h2>使っていない出力</h2>
+          <span className="small">
+            {staleItems.length} 件{staleItems.length > 0 ? ` ・ 合計 ${formatBytes(staleBytes)}` : ""}
+          </span>
+        </div>
+        <p className="small" style={{ marginBottom: 12 }}>
+          組み直したり、これは別々にしたりして置き換わった結合結果です。元になったファイルは
+          ここには出ません。
+        </p>
+        {staleItems.length === 0 ? (
+          <p className="small">使っていない出力はありません。</p>
+        ) : (
           <ul style={{ display: "flex", flexDirection: "column", gap: 14, listStyle: "none", padding: 0 }}>
             {staleItems.map((item) => (
-              <li key={item.id} className="row" style={{ alignItems: "flex-start" }}>
+              <li key={item.id} className="rowtop">
                 <div className="grow">
                   <code className="small">{item.rel_path}</code>
                   <div className="small">
                     {formatBytes(item.size_bytes)} ・
-                    {item.reason === "superseded" ? "組み直しで置き換わった" : "破棄した組"}
+                    {item.reason === "superseded" ? "組み直しで置き換わった" : "別々にした組"}
                   </div>
                 </div>
                 <button
                   type="button"
                   className="btn sm quiet"
+                  aria-label={`このファイルを消す：${item.rel_path}`}
                   disabled={busy}
                   onClick={() =>
                     setConfirmation({
@@ -148,8 +161,8 @@ export function MergeHistoryScreen() {
               </li>
             ))}
           </ul>
-        </section>
-      )}
+        )}
+      </section>
 
       {confirmation && (
         <ConfirmDialog

@@ -23,6 +23,8 @@ export type Job = {
   status: string;
   created_at: string;
   started_at?: string | null;
+  // **走っている間は無い**（終わった時点で API が入れる）。
+  finished_at?: string | null;
   progress?: JobProgressValue | null;
 };
 

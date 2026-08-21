@@ -13,7 +13,7 @@ import { ErrorBanner } from "../../components/ErrorBanner";
 import { Icon } from "../../components/Icon";
 import { useEvents } from "../../hooks/useEvents";
 import { useReloadOnEvents } from "../../hooks/useReloadOnEvents";
-import { formatDateTime } from "../../utils/formatDateTime";
+import { formatSystemDateTime } from "../../utils/formatDateTime";
 
 type Record_ = {
   id: string;
@@ -101,7 +101,7 @@ export function ApproveScreen() {
                   </div>
                 </div>
                 <p className="small" style={{ marginTop: 8 }}>
-                  観測した時刻: {record.remote_checked_at ? formatDateTime(record.remote_checked_at) : "—"}
+                  観測した時刻: {record.remote_checked_at ? formatSystemDateTime(record.remote_checked_at) : "—"}
                 </p>
               </div>
               <div className="acts">

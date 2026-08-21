@@ -29,3 +29,16 @@ export function formatDateTime(iso: string): string {
   }
   return `${formatDate(iso)} ${time}`;
 }
+
+/**
+ * システム時刻（`mediaferry.clock.now_iso` が作る UTC の ISO 文字列）を人が読める形にする。
+ *
+ * `captured_at` と違い、システム時刻は常に UTC で保存される。上の `formatDateTime` と
+ * 同じく文字列を切り出すだけなので、そのまま出すと見ている人の現地時刻に見えてしまう。
+ * **UTC だと分かる印を添える**（変換はしない —— ブラウザのタイムゾーンに依存させない
+ * という上の設計は崩さない）。
+ */
+export function formatSystemDateTime(iso: string): string {
+  const formatted = formatDateTime(iso);
+  return formatted === "日時が不明" ? formatted : `${formatted}（UTC）`;
+}

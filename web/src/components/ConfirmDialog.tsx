@@ -53,7 +53,7 @@ export function describe(confirmation: Confirmation): { title: string; body: Rea
       };
     case "delete_merge_history":
       return {
-        title: "この破棄の記録を消しますか",
+        title: "この記録を消しますか",
         body: (
           <p>
             {confirmation.groupLabel} の記録を消します。**もう一度「候補を検出する」を

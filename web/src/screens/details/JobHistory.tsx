@@ -1,5 +1,5 @@
 // 作業の履歴（§13「詳しい情報」）。いま走っている作業はホームに出るので、ここは
-// 一覧と、終わった作業に何が起きたかを見る場所。中止は走っている間だけできる。
+// 一覧と、終わった作業がいつ・どうなったかを見る場所。
 
 import { useEffect, useState } from "react";
 import { Link } from "react-router-dom";
@@ -12,12 +12,15 @@ import { JobCard } from "../../components/JobCard";
 import type { Job } from "../../components/JobProgress";
 import { useEvents } from "../../hooks/useEvents";
 import { useReloadOnEvents } from "../../hooks/useReloadOnEvents";
+import { formatSystemDateTime } from "../../utils/formatDateTime";
 
 type Jobs = { jobs: Job[] };
 
-// キャンセルできる状態（`routes_system` の生存状態と揃える）。
+// 中止できる状態。待機中はすぐに取り消され、実行中はキャンセル中を経て取り消される
+// （`db/jobs.py` の `request_cancel`）。
 const CANCELLABLE_STATUSES = ["queued", "running"];
-// 進捗を取り直しにいく必要がある状態。
+// 進捗を持ちうる状態（`routes_system.py` の `_LIVE_STATUSES` と揃える）。走っている間
+// だけ一覧を取り直しにいく。
 const LIVE_STATUSES = ["queued", "running", "cancelling"];
 
 export function JobHistoryScreen() {
@@ -47,10 +50,13 @@ export function JobHistoryScreen() {
     return () => clearInterval(timer);
   }, [running, reload]);
 
-  // **画面を再読み込みせずに進む。** 届いたイベントのジョブだけ取り直す。
+  // **ジョブごとの最新イベントの索引。** 進捗が無い（終わった）ジョブに、届いた最後の
+  // イベントの文言を添えるのに使う。一覧そのものの取り直しは、上の `useReloadOnEvents`
+  // が「届いた」ことだけを合図にまとめて 1 回行う（イベントの中身はそちらでは読まない）。
   const latestByJob = new Map(events.map((event) => [event.job_id, event]));
 
   async function cancel(jobId: string) {
+    setError(null);
     try {
       await request(`/jobs/${jobId}/cancel`, { method: "POST" });
       jobs.reload();
@@ -100,7 +106,13 @@ export function JobHistoryScreen() {
               rate={averageRate(job)}
               onCancel={CANCELLABLE_STATUSES.includes(job.status) ? (id) => void cancel(id) : undefined}
             />
-            {/* **進捗が無い（終わった）ジョブは、届いた最後のイベントの文言で補う。** */}
+            {/* Settings.tsx の入口が「いつ終わったか」を約束しているので、終わった
+                ジョブには終了日時を添える。システム時刻は UTC なので印を付ける。 */}
+            {job.finished_at && (
+              <p className="small" style={{ marginTop: -8, marginBottom: 8, paddingLeft: 4 }}>
+                終わった日時: {formatSystemDateTime(job.finished_at)}
+              </p>
+            )}
             {!job.progress && latestByJob.get(job.id) && (
               <p className="small" style={{ marginTop: -8, marginBottom: 8, paddingLeft: 4 }}>
                 {latestByJob.get(job.id)?.message}

@@ -1025,7 +1025,8 @@ describe("送り先", () => {
     stubApi({ "/destinations": { destinations: [HOME] }, "/uploads": NO_SKIPS });
     renderDestinations();
 
-    expect(await screen.findByText(/2026年8月18日 05:03/)).toBeInTheDocument();
+    // システム時刻（clock が作る UTC）はそのまま出すと現地時刻に見えるので、印を添える。
+    expect(await screen.findByText(/2026年8月18日 05:03（UTC）/)).toBeInTheDocument();
   });
 
   it("まだ確かめていない送り先には、そう書く", async () => {

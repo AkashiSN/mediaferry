@@ -186,7 +186,8 @@ describe("確認", () => {
         <ApproveScreen />
       </MemoryRouter>,
     );
-    await waitFor(() => expect(screen.getByText(/2026年8月14日 09:00/)).toBeInTheDocument());
+    // システム時刻（clock が作る UTC）はそのまま出すと現地時刻に見えるので、印を添える。
+    await waitFor(() => expect(screen.getByText(/2026年8月14日 09:00（UTC）/)).toBeInTheDocument());
     expect(screen.queryByText("2026-08-14 09:00")).not.toBeInTheDocument();
   });
 

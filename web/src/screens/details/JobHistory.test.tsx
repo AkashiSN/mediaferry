@@ -1,11 +1,12 @@
 // 作業の履歴（§13）。いまどのファイルをどこまで書いたか、終わった作業には何が
 // 起きたかを出す。
 
-import { render, screen } from "@testing-library/react";
+import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { MemoryRouter } from "react-router-dom";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
+import { emitJob, failStream, openStream } from "../../test/setup";
 import { stubApi } from "../../test/api";
 import { JobHistoryScreen } from "./JobHistory";
 
@@ -76,6 +77,58 @@ describe("作業の履歴", () => {
 
     expect(await screen.findByText("完了")).toBeInTheDocument();
     expect(screen.queryByText(/コピー中|結合中/)).toBeNull();
+  });
+
+  it("終わった作業には、終わった日時を出す（設定の入口が約束している）", async () => {
+    stubApi({
+      "/jobs": {
+        jobs: [
+          {
+            id: "j1",
+            type: "merge",
+            status: "succeeded",
+            created_at: "2026-08-21T00:00:00+00:00",
+            started_at: "2026-08-21T00:00:00+00:00",
+            finished_at: "2026-08-21T00:10:00+00:00",
+            progress: null,
+          },
+        ],
+      },
+    });
+    render(
+      <MemoryRouter>
+        <JobHistoryScreen />
+      </MemoryRouter>,
+    );
+
+    // システム時刻（UTC）をそのまま出すと現地時刻に見えるので、印を添える。
+    expect(await screen.findByText(/終わった日時: 2026年8月21日 00:10（UTC）/)).toBeInTheDocument();
+  });
+
+  it("走っている作業には、終わった日時を出さない", async () => {
+    stubApi({
+      "/jobs": {
+        jobs: [
+          {
+            id: "j1",
+            type: "import",
+            status: "running",
+            created_at: "2026-08-21T00:00:00+00:00",
+            started_at: "2026-08-21T00:00:00+00:00",
+            finished_at: null,
+            progress: null,
+          },
+        ],
+      },
+    });
+    render(
+      <MemoryRouter>
+        <JobHistoryScreen />
+      </MemoryRouter>,
+    );
+
+    await screen.findByText("実行中");
+    expect(screen.queryByText(/終わった日時/)).not.toBeInTheDocument();
   });
 
   it("キャンセルできる状態のジョブだけキャンセルボタンを出し、押すと叩く", async () => {
@@ -172,6 +225,47 @@ describe("作業の履歴", () => {
     expect(await screen.findByText("作業の記録はまだありません。")).toBeInTheDocument();
   });
 
+  it("見出しと領域の名は「作業の履歴」（内部の名前を出さない）", async () => {
+    stubApi({ "/jobs": { jobs: [] } });
+    const { container } = render(
+      <MemoryRouter>
+        <JobHistoryScreen />
+      </MemoryRouter>,
+    );
+    await screen.findByText("作業の記録はまだありません。");
+    expect(screen.getByRole("heading", { level: 1, name: "作業の履歴" })).toBeInTheDocument();
+    expect(container.querySelector('section[aria-label="作業の履歴"]')).not.toBeNull();
+  });
+
+  it("設定へ戻る導線を出す", async () => {
+    stubApi({ "/jobs": { jobs: [] } });
+    render(
+      <MemoryRouter>
+        <JobHistoryScreen />
+      </MemoryRouter>,
+    );
+    expect(await screen.findByRole("link", { name: /設定へ/ })).toHaveAttribute("href", "/settings");
+  });
+
+  it("進捗のイベントが届いたら、一覧を取り直す", async () => {
+    const { calls } = stubApi({ "/jobs": { jobs: [] } });
+    render(
+      <MemoryRouter>
+        <JobHistoryScreen />
+      </MemoryRouter>,
+    );
+    await screen.findByText("作業の記録はまだありません。");
+    const before = calls().filter((c) => c.path === "/jobs" && c.method === "GET").length;
+    emitJob({ job_id: "j1", seq: 1, level: "info", message: "更新", data: null, at: "" });
+    await waitFor(
+      () =>
+        expect(calls().filter((c) => c.path === "/jobs" && c.method === "GET").length).toBeGreaterThan(
+          before,
+        ),
+      { timeout: 2000 },
+    );
+  });
+
   it("進捗の接続が切れていると、そう出す", async () => {
     stubApi({ "/jobs": { jobs: [] } });
     render(
@@ -181,4 +275,95 @@ describe("作業の履歴", () => {
     );
     expect(await screen.findByRole("status")).toHaveTextContent("進捗の接続が切れています");
   });
+
+  it("つながっている間は、接続が切れているという表示を出さない", async () => {
+    stubApi({ "/jobs": { jobs: [] } });
+    render(
+      <MemoryRouter>
+        <JobHistoryScreen />
+      </MemoryRouter>,
+    );
+    await screen.findByRole("status");
+    openStream();
+    await waitFor(() => expect(screen.queryByRole("status")).not.toBeInTheDocument());
+  });
+
+  it("つながった後に切れたら、また表示を出す", async () => {
+    stubApi({ "/jobs": { jobs: [] } });
+    render(
+      <MemoryRouter>
+        <JobHistoryScreen />
+      </MemoryRouter>,
+    );
+    await screen.findByRole("status");
+    openStream();
+    await waitFor(() => expect(screen.queryByRole("status")).not.toBeInTheDocument());
+    failStream();
+    expect(await screen.findByRole("status")).toHaveTextContent("進捗の接続が切れています");
+  });
+
+  it(
+    "実行中のジョブがある間は、進捗を取り直し続ける",
+    async () => {
+      const { calls } = stubApi({
+        "/jobs": {
+          jobs: [
+            {
+              id: "j1",
+              type: "import",
+              status: "running",
+              created_at: "2026-08-21T00:00:00+00:00",
+              started_at: "2026-08-21T00:00:00+00:00",
+              progress: null,
+            },
+          ],
+        },
+      });
+      render(
+        <MemoryRouter>
+          <JobHistoryScreen />
+        </MemoryRouter>,
+      );
+      await screen.findByText("実行中");
+      const before = calls().filter((c) => c.path === "/jobs" && c.method === "GET").length;
+      await waitFor(
+        () =>
+          expect(calls().filter((c) => c.path === "/jobs" && c.method === "GET").length).toBeGreaterThan(
+            before,
+          ),
+        { timeout: 3000 },
+      );
+    },
+    6000,
+  );
+
+  it(
+    "終わっているジョブしか無ければ、取り直さない",
+    async () => {
+      const { calls } = stubApi({
+        "/jobs": {
+          jobs: [
+            {
+              id: "j1",
+              type: "merge",
+              status: "succeeded",
+              created_at: "2026-08-21T00:00:00+00:00",
+              started_at: "2026-08-21T00:00:00+00:00",
+              progress: null,
+            },
+          ],
+        },
+      });
+      render(
+        <MemoryRouter>
+          <JobHistoryScreen />
+        </MemoryRouter>,
+      );
+      await screen.findByText("完了");
+      const before = calls().filter((c) => c.path === "/jobs" && c.method === "GET").length;
+      await new Promise((resolve) => setTimeout(resolve, 2200));
+      expect(calls().filter((c) => c.path === "/jobs" && c.method === "GET").length).toBe(before);
+    },
+    6000,
+  );
 });

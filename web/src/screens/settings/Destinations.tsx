@@ -11,7 +11,7 @@ import { useQuery } from "../../api/hooks";
 import { ConfirmDialog } from "../../components/ConfirmDialog";
 import { ErrorBanner } from "../../components/ErrorBanner";
 import { Icon } from "../../components/Icon";
-import { formatDateTime } from "../../utils/formatDateTime";
+import { formatSystemDateTime } from "../../utils/formatDateTime";
 
 type Destination = {
   id: string;
@@ -210,7 +210,7 @@ export function DestinationsScreen() {
                 最後に確かめた:{" "}
                 {destination.verified_at === null
                   ? "まだ確かめていません"
-                  : formatDateTime(destination.verified_at)}
+                  : formatSystemDateTime(destination.verified_at)}
               </p>
               {sharesLibrary(all, destination) && (
                 <p role="note" className="small" style={{ marginTop: 4 }}>
