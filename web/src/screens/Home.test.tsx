@@ -159,7 +159,7 @@ describe("ホーム", () => {
     reason: "DCIM がある",
   };
 
-  it("「いま取り込む」を押すと、そのカードの取り込みを始める", async () => {
+  it("「いま取り込む」を押すと、数えてから取り込み、分かれた動画まで探す", async () => {
     const api = stubApi({
       "/dashboard": EMPTY_DASHBOARD,
       "/devices": { volumes: [actionableVolume] },
@@ -170,11 +170,32 @@ describe("ホーム", () => {
 
     await userEvent.click(await screen.findByRole("button", { name: "いま取り込む" }));
 
+    // **数えるのが先。** 取り込みのジョブは前のスキャンが残した記録を読むので、
+    // 数えずに取り込むとジョブは成功のまま 1 件も取り込まない。
     await waitFor(() =>
       expect(
         api.calls().some((call) => call.path === "/volumes/v1/import" && call.method === "POST"),
       ).toBe(true),
     );
+    const posts = api.calls().filter((call) => call.method === "POST");
+    expect(posts.map((call) => call.path)).toEqual([
+      "/volumes/v1/scan",
+      "/volumes/v1/import",
+      "/merge-groups/detect?profile_slug=dji-osmo",
+    ]);
+  });
+
+  it("対象外のカードには「いま取り込む」を出さない（探す先も無い）", async () => {
+    stubApi({
+      "/dashboard": EMPTY_DASHBOARD,
+      "/devices": { volumes: [{ ...actionableVolume, profile_slug: null }] },
+      "/jobs": { jobs: [] },
+      "/settings": { settings: [{ key: "AUTO_IMPORT", value: "trusted" }], warnings: [] },
+    });
+    renderHome();
+
+    await waitFor(() => expect(screen.getByText(/対象外の理由/)).toBeInTheDocument());
+    expect(screen.queryByRole("button", { name: "いま取り込む" })).toBeNull();
   });
 
   it("「取り外す」を押すと、そのカードを取り外す", async () => {

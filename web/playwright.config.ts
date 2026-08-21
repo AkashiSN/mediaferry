@@ -5,7 +5,8 @@ import { defineConfig } from "@playwright/test";
 // 通らない。
 export default defineConfig({
   testDir: "e2e",
-  timeout: 60_000,
+  // 主要動線は取り込み・つなぐ・送るを通すので、1 本が長い。
+  timeout: 120_000,
   expect: { timeout: 10_000 },
   use: { trace: "off" },
   reporter: [["list"]],

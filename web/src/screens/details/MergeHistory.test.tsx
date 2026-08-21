@@ -96,7 +96,8 @@ describe("つないだ動画の記録", () => {
     await userEvent.click(screen.getByRole("button", { name: "消す：library/a.MP4" }));
     // 消す対象が分かるように、その組の 1 つ目のファイル名を確認に出す。
     expect(screen.getByRole("dialog")).toHaveTextContent("library/a.MP4");
-    expect(screen.getByRole("dialog")).toHaveTextContent("もう一度「候補を検出する」を");
+    // **画面にあるボタンの名前で言う**（§13 の言い換え。「候補を検出する」はもう無い）。
+    expect(screen.getByRole("dialog")).toHaveTextContent("もう一度「分かれた動画を探す」を");
     expect(screen.getByRole("dialog")).toHaveTextContent("組み合わせがまた出ることがあります");
     expect(calls().some((c) => c.method === "DELETE")).toBe(false);
 

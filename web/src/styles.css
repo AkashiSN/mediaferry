@@ -305,8 +305,9 @@ textarea.field {
   .acts { width: 100%; }
   .acts > .btn { flex: 1 1 auto; }
   .rowtop > .grow, .row > .grow { flex: 1 1 60%; }
-  /* **押せる領域は 44px 以上**（§13）。広い画面では 36px のままでよい。 */
+  /* **押せる領域は 44px 以上**（§13）。広い画面では 36px / 40px のままでよい。 */
   .btn.sm { height: 44px; }
+  .chip { height: 44px; }
 }
 
 .sendbar { position: sticky; bottom: 12px; }

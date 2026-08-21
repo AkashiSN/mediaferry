@@ -107,6 +107,40 @@ export function HomeScreen() {
     }
   }
 
+  /**
+   * カードの帯の「いま取り込む」（§13）。**数える → コピーする → 分かれた動画を
+   * 探す**を、この順に積む。
+   *
+   * **コピーは数えた結果を読む。** 取り込みのジョブは前のスキャンが残した
+   * `source_entry` を publish するだけなので、数えずにコピーだけを積むと、
+   * ジョブは成功のまま 1 件も取り込まない。
+   *
+   * **探すところまでやる。** ホームの「やること」は現行の結合候補の数から導く
+   * ので、取り込んだあとに探しておかないと「つなぐ」が出ず、つなぐ画面へ入る道が
+   * 無い（ナビは 3 つだけで、作業ページはやることからしか開かない）。
+   *
+   * ジョブは積んだ順に 1 本ずつ走るので、探すのは取り込みが終わったあとになる。
+   */
+  async function importNow(volumeId: string, profileSlug: string | null) {
+    setBusy(`${volumeId}:import`);
+    setError(null);
+    try {
+      await request(`/volumes/${volumeId}/scan`, { method: "POST" });
+      await request(`/volumes/${volumeId}/import`, { method: "POST" });
+      if (profileSlug !== null) {
+        await request(`/merge-groups/detect?profile_slug=${encodeURIComponent(profileSlug)}`, {
+          method: "POST",
+        });
+      }
+      devices.reload();
+      jobs.reload();
+    } catch (caught) {
+      setError(caught);
+    } finally {
+      setBusy(null);
+    }
+  }
+
   async function cancelJob(jobId: string) {
     try {
       await request(`/jobs/${jobId}/cancel`, { method: "POST" });
@@ -192,6 +226,7 @@ export function HomeScreen() {
             autoImport={autoImport}
             busy={busy}
             onAct={act}
+            onImport={importNow}
             onAskTrust={(label, outlook) =>
               setConfirming({
                 confirmation: { kind: "trust_volume", label, ...outlook },
@@ -287,6 +322,7 @@ function CardBanner({
   autoImport,
   busy,
   onAct,
+  onImport,
   onAskTrust,
 }: {
   volume: Volume;
@@ -295,6 +331,7 @@ function CardBanner({
   autoImport: string | null;
   busy: string | null;
   onAct: (volumeId: string, action: "trust" | "scan" | "import" | "close") => void;
+  onImport: (volumeId: string, profileSlug: string | null) => void;
   onAskTrust: (label: string, outlook: ReturnType<typeof autoImportOutlook>) => void;
 }) {
   const actionable = volume.profile_slug !== null;
@@ -334,7 +371,7 @@ function CardBanner({
               type="button"
               className="btn primary"
               disabled={busy !== null}
-              onClick={() => onAct(volume.volume_instance_id, "import")}
+              onClick={() => onImport(volume.volume_instance_id, volume.profile_slug)}
             >
               いま取り込む
             </button>

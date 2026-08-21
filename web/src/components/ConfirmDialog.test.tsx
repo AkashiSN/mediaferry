@@ -103,7 +103,46 @@ describe("不可逆な操作の確認", () => {
       expect(body).toBeTruthy();
     }
   });
+
+  // **Markdown は JSX の中で効かない。** `**強調**` と書くとアスタリスクが
+  // そのまま画面に出る。取り消せない操作の確認文で起きるといちばん読みにくい。
+  it("本文に Markdown の記号が残っていない", () => {
+    for (const confirmation of EVERY_KIND) {
+      const { unmount } = render(
+        <ConfirmDialog confirmation={confirmation} onConfirm={() => {}} onCancel={() => {}} />,
+      );
+      expect(screen.getByRole("dialog").textContent ?? "").not.toContain("**");
+      unmount();
+    }
+  });
+
+  // **確認の本文は、画面にあるボタンの名前で言う**（§13 の言い換え）。
+  it("本文が、もう無いボタンの名前を指していない", () => {
+    for (const confirmation of EVERY_KIND) {
+      const { unmount } = render(
+        <ConfirmDialog confirmation={confirmation} onConfirm={() => {}} onCancel={() => {}} />,
+      );
+      expect(screen.getByRole("dialog").textContent ?? "").not.toContain("候補を検出する");
+      unmount();
+    }
+  });
 });
+
+/** `Confirmation` の全種類。**1 つでも欠けると、その本文は誰も読まない。** */
+const EVERY_KIND: Confirmation[] = [
+  { kind: "upload", count: 1, totalBytes: 1, destinationNames: ["a"] },
+  { kind: "archive_destination", name: "a" },
+  { kind: "discard_merge_group", groupLabel: "a", publishedCount: 1 },
+  { kind: "delete_merge_history", groupLabel: "a" },
+  { kind: "delete_stale_derived", relPath: "derived/a.MP4" },
+  { kind: "remerge_group", groupLabel: "a" },
+  { kind: "adopt_failed_merge", groupLabel: "a", reason: "サイズ" },
+  { kind: "approve_datetime", current: "a", proposed: "b" },
+  { kind: "archive_profile", slug: "a" },
+  { kind: "trust_volume", label: "a", state: "starts", reason: null },
+  { kind: "trust_volume", label: "a", state: "pending", reason: "確かめられた場合" },
+  { kind: "trust_volume", label: "a", state: "blocked", reason: "設定が off な" },
+];
 
 describe("大きさの表示", () => {
   it("人が読める単位にする", () => {

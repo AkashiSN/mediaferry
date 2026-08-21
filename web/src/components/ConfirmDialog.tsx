@@ -56,9 +56,11 @@ export function describe(confirmation: Confirmation): { title: string; body: Rea
         title: "この記録を消しますか",
         body: (
           <p>
-            {confirmation.groupLabel} の記録を消します。**もう一度「候補を検出する」を
-            押すと、この組み合わせがまた出ることがあります**（記録が「作り直さない」の
-            根拠になっているため）。ファイルは何も消えません。
+            {confirmation.groupLabel} の記録を消します。
+            <strong>
+              もう一度「分かれた動画を探す」を押すと、この組み合わせがまた出ることがあります
+            </strong>
+            （記録が「作り直さない」の根拠になっているため）。ファイルは何も消えません。
           </p>
         ),
       };
@@ -67,7 +69,7 @@ export function describe(confirmation: Confirmation): { title: string; body: Rea
         title: "この結合物を消しますか",
         body: (
           <p>
-            {confirmation.relPath} を消します。**元になったファイルは残ります**。
+            {confirmation.relPath} を消します。<strong>元になったファイルは残ります</strong>。
             もう現行でないグループの結合結果なので、選択肢には出ていません。
           </p>
         ),
@@ -77,9 +79,9 @@ export function describe(confirmation: Confirmation): { title: string; body: Rea
         title: "同じ構成でやり直しますか",
         body: (
           <p>
-            {confirmation.groupLabel} と同じ構成で新しい候補を作ります。**いまの結合物は
-            消えません**（古いグループに残ります）。結合の実装が変わったときに、作り直す
-            ための操作です。
+            {confirmation.groupLabel} と同じ構成で新しい候補を作ります。
+            <strong>いまの結合物は消えません</strong>
+            （古いグループに残ります）。結合の実装が変わったときに、作り直すための操作です。
           </p>
         ),
       };
