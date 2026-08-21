@@ -263,6 +263,8 @@ describe("設定のトップ", () => {
       [/詳しい設定/, "/settings/general"],
       [/作業の履歴/, "/settings/jobs"],
       [/つないだ動画の記録/, "/settings/merge-history"],
+      // 裁定 42: 押した側がどちらの節に着いたか分かるよう、節の錨（#stale）へ飛ばす。
+      [/使っていないファイル/, "/settings/merge-history#stale"],
       [/接続中のカード/, "/card"],
     ];
     for (const [name, href] of entries) {

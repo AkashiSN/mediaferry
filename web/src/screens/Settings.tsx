@@ -30,7 +30,7 @@ const DETAILS: readonly { to: string; title: string; note: string }[] = [
   {
     // 置き換わった出力は、それを作った記録と同じ画面にある（どのつなぎ直しで
     // 置き換わったかが並んでいないと、消してよいか判断できない）。
-    to: "/settings/merge-history",
+    to: "/settings/merge-history#stale",
     title: "使っていないファイル",
     note: "つなぎ直しで置き換わった古い出力",
   },
