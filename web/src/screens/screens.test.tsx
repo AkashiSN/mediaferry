@@ -16,25 +16,11 @@ import { MergesScreen } from "./Merges";
 import { DashboardScreen } from "./Dashboard";
 import { JobsScreen } from "./Jobs";
 import { SettingsScreen } from "./Settings";
+import { stubApi } from "../test/api";
 
-type Handler = (path: string, init?: RequestInit) => unknown;
-
+// `stubProfiles` と `stubDevices`（このファイルの下の方）は `stubApi` を使わず、
+// 自前で `fetch` を差し替えて、この `calls` に記録する。
 let calls: { path: string; method: string }[] = [];
-
-function stubApi(routes: Record<string, unknown>, onCall?: Handler) {
-  calls = [];
-  vi.stubGlobal(
-    "fetch",
-    vi.fn((input: string, init?: RequestInit) => {
-      const path = input.replace(/^\/api/, "");
-      calls.push({ path, method: init?.method ?? "GET" });
-      onCall?.(path, init);
-      const key = Object.keys(routes).find((candidate) => path.startsWith(candidate));
-      const body = key === undefined ? {} : routes[key];
-      return Promise.resolve(new Response(JSON.stringify(body), { status: 200 }));
-    }),
-  );
-}
 
 beforeEach(() => {
   document.cookie = "XSRF-TOKEN=token; path=/";
@@ -54,7 +40,7 @@ describe("ライブラリの送信", () => {
   const destinations = { destinations: [{ id: "d1", name: "home", enabled: true }] };
 
   it("確認が出るまで送信しない", async () => {
-    stubApi({ "/media": media, "/destinations": destinations });
+    const api = stubApi({ "/media": media, "/destinations": destinations });
     render(
       <MemoryRouter>
         <LibraryScreen />
@@ -68,11 +54,11 @@ describe("ライブラリの送信", () => {
     await userEvent.click(send);
 
     expect(await screen.findByRole("dialog")).toBeInTheDocument();
-    expect(calls.some((call) => call.method === "POST")).toBe(false);
+    expect(api.calls().some((call) => call.method === "POST")).toBe(false);
   });
 
   it("送信は 2 段階（組を作ってから宛先ごとに開始する）", async () => {
-    stubApi({
+    const api = stubApi({
       "/media": media,
       "/destinations": destinations,
       // **組ごとの結果を返す。** 受け付けられた宛先だけ送信を始める。
@@ -100,6 +86,7 @@ describe("ライブラリの送信", () => {
     await userEvent.click(screen.getByRole("button", { name: "実行する" }));
 
     await waitFor(() => {
+      const calls = api.calls();
       expect(calls.filter((call) => call.path === "/uploads" && call.method === "POST")).toHaveLength(1);
       expect(
         calls.filter((call) => call.path === "/destinations/d1/upload" && call.method === "POST"),
@@ -110,7 +97,7 @@ describe("ライブラリの送信", () => {
 
 describe("転送先の退役", () => {
   it("確認が出るまで退役させない", async () => {
-    stubApi({
+    const api = stubApi({
       "/destinations": {
         destinations: [
           { id: "d1", name: "home", enabled: true, base_url: "http://x", public_url: null, same_library_as: [] },
@@ -122,7 +109,7 @@ describe("転送先の退役", () => {
     await userEvent.click(await screen.findByRole("button", { name: "退役させる" }));
 
     expect(await screen.findByRole("dialog")).toBeInTheDocument();
-    expect(calls.some((call) => call.path.includes("archive"))).toBe(false);
+    expect(api.calls().some((call) => call.path.includes("archive"))).toBe(false);
   });
 });
 
@@ -158,7 +145,7 @@ describe("破棄した組み合わせ", () => {
 
 describe("結合グループの破棄", () => {
   it("確認が出るまで破棄しない", async () => {
-    stubApi({
+    const api = stubApi({
       // **前方一致なので、細かい方を先に置く**（`/merge-groups` が先だと履歴の
       // 問い合わせにも同じ本文が返り、同じグループが 2 度描かれる）。
       "/merge-groups?status=skipped": { groups: [] },
@@ -181,7 +168,7 @@ describe("結合グループの破棄", () => {
     await userEvent.click(await screen.findByRole("button", { name: "破棄する" }));
 
     expect(await screen.findByRole("dialog")).toBeInTheDocument();
-    expect(calls.some((call) => call.method === "PATCH")).toBe(false);
+    expect(api.calls().some((call) => call.method === "PATCH")).toBe(false);
   });
 });
 
@@ -202,13 +189,13 @@ describe("日時の承認", () => {
   };
 
   it("確認が出るまでリモートを書き換えない", async () => {
-    stubApi({ "/uploads": records });
+    const api = stubApi({ "/uploads": records });
     render(<ApprovalsScreen />);
 
     await userEvent.click(await screen.findByRole("button", { name: "承認する" }));
 
     expect(await screen.findByRole("dialog")).toBeInTheDocument();
-    expect(calls.some((call) => call.path.includes("approve"))).toBe(false);
+    expect(api.calls().some((call) => call.path.includes("approve"))).toBe(false);
   });
 
   it("変更が無い行では承認を促さない", async () => {
@@ -876,7 +863,7 @@ describe("スタックの結果（§9.11）", () => {
   });
 
   it("見送りだけを問い合わせる", async () => {
-    stubApi({ "/destinations": destinations, "/uploads": { records: [] } });
+    const api = stubApi({ "/destinations": destinations, "/uploads": { records: [] } });
 
     render(
       <MemoryRouter>
@@ -886,9 +873,9 @@ describe("スタックの結果（§9.11）", () => {
 
     await waitFor(() =>
       expect(
-        calls.some(
-          (call) => call.path === "/uploads?destination_id=d1&stack_state=skipped&limit=50",
-        ),
+        api
+          .calls()
+          .some((call) => call.path === "/uploads?destination_id=d1&stack_state=skipped&limit=50"),
       ).toBe(true),
     );
   });
@@ -1036,7 +1023,7 @@ describe("ジョブの進捗", () => {
 describe("破棄の記録を消す", () => {
   it("確認が出るまで消さない", async () => {
     const member = { media_file_id: "m1", rel_path: "library/a.MP4", size_bytes: 1, gap_seconds: null };
-    stubApi({
+    const api = stubApi({
       "/merge-groups?status=skipped": {
         groups: [
           {
@@ -1058,14 +1045,14 @@ describe("破棄の記録を消す", () => {
     await userEvent.click(await screen.findByRole("button", { name: "消す" }));
 
     expect(await screen.findByRole("dialog")).toBeInTheDocument();
-    expect(calls.some((call) => call.method === "DELETE")).toBe(false);
+    expect(api.calls().some((call) => call.method === "DELETE")).toBe(false);
   });
 });
 
 describe("同じ構成でやり直す", () => {
   it("結合済みのグループにだけ出る", async () => {
     const member = { media_file_id: "m1", rel_path: "library/a.MP4", size_bytes: 1, gap_seconds: null };
-    stubApi({
+    const api = stubApi({
       "/merge-groups?status=skipped": { groups: [] },
       "/merge-groups": {
         groups: [
@@ -1085,7 +1072,7 @@ describe("同じ構成でやり直す", () => {
 
     await userEvent.click(await screen.findByRole("button", { name: "同じ構成でやり直す" }));
     expect(await screen.findByRole("dialog")).toBeInTheDocument();
-    expect(calls.some((call) => call.method === "PATCH")).toBe(false);
+    expect(api.calls().some((call) => call.method === "PATCH")).toBe(false);
   });
 });
 
@@ -1128,7 +1115,7 @@ describe("結合の出力", () => {
   it("もう使われていない出力を、置き換えられたグループが出なくても消せる", async () => {
     // **置き換えられたグループは `/merge-groups` に出ない**（API の既定）。
     // 出るのは残っているファイルの方で、削除ボタンはそこに付く。
-    stubApi({
+    const api = stubApi({
       "/merge-groups?status=skipped": { groups: [] },
       "/merge-groups": { groups: [] },
       "/media/stale-derived": {
@@ -1147,7 +1134,7 @@ describe("結合の出力", () => {
 
     await userEvent.click(await screen.findByRole("button", { name: "このファイルを消す" }));
     expect(await screen.findByRole("dialog")).toBeInTheDocument();
-    expect(calls.some((call) => call.method === "DELETE")).toBe(false);
+    expect(api.calls().some((call) => call.method === "DELETE")).toBe(false);
   });
 
   it("もう使われていない出力が無ければ、その節を出さない", async () => {

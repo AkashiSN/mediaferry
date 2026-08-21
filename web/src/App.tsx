@@ -39,7 +39,8 @@ export function App() {
   }
   return (
     <BrowserRouter>
-      <Layout warnings={settings.data?.warnings ?? []}>
+      {/* やることの件数は後続のタスクで配線する（画面ごとに数えさせない方針）。 */}
+      <Layout warnings={settings.data?.warnings ?? []} taskCount={0}>
         <Routes>
           <Route path="/" element={<DashboardScreen />} />
           <Route path="/devices" element={<DevicesScreen />} />
