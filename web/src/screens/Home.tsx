@@ -74,7 +74,7 @@ export function HomeScreen() {
   const jobs = useQuery<Jobs>("/jobs");
   const settings = useQuery<Settings>("/settings");
   const profiles = useQuery<Profiles>("/profiles");
-  const { received } = useEvents();
+  const { received, connected } = useEvents();
   useReloadOnEvents(received, dashboard.reload);
   useReloadOnEvents(received, devices.reload);
   useReloadOnEvents(received, jobs.reload);
@@ -174,6 +174,10 @@ export function HomeScreen() {
           error={error ?? dashboard.error ?? devices.error ?? jobs.error ?? settings.error ?? profiles.error}
           onDismiss={() => setError(null)}
         />
+
+        {!connected && (
+          <p role="status">進捗の接続が切れています。再接続を待っています…</p>
+        )}
 
         {(devices.data?.volumes ?? []).map((volume) => (
           <CardBanner

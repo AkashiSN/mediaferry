@@ -6,18 +6,59 @@ import { BrowserRouter, Route, Routes } from "react-router-dom";
 import { request } from "./api/client";
 import { useQuery } from "./api/hooks";
 import { Layout } from "./components/Layout";
-import { ApprovalsScreen } from "./screens/Approvals";
-import { DashboardScreen } from "./screens/Dashboard";
-import { DestinationsScreen } from "./screens/Destinations";
-import { DevicesScreen } from "./screens/Devices";
-import { JobsScreen } from "./screens/Jobs";
-import { LibraryScreen } from "./screens/Library";
+import type { Warning } from "./components/Layout";
+import { tasksFrom } from "./hooks/useTasks";
+import type { DashboardCounts } from "./hooks/useTasks";
+import { CardDetailScreen } from "./screens/work/CardDetail";
 import { LoginScreen } from "./screens/Login";
-import { MergesScreen } from "./screens/Merges";
+import { HomeScreen } from "./screens/Home";
+import { MergeScreen } from "./screens/work/Merge";
+import { ApproveScreen } from "./screens/work/Approve";
+import { SendScreen } from "./screens/work/Send";
+import { SendingScreen } from "./screens/work/Sending";
+import { PhotosScreen } from "./screens/Photos";
 import { SettingsScreen } from "./screens/Settings";
+import { DestinationsScreen } from "./screens/settings/Destinations";
+import { ProfilesScreen } from "./screens/settings/Profiles";
+import { GeneralScreen } from "./screens/settings/General";
+import { JobHistoryScreen } from "./screens/details/JobHistory";
+import { MergeHistoryScreen } from "./screens/details/MergeHistory";
 
 type Session = { required: boolean; authenticated: boolean };
-type Settings = { warnings: { code: string; message: string }[] };
+type Settings = { warnings: Warning[] };
+
+/**
+ * 認証を済ませた後だけ描画する部分。**`taskCount` はここで 1 回だけ引く**
+ * （画面ごとに数えさせない方針）。`App` 本体に置くと、ログイン確認が終わる前の
+ * 描画でも `/dashboard` の `useEffect` が走ってしまうので、別のコンポーネントに
+ * 切り出してマウント自体をログイン後まで遅らせる。
+ */
+function AuthedApp({ warnings }: { warnings: Warning[] }) {
+  const dashboard = useQuery<DashboardCounts>("/dashboard");
+  const taskCount = tasksFrom(dashboard.data).length;
+
+  return (
+    <BrowserRouter>
+      <Layout warnings={warnings} taskCount={taskCount}>
+        <Routes>
+          <Route path="/" element={<HomeScreen />} />
+          <Route path="/card" element={<CardDetailScreen />} />
+          <Route path="/merge" element={<MergeScreen />} />
+          <Route path="/approve" element={<ApproveScreen />} />
+          <Route path="/send" element={<SendScreen />} />
+          <Route path="/sending" element={<SendingScreen />} />
+          <Route path="/photos" element={<PhotosScreen />} />
+          <Route path="/settings" element={<SettingsScreen />} />
+          <Route path="/settings/destinations" element={<DestinationsScreen />} />
+          <Route path="/settings/profiles" element={<ProfilesScreen />} />
+          <Route path="/settings/general" element={<GeneralScreen />} />
+          <Route path="/settings/jobs" element={<JobHistoryScreen />} />
+          <Route path="/settings/merge-history" element={<MergeHistoryScreen />} />
+        </Routes>
+      </Layout>
+    </BrowserRouter>
+  );
+}
 
 export function App() {
   const [session, setSession] = useState<Session | null>(null);
@@ -37,21 +78,5 @@ export function App() {
   if (session.required && !session.authenticated) {
     return <LoginScreen onSignedIn={load} />;
   }
-  return (
-    <BrowserRouter>
-      {/* やることの件数は後続のタスクで配線する（画面ごとに数えさせない方針）。 */}
-      <Layout warnings={settings.data?.warnings ?? []} taskCount={0}>
-        <Routes>
-          <Route path="/" element={<DashboardScreen />} />
-          <Route path="/devices" element={<DevicesScreen />} />
-          <Route path="/library" element={<LibraryScreen />} />
-          <Route path="/merges" element={<MergesScreen />} />
-          <Route path="/destinations" element={<DestinationsScreen />} />
-          <Route path="/approvals" element={<ApprovalsScreen />} />
-          <Route path="/jobs" element={<JobsScreen />} />
-          <Route path="/settings" element={<SettingsScreen />} />
-        </Routes>
-      </Layout>
-    </BrowserRouter>
-  );
+  return <AuthedApp warnings={settings.data?.warnings ?? []} />;
 }

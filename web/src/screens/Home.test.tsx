@@ -5,6 +5,7 @@ import userEvent from "@testing-library/user-event";
 import { MemoryRouter, Route, Routes } from "react-router-dom";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
+import { openStream, failStream } from "../test/setup";
 import { stubApi } from "../test/api";
 import { HomeScreen } from "./Home";
 
@@ -296,5 +297,29 @@ describe("ホーム", () => {
     });
     renderHome();
     await waitFor(() => expect(screen.getByText(/送信中 3 件/)).toBeInTheDocument());
+  });
+
+  it("進捗の接続が切れていると、そう出す", async () => {
+    stubApi({ "/dashboard": EMPTY_DASHBOARD, "/devices": { volumes: [] }, "/jobs": { jobs: [] } });
+    renderHome();
+    expect(await screen.findByRole("status")).toHaveTextContent("進捗の接続が切れています");
+  });
+
+  it("つながっている間は、接続が切れているという表示を出さない", async () => {
+    stubApi({ "/dashboard": EMPTY_DASHBOARD, "/devices": { volumes: [] }, "/jobs": { jobs: [] } });
+    renderHome();
+    await screen.findByRole("status");
+    openStream();
+    await waitFor(() => expect(screen.queryByRole("status")).not.toBeInTheDocument());
+  });
+
+  it("つながった後に切れたら、また表示を出す", async () => {
+    stubApi({ "/dashboard": EMPTY_DASHBOARD, "/devices": { volumes: [] }, "/jobs": { jobs: [] } });
+    renderHome();
+    await screen.findByRole("status");
+    openStream();
+    await waitFor(() => expect(screen.queryByRole("status")).not.toBeInTheDocument());
+    failStream();
+    expect(await screen.findByRole("status")).toHaveTextContent("進捗の接続が切れています");
   });
 });
