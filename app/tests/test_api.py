@@ -314,3 +314,29 @@ def test_a_running_job_carries_its_progress(client, api_db=None):
         assert json_module.dumps(body)
     finally:
         conn.close()
+
+
+def test_a_finished_job_never_shows_progress(client):
+    """**終わったジョブに「いま何をしているか」は無い**（読む側でも守る）.
+
+    落とすのは終了時の 1 回きりなので、書き手が取り違えると（`finish` と
+    `finish_claimed`）画面に残り続ける。実機で「完了」なのに「結合中 …」と
+    出ていた。
+    """
+    from mediaferry.db.jobs import JobStore
+
+    conn = client.app.state.mediaferry.database.connect()
+    try:
+        store = JobStore(conn)
+        store.enqueue("merge", {})
+        ctx = store.claim_next()
+        ctx.heartbeat({"phase": "merge", "bytes_done": 5})
+        # 落とし忘れた行を直に作る。
+        conn.execute(
+            "UPDATE job SET status = 'succeeded', finished_at = '2026-08-21T00:00:00+00:00'"
+            " WHERE id = ?",
+            (ctx.job_id,),
+        )
+        assert client.get(f"/api/jobs/{ctx.job_id}").json()["progress"] is None
+    finally:
+        conn.close()

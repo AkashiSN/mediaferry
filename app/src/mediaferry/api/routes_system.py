@@ -365,9 +365,16 @@ def _job(row) -> dict[str, Any]:  # noqa: ANN001
     }
 
 
+# 進捗を持ちうる状態。**終わった行に「いま何をしているか」は無い。**
+_LIVE_STATUSES = ("queued", "running", "cancelling")
+
+
 def _progress(row) -> dict[str, Any] | None:  # noqa: ANN001
+    """**読む側でも守る。** 落とすのは終了時の 1 回きりなので、書き手が
+    取り違えると（`finish` と `finish_claimed`）画面に残り続ける。
+    """
     raw = row["progress_json"]
-    if not raw:
+    if not raw or row["status"] not in _LIVE_STATUSES:
         return None
     try:
         value = json.loads(raw)

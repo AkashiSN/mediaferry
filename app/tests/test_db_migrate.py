@@ -307,6 +307,7 @@ def test_a_database_from_the_previous_release_still_opens(tmp_path):
         "0015_stacking.sql": None,
         "0016_stack_needs_its_asset.sql": None,
         "0017_discard_frees_members.sql": None,
+        "0018_clear_stale_progress.sql": None,
     }
     shipped = sorted(path.name for path in MIGRATIONS_DIR.glob("*.sql"))
     assert shipped == sorted(frozen), "版を足したら、この一覧にも足す"
@@ -608,4 +609,33 @@ def test_a_group_discarded_before_the_change_gives_its_files_back(tmp_path):
     assert apply_migrations(conn) == [17]
 
     assert conn.execute("SELECT count(*) FROM merge_member WHERE active = 1").fetchone()[0] == 0
+    conn.close()
+
+
+def test_progress_left_on_a_finished_job_is_cleared(tmp_path):
+    """`0018`。**版を足すだけでは、既に終わっている行は誰も直さない.**
+
+    進捗を落とすのは終了時の 1 回きり。実機では、直す前の版で完了したジョブに
+    「結合中 …」が残り続けていた。
+    """
+    conn = Database(tmp_path / "old.sqlite3").connect()
+    apply_migrations(conn)
+    conn.execute("DELETE FROM schema_migration WHERE version = 18")
+    conn.execute(
+        "INSERT INTO job (id, type, status, params_json, progress_json, created_at, finished_at)"
+        " VALUES ('j-old', 'merge', 'succeeded', '{}', '{\"phase\": \"merge\"}', ?, ?)",
+        (now_iso(), now_iso()),
+    )
+    conn.execute(
+        "INSERT INTO job (id, type, status, params_json, progress_json, created_at)"
+        " VALUES ('j-live', 'import', 'running', '{}', '{\"phase\": \"copy\"}', ?)",
+        (now_iso(),),
+    )
+
+    assert apply_migrations(conn) == [18]
+
+    rows = {row["id"]: row["progress_json"] for row in conn.execute("SELECT * FROM job")}
+    assert rows["j-old"] is None
+    # 走っているものには触らない。
+    assert rows["j-live"] is not None
     conn.close()
