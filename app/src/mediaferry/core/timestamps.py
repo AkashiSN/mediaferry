@@ -1,15 +1,17 @@
 """撮影日時の解決.
 
-`force_offset` は、ファイル名または mtime から得た**壁時計**にプロファイルの
+`force_offset` は、ファイル名または EXIF から得た**壁時計**にプロファイルの
 オフセットを付与する。DJI が MP4 の creation_time を UTC で書きつつオフセットも
 GPS も書かないため、Immich が撮影地の TZ を判定できず、UTC の壁時計をそのまま
 localDateTime として採用してしまう問題への対処である。
 
-**mtime は真の瞬間として扱う。** Linux の exfat ドライバは、`OffsetFromUtc` の
-valid bit が立っていればそのオフセットで UTC へ変換する（`fs/exfat/misc.c` の
-`exfat_get_entry_time`）。DJI はこれを書いているので、mtime の epoch は録画終端の
-正しい瞬間になる。したがって fallback の壁時計は、UTC 表現ではなく解決した
-timezone で描画する。
+**mtime だけは壁時計ではなく真の瞬間として扱う。** Linux の exfat ドライバは、
+`OffsetFromUtc` の valid bit が立っていればそのオフセットで UTC へ変換する
+（`fs/exfat/misc.c` の `exfat_get_entry_time`）。DJI はこれを書いているので、
+mtime の epoch は録画終端の正しい瞬間になる。解決した timezone を付けた値を
+そのまま採り、**オフセットを付け直さない** —— naive の壁時計へ落とすと、DST の
+戻りでどちらの 1 時間かを失う。曖昧さの解決（下の `_attach_offset`）は、
+**壁時計から始めた値**にだけ当たる。
 
 `timezone_policy: none` のときは描画に使う timezone が無いので、UTC 表現の壁時計を
 そのまま採る（介入しない方針そのもの）。
@@ -63,8 +65,10 @@ def resolve_captured_at(
         zone = ZoneInfo(name)
 
     wall, source = _wall_clock(defn, rel_path, mtime_ns, exif_wall, zone)
-    if wall.tzinfo is not None:
-        # mtime。**瞬間から始めた値は fold まで決まっている**ので付け直さない。
+    if source == "mtime":
+        # **瞬間から始めた値は fold まで決まっている**ので付け直さない。
+        # **見分けるのは source。** 「aware かどうか」で見ると、オフセット付きの
+        # EXIF がそのまま通り、`at` と `tz` が食い違う `CapturedAt` ができる。
         return CapturedAt(at=wall, source=source, tz=name, note=None)
     if name is None:
         return CapturedAt(at=wall.replace(tzinfo=UTC), source=source, tz=None, note=None)
@@ -81,8 +85,8 @@ def _wall_clock(
 ) -> tuple[datetime, str]:
     """`zone` は mtime の epoch に付ける TZ.
 
-    **返す値は mtime のときだけ aware。** ファイル名と EXIF は naive の壁時計で、
-    オフセットの付与は呼び出し側が行う（`_attach_offset`）。
+    **返す値は `source` が `mtime` のときだけ aware。** ファイル名と EXIF は
+    壁時計で、オフセットの付与は呼び出し側が行う（`_attach_offset`）。
     """
     rule = defn.timestamp
     if rule.source == "filename" and rule.pattern is not None and rule.format is not None:

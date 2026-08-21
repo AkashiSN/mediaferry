@@ -285,11 +285,11 @@ GUI での編集は既存定義を書き換えず、**新しいリビジョン�
 
 - `none`: 撮影日時にアプリは介入しない。EXIF や埋め込みメタデータを Immich に委ねる。
   Canon はこちら（EXIF にローカル時刻を書くため補正が不要）。
-- `force_offset`: ファイル名または mtime から得た**壁時計**に `timezone` のオフセットを
+- `force_offset`: ファイル名または EXIF から得た**壁時計**に `timezone` のオフセットを
   付与して `dateTimeOriginal` を書き戻す。DJI が MP4 の `creation_time` を UTC で書きつつ
   オフセットも GPS も書かないため、Immich が撮影地の TZ を判定できず `localDateTime` を
   UTC の壁時計のまま採用してしまう問題への対処。
-  **mtime は真の瞬間**（exFAT の `OffsetFromUtc` が効いている。実測は
+  **mtime だけは壁時計ではなく真の瞬間**（exFAT の `OffsetFromUtc` が効いている。実測は
   [`history/hardware-verification.md`](history/hardware-verification.md)）なので、
   `timezone` を付けた値をそのまま使い、**オフセットを付け直さない**（naive の壁時計へ
   落とすと DST の戻りで 1 時間ずれる）。下の「曖昧・存在しない壁時計」の扱いは、

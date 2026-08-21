@@ -106,6 +106,13 @@ blocker が 2 件ずつ出た。**巡を重ねても止まらない。** Phase 5
 - **`pytest-timeout` は入っていない。** `uv run pytest --timeout=90 --version` は
   通るが（`--version` が引数検証より先に返る）、実際に使うと
   `unrecognized arguments` になる。**「入っている」と誤読しないこと**
+- **`test_api.py::test_shutdown_waits_for_the_running_handler` が一度ハングした**
+  （2026-08-21。通常 3 分 45 秒の全件が 27 分止まった。単体で流すと 5 秒、直後の
+  全件も 226 秒で通ったので再現しない）。`slow_scan` は `ctx.cancelled()` が立つまで
+  回り、lifespan はその worker を**上限無しで待つ**ので、キャンセルが届かないと
+  失敗ではなく無限待ちになる。**止まったときの当たり付け**: `/proc/<pid>/task/*/wchan`
+  に `skb_wait_for_more_packets` が並んでいたらソケット待ち、
+  `/tmp/pytest-of-ubuntu/pytest-current/` の最新ディレクトリがその時のテスト名
 - **回帰でテストが「ハング」する形を書かない。** 応答しない相手を待つ試験や
   ReDoS の試験を素直に書くと、実装を壊したときに失敗ではなく無限待ちになる
   （`to_thread` のスレッドはインタプリタ終了時に join される）。**待ちには必ず

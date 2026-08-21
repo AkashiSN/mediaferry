@@ -240,6 +240,26 @@ def test_exif_wall_clock_gets_the_configured_offset():
     assert got.at.isoformat() == "2026-08-19T14:30:05+09:00"
 
 
+def test_an_aware_exif_value_is_still_read_as_a_wall_clock():
+    """`exif_wall` は**壁時計**という契約. オフセットが付いていても桁を採る.
+
+    「aware かどうか」で mtime を見分けると、オフセット付きの EXIF がその値の
+    まま通り、`at` は +00:00 なのに `tz` は Asia/Tokyo という矛盾した
+    `CapturedAt` ができる（`adapters/exif.py` は naive しか返さないので現行の
+    経路では起きないが、判別の根拠としては脆い）。
+    """
+    got = resolve_captured_at(
+        defn(source="exif", pattern=None, format=None, timezone="Asia/Tokyo"),
+        "DCIM/100CANON/IMG_0001.JPG",
+        0,
+        None,
+        exif_wall=datetime(2026, 8, 19, 14, 30, tzinfo=UTC),
+    )
+    assert got.source == "exif"
+    assert got.at.isoformat() == "2026-08-19T14:30:00+09:00"
+    assert got.at.utcoffset() == got.at.tzinfo.utcoffset(got.at), "at と tz が食い違っている"
+
+
 def test_a_pathological_timestamp_pattern_falls_back_instead_of_hanging():
     """`timestamp.pattern` もユーザが書く. 悪性の式で取り込みを止めない.
 
