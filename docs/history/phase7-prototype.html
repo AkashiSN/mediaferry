@@ -1,0 +1,1148 @@
+<title>mediaferry 画面プロトタイプ</title>
+<style>
+*, *::before, *::after { box-sizing: border-box; }
+
+:root {
+  color-scheme: light dark;
+  --bg: #f6f4f0;
+  --surface: #ffffff;
+  --surface-2: #faf8f5;
+  --line: #e6e1d8;
+  --line-2: #efece5;
+  --ink: #1c1917;
+  --ink-2: #6d665e;
+  --ink-3: #9a938a;
+  --accent: #1a6b64;
+  --accent-ink: #ffffff;
+  --accent-soft: #eef6f4;
+  --accent-line: #bcd9d4;
+  --accent-deep: #12524d;
+  --warn: #7d4900;
+  --warn-soft: #fdf8ee;
+  --warn-line: #ecd9b4;
+  --warn-dot: #c8901f;
+  --ok: #3a7350;
+  --danger: #a32a1c;
+  --danger-line: #e6d3d0;
+  --track: #ece7de;
+  --scrim: rgba(28, 25, 23, .48);
+  --shadow: 0 1px 2px rgba(28, 25, 23, .05);
+  --shadow-lg: 0 18px 44px rgba(28, 25, 23, .3);
+  --t0: #cdd8d2; --t1: #d9d2c4; --t2: #cfd4de; --t3: #ddd0cd;
+  --t4: #d2dccd; --t5: #d8cfd8; --t6: #ccd6da; --t7: #dbd3c8;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #141311;
+    --surface: #1d1b18;
+    --surface-2: #1a1815;
+    --line: #302d28;
+    --line-2: #282520;
+    --ink: #efeae2;
+    --ink-2: #a9a29a;
+    --ink-3: #7d776f;
+    --accent: #5cb5aa;
+    --accent-ink: #0c211f;
+    --accent-soft: #17302d;
+    --accent-line: #2a544f;
+    --accent-deep: #8bd4cb;
+    --warn: #e0a75c;
+    --warn-soft: #26200f;
+    --warn-line: #453820;
+    --warn-dot: #d9962f;
+    --ok: #6bab80;
+    --danger: #e08272;
+    --danger-line: #4a2c26;
+    --track: #2b2823;
+    --scrim: rgba(0, 0, 0, .62);
+    --shadow: 0 1px 2px rgba(0, 0, 0, .3);
+    --shadow-lg: 0 18px 44px rgba(0, 0, 0, .55);
+    --t0: #33403c; --t1: #403a2f; --t2: #333845; --t3: #423734;
+    --t4: #363f33; --t5: #3d3540; --t6: #313c40; --t7: #3f3a31;
+  }
+}
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--ink);
+  font-family: system-ui, -apple-system, "Hiragino Kaku Gothic ProN", "Noto Sans JP", "Yu Gothic UI", Meiryo, sans-serif;
+  -webkit-font-smoothing: antialiased;
+  text-wrap: pretty;
+  font-size: 15px;
+  line-height: 1.6;
+}
+
+button { font-family: inherit; cursor: pointer; }
+h1, h2, h3 { margin: 0; line-height: 1.4; }
+p { margin: 0; }
+ul { margin: 0; }
+
+/* ---- 骨格：広いときはサイドバー、狭いときは下タブ ---- */
+.app { display: grid; grid-template-columns: 248px minmax(0, 1fr); min-height: 100vh; }
+.side {
+  border-right: 1px solid var(--line);
+  background: var(--surface-2);
+  padding: 20px 14px 16px;
+  display: flex; flex-direction: column; gap: 3px;
+  position: sticky; top: 0; height: 100vh;
+}
+.main { min-width: 0; padding: 26px 32px 40px; }
+.wrap { max-width: 1040px; margin: 0 auto; display: flex; flex-direction: column; gap: 22px; }
+.tabbar { display: none; }
+
+@media (max-width: 899px) {
+  .app { grid-template-columns: minmax(0, 1fr); }
+  .side { display: none; }
+  .main { padding: 16px 16px 104px; }
+  .wrap { gap: 18px; }
+  .tabbar {
+    position: fixed; left: 0; right: 0; bottom: 0; z-index: 20;
+    display: grid; grid-template-columns: repeat(3, minmax(0, 1fr));
+    border-top: 1px solid var(--line); background: var(--surface-2);
+    padding: 6px 0 max(14px, env(safe-area-inset-bottom));
+  }
+}
+
+.brand { display: flex; align-items: center; gap: 10px; padding: 6px 8px 18px; }
+.brand b { font-size: 15px; font-weight: 650; letter-spacing: .02em; }
+
+.navitem {
+  display: flex; align-items: center; gap: 11px; width: 100%;
+  height: 44px; padding: 0 11px; border: none; border-radius: 9px;
+  background: transparent; color: var(--ink-2); font-size: 14.5px; text-align: left;
+}
+.navitem[aria-current="page"] { background: var(--accent-soft); color: var(--accent-deep); font-weight: 650; }
+.navitem .count { margin-left: auto; font-size: 12.5px; color: var(--ink-3); }
+.navitem[aria-current="page"] .count { color: var(--accent-deep); }
+.pill {
+  margin-left: auto; min-width: 22px; height: 20px; padding: 0 6px; border-radius: 10px;
+  background: var(--accent); color: var(--accent-ink); font-size: 12px; font-weight: 650;
+  display: flex; align-items: center; justify-content: center;
+}
+
+.tab {
+  border: none; background: transparent; color: var(--ink-3);
+  display: flex; flex-direction: column; align-items: center; gap: 3px;
+  padding: 6px 0 4px; min-height: 52px; position: relative;
+}
+.tab[aria-current="page"] { color: var(--accent-deep); font-weight: 650; }
+.tab span { font-size: 11px; }
+.tab .dot {
+  position: absolute; top: 2px; left: 50%; margin-left: 6px;
+  min-width: 17px; height: 17px; padding: 0 5px; border-radius: 9px;
+  background: var(--accent); color: var(--accent-ink);
+  font-size: 10.5px; font-weight: 650; display: flex; align-items: center; justify-content: center;
+}
+
+/* ---- 部品 ---- */
+.card { border: 1px solid var(--line); border-radius: var(--radius, 11px); border-radius: 11px; background: var(--surface); box-shadow: var(--shadow); }
+.pad { padding: 16px 18px; }
+.hl { border-color: var(--accent-line); background: var(--accent-soft); }
+.wn { border-color: var(--warn-line); background: var(--warn-soft); }
+
+.btn {
+  display: inline-flex; align-items: center; justify-content: center; gap: 8px;
+  height: 44px; padding: 0 18px; border: 1px solid var(--line); border-radius: 9px;
+  background: var(--surface); color: var(--ink); font-size: 14px; white-space: nowrap;
+}
+.btn:hover { border-color: var(--ink-3); }
+.btn.primary { border-color: var(--accent); background: var(--accent); color: var(--accent-ink); font-weight: 650; }
+.btn.primary:hover { filter: brightness(1.08); }
+.btn.outline { border-color: var(--accent); color: var(--accent); font-weight: 600; }
+.btn.warnish { border-color: var(--warn-line); color: var(--warn); font-weight: 600; }
+.btn.quiet { border-color: transparent; background: transparent; color: var(--ink-2); }
+.btn.danger { border-color: var(--danger-line); color: var(--danger); font-weight: 600; }
+.btn.sm { height: 36px; padding: 0 14px; font-size: 13px; }
+.btn.big { height: 50px; padding: 0 26px; font-size: 15.5px; }
+.btn:disabled { opacity: .45; cursor: not-allowed; }
+
+.row { display: flex; align-items: center; gap: 12px; }
+.rowtop { display: flex; align-items: flex-start; gap: 14px; }
+.acts { display: flex; gap: 8px; flex-wrap: wrap; }
+.grow { flex: 1; min-width: 0; }
+.muted { color: var(--ink-2); font-size: 13px; }
+.small { color: var(--ink-3); font-size: 12.5px; }
+.sechead { display: flex; align-items: baseline; gap: 10px; }
+.sechead h2 { font-size: 15px; font-weight: 650; }
+h1.page { font-size: 21px; font-weight: 650; }
+.iconbox {
+  width: 40px; height: 40px; flex: 0 0 40px; border-radius: 9px;
+  background: var(--line-2); display: flex; align-items: center; justify-content: center; color: var(--ink-2);
+}
+.iconbox.on { background: var(--surface); border: 1px solid var(--accent-line); color: var(--accent); }
+.iconbox.wn { background: var(--warn-soft); border: 1px solid var(--warn-line); color: var(--warn-dot); }
+
+.bar { height: 8px; border-radius: 4px; background: var(--track); overflow: hidden; }
+.bar > i { display: block; height: 100%; background: var(--accent); transition: width .12s linear; }
+
+.chips { display: flex; gap: 8px; flex-wrap: wrap; }
+.chip {
+  display: inline-flex; align-items: center; gap: 7px; height: 40px; padding: 0 15px;
+  border: 1px solid var(--line); border-radius: 20px; background: var(--surface);
+  color: var(--ink-2); font-size: 13.5px;
+}
+.chip[aria-pressed="true"] { border-color: var(--accent); background: var(--accent); color: var(--accent-ink); font-weight: 650; }
+.chip:disabled { opacity: .5; }
+
+.grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(132px, 1fr)); gap: 10px; }
+@media (max-width: 899px) { .grid { grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; } }
+.tile {
+  position: relative; aspect-ratio: 1; border-radius: 9px; border: none; padding: 0;
+  display: flex; align-items: center; justify-content: center; color: rgba(128, 128, 128, .6);
+}
+.tile.sel { box-shadow: 0 0 0 3px var(--accent); }
+.tile .mark {
+  position: absolute; left: 7px; bottom: 7px; width: 18px; height: 18px; border-radius: 50%;
+  display: flex; align-items: center; justify-content: center; font-size: 11px; font-weight: 700;
+}
+.tile .mark.unsent { border: 2px solid #fff; box-shadow: 0 0 0 1px rgba(0, 0, 0, .18); }
+.tile .mark.sent { background: var(--ok); color: #fff; }
+.tile .mark.awaiting { background: var(--warn-dot); color: #fff; }
+.tile .check {
+  position: absolute; top: 7px; left: 7px; width: 21px; height: 21px; border-radius: 50%;
+  background: var(--accent); color: var(--accent-ink); display: flex; align-items: center; justify-content: center;
+}
+.tile .dur {
+  position: absolute; right: 6px; bottom: 6px; font-size: 10.5px; color: #fff;
+  background: rgba(28, 25, 23, .6); border-radius: 4px; padding: 1px 5px;
+}
+.t0 { background: var(--t0); } .t1 { background: var(--t1); } .t2 { background: var(--t2); } .t3 { background: var(--t3); }
+.t4 { background: var(--t4); } .t5 { background: var(--t5); } .t6 { background: var(--t6); } .t7 { background: var(--t7); }
+
+.legend { display: flex; gap: 16px; flex-wrap: wrap; font-size: 12px; color: var(--ink-2); }
+.legend span { display: inline-flex; align-items: center; gap: 6px; }
+.lg { width: 12px; height: 12px; border-radius: 50%; display: inline-flex; align-items: center; justify-content: center; font-size: 8px; font-weight: 700; color: #fff; }
+
+.actionbar {
+  position: sticky; bottom: 12px; z-index: 10;
+  display: flex; align-items: center; gap: 14px; flex-wrap: wrap;
+  padding: 12px 14px 12px 20px; border-radius: 14px;
+  background: #211f1c; color: #fff; box-shadow: var(--shadow-lg);
+}
+@media (max-width: 899px) { .actionbar { position: fixed; left: 12px; right: 12px; bottom: 92px; } }
+
+.backdrop {
+  position: fixed; inset: 0; background: var(--scrim); z-index: 40;
+  display: grid; place-items: center; padding: 20px;
+}
+.dialog {
+  width: min(560px, 100%); max-height: 88vh; overflow: auto;
+  border-radius: 16px; background: var(--surface); box-shadow: var(--shadow-lg); padding: 26px 26px 22px;
+}
+.factlist { border: 1px solid var(--line); border-radius: 12px; overflow: hidden; }
+.factlist > div { display: flex; align-items: center; gap: 14px; padding: 13px 16px; border-bottom: 1px solid var(--line-2); }
+.factlist > div:last-child { border-bottom: none; background: var(--surface-2); }
+.factlist dt { flex: 0 0 96px; font-size: 13px; color: var(--ink-2); }
+.factlist dd { margin: 0; font-size: 16px; font-weight: 650; }
+
+.toast {
+  position: fixed; left: 50%; top: 16px; transform: translateX(-50%); z-index: 60;
+  background: #211f1c; color: #fff; border-radius: 11px; padding: 13px 18px;
+  font-size: 13.5px; box-shadow: var(--shadow-lg); max-width: min(520px, calc(100% - 32px));
+}
+
+
+.switch {
+  width: 50px; height: 30px; border-radius: 15px; border: none; padding: 3px;
+  background: var(--track); display: flex; align-items: center; transition: background .15s;
+}
+.switch[aria-checked="true"] { background: var(--accent); justify-content: flex-end; }
+.switch i { display: block; width: 24px; height: 24px; border-radius: 50%; background: #fff; box-shadow: 0 1px 3px rgba(0, 0, 0, .3); }
+
+.parts { display: flex; gap: 4px; flex: 0 0 auto; }
+.parts > div { width: 52px; height: 52px; border-radius: 3px; display: flex; align-items: center; justify-content: center; color: rgba(128, 128, 128, .6); }
+.parts > div:first-child { border-radius: 7px 3px 3px 7px; }
+.parts > div:last-child { border-radius: 3px 7px 7px 3px; }
+@media (max-width: 899px) { .parts { width: 100%; } .parts > div { flex: 1; width: auto; height: 54px; } }
+
+/* 狭いときは、本文を潰さずにボタンを次の行へ落とす */
+@media (max-width: 899px) {
+  .row, .rowtop { flex-wrap: wrap; }
+  .acts { width: 100%; }
+  .acts > .btn { flex: 1 1 auto; }
+  .rowtop > .grow, .row > .grow { flex: 1 1 60%; }
+}
+
+.sendbar { position: sticky; bottom: 12px; }
+@media (max-width: 899px) { .sendbar { bottom: 96px; } }
+
+.empty { text-align: center; padding: 46px 20px; }
+.stepdots { display: flex; gap: 6px; }
+.stepdots > i { flex: 1; height: 5px; border-radius: 3px; background: var(--track); }
+.stepdots > i.on { background: var(--accent); }
+</style>
+<div id="app"></div>
+<script>
+(() => {
+  "use strict";
+
+  // 外部からスクリプトも書体も読めない前提（CSP）なので、アイコンは全部インライン SVG。
+  const svg = (d, size = 20, sw = 1.7) =>
+    `<svg width="${size}" height="${size}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="${sw}" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${d}</svg>`;
+
+  const ic = {
+    logo: svg('<path d="M6 3h8l4 4v14H6z"/><path d="M10 3v4M13 3v4"/><path d="M9 15h6M13 12l3 3-3 3"/>', 22),
+    home: svg('<path d="M4 11l8-6 8 6"/><path d="M6 10v9h12v-9"/>'),
+    photo: svg('<rect x="3" y="5" width="18" height="14" rx="2"/><circle cx="8.5" cy="10" r="1.6"/><path d="M4 17l5-5 4 4 2.5-2.5L20 17"/>'),
+    gear: svg('<path d="M4 8h9M19 8h1M4 16h1M11 16h9"/><circle cx="16" cy="8" r="2.6"/><circle cx="8" cy="16" r="2.6"/>'),
+    card: svg('<path d="M7 3h7l4 4v14H7z"/><path d="M10 3v3.5M13 3v3.5"/>'),
+    merge: svg('<rect x="2.5" y="7" width="8" height="10" rx="1.5"/><rect x="13.5" y="7" width="8" height="10" rx="1.5"/><path d="M10.5 12h3"/>'),
+    up: svg('<path d="M12 19V5"/><path d="M6 11l6-6 6 6"/>'),
+    alert: svg('<circle cx="12" cy="12" r="9"/><path d="M12 8v5"/><circle cx="12" cy="16.4" r=".95" fill="currentColor" stroke="none"/>'),
+    info: svg('<circle cx="12" cy="12" r="9"/><path d="M12 16v-4.5"/><circle cx="12" cy="8.2" r=".95" fill="currentColor" stroke="none"/>'),
+    check: svg('<path d="M5 13l4 4 10-10"/>', 20, 2.6),
+    lock: svg('<rect x="4" y="10" width="16" height="10" rx="2"/><path d="M8 10V7a4 4 0 0 1 8 0v3"/>', 15, 1.9),
+    back: svg('<path d="M14 6l-6 6 6 6"/>', 18, 1.9),
+    close: svg('<path d="M6 6l12 12M18 6L6 18"/>', 17, 2),
+    play: svg('<path d="M10 8l6 4-6 4z"/>'),
+    image: svg('<path d="M3 17l5-5 4 4 3-3 6 6"/><circle cx="8" cy="8" r="1.8"/>'),
+    minus: svg('<path d="M8 12h8"/>', 20, 2.6),
+    list: svg('<path d="M4 7h16M4 12h16M4 17h9"/>'),
+  };
+
+  const DATES = ["2026年8月18日（日）", "2026年8月17日（土）", "2026年8月16日（金）"];
+
+  function makePhotos() {
+    const out = [];
+    for (let i = 0; i < 60; i++) {
+      const video = i % 7 === 3;
+      const d = i < 24 ? 0 : i < 42 ? 1 : 2;
+      out.push({
+        id: "p" + i,
+        name: (video ? "DJI_" : "IMG_") + (1000 + i) + (video ? ".MP4" : ".JPG"),
+        kind: video ? "video" : "photo",
+        date: d,
+        dur: video ? (2 + (i % 9)) + ":" + String(10 + (i % 40)).padStart(2, "0") : null,
+        mib: video ? 900 + (i % 5) * 420 : 18 + (i % 7) * 4,
+        status: i < 48 ? "unsent" : "sent",
+        tone: i % 8,
+        merged: false,
+      });
+    }
+    out[48].status = "awaiting";
+    out[49].status = "awaiting";
+    return out;
+  }
+
+  const initial = () => ({
+    tab: "home",
+    route: "home",
+    card: { present: true, trusted: false, profile: "DJI Osmo Pocket", count: 128, gib: 14.2 },
+    merges: [
+      { id: "m1", when: "8月18日 14:03", parts: 3, gib: 11.4, mins: 18, gap: 0 },
+      { id: "m2", when: "8月18日 16:41", parts: 2, gib: 7.8, mins: 12, gap: 0 },
+      { id: "m3", when: "8月17日 09:12", parts: 3, gib: 9.9, mins: 15, gap: 3.2 },
+    ],
+    approvals: [
+      { id: "a1", photo: "p48", current: "2026-08-14 11:02", proposed: "2026-08-14 20:02" },
+      { id: "a2", photo: "p49", current: null, proposed: "2026-08-14 20:06" },
+    ],
+    dests: [
+      { id: "d1", name: "家の Immich", enabled: true },
+      { id: "d2", name: "旅行用 Immich", enabled: false },
+    ],
+    auto: true,
+    photos: makePhotos(),
+    sel: new Set(),
+    filter: "unsent",
+    sendDests: new Set(["d1"]),
+    preset: "unsent",
+    fromSelection: null,
+    job: null,
+    dialog: null,
+    toast: null,
+    done: null,
+  });
+
+  let S = initial();
+  let timer = null;
+  let toastTimer = null;
+
+  // ---- 計算 ----
+  const unsent = () => S.photos.filter((p) => p.status === "unsent");
+  const sumMiB = (list) => list.reduce((a, p) => a + p.mib, 0);
+  const dest = (id) => S.dests.find((d) => d.id === id);
+
+  function fmt(mib) {
+    if (mib < 1024) return Math.round(mib) + " MiB";
+    const g = mib / 1024;
+    return (g >= 10 ? Math.round(g) : Math.round(g * 10) / 10) + " GiB";
+  }
+
+  function tasks() {
+    const t = [];
+    if (S.merges.length) t.push("merge");
+    if (unsent().length) t.push("send");
+    if (S.approvals.length) t.push("approve");
+    return t;
+  }
+
+  function targetIds() {
+    if (S.preset === "selection") return S.fromSelection || [];
+    if (S.preset === "day0") return unsent().filter((p) => p.date === 0).map((p) => p.id);
+    return unsent().map((p) => p.id);
+  }
+
+  const byId = (id) => S.photos.find((p) => p.id === id);
+
+  // ---- 部品 ----
+  const tile = (p, selectable) => {
+    const sel = S.sel.has(p.id);
+    const mark =
+      p.status === "sent"
+        ? `<span class="mark sent">${svg('<path d="M5 13l4 4 10-10"/>', 11, 3.6)}</span>`
+        : p.status === "awaiting"
+        ? '<span class="mark awaiting">!</span>'
+        : '<span class="mark unsent"></span>';
+    return `<button class="tile t${p.tone}${sel ? " sel" : ""}" ${selectable ? `data-act="pick:${p.id}"` : "disabled"} title="${p.name}" aria-label="${p.name}" aria-pressed="${sel}">
+      ${p.kind === "video" ? ic.play : ic.image}
+      ${sel ? `<span class="check">${svg('<path d="M5 13l4 4 10-10"/>', 12, 3.4)}</span>` : mark}
+      ${p.dur ? `<span class="dur">${p.dur}</span>` : ""}
+      ${p.merged ? `<span class="dur" style="left:6px;right:auto;bottom:auto;top:6px;">つないだ</span>` : ""}
+    </button>`;
+  };
+
+  const navBtn = (tab, label, icon, extra) =>
+    `<button class="navitem" data-act="nav:${tab}" ${S.tab === tab ? 'aria-current="page"' : ""}>${icon}<span class="grow">${label}</span>${extra || ""}</button>`;
+
+  function sideNav() {
+    const n = tasks().length;
+    return `<aside class="side">
+      <div class="brand">${ic.logo}<b>mediaferry</b></div>
+      ${navBtn("home", "ホーム", ic.home, n ? `<span class="pill">${n}</span>` : "")}
+      ${navBtn("photos", "写真", ic.photo, `<span class="count">${S.photos.length}</span>`)}
+      ${navBtn("settings", "設定", ic.gear, "")}
+      ${S.job ? `<div style="margin-top:auto">${jobMini()}</div>` : ""}
+    </aside>`;
+  }
+
+  function tabBar() {
+    const n = tasks().length;
+    const t = (tab, label, icon, badge) =>
+      `<button class="tab" data-act="nav:${tab}" ${S.tab === tab ? 'aria-current="page"' : ""}>${icon}<span>${label}</span>${badge ? `<span class="dot">${badge}</span>` : ""}</button>`;
+    return `<nav class="tabbar">
+      ${t("home", "ホーム", ic.home, n || 0)}
+      ${t("photos", "写真", ic.photo, 0)}
+      ${t("settings", "設定", ic.gear, 0)}
+    </nav>`;
+  }
+
+  function jobMini() {
+    return `<div class="card pad" style="padding:12px 13px">
+      <div class="row" style="gap:8px;font-size:12.5px;color:var(--ink-2);font-weight:600">
+        <span style="width:8px;height:8px;border-radius:50%;background:var(--accent)"></span>
+        <span>${S.job.title}</span><b style="margin-left:auto;color:var(--ink)">${S.job.pct}%</b>
+      </div>
+      <div class="bar" style="margin:9px 0 0;height:6px"><i style="width:${S.job.pct}%"></i></div>
+    </div>`;
+  }
+
+  function jobCard() {
+    const j = S.job;
+    return `<section class="card pad">
+      <div class="row">
+        <div class="grow">
+          <div class="row" style="gap:9px"><h3 style="font-size:14.5px;font-weight:600">${j.title}</h3><span class="small">${j.counter(j)}</span></div>
+          <p class="small" style="margin-top:3px">${j.sub(j)}</p>
+        </div>
+        <button class="btn sm" data-act="canceljob">中止する</button>
+      </div>
+      <div class="bar" style="margin-top:12px"><i style="width:${j.pct}%"></i></div>
+    </section>`;
+  }
+
+  function backBar(label, to) {
+    return `<div class="row"><button class="btn sm" data-act="nav:${to}">${ic.back}${label}</button></div>`;
+  }
+
+  // ---- ホーム ----
+  function cardBanner() {
+    const c = S.card;
+    if (c.count === 0) {
+      return `<section class="card pad hl">
+        <div class="rowtop">
+          <div class="iconbox on">${ic.card}</div>
+          <div class="grow">
+            <h2 style="font-size:16px;font-weight:650">${c.profile} のカードは取り込み済みです</h2>
+            <p class="muted" style="margin-top:4px">新しいものはありません。抜いて大丈夫です。</p>
+          </div>
+          <div class="acts"><button class="btn" data-act="eject">取り外す</button></div>
+        </div>
+      </section>`;
+    }
+    return `<section class="card pad hl">
+      <div class="rowtop">
+        <div class="iconbox on">${ic.card}</div>
+        <div class="grow">
+          <h2 style="font-size:16px;font-weight:650">${c.trusted ? c.profile + " のカードが挿さっています" : "初めて見るカードです"}</h2>
+          <p class="muted" style="margin-top:4px">${c.trusted ? "" : c.profile + " のカードのようです。"}まだ取り込んでいないもの <b>${c.count} 件・${c.gib} GiB</b></p>
+          <p class="small" style="margin-top:4px">${
+            c.trusted
+              ? "このカードは信頼済みです。挿すだけで取り込みが始まります。"
+              : "取り込むかどうかは、いまはこちらで決めます。信頼すると、次からは挿すだけで取り込みます。"
+          }</p>
+        </div>
+        <div class="acts" style="flex-direction:column;align-items:stretch">
+          <button class="btn primary" data-act="import">いま取り込む</button>
+          <div class="acts">
+            ${c.trusted ? "" : '<button class="btn sm outline" data-act="asktrust">このカードを信頼する</button>'}
+            <button class="btn sm" data-act="nav:carddetail">中身を見る</button>
+            <button class="btn sm" data-act="eject">取り外す</button>
+          </div>
+        </div>
+      </div>
+    </section>`;
+  }
+
+  function taskCard(kind) {
+    if (kind === "merge") {
+      return `<article class="card pad">
+        <div class="row">
+          <div class="iconbox">${ic.merge}</div>
+          <div class="grow">
+            <h3 style="font-size:14.5px;font-weight:600">分かれている動画を ${S.merges.length} 本つなぐ</h3>
+            <p class="small" style="margin-top:3px">カメラが 4 GiB ごとに分けて保存した動画です。つなぐと 1 本の動画になります。</p>
+          </div>
+          <div class="acts"><button class="btn outline" data-act="nav:merge">つなぐ</button></div>
+        </div>
+      </article>`;
+    }
+    if (kind === "send") {
+      const u = unsent();
+      const names = S.dests.filter((d) => d.enabled).map((d) => d.name).join(" / ") || "（送り先がありません）";
+      return `<article class="card pad">
+        <div class="row">
+          <div class="iconbox">${ic.up}</div>
+          <div class="grow">
+            <h3 style="font-size:14.5px;font-weight:600">${u.length} 件をまだ送っていません</h3>
+            <p class="small" style="margin-top:3px">合計 ${fmt(sumMiB(u))}・送り先「${names}」。送るかどうかは毎回こちらで決めます。</p>
+          </div>
+          <div class="acts">
+            <button class="btn sm quiet" data-act="showunsent">どれか見る</button>
+            <button class="btn primary" data-act="sendall">送る</button>
+          </div>
+        </div>
+      </article>`;
+    }
+    return `<article class="card pad wn">
+      <div class="row">
+        <div class="iconbox wn">${ic.alert}</div>
+        <div class="grow">
+          <h3 style="font-size:14.5px;font-weight:600">写真の日時を直していいか、${S.approvals.length} 件の確認があります</h3>
+          <p class="small" style="margin-top:3px">先に誰かが Immich へ上げていた写真です。勝手に書き換えないので、こちらで決めてください。</p>
+        </div>
+        <div class="acts"><button class="btn warnish" data-act="nav:approvals">確認する</button></div>
+      </div>
+    </article>`;
+  }
+
+  function emptyState() {
+    return `<section class="card pad empty">
+      <div class="iconbox on" style="margin:0 auto 14px;width:52px;height:52px;flex:none;border-radius:50%">${svg('<path d="M5 13l4 4 10-10"/>', 26, 2.4)}</div>
+      <h2 style="font-size:18px;font-weight:650">いま、やることはありません</h2>
+      <p class="muted" style="margin-top:6px">${S.done || "カードを挿すと、ここに次にやることが出ます。"}</p>
+    </section>`;
+  }
+
+  function homeScreen() {
+    const t = tasks();
+    const recent = S.photos.slice(0, 6);
+    return `<div class="wrap">
+      <div class="row">
+        <h1 class="page">ホーム</h1>
+        <span class="chip" style="margin-left:auto;height:32px;font-size:12.5px;pointer-events:none">${ic.lock} 自動で取り込む：<b>${S.auto ? "オン" : "オフ"}</b></span>
+      </div>
+      ${S.card.present ? cardBanner() : ""}
+      ${S.job ? jobCard() : ""}
+      ${t.length ? `<section style="display:flex;flex-direction:column;gap:10px">
+        <div class="sechead"><h2>やること</h2><span class="small">${t.length} 件</span></div>
+        ${t.map(taskCard).join("")}
+      </section>` : emptyState()}
+      <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:18px">
+        <section class="card pad">
+          <div class="sechead" style="margin-bottom:12px"><h2 style="font-size:14px">送り先</h2></div>
+          <div style="display:flex;flex-direction:column;gap:12px">
+            ${S.dests.map((d) => {
+              const sent = S.photos.filter((p) => p.status === "sent").length;
+              return `<div class="row" style="gap:10px">
+                <span style="width:8px;height:8px;border-radius:50%;flex:0 0 8px;background:${d.enabled ? "var(--ok)" : "var(--ink-3)"}"></span>
+                <div class="grow">
+                  <div style="font-size:13.5px;font-weight:600;${d.enabled ? "" : "color:var(--ink-2)"}">${d.name}</div>
+                  <div class="small">${d.enabled ? `送信済み ${sent} ・ 未送信 ${unsent().length}` : "いまは送りません（休止中）"}</div>
+                </div>
+              </div>`;
+            }).join("")}
+          </div>
+        </section>
+        <section class="card pad">
+          <div class="sechead" style="margin-bottom:12px"><h2 style="font-size:14px">さっき取り込んだもの</h2>
+            <button class="btn sm quiet" style="margin-left:auto;height:26px;padding:0 8px" data-act="nav:photos">すべて</button></div>
+          <div style="display:grid;grid-template-columns:repeat(6,minmax(0,1fr));gap:7px">
+            ${recent.map((p) => tile(p, false)).join("")}
+          </div>
+        </section>
+      </div>
+    </div>`;
+  }
+
+  // ---- 写真 ----
+  const FILTERS = [
+    { k: "all", label: "すべて" },
+    { k: "unsent", label: "まだ送っていない" },
+    { k: "awaiting", label: "確認が要る" },
+    { k: "video", label: "動画" },
+    { k: "sent", label: "送信済み" },
+  ];
+
+  function filtered() {
+    return S.photos.filter((p) => {
+      if (S.filter === "all") return true;
+      if (S.filter === "video") return p.kind === "video";
+      return p.status === S.filter;
+    });
+  }
+
+  function photosScreen() {
+    const list = filtered();
+    const groups = DATES.map((label, i) => ({ label, items: list.filter((p) => p.date === i) })).filter((g) => g.items.length);
+    const selected = S.photos.filter((p) => S.sel.has(p.id));
+    return `<div class="wrap">
+      <div class="row">
+        <h1 class="page">写真</h1>
+        <span class="small">${FILTERS.find((f) => f.k === S.filter).label}：${list.length} 件</span>
+      </div>
+      ${S.card.present && S.card.count > 0 ? `<div class="card pad hl row" style="padding:12px 14px">
+        <span style="color:var(--accent)">${ic.card}</span>
+        <span class="muted grow">カードに、まだ取り込んでいないものが <b>${S.card.count} 件</b> あります</span>
+        <button class="btn sm primary" data-act="import">取り込む</button>
+      </div>` : ""}
+      <div class="chips">
+        ${FILTERS.map((f) => `<button class="chip" data-act="filter:${f.k}" aria-pressed="${S.filter === f.k}">${f.label}${f.k === "unsent" ? ` <span>${unsent().length}</span>` : ""}${f.k === "awaiting" && S.approvals.length ? ` <span>${S.approvals.length}</span>` : ""}</button>`).join("")}
+      </div>
+      <div class="legend">
+        <span><i class="lg" style="border:2px solid var(--ink-3)"></i>まだ送っていない</span>
+        <span><i class="lg" style="background:var(--ok)">${svg('<path d="M5 13l4 4 10-10"/>', 8, 4)}</i>送信済み</span>
+        <span><i class="lg" style="background:var(--warn-dot)">!</i>確認が要る</span>
+      </div>
+      ${groups.length === 0 ? `<div class="card pad empty"><p class="muted">この絞り込みに当てはまる写真はありません。</p></div>` : ""}
+      ${groups.map((g) => `<section style="display:flex;flex-direction:column;gap:10px">
+        <div class="sechead">
+          <h2 style="font-size:14px">${g.label}</h2><span class="small">${g.items.length} 件</span>
+          <button class="btn sm quiet" style="height:26px;padding:0 8px" data-act="pickday:${DATES.indexOf(g.label)}">この日を選ぶ</button>
+        </div>
+        <div class="grid">${g.items.map((p) => tile(p, true)).join("")}</div>
+      </section>`).join("")}
+      ${selected.length ? `<div class="actionbar">
+        <div>
+          <div style="font-size:14px;font-weight:650">${selected.length} 件を選択中</div>
+          <div style="font-size:11.5px;opacity:.65">合計 ${fmt(sumMiB(selected))}</div>
+        </div>
+        <button class="btn primary" style="margin-left:auto" data-act="sendselection">送る</button>
+        <button class="btn quiet" style="color:rgba(255,255,255,.7)" data-act="clearsel">やめる</button>
+      </div>` : ""}
+    </div>`;
+  }
+
+  // ---- つなぐ ----
+  function mergeScreen() {
+    return `<div class="wrap">
+      ${backBar("ホームへ", "home")}
+      <div>
+        <h1 class="page" style="font-size:24px">分かれている動画を 1 本につなぎます</h1>
+        <p class="muted" style="margin-top:7px">カメラは長い動画を 4 GiB ごとに分けて保存します。ここでつないでおくと、Immich には 1 本の動画として並びます。つないだあとも、元の分かれたファイルは NAS に残ります。</p>
+      </div>
+      ${S.job ? jobCard() : ""}
+      ${S.merges.length === 0 ? `<div class="card pad empty"><h2 style="font-size:17px;font-weight:650">つなぐものはありません</h2><p class="muted" style="margin-top:6px">分かれた動画が見つかると、ここに出ます。</p></div>` : ""}
+      ${S.merges.map((m) => `<article class="card pad ${m.gap > 0 ? "wn" : ""}">
+        <div class="rowtop" style="flex-wrap:wrap">
+          <div class="parts">${Array.from({ length: m.parts }).map((_, i) => `<div class="t${(i + m.parts) % 8}">${ic.play}</div>`).join("")}</div>
+          <div class="grow">
+            <h2 style="font-size:15.5px;font-weight:650">${m.when} の動画 ・ ${m.parts} つに分かれています</h2>
+            <p class="muted" style="margin-top:4px">合計 ${m.gib} GiB ・ つなぐと 1 本（約 ${m.mins} 分）</p>
+            <p class="small" style="margin-top:3px;${m.gap > 0 ? "color:var(--warn)" : ""}">${
+              m.gap > 0
+                ? `つなぎ目に ${m.gap} 秒の空白があります。別の撮影かもしれないので、確かめてから決めてください。`
+                : "連番が続いていて、つなぎ目の空白は 0.0 秒です。だから同じ 1 本と判断しました。"
+            }</p>
+          </div>
+          <div class="acts">
+            <button class="btn sm" data-act="asksplit:${m.id}">これは別々</button>
+            <button class="btn ${m.gap > 0 ? "warnish" : "outline"}" data-act="merge:${m.id}" ${S.job ? "disabled" : ""}>つなぐ</button>
+          </div>
+        </div>
+      </article>`).join("")}
+    </div>`;
+  }
+
+  // ---- 確認（日時） ----
+  function approvalsScreen() {
+    return `<div class="wrap">
+      ${backBar("ホームへ", "home")}
+      <div>
+        <h1 class="page" style="font-size:24px">写真の日時を直していいか確かめます</h1>
+        <p class="muted" style="margin-top:7px">下の写真は、先に誰かが Immich へ上げていたものです。mediaferry は自分が上げた写真の日時しか直しません。書き換えていいかどうかを決めてください。<b>却下しても、Immich には何も起きません。</b></p>
+      </div>
+      ${S.approvals.length === 0 ? `<div class="card pad empty"><h2 style="font-size:17px;font-weight:650">確認するものはありません</h2></div>` : ""}
+      ${S.approvals.map((a) => {
+        const p = byId(a.photo);
+        return `<article class="card pad">
+          <div class="rowtop" style="flex-wrap:wrap">
+            <div style="width:64px;height:64px;flex:0 0 64px;border-radius:9px;display:flex;align-items:center;justify-content:center;color:rgba(128,128,128,.6)" class="t${p ? p.tone : 0}">${ic.image}</div>
+            <div class="grow">
+              <h2 style="font-size:15px;font-weight:650">${p ? p.name : a.photo}</h2>
+              <div style="display:flex;gap:22px;flex-wrap:wrap;margin-top:8px">
+                <div><div class="small">Immich にある日時</div><div style="font-size:15px;font-weight:600;margin-top:2px">${a.current || "（読めませんでした）"}</div></div>
+                <div style="align-self:center;color:var(--ink-3)">→</div>
+                <div><div class="small">直したい日時</div><div style="font-size:15px;font-weight:600;margin-top:2px;color:var(--accent-deep)">${a.proposed}</div></div>
+              </div>
+              <p class="small" style="margin-top:8px">この機種は世界時で日時を書くので、撮った場所の時計に直しています。</p>
+            </div>
+            <div class="acts">
+              <button class="btn" data-act="reject:${a.id}">直さない</button>
+              <button class="btn outline" data-act="askapprove:${a.id}">この日時に直す</button>
+            </div>
+          </div>
+        </article>`;
+      }).join("")}
+    </div>`;
+  }
+
+  // ---- 送る ----
+  function sendScreen() {
+    const ids = targetIds();
+    const list = ids.map(byId).filter(Boolean);
+    const chosen = S.dests.filter((d) => S.sendDests.has(d.id) && d.enabled);
+    const presets = [];
+    if (S.fromSelection) presets.push({ k: "selection", title: "写真の画面で選んだもの", sub: `${S.fromSelection.length} 件` });
+    presets.push({ k: "unsent", title: "まだ送っていないもの、すべて", sub: `${unsent().length} 件 ・ ${fmt(sumMiB(unsent()))}` });
+    presets.push({ k: "day0", title: "8月18日に撮った分だけ", sub: `${unsent().filter((p) => p.date === 0).length} 件 ・ ${fmt(sumMiB(unsent().filter((p) => p.date === 0)))}` });
+    presets.push({ k: "pick", title: "写真を自分で選ぶ", sub: "一覧から選びます" });
+
+    return `<div class="wrap">
+      ${backBar("やめる", "home")}
+      <h1 class="page">Immich へ送る</h1>
+
+      <section>
+        <div class="sechead"><h2>どこへ送りますか</h2></div>
+        <p class="small" style="margin:4px 0 12px">送ったあとで取り消すことはできません。</p>
+        <div class="chips">
+          ${S.dests.map((d) => `<button class="chip" style="height:56px;padding:0 18px" data-act="dest:${d.id}" aria-pressed="${S.sendDests.has(d.id) && d.enabled}" ${d.enabled ? "" : "disabled"}>
+            <span style="width:20px;height:20px;border-radius:50%;border:2px solid currentColor;display:flex;align-items:center;justify-content:center">${S.sendDests.has(d.id) && d.enabled ? svg('<path d="M5 13l4 4 10-10"/>', 11, 3.6) : ""}</span>
+            <span style="text-align:left"><b style="display:block;font-size:14.5px">${d.name}</b><span style="font-size:11.5px;opacity:.8">${d.enabled ? "つながっています" : "いまは休止中なので選べません"}</span></span>
+          </button>`).join("")}
+        </div>
+      </section>
+
+      <section>
+        <div class="sechead" style="margin-bottom:12px"><h2>何を送りますか</h2></div>
+        <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(230px,1fr));gap:10px">
+          ${presets.map((pr) => `<button class="card pad" style="text-align:left;border-color:${S.preset === pr.k ? "var(--accent)" : "var(--line)"};background:${S.preset === pr.k ? "var(--accent-soft)" : "var(--surface)"};display:flex;gap:11px;align-items:flex-start" data-act="preset:${pr.k}">
+            <span style="margin-top:2px;width:19px;height:19px;flex:0 0 19px;border-radius:50%;border:${S.preset === pr.k ? "5px solid var(--accent)" : "2px solid var(--ink-3)"};background:var(--surface)"></span>
+            <span><b style="display:block;font-size:14px">${pr.title}</b><span class="small">${pr.sub}</span></span>
+          </button>`).join("")}
+        </div>
+      </section>
+
+      <section>
+        <div class="sechead" style="margin-bottom:11px"><h2>送るもの</h2><span class="small">${list.length} 件のうち、はじめの ${Math.min(16, list.length)} 件</span></div>
+        <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(58px,1fr));gap:7px">
+          ${list.slice(0, 16).map((p) => tile(p, false)).join("")}
+        </div>
+      </section>
+
+      <div class="card pad rowtop">
+        <span style="color:var(--ink-2);flex:0 0 auto">${ic.info}</span>
+        <p class="muted">Immich にすでにある写真は、自動でとばします（同じ写真が二重に並びません）。Immich のゴミ箱に入っているものも「ある」と数えるので、勝手に戻すことはありません。</p>
+      </div>
+
+      <div class="card pad row sendbar">
+        <div class="grow">
+          <div style="font-size:15px;font-weight:650">${list.length} 件 ・ ${fmt(sumMiB(list))}</div>
+          <div class="small">送り先：${chosen.map((d) => d.name).join(" / ") || "（選んでください）"}</div>
+        </div>
+        <button class="btn primary big" data-act="askconfirm" ${list.length && chosen.length ? "" : "disabled"}>内容を確かめる</button>
+      </div>
+    </div>`;
+  }
+
+  function sendingScreen() {
+    const j = S.job;
+    const done = Math.min(j.total, Math.round((j.pct / 100) * j.total));
+    const secs = Math.max(1, Math.round((j.bytes * (100 - j.pct)) / 100 / 82));
+    const remain = secs < 90 ? `約 ${secs} 秒` : `約 ${Math.round(secs / 60)} 分`;
+    const recent = j.list.slice(Math.max(0, done - 3), done).reverse();
+    return `<div class="wrap" style="max-width:640px">
+      <div class="row"><h1 class="page">送っています</h1><button class="btn sm" style="margin-left:auto" data-act="nav:home">閉じる</button></div>
+      <section class="card pad">
+        <div class="row" style="align-items:baseline">
+          <span style="font-size:34px;font-weight:650;letter-spacing:-.01em">${j.pct}</span>
+          <span style="font-size:17px;font-weight:600;color:var(--ink-2)">%</span>
+          <b style="margin-left:auto;font-size:14px">${done} / ${j.total} 件</b>
+        </div>
+        <div class="bar" style="height:10px;margin:13px 0 14px"><i style="width:${j.pct}%"></i></div>
+        <div class="row">
+          <div class="t${(j.list[Math.min(done, j.total - 1)] || {}).tone || 0}" style="width:40px;height:40px;flex:0 0 40px;border-radius:8px;display:flex;align-items:center;justify-content:center;color:rgba(128,128,128,.6)">${ic.up}</div>
+          <div class="grow" style="min-width:0">
+            <div style="font-size:13.5px;font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${(j.list[Math.min(done, j.total - 1)] || {}).name || ""}</div>
+            <div class="small" style="margin-top:2px">${fmt((j.bytes * j.pct) / 100)} / ${fmt(j.bytes)}</div>
+          </div>
+        </div>
+        <div class="row" style="gap:18px;margin-top:14px;padding-top:13px;border-top:1px solid var(--line-2)">
+          <div><div class="small">速さ</div><div style="font-size:13.5px;font-weight:600">82 MiB/秒</div></div>
+          <div><div class="small">残り</div><div style="font-size:13.5px;font-weight:600">${remain}</div></div>
+          <span class="chip" style="margin-left:auto;height:30px;pointer-events:none;background:var(--accent-soft);border-color:var(--accent-line);color:var(--accent-deep)">${j.destName}</span>
+        </div>
+      </section>
+      <p class="muted" style="text-align:center">この画面を閉じても送信は続きます。<br>終わったら「やること」から結果を見られます。</p>
+      <section style="display:flex;flex-direction:column;gap:8px">
+        <div class="sechead"><h2 style="font-size:13.5px">終わったもの</h2></div>
+        ${recent.length === 0 ? `<p class="small">まだありません。</p>` : ""}
+        ${recent.map((p, i) => {
+          const skipped = (done - 1 - i) % 9 === 4;
+          return `<div class="card row" style="padding:10px 12px">
+            <div class="t${p.tone}" style="width:34px;height:34px;flex:0 0 34px;border-radius:7px"></div>
+            <div class="grow" style="min-width:0">
+              <div style="font-size:13px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${p.name}</div>
+              <div class="small" style="color:${skipped ? "var(--ink-2)" : "var(--ok)"}">${skipped ? "すでに Immich にありました（とばしました）" : "送りました"}</div>
+            </div>
+            <span style="width:20px;height:20px;border-radius:50%;display:flex;align-items:center;justify-content:center;${skipped ? "border:1.8px solid var(--ink-3);color:var(--ink-3)" : "background:var(--ok);color:#fff"}">${skipped ? ic.minus : svg('<path d="M5 13l4 4 10-10"/>', 12, 3.4)}</span>
+          </div>`;
+        }).join("")}
+      </section>
+      <button class="btn danger big" data-act="canceljob">送るのをやめる</button>
+    </div>`;
+  }
+
+  // ---- カードの中身 ----
+  function cardScreen() {
+    const c = S.card;
+    return `<div class="wrap" style="max-width:760px">
+      ${backBar("ホームへ", "home")}
+      <h1 class="page">カードの中身</h1>
+      <section class="card pad">
+        <div class="rowtop">
+          <div class="iconbox on">${ic.card}</div>
+          <div class="grow">
+            <h2 style="font-size:16px;font-weight:650">${c.profile}</h2>
+            <p class="small" style="margin-top:4px">そう判断した理由：DCIM フォルダがあり、DJI_ で始まるファイルが 128 件見つかりました。</p>
+          </div>
+        </div>
+        <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:14px;margin-top:16px;padding-top:14px;border-top:1px solid var(--line-2)">
+          <div><div class="small">まだ取り込んでいないもの</div><div style="font-size:17px;font-weight:650">${c.count} 件</div></div>
+          <div><div class="small">大きさ</div><div style="font-size:17px;font-weight:650">${c.gib} GiB</div></div>
+          <div><div class="small">このカードの扱い</div><div style="font-size:17px;font-weight:650;color:${c.trusted ? "var(--ok)" : "var(--warn)"}">${c.trusted ? "信頼済み" : "未承認"}</div></div>
+        </div>
+      </section>
+      <section class="card pad">
+        <h2 style="font-size:14.5px;font-weight:650">${c.trusted ? "このカードは信頼済みです" : "このカードを信頼しますか"}</h2>
+        <p class="muted" style="margin-top:6px">${
+          c.trusted
+            ? "挿すだけで取り込みが始まります。取り消したいときは、下のボタンで戻せます。"
+            : "信頼すると、いま入っている中身も含めて、以後このカードを挿すだけで NAS へコピーされます（画面の操作は要りません）。"
+        }</p>
+        <p class="small" style="margin-top:8px">見分けはカードの中身の指紋で行うので、<b>同じ UUID の別のカードや、復元したカードを取り違えることがあります。</b></p>
+        <div class="acts" style="margin-top:14px">
+          ${c.trusted
+            ? '<button class="btn" data-act="untrust">信頼をやめる</button>'
+            : '<button class="btn outline" data-act="asktrust">このカードを信頼する</button>'}
+          <button class="btn primary" data-act="import">いま取り込む</button>
+        </div>
+      </section>
+    </div>`;
+  }
+
+  // ---- 設定 ----
+  function settingsScreen() {
+    return `<div class="wrap" style="max-width:760px">
+      <h1 class="page">設定</h1>
+
+      <section class="card pad">
+        <div class="row">
+          <div class="grow">
+            <h2 style="font-size:14.5px;font-weight:650">信頼したカードを自動で取り込む</h2>
+            <p class="small" style="margin-top:4px">オフにすると、信頼したカードでも毎回こちらで「取り込む」を押します。<b>送信はどちらの設定でも常に手動です。</b></p>
+          </div>
+          <button class="switch" data-act="toggleauto" role="switch" aria-checked="${S.auto}" aria-label="自動で取り込む"><i></i></button>
+        </div>
+      </section>
+
+      <section class="card pad">
+        <div class="sechead" style="margin-bottom:12px"><h2 style="font-size:14.5px">送り先</h2></div>
+        <div style="display:flex;flex-direction:column;gap:14px">
+          ${S.dests.map((d) => `<div class="row" style="flex-wrap:wrap">
+            <div class="grow">
+              <div style="font-size:14px;font-weight:600">${d.name}</div>
+              <div class="small">${d.enabled ? "使えます" : "休止中：送り先の候補に出ません"}</div>
+            </div>
+            <div class="acts">
+              <button class="btn sm" data-act="verify:${d.id}">つながるか確かめる</button>
+              <button class="btn sm" data-act="toggledest:${d.id}">${d.enabled ? "休止する" : "使う"}</button>
+            </div>
+          </div>`).join("")}
+        </div>
+        <button class="btn sm outline" style="margin-top:14px" data-act="noop">送り先を追加する</button>
+      </section>
+
+      <section class="card pad">
+        <div class="sechead" style="margin-bottom:12px"><h2 style="font-size:14.5px">カメラの種類</h2></div>
+        <p class="small" style="margin-bottom:12px">挿したカードがどの機種かを見分けるための決まりです。ふだん触る必要はありません。</p>
+        <div style="display:flex;flex-direction:column;gap:10px">
+          ${["DJI Osmo Pocket（つなぐ・日時を直す）", "Canon EOS（RAW と JPEG を束ねる）", "一般的な DCIM カード（取り込むだけ）"].map((n) => `<div class="row"><span class="grow" style="font-size:13.5px">${n}</span><button class="btn sm quiet" data-act="noop">複製して変える</button></div>`).join("")}
+        </div>
+      </section>
+
+      <section class="card pad">
+        <div class="sechead" style="margin-bottom:10px"><h2 style="font-size:14.5px">詳しい情報</h2></div>
+        <p class="small" style="margin-bottom:12px">ふだんは見なくて大丈夫です。困ったときにここを開きます。</p>
+        <div style="display:flex;flex-direction:column;gap:2px">
+          ${[["作業の履歴", "取り込みや送信がいつ終わったか"], ["つないだ動画の記録", "どの部品から作ったか、破棄した組み合わせ"], ["使っていないファイル", "つなぎ直しで置き換わった古い出力"], ["接続中のカード", "判定の理由と、信頼の記録"]].map(
+            (r) => `<button class="navitem" data-act="noop" style="height:52px">${ic.list}<span class="grow"><b style="display:block;font-size:13.5px;color:var(--ink)">${r[0]}</b><span class="small">${r[1]}</span></span>${svg('<path d="M10 6l6 6-6 6"/>', 16, 1.8)}</button>`
+          ).join("")}
+        </div>
+      </section>
+
+      <div class="row"><button class="btn sm quiet" data-act="reset">この試作を最初の状態に戻す</button></div>
+    </div>`;
+  }
+
+  // ---- ダイアログ ----
+  function dialogView() {
+    const d = S.dialog;
+    let title = "", body = "", ok = "実行する", tone = "primary";
+    if (d.kind === "send") {
+      const list = d.ids.map(byId).filter(Boolean);
+      const names = S.dests.filter((x) => S.sendDests.has(x.id) && x.enabled).map((x) => x.name);
+      const photos = list.filter((p) => p.kind === "photo").length;
+      title = "この内容で送りますか";
+      ok = `${names.join(" / ")} へ ${list.length} 件を送る`;
+      body = `<p class="muted" style="margin-bottom:18px">送ったあとで取り消すことはできません。送り先を確かめてください。</p>
+        <dl class="factlist">
+          <div><dt>送るもの</dt><dd>${list.length} 件</dd><span class="small">（写真 ${photos} ・ 動画 ${list.length - photos}）</span></div>
+          <div><dt>合計の大きさ</dt><dd>${fmt(sumMiB(list))}</dd></div>
+          <div><dt>送り先</dt><dd><span class="row" style="gap:8px"><span style="width:9px;height:9px;border-radius:50%;background:var(--ok)"></span>${names.join(" / ")}</span></dd></div>
+        </dl>
+        <ul class="muted" style="margin-top:16px;padding-left:19px;line-height:1.85;font-size:12.5px">
+          <li>すでに Immich にある写真は、自動でとばします。</li>
+          <li>進み具合はホームで見られます。この画面を閉じても続きます。</li>
+        </ul>`;
+    } else if (d.kind === "trust") {
+      title = "このカードを信頼しますか";
+      ok = "信頼する";
+      body = `<p class="muted">${S.card.profile} のカードを信頼すると、<b>いま入っている中身も含めて、以後このカードを挿すだけで NAS へコピーされます</b>（画面の操作は要りません）。取り込みは承認の数秒後に始まります。</p>
+        <p class="muted" style="margin-top:12px">見分けはカードの中身の指紋で行うので、<b>同じ UUID の別のカードや、復元したカードを取り違えることがあります。</b></p>`;
+    } else if (d.kind === "approve") {
+      const a = S.approvals.find((x) => x.id === d.id);
+      title = "Immich の日時を書き換えますか";
+      ok = "この日時に直す";
+      body = `<p class="muted" style="margin-bottom:16px">この写真は、先に誰かが Immich へ上げていたものです。書き換えると元には戻せません。</p>
+        <dl class="factlist">
+          <div><dt>いまの日時</dt><dd>${a.current || "（読めませんでした）"}</dd></div>
+          <div><dt>直したあと</dt><dd>${a.proposed}</dd></div>
+        </dl>`;
+    } else if (d.kind === "split") {
+      const m = S.merges.find((x) => x.id === d.id);
+      title = "この組み合わせを取り消しますか";
+      ok = "別々のままにする";
+      tone = "outline";
+      body = `<p class="muted">${m.when} の ${m.parts} 本を、別々の動画として扱います。<b>ファイルは何も消えません。</b>次に候補を探したとき、この組み合わせはもう出しません。</p>`;
+    }
+    return `<div class="backdrop" data-act="closedialog">
+      <div class="dialog" role="dialog" aria-modal="true" aria-label="${title}" data-stop="1">
+        <h2 style="font-size:21px;font-weight:650;margin-bottom:6px">${title}</h2>
+        ${body}
+        <div class="row" style="gap:10px;margin-top:22px">
+          <button class="btn" data-act="closedialog">やめる</button>
+          <button class="btn ${tone}" style="flex:1" data-act="confirm">${ok}</button>
+        </div>
+      </div>
+    </div>`;
+  }
+
+  // ---- 描画 ----
+  function screen() {
+    switch (S.route) {
+      case "photos": return photosScreen();
+      case "settings": return settingsScreen();
+      case "merge": return mergeScreen();
+      case "approvals": return approvalsScreen();
+      case "send": return sendScreen();
+      case "sending": return sendingScreen();
+      case "carddetail": return cardScreen();
+      default: return homeScreen();
+    }
+  }
+
+  function render() {
+    const y = window.scrollY;
+    document.getElementById("app").innerHTML = `<div class="app">${sideNav()}<main class="main">${screen()}</main>${tabBar()}</div>
+      ${S.dialog ? dialogView() : ""}
+      ${S.toast ? `<div class="toast" role="status">${S.toast}</div>` : ""}`;
+    window.scrollTo(0, y);
+  }
+
+  function toast(msg) {
+    S.toast = msg;
+    clearTimeout(toastTimer);
+    toastTimer = setTimeout(() => { S.toast = null; render(); }, 4200);
+  }
+
+  function runJob(job, onDone) {
+    S.job = Object.assign({ pct: 0 }, job);
+    clearInterval(timer);
+    timer = setInterval(() => {
+      if (!S.job) { clearInterval(timer); return; }
+      S.job.pct += 3;
+      if (S.job.pct >= 100) {
+        clearInterval(timer);
+        S.job = null;
+        onDone();
+      }
+      render();
+    }, 110);
+    render();
+  }
+
+  // ---- 操作 ----
+  const ACT = {
+    nav(v) {
+      if (["home", "photos", "settings"].includes(v)) S.tab = v;
+      else if (v === "merge" || v === "approvals" || v === "carddetail" || v === "send") S.tab = "home";
+      S.route = v;
+    },
+    filter(v) { S.filter = v; },
+    pick(v) { S.sel.has(v) ? S.sel.delete(v) : S.sel.add(v); },
+    pickday(v) {
+      filtered().filter((p) => p.date === Number(v)).forEach((p) => S.sel.add(p.id));
+    },
+    clearsel() { S.sel.clear(); },
+    showunsent() { S.tab = "photos"; S.route = "photos"; S.filter = "unsent"; },
+    sendall() { S.fromSelection = null; S.preset = "unsent"; ACT.nav("send"); },
+    sendselection() {
+      S.fromSelection = [...S.sel];
+      S.preset = "selection";
+      S.tab = "photos"; S.route = "send";
+    },
+    preset(v) {
+      if (v === "pick") { S.tab = "photos"; S.route = "photos"; S.filter = "unsent"; toast("送りたい写真を選んでから、下の「送る」を押してください。"); return; }
+      S.preset = v;
+    },
+    dest(v) { S.sendDests.has(v) ? S.sendDests.delete(v) : S.sendDests.add(v); },
+    toggledest(v) {
+      const d = dest(v);
+      d.enabled = !d.enabled;
+      if (!d.enabled) S.sendDests.delete(v);
+      toast(`${d.name} を${d.enabled ? "使うようにしました" : "休止しました"}。`);
+    },
+    verify(v) { toast(`${dest(v).name} につながりました。`); },
+    toggleauto() { S.auto = !S.auto; toast(`自動の取り込みを${S.auto ? "オン" : "オフ"}にしました。`); },
+    asktrust() { S.dialog = { kind: "trust" }; },
+    untrust() { S.card.trusted = false; toast("信頼をやめました。次からは毎回こちらで取り込みます。"); },
+    asksplit(v) { S.dialog = { kind: "split", id: v }; },
+    askapprove(v) { S.dialog = { kind: "approve", id: v }; },
+    askconfirm() { S.dialog = { kind: "send", ids: targetIds() }; },
+    closedialog() { S.dialog = null; },
+    eject() { S.card.present = false; S.route = S.route === "carddetail" ? "home" : S.route; S.tab = S.route === "home" ? "home" : S.tab; toast("カードを取り外しました。抜いて大丈夫です。"); },
+    canceljob() {
+      clearInterval(timer); S.job = null;
+      if (S.route === "sending") { S.route = "home"; S.tab = "home"; }
+      toast("途中でやめました。すでに終わった分はそのまま残ります。");
+    },
+    reject(v) {
+      const a = S.approvals.find((x) => x.id === v);
+      const p = byId(a.photo);
+      if (p) p.status = "sent";
+      S.approvals = S.approvals.filter((x) => x.id !== v);
+      toast("Immich には何もせずに、確認を終えました。");
+      if (!S.approvals.length) { S.route = "home"; S.tab = "home"; }
+    },
+    import() {
+      if (S.job) return;
+      const n = S.card.count;
+      runJob(
+        { title: "カードから取り込んでいます", total: n, counter: (j) => `${Math.floor((j.pct / 100) * j.total)} / ${j.total} 件`, sub: (j) => `DJI_00${40 + (j.pct % 9)}.MP4 ・ ${((S.card.gib * j.pct) / 100).toFixed(1)} GiB / ${S.card.gib} GiB ・ 82 MiB/秒` },
+        () => {
+          S.card.count = 0;
+          for (let i = 0; i < 6; i++) {
+            S.photos.unshift({ id: "n" + i + Date.now(), name: "DJI_" + (2000 + i) + (i % 3 === 0 ? ".MP4" : ".JPG"), kind: i % 3 === 0 ? "video" : "photo", date: 0, dur: i % 3 === 0 ? "3:12" : null, mib: i % 3 === 0 ? 1400 : 24, status: "unsent", tone: i % 8, merged: false });
+          }
+          toast(`${n} 件を NAS に取り込みました。分かれた動画が ${S.merges.length} 本見つかっています。`);
+        }
+      );
+    },
+    merge(v) {
+      if (S.job) return;
+      const m = S.merges.find((x) => x.id === v);
+      runJob(
+        { title: "動画をつないでいます", total: m.parts, counter: (j) => `${Math.min(m.parts, Math.ceil((j.pct / 100) * m.parts))} / ${m.parts} パート`, sub: (j) => `${m.when} の動画 ・ ${((m.gib * j.pct) / 100).toFixed(1)} GiB / ${m.gib} GiB` },
+        () => {
+          S.merges = S.merges.filter((x) => x.id !== v);
+          S.photos.unshift({ id: "mg" + v, name: "DJI_" + m.when.replace(/[^0-9]/g, "") + "_つないだ.MP4", kind: "video", date: 0, dur: m.mins + ":00", mib: m.gib * 1024, status: "unsent", tone: 4, merged: true });
+          toast(`${m.when} の動画を 1 本につなぎました。中身を確かめて問題なければ送れます。`);
+          if (!S.merges.length) { S.route = "home"; S.tab = "home"; }
+        }
+      );
+    },
+    confirm() {
+      const d = S.dialog;
+      S.dialog = null;
+      if (d.kind === "trust") {
+        S.card.trusted = true;
+        toast("信頼しました。次からは挿すだけで取り込みます。");
+      } else if (d.kind === "split") {
+        const m = S.merges.find((x) => x.id === d.id);
+        S.merges = S.merges.filter((x) => x.id !== d.id);
+        toast(`${m.when} の ${m.parts} 本は、別々のままにします。`);
+        if (!S.merges.length) { S.route = "home"; S.tab = "home"; }
+      } else if (d.kind === "approve") {
+        const a = S.approvals.find((x) => x.id === d.id);
+        const p = byId(a.photo);
+        if (p) p.status = "sent";
+        S.approvals = S.approvals.filter((x) => x.id !== d.id);
+        toast("Immich の日時を直しました。");
+        if (!S.approvals.length) { S.route = "home"; S.tab = "home"; }
+      } else if (d.kind === "send") {
+        const list = d.ids.map(byId).filter(Boolean);
+        const names = S.dests.filter((x) => S.sendDests.has(x.id) && x.enabled).map((x) => x.name);
+        S.route = "sending";
+        runJob(
+          {
+            title: "送っています",
+            total: list.length,
+            list,
+            bytes: sumMiB(list),
+            destName: names.join(" / "),
+            counter: (j) => `${Math.min(j.total, Math.round((j.pct / 100) * j.total))} / ${j.total} 件`,
+            sub: (j) => `${j.destName} へ ・ ${fmt((j.bytes * j.pct) / 100)} / ${fmt(j.bytes)} ・ 82 MiB/秒`,
+          },
+          () => {
+            list.forEach((p) => { p.status = "sent"; });
+            S.sel.clear();
+            S.fromSelection = null;
+            S.done = `${list.length} 件を「${names.join(" / ")}」へ送りました。カードを挿すと、またここに次の手が出ます。`;
+            S.route = "home"; S.tab = "home";
+            toast(`${list.length} 件を送りました。`);
+          }
+        );
+      }
+    },
+    reset() { clearInterval(timer); S = initial(); toast("最初の状態に戻しました。"); },
+    noop() { toast("この試作では、この先はまだ作っていません。"); },
+  };
+
+  document.getElementById("app").addEventListener("click", (e) => {
+    const stop = e.target.closest("[data-stop]");
+    const hit = e.target.closest("[data-act]");
+    if (!hit) return;
+    if (hit.classList.contains("backdrop") && stop) return;
+    const [name, arg] = hit.dataset.act.split(":");
+    const fn = ACT[name];
+    if (!fn) return;
+    fn(arg);
+    render();
+  });
+
+  render();
+})();
+</script>
