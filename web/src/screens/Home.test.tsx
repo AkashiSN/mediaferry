@@ -320,6 +320,83 @@ describe("ホーム", () => {
     await waitFor(() => expect(screen.getByText(/送信中 3 件/)).toBeInTheDocument());
   });
 
+  // レビュー指摘（Critical #2）: `failed` はホームのどこにも出ていなかった。
+  it("送れなかったものがあれば、送り先の行に件数を出す", async () => {
+    stubApi({
+      "/dashboard": {
+        ...EMPTY_DASHBOARD,
+        destinations: [
+          {
+            destination_id: "d1",
+            name: "home",
+            enabled: true,
+            complete: 5,
+            failed: 2,
+            awaiting_approval: 0,
+            pending: 0,
+            unsent: 0,
+            stacked: 0,
+            stack_skipped: 0,
+          },
+        ],
+      },
+      "/devices": { volumes: [] },
+      "/jobs": { jobs: [] },
+    });
+    renderHome();
+    await waitFor(() => expect(screen.getByText(/送れなかった 2 件/)).toBeInTheDocument());
+  });
+
+  it("送れなかったものが無ければ、その枠は出さない", async () => {
+    stubApi({
+      "/dashboard": {
+        ...EMPTY_DASHBOARD,
+        destinations: [
+          {
+            destination_id: "d1",
+            name: "home",
+            enabled: true,
+            complete: 5,
+            failed: 0,
+            awaiting_approval: 0,
+            pending: 0,
+            unsent: 0,
+            stacked: 0,
+            stack_skipped: 0,
+          },
+        ],
+      },
+      "/devices": { volumes: [] },
+      "/jobs": { jobs: [] },
+    });
+    renderHome();
+    await waitFor(() => expect(screen.getByText(/送信済み 5/)).toBeInTheDocument());
+    expect(screen.queryByText(/送れなかった/)).toBeNull();
+  });
+
+  // レビュー指摘（Important #8）: 孤立・見つからないファイルの報告が画面から
+  // 消えていた（`docs/decisions.md`「孤立ファイルは報告するだけ」の *報告*）。
+  it("行き場の無いファイルと、見つからないファイルを報告する", async () => {
+    stubApi({
+      "/dashboard": { ...EMPTY_DASHBOARD, orphans: 3, missing: 1 },
+      "/devices": { volumes: [] },
+      "/jobs": { jobs: [] },
+    });
+    renderHome();
+    const note = await screen.findByRole("status");
+    expect(note).toHaveTextContent("どこにも結び付いていないファイル 3 件");
+    expect(note).toHaveTextContent("見つからないファイル 1 件");
+    // **削除の操作は足さない**（自動削除はデータを失う経路になる）。
+    expect(note).toHaveTextContent("自動では消しません");
+  });
+
+  it("どちらも 0 件なら、報告そのものを出さない", async () => {
+    stubApi({ "/dashboard": EMPTY_DASHBOARD, "/devices": { volumes: [] }, "/jobs": { jobs: [] } });
+    renderHome();
+    await waitFor(() => expect(screen.getByText("いま、やることはありません")).toBeInTheDocument());
+    expect(screen.queryByText(/どこにも結び付いていないファイル/)).toBeNull();
+  });
+
   it("開いた直後は、接続が切れているとは出さない（まだ繋がったことが無いだけなので）", async () => {
     stubApi({ "/dashboard": EMPTY_DASHBOARD, "/devices": { volumes: [] }, "/jobs": { jobs: [] } });
     renderHome();

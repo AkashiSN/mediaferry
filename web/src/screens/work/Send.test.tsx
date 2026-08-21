@@ -6,7 +6,7 @@ import { MemoryRouter, Route, Routes, useLocation } from "react-router-dom";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { stubApi } from "../../test/api";
-import { SendScreen, summarise } from "./Send";
+import { SendScreen, mergeMedia, summarise } from "./Send";
 
 const DESTINATIONS = {
   destinations: [
@@ -39,6 +39,32 @@ beforeEach(() => {
   document.cookie = "XSRF-TOKEN=token; path=/";
 });
 afterEach(() => vi.restoreAllMocks());
+
+describe("宛先ごとの未送信をまとめる", () => {
+  const m = (id: string, captured_at: string) => ({
+    id,
+    rel_path: `${id}.JPG`,
+    kind: "photo",
+    captured_at,
+    size_bytes: 1024,
+  });
+
+  it("同じ写真は 1 度だけにする", () => {
+    const merged = mergeMedia([
+      { media: [m("m1", "2026-08-18T10:00:00+09:00")] },
+      { media: [m("m1", "2026-08-18T10:00:00+09:00")] },
+    ]);
+    expect(merged.map((media) => media.id)).toEqual(["m1"]);
+  });
+
+  it("並びは API と同じ（新しい撮影日時が先、同じなら id の大きい方が先）", () => {
+    const merged = mergeMedia([
+      { media: [m("a", "2026-08-17T09:00:00+09:00"), m("c", "2026-08-18T10:00:00+09:00")] },
+      { media: [m("b", "2026-08-18T10:00:00+09:00")] },
+    ]);
+    expect(merged.map((media) => media.id)).toEqual(["c", "b", "a"]);
+  });
+});
 
 describe("送る", () => {
   it("休止中の宛先は選べず、理由が出る", async () => {
@@ -109,6 +135,12 @@ describe("送った結果の 1 文", () => {
   it("断られた組と、開始に失敗した宛先を隠さない", () => {
     expect(summarise(3, [{ reason: "結合中" }], ["旅行用"], 1)).toContain("送れない組が 1 件");
     expect(summarise(3, [{ reason: "結合中" }], ["旅行用"], 1)).toContain("旅行用");
+  });
+
+  // レビュー指摘（Critical #2）: 案内は実在する導線を指すこと。設定 › 送り先の
+  // カードに「送り直す」がある。
+  it("開始できなかったときは、実在する導線を案内する", () => {
+    expect(summarise(1, [], ["旅行用"], 0)).toContain("設定 › 送り先の「送り直す」");
   });
 
   // `screens.test.tsx` から移した（Ruling 2）。`LibraryScreen` を描画するテストでは
@@ -290,6 +322,163 @@ describe("対象の解決", () => {
     await waitFor(() => expect(screen.getByRole("button", { name: /内容を確かめる/ })).toBeEnabled());
     expect(screen.getByText(/1 件のうち、はじめの 1 件/)).toBeInTheDocument();
     expect(await screen.findByText(/1 件は見つからないので外しました/)).toBeInTheDocument();
+  });
+});
+
+// レビュー指摘（Important #1）: 宛先を 2 つ選ぶと、対象が 1 宛先ぶんしか
+// 引かれず「まだ送っていないもの、すべて」が嘘になる。
+describe("宛先を複数選んだときの対象", () => {
+  const TWO = {
+    destinations: [
+      { id: "d1", name: "家の Immich", enabled: true },
+      { id: "d2", name: "旅行用 Immich", enabled: true },
+    ],
+  };
+  const page = (media: unknown[], total: number) => ({ media, total, page: 1, page_size: 200 });
+  const m = (id: string, captured_at: string) => ({
+    id,
+    rel_path: `${id}.JPG`,
+    kind: "photo",
+    captured_at,
+    size_bytes: 1024,
+  });
+
+  /** 宛先ごとに違う未送信を返す `fetch`。 */
+  function stubPerDestination(byDestination: Record<string, unknown>) {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn((input: string) => {
+        const path = input.replace(/^\/api/, "");
+        for (const [id, body] of Object.entries(byDestination)) {
+          if (path.startsWith("/media?") && path.includes(`destination_id=${id}`)) {
+            return Promise.resolve(new Response(JSON.stringify(body), { status: 200 }));
+          }
+        }
+        if (path.startsWith("/destinations")) {
+          return Promise.resolve(new Response(JSON.stringify(TWO), { status: 200 }));
+        }
+        return Promise.resolve(new Response("{}", { status: 200 }));
+      }),
+    );
+  }
+
+  it("選んだ宛先すべての未送信を集め、同じ写真は 1 度だけ数える", async () => {
+    stubPerDestination({
+      d1: page([m("m1", "2026-08-18T10:00:00+09:00"), m("m2", "2026-08-18T09:00:00+09:00")], 2),
+      d2: page([m("m2", "2026-08-18T09:00:00+09:00"), m("m3", "2026-08-18T08:00:00+09:00")], 2),
+    });
+    renderSend();
+    await waitFor(() => expect(screen.getByRole("button", { name: /家の Immich/ })).toBeEnabled());
+    await userEvent.click(screen.getByRole("button", { name: /家の Immich/ }));
+    await userEvent.click(screen.getByRole("button", { name: /旅行用 Immich/ }));
+
+    // m1・m2・m3 の 3 件（m2 を二重に数えない）。1 宛先ぶんなら 2 件になる。
+    await waitFor(() => expect(screen.getByText(/3 件のうち、はじめの 3 件/)).toBeInTheDocument());
+  });
+
+  it("宛先ごとに問い合わせる（片方だけで済ませない）", async () => {
+    const seen: string[] = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn((input: string) => {
+        const path = input.replace(/^\/api/, "");
+        if (path.startsWith("/media?")) {
+          seen.push(path);
+          return Promise.resolve(new Response(JSON.stringify(page([], 0)), { status: 200 }));
+        }
+        if (path.startsWith("/destinations")) {
+          return Promise.resolve(new Response(JSON.stringify(TWO), { status: 200 }));
+        }
+        return Promise.resolve(new Response("{}", { status: 200 }));
+      }),
+    );
+    renderSend();
+    await waitFor(() => expect(screen.getByRole("button", { name: /家の Immich/ })).toBeEnabled());
+    await userEvent.click(screen.getByRole("button", { name: /家の Immich/ }));
+    await userEvent.click(screen.getByRole("button", { name: /旅行用 Immich/ }));
+
+    await waitFor(() =>
+      expect(seen.some((path) => path.includes("destination_id=d2"))).toBe(true),
+    );
+    expect(seen.some((path) => path.includes("destination_id=d1"))).toBe(true);
+  });
+
+  it("宛先が 2 つ以上のときは、残りの件数を数で言わない（重複して数えるので）", async () => {
+    stubPerDestination({
+      d1: page([m("m1", "2026-08-18T10:00:00+09:00")], 300),
+      d2: page([m("m1", "2026-08-18T10:00:00+09:00")], 300),
+    });
+    renderSend();
+    await waitFor(() => expect(screen.getByRole("button", { name: /家の Immich/ })).toBeEnabled());
+    await userEvent.click(screen.getByRole("button", { name: /家の Immich/ }));
+    await userEvent.click(screen.getByRole("button", { name: /旅行用 Immich/ }));
+
+    expect(
+      await screen.findByText(/1 度に送れる分を超えています/),
+    ).toBeInTheDocument();
+    expect(screen.queryByText(/残り 299 件/)).toBeNull();
+  });
+
+  it("宛先を 1 つも選んでいなければ、まず宛先を選ばせる", async () => {
+    // 宛先が 2 つとも使えるので自動選択は効かない（`Photos.tsx` と同じ
+    // 「候補が 1 つだけなら黙って使う」規則）。
+    stubPerDestination({});
+    renderSend();
+    await waitFor(() => expect(screen.getByRole("button", { name: /家の Immich/ })).toBeEnabled());
+    // 「すべて」と「いちばん新しい撮影日」の両方が、宛先待ちだと言う。
+    expect(screen.getAllByText("宛先を選んでください")).toHaveLength(2);
+  });
+
+  it("宛先を選ぶ前の説明は、宛先を単数と決めつけない", async () => {
+    stubPerDestination({});
+    renderSend();
+    await waitFor(() => expect(screen.getByRole("button", { name: /家の Immich/ })).toBeEnabled());
+    await userEvent.click(screen.getByRole("button", { name: /家の Immich/ }));
+    await userEvent.click(screen.getByRole("button", { name: /旅行用 Immich/ }));
+    await userEvent.click(screen.getByRole("radio", { name: /いちばん新しい撮影日/ }));
+
+    expect(screen.getByRole("radio", { name: /選んだ送り先へまだ送っていないもの/ })).toBeInTheDocument();
+  });
+});
+
+// レビュー指摘（Important #2）: 写真の画面から戻ったときに、選んでいた宛先が
+// 巻き戻らないこと。
+describe("写真の画面から戻ったとき", () => {
+  it("持ち帰った宛先を選んだ状態で始める", async () => {
+    stubApi({
+      "/destinations": {
+        destinations: [
+          { id: "d1", name: "家の Immich", enabled: true },
+          { id: "d2", name: "旅行用 Immich", enabled: true },
+        ],
+      },
+      "/media/m1": {
+        id: "m1",
+        rel_path: "a.JPG",
+        kind: "photo",
+        captured_at: "2026-08-18T10:00:00+09:00",
+        size_bytes: 1024,
+      },
+      "/media": { media: [], total: 0, page: 1, page_size: 200 },
+    });
+    render(
+      <MemoryRouter
+        initialEntries={[{ pathname: "/send", state: { ids: ["m1"], destinationIds: ["d2"] } }]}
+      >
+        <SendScreen />
+      </MemoryRouter>,
+    );
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: /旅行用 Immich/ })).toHaveAttribute(
+        "aria-pressed",
+        "true",
+      ),
+    );
+    expect(screen.getByRole("button", { name: /家の Immich/ })).toHaveAttribute(
+      "aria-pressed",
+      "false",
+    );
+    expect(screen.getByText("送り先：旅行用 Immich")).toBeInTheDocument();
   });
 });
 

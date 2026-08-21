@@ -7,6 +7,8 @@ import { request } from "./api/client";
 import { useQuery } from "./api/hooks";
 import { Layout } from "./components/Layout";
 import type { Warning } from "./components/Layout";
+import { useEvents } from "./hooks/useEvents";
+import { useReloadOnEvents } from "./hooks/useReloadOnEvents";
 import { tasksFrom } from "./hooks/useTasks";
 import type { DashboardCounts } from "./hooks/useTasks";
 import { CardDetailScreen } from "./screens/work/CardDetail";
@@ -32,11 +34,18 @@ type Settings = { warnings: Warning[] };
  * ここで 1 回だけ引く**（画面ごとに数えさせない方針）。`App` 本体に置くと、
  * ログイン確認が終わる前の描画でも `useEffect` が走ってしまうので、別の
  * コンポーネントに切り出してマウント自体をログイン後まで遅らせる。
+ *
+ * **枠も進捗で取り直す。** ここは `BrowserRouter` の外側なので画面を移っても
+ * 再マウントせず、取り直さないとナビのバッジも警告バナーもセッション中ずっと
+ * 開いた時のままになる（§13「画面を再読み込みせずに進む」）。
  */
 function AuthedApp() {
   const settings = useQuery<Settings>("/settings");
   const dashboard = useQuery<DashboardCounts>("/dashboard");
   const taskCount = tasksFrom(dashboard.data).length;
+  const { received } = useEvents();
+  useReloadOnEvents(received, settings.reload);
+  useReloadOnEvents(received, dashboard.reload);
 
   return (
     <BrowserRouter>

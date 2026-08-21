@@ -32,6 +32,16 @@ describe("送信中", () => {
     expect(screen.getByRole("button", { name: "閉じる" })).toBeInTheDocument();
   });
 
+  // レビュー指摘（Important #3）: 「やること」は残っている仕事しか出さないので、
+  // 送り終えると空になる。結果があるのは 設定 › 詳しい情報 › 作業の履歴。
+  it("結果を見る先は、実在する画面を指す", async () => {
+    stubApi({ "/jobs": { jobs: [] } });
+    renderSending({ jobIds: ["j1"] });
+    const link = screen.getByRole("link", { name: "作業の履歴" });
+    expect(link).toHaveAttribute("href", "/settings/jobs");
+    expect(screen.queryByText(/「やること」から結果/)).toBeNull();
+  });
+
   it("断られた組と、開始に失敗した宛先を隠さない", async () => {
     stubApi({ "/jobs": { jobs: [] } });
     renderSending({

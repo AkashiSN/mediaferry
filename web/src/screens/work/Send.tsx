@@ -26,6 +26,30 @@ type PairResult = { pairs: Pair[] };
 /** 何を送るか（§13「送る」の 2 段目）。`pick` だけは選ぶと写真の画面へ移る。 */
 type Preset = "selection" | "unsent" | "day0" | "pick";
 
+/** 1 度に読む件数（`core/listing.MAX_PAGE_SIZE` と同じ）。 */
+const PAGE_SIZE = 200;
+
+/**
+ * 宛先ごとの未送信を 1 つの並びにまとめる。**同じ写真を二重に数えない。**
+ *
+ * 並びは API と同じ `captured_at DESC, id DESC`（SQL も文字列として比べるので、
+ * オフセット付きの値をそのまま比べれば同じ順になる）。
+ */
+export function mergeMedia(pages: { media: Media[] }[]): Media[] {
+  const byId = new Map<string, Media>();
+  for (const page of pages) {
+    for (const media of page.media) {
+      byId.set(media.id, media);
+    }
+  }
+  return [...byId.values()].sort((left, right) => {
+    if (left.captured_at !== right.captured_at) {
+      return left.captured_at < right.captured_at ? 1 : -1;
+    }
+    return left.id < right.id ? 1 : -1;
+  });
+}
+
 /** 送信の結果を 1 文にする（**断られた組と、開始に失敗した宛先を隠さない**）。 */
 export function summarise(
   total: number,
@@ -39,7 +63,9 @@ export function summarise(
     parts.push(`送れない組が ${rejected.length} 件ありました（${reasons.join(" / ")}）。`);
   }
   if (failures.length > 0) {
-    parts.push(`開始できなかった宛先: ${failures.join(" / ")}。設定 › 送り先から再試行できます。`);
+    parts.push(
+      `開始できなかった宛先: ${failures.join(" / ")}。設定 › 送り先の「送り直す」で始め直せます。`,
+    );
   }
   return parts.join("");
 }
@@ -47,12 +73,14 @@ export function summarise(
 export function SendScreen() {
   const location = useLocation();
   const navigate = useNavigate();
-  const ids = (location.state as { ids?: string[] } | null)?.ids;
+  const passed = location.state as { ids?: string[]; destinationIds?: string[] } | null;
+  const ids = passed?.ids;
 
   const [preset, setPreset] = useState<Preset>(ids && ids.length > 0 ? "selection" : "unsent");
-  // **選んだ宛先。** 候補が 1 つしかないときは、黙ってそれを使う
-  // （`Photos.tsx` の宛先選びと同じ考え方）。空のままなら derive 側で補う。
-  const [targets, setTargets] = useState<Set<string>>(new Set());
+  // **選んだ宛先。** 写真の画面から持ち帰った宛先があれば、それを選んだ状態で
+  // 始める（§13 の「宛先を先に決める」が往復で巻き戻らないように）。候補が
+  // 1 つしかないときは黙ってそれを使う（`Photos.tsx` の宛先選びと同じ考え方）。
+  const [targets, setTargets] = useState<Set<string>>(new Set(passed?.destinationIds ?? []));
   const [confirming, setConfirming] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<unknown>(null);
@@ -62,7 +90,11 @@ export function SendScreen() {
   const [targetMedia, setTargetMedia] = useState<Media[]>([]);
   // サーバ側の総数。`targetMedia` は 1 度に読む上限（200 件）で切れることがあるので、
   // 「すべて」と名乗る対象がそれより多いときに気付けるよう別に持つ。
-  const [targetTotal, setTargetTotal] = useState(0);
+  // **宛先が 2 つ以上のときは `null`。** 宛先ごとの総数を足すと、両方に未送信の
+  // 写真を二重に数えてしまう（残りの件数は数で言えない）。
+  const [targetTotal, setTargetTotal] = useState<number | null>(0);
+  // 1 度に読む上限で切れたかどうか。件数が言えないときでも、切れたことは言う。
+  const [targetTruncated, setTargetTruncated] = useState(false);
   const [targetLoading, setTargetLoading] = useState(false);
 
   const destinationsQuery = useQuery<Destinations>("/destinations");
@@ -79,7 +111,9 @@ export function SendScreen() {
   const chosen = destinationRows.filter(
     (row) => effectiveTargets(targets).has(row.id) && row.enabled,
   );
-  const primaryDestinationId = chosen[0]?.id ?? null;
+  // **効果の依存は id の並びで見る。** `chosen` は毎回新しい配列なので、その
+  // まま依存に置くと描画のたびに読み直しに行く。
+  const chosenKey = chosen.map((destination) => destination.id).join(",");
 
   function toggleTarget(id: string) {
     setTargets((current) => {
@@ -96,23 +130,49 @@ export function SendScreen() {
   // 対象の解決（§10）。preset ごとに叩く API が違う。
   useEffect(() => {
     let cancelled = false;
+    const targetIds = chosenKey === "" ? [] : chosenKey.split(",");
+
+    /** 選んだ宛先ぶんの「まだ送っていない」を、宛先ごとに 1 巡ずつ読む。 */
+    function unsentPages(day: { from: string; to: string } | null): Promise<MediaPage[]> {
+      return Promise.all(
+        targetIds.map((destinationId) => {
+          const query = new URLSearchParams({
+            destination_id: destinationId,
+            status: "unsent",
+            page_size: String(PAGE_SIZE),
+          });
+          if (day !== null) {
+            query.set("captured_from", day.from);
+            query.set("captured_to", day.to);
+          }
+          return request<MediaPage>(`/media?${query.toString()}`);
+        }),
+      );
+    }
+
+    function clear() {
+      if (!cancelled) {
+        setTargetMedia([]);
+        setTargetTotal(0);
+        setTargetTruncated(false);
+      }
+    }
 
     async function resolve() {
       if (preset === "pick") {
-        // 自分で選ぶ：写真の画面へ渡す。宛先が決まっていれば絞り込みも渡す。
+        // 自分で選ぶ：写真の画面へ渡す。写真の画面は宛先を 1 つしか絞れないので、
+        // 絞り込みに渡すのは先頭の 1 つ。
         navigate(
-          `/photos?status=unsent${primaryDestinationId ? `&destination_id=${primaryDestinationId}` : ""}`,
+          `/photos?status=unsent${targetIds[0] ? `&destination_id=${targetIds[0]}` : ""}`,
         );
         return;
       }
       if (preset === "selection" && (!ids || ids.length === 0)) {
-        setTargetMedia([]);
-        setTargetTotal(0);
+        clear();
         return;
       }
-      if (preset !== "selection" && primaryDestinationId === null) {
-        setTargetMedia([]);
-        setTargetTotal(0);
+      if (preset !== "selection" && targetIds.length === 0) {
+        clear();
         return;
       }
 
@@ -133,6 +193,7 @@ export function SendScreen() {
           if (!cancelled) {
             setTargetMedia(found);
             setTargetTotal(found.length);
+            setTargetTruncated(false);
             if (missing > 0) {
               setNote(`${missing} 件は見つからないので外しました。`);
             }
@@ -140,40 +201,37 @@ export function SendScreen() {
           return;
         }
 
-        const query = new URLSearchParams({
-          destination_id: primaryDestinationId as string,
-          status: "unsent",
-          page_size: "200",
-        });
+        let pages = await unsentPages(null);
         if (preset === "day0") {
           // **いちばん新しい撮影日のぶんだけ。** 並びは `captured_at DESC` なので、
-          // 絞らずに 1 巡取った先頭が最新の撮影日。その日の 0 時〜24 時で絞り直す。
-          const latest = await request<MediaPage>(`/media?${query.toString()}`);
-          const top = latest.media[0];
+          // 絞らずに 1 巡取った先頭が最新の撮影日（宛先が複数あるときは、その中で
+          // いちばん新しいもの）。その日の 0 時〜24 時で絞り直す。
+          const top = mergeMedia(pages)[0];
           if (top === undefined) {
-            if (!cancelled) {
-              setTargetMedia([]);
-              setTargetTotal(0);
-            }
+            clear();
             return;
           }
           const day = top.captured_at.slice(0, 10);
           const offset = top.captured_at.slice(19);
-          query.set("captured_from", `${day}T00:00:00${offset}`);
-          query.set("captured_to", `${day}T23:59:59${offset}`);
+          pages = await unsentPages({
+            from: `${day}T00:00:00${offset}`,
+            to: `${day}T23:59:59${offset}`,
+          });
         }
-        const page = await request<MediaPage>(`/media?${query.toString()}`);
         if (!cancelled) {
-          setTargetMedia(page.media);
+          setTargetMedia(mergeMedia(pages));
           // **応答の `total` を読む。** 200 件の上限で切れていても黙らない
-          // （Ruling 20）。
-          setTargetTotal(page.total);
+          // （Ruling 20）。宛先が 2 つ以上あると総数を足せないので、そのときは
+          // 「切れている」ことだけを持つ。
+          setTargetTotal(targetIds.length === 1 ? pages[0].total : null);
+          setTargetTruncated(pages.some((page) => page.total > page.media.length));
         }
       } catch (caught) {
         if (!cancelled) {
           setError(caught);
           setTargetMedia([]);
           setTargetTotal(0);
+          setTargetTruncated(false);
         }
       } finally {
         if (!cancelled) {
@@ -188,7 +246,7 @@ export function SendScreen() {
     };
     // ids は同じ選択の間は同じ配列なので、深く比べる必要はない。
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [preset, primaryDestinationId]);
+  }, [preset, chosenKey]);
 
   const totalBytes = useMemo(
     () => targetMedia.reduce((sum, media) => sum + media.size_bytes, 0),
@@ -254,11 +312,13 @@ export function SendScreen() {
   presets.push({ key: "pick", title: "写真を自分で選ぶ", sub: "一覧から選びます" });
 
   function presetSub(key: "unsent" | "day0"): string {
-    if (primaryDestinationId === null) {
+    if (chosen.length === 0) {
       return "宛先を選んでください";
     }
     if (preset !== key) {
-      return key === "day0" ? "いちばん新しい日にちだけ送ります" : "この宛先へまだ送っていないもの";
+      return key === "day0"
+        ? "いちばん新しい日にちだけ送ります"
+        : "選んだ送り先へまだ送っていないもの";
     }
     if (targetLoading) {
       return "読み込み中…";
@@ -385,10 +445,13 @@ export function SendScreen() {
           </div>
           <div className="small">送り先：{chosen.map((d) => d.name).join(" / ") || "（選んでください）"}</div>
           {/* **「すべて」が黙って上限で切れない**（Ruling 20）。1 度に読むのは
-              200 件までなので、それより多ければ正直に言う。 */}
-          {targetTotal > targetMedia.length && (
+              200 件までなので、それより多ければ正直に言う。宛先が 2 つ以上の
+              ときは、残りを数で言うと同じ写真を重複して数えることになる。 */}
+          {targetTruncated && (
             <div className="small">
-              残り {targetTotal - targetMedia.length} 件は次にもう一度送ってください。
+              {targetTotal === null
+                ? "1 度に送れる分を超えています。これを送ったあと、もう一度送ってください。"
+                : `残り ${targetTotal - targetMedia.length} 件は次にもう一度送ってください。`}
             </div>
           )}
         </div>

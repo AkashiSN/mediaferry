@@ -20,7 +20,7 @@ type MediaPage = { media: Media[]; total: number; page: number; page_size: numbe
 type Destination = { id: string; name: string; enabled: boolean };
 type Destinations = { destinations: Destination[] };
 
-type FilterKey = "all" | "unsent" | "awaiting" | "video" | "sent";
+type FilterKey = "all" | "unsent" | "awaiting" | "video" | "sent" | "failed";
 
 const FILTERS: { key: FilterKey; label: string }[] = [
   { key: "all", label: "すべて" },
@@ -28,11 +28,22 @@ const FILTERS: { key: FilterKey; label: string }[] = [
   { key: "awaiting", label: "確認が要る" },
   { key: "video", label: "動画" },
   { key: "sent", label: "送信済み" },
+  { key: "failed", label: "送れなかった" },
 ];
 
-// **「まだ送っていない」「確認が要る」「送信済み」は宛先ごと**なので、
+// **「まだ送っていない」「確認が要る」「送信済み」「送れなかった」は宛先ごと**なので、
 // `destination_id` を伴わなければ API が 400 を返す。
-const DESTINATION_SCOPED: ReadonlySet<FilterKey> = new Set(["unsent", "awaiting", "sent"]);
+const DESTINATION_SCOPED: ReadonlySet<FilterKey> = new Set([
+  "unsent",
+  "awaiting",
+  "sent",
+  "failed",
+]);
+
+// 1 度に読む件数。**渡さないと API の既定（50 件）で切れる。** 上限は
+// `core/listing.MAX_PAGE_SIZE` と同じ 200 で、`work/Send.tsx` や `work/Merge.tsx`
+// もこの数で読む。
+const PAGE_SIZE = 200;
 
 /** URL の検索パラメータから、いまの絞り込みを読む。 */
 function filterFromParams(params: URLSearchParams): FilterKey {
@@ -40,7 +51,7 @@ function filterFromParams(params: URLSearchParams): FilterKey {
     return "video";
   }
   const status = params.get("status");
-  if (status === "unsent" || status === "awaiting" || status === "sent") {
+  if (status === "unsent" || status === "awaiting" || status === "sent" || status === "failed") {
     return status;
   }
   return "all";
@@ -56,6 +67,7 @@ function buildMediaQuery(filter: FilterKey, destinationId: string | null): strin
     query.set("status", filter);
     query.set("destination_id", destinationId);
   }
+  query.set("page_size", String(PAGE_SIZE));
   return query.toString();
 }
 
@@ -105,7 +117,7 @@ export function PhotosScreen() {
   const needsDestination = DESTINATION_SCOPED.has(filter) && effectiveDestinationId === null;
 
   const mediaQuery = buildMediaQuery(filter, needsDestination ? null : effectiveDestinationId);
-  const media = useQuery<MediaPage>(`/media${mediaQuery ? `?${mediaQuery}` : ""}`, [mediaQuery]);
+  const media = useQuery<MediaPage>(`/media?${mediaQuery}`, [mediaQuery]);
   // 取り込みや送信が進んだら取り直す（**画面を再読み込みせずに進む**。§13）。
   const { received } = useEvents();
   useReloadOnEvents(received, media.reload);
@@ -120,6 +132,10 @@ export function PhotosScreen() {
     return (media.data?.media ?? []).map((row) => ({ ...row, status: impliedStatus }));
   }, [media.data, impliedStatus, needsDestination]);
   const groups = useMemo(() => groupByDate(rows), [rows]);
+  // **サーバ側の総数。** 1 度に読むのは `PAGE_SIZE` 件までなので、これより
+  // 読めた行が少なければ切れている。宛先を選ぶ前は、いま出している 0 件と
+  // 揃わない数（宛先を伴わない問い合わせの総数）を出さない。
+  const total = needsDestination ? 0 : (media.data?.total ?? 0);
 
   const totalBytes = useMemo(
     () => [...selected.values()].reduce((sum, size) => sum + size, 0),
@@ -161,7 +177,7 @@ export function PhotosScreen() {
       <div className="row">
         <h1 className="page">写真</h1>
         <span className="small">
-          {FILTERS.find((f) => f.key === filter)?.label}：{rows.length} 件
+          {FILTERS.find((f) => f.key === filter)?.label}：{rows.length} / {total} 件
         </span>
       </div>
 
@@ -217,6 +233,12 @@ export function PhotosScreen() {
           </i>
           確認が要る
         </span>
+        <span>
+          <i className="lg" style={{ background: "var(--danger)" }}>
+            ×
+          </i>
+          送れなかった
+        </span>
       </div>
 
       {needsDestination ? (
@@ -262,7 +284,17 @@ export function PhotosScreen() {
             type="button"
             className="btn primary"
             style={{ marginLeft: "auto" }}
-            onClick={() => navigate("/send", { state: { ids: [...selected.keys()] } })}
+            // **絞り込んでいた宛先も持って帰る**（§13 の「宛先を先に決める」が、
+            // 写真を選びに来た往復で巻き戻らないように）。写真の画面は宛先を
+            // 1 つしか絞れないので、持ち帰るのもその 1 つ。
+            onClick={() =>
+              navigate("/send", {
+                state: {
+                  ids: [...selected.keys()],
+                  destinationIds: effectiveDestinationId === null ? [] : [effectiveDestinationId],
+                },
+              })
+            }
           >
             送る
           </button>

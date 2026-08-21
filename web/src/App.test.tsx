@@ -11,6 +11,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { App } from "./App";
 import { stubApi } from "./test/api";
+import { emitJob } from "./test/setup";
 
 const AUTHENTICATED = { required: false, authenticated: true };
 
@@ -151,5 +152,72 @@ describe("ログイン前は叩かない", () => {
     await screen.findByRole("region", { name: "ログイン" });
     expect(api.calls().some((c) => c.path === "/dashboard")).toBe(false);
     expect(api.calls().some((c) => c.path === "/settings")).toBe(false);
+  });
+});
+
+// レビュー指摘（Important #6）: ナビのバッジと警告バナーが、セッション中に
+// 一度も取り直されなかった。**画面を再読み込みせずに進む**（§13）。
+//
+// `/settings` を開いておくのは、その画面が進捗を購読しないから
+// （`emitJob` は最後に開いた接続へ配るので、対象を 1 本に絞る）。
+describe("進捗が届いたら、枠も取り直す", () => {
+  /** 応答を差し替えられる `fetch`。 */
+  function stubMutable(state: { dashboard: unknown; settings: unknown }) {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn((input: string) => {
+        const path = input.replace(/^\/api/, "");
+        const body =
+          path === "/dashboard"
+            ? state.dashboard
+            : path === "/settings"
+              ? state.settings
+              : path === "/auth/session"
+                ? AUTHENTICATED
+                : path.startsWith("/destinations")
+                  ? { destinations: [] }
+                  : path.startsWith("/profiles")
+                    ? { profiles: [] }
+                    : {};
+        return Promise.resolve(new Response(JSON.stringify(body), { status: 200 }));
+      }),
+    );
+  }
+
+  it("やることが増えたら、ナビのバッジも増える", async () => {
+    const state = {
+      dashboard: EMPTY_DASHBOARD as unknown,
+      settings: { settings: [], warnings: [] } as unknown,
+    };
+    stubMutable(state);
+    window.history.pushState({}, "", "/settings");
+    render(<App />);
+    await screen.findByRole("region", { name: "設定" });
+    const home = screen.getByRole("link", { name: /ホーム/ });
+    await waitFor(() => expect(home.textContent).not.toMatch(/[0-9]/));
+
+    state.dashboard = { ...EMPTY_DASHBOARD, unsent_total: 7 };
+    emitJob({ job_id: "j1", seq: 1, level: "info", message: "送った", data: null, at: "" });
+
+    await waitFor(() => expect(home).toHaveTextContent("1"));
+  });
+
+  it("警告が消えたら、バナーも消える", async () => {
+    const state = {
+      dashboard: EMPTY_DASHBOARD as unknown,
+      settings: {
+        settings: [],
+        warnings: [{ code: "timezone_unset", message: "時間帯が決まっていません" }],
+      } as unknown,
+    };
+    stubMutable(state);
+    window.history.pushState({}, "", "/settings");
+    render(<App />);
+    expect(await screen.findByText("時間帯が決まっていません")).toBeInTheDocument();
+
+    state.settings = { settings: [], warnings: [] };
+    emitJob({ job_id: "j1", seq: 1, level: "info", message: "直した", data: null, at: "" });
+
+    await waitFor(() => expect(screen.queryByText("時間帯が決まっていません")).toBeNull());
   });
 });

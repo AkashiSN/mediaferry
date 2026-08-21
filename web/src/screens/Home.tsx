@@ -258,6 +258,15 @@ export function HomeScreen() {
           </section>
         )}
 
+        {dashboardData !== null && (dashboardData.orphans > 0 || dashboardData.missing > 0) && (
+          // **報告はするが、消す操作は置かない**（自動削除はデータを失う経路になる。
+          // `docs/decisions.md`）。
+          <p role="status" className="card pad small">
+            注意が要るもの：どこにも結び付いていないファイル {dashboardData.orphans} 件 ・
+            見つからないファイル {dashboardData.missing} 件。どちらも自動では消しません。
+          </p>
+        )}
+
         <div
           style={{
             display: "grid",
@@ -513,12 +522,22 @@ function EmptyState() {
 
 /** 送り先 1 件の行。**`pending` は「積んだまま送信が始まっていない」件数**で、
  * 「まだ送っていない」（宛先の有効な記録が無いもの）には含まれない。止まった
- * 送信に気づけるよう、0 より大きいときだけ別枠で足す。 */
+ * 送信に気づけるよう、0 より大きいときだけ別枠で足す。
+ *
+ * **`failed` も同じ扱いで出す。** 送れなかったものは「まだ送っていない」にも
+ * 「送信済み」にも入らないので、ここに出さないと画面のどこにも現れない
+ * （送り直すのは 設定 › 送り先）。休止中でも失敗の記録は消えないので出す。 */
 function DestinationRow({ destination }: { destination: DestinationSummary }) {
-  const base = destination.enabled
-    ? `送信済み ${destination.complete} ・ 未送信 ${destination.unsent}`
-    : "いまは送りません（休止中）";
-  const line = destination.pending > 0 ? `${base} ・ 送信中 ${destination.pending} 件` : base;
+  const parts = destination.enabled
+    ? [`送信済み ${destination.complete} ・ 未送信 ${destination.unsent}`]
+    : ["いまは送りません（休止中）"];
+  if (destination.pending > 0) {
+    parts.push(`送信中 ${destination.pending} 件`);
+  }
+  if (destination.failed > 0) {
+    parts.push(`送れなかった ${destination.failed} 件`);
+  }
+  const line = parts.join(" ・ ");
   return (
     <div className="row" style={{ gap: 10 }}>
       <span

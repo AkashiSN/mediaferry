@@ -206,6 +206,7 @@ h1.page.lg { font-size: 24px; }
 .tile .mark.unsent { border: 2px solid #fff; box-shadow: 0 0 0 1px rgba(0, 0, 0, .18); }
 .tile .mark.sent { background: var(--ok); color: #fff; }
 .tile .mark.awaiting { background: var(--warn-dot); color: #fff; }
+.tile .mark.failed { background: var(--danger); color: #fff; }
 .tile .check {
   position: absolute; top: 7px; left: 7px; width: 21px; height: 21px; border-radius: 50%;
   background: var(--accent); color: var(--accent-ink); display: flex; align-items: center; justify-content: center;

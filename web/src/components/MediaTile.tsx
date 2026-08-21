@@ -1,11 +1,12 @@
 // 写真 1 枚のタイル（§13）。プロトタイプの `tile()` から色・間隔を取る。
 //
 // **状態の印は形と文字の両方で伝える。** 色だけにすると、色覚特性や白黒印刷で
-// 区別が付かない：未送信は白縁の丸、送信済みはチェック、確認が要るは「!」。
+// 区別が付かない：未送信は白縁の丸、送信済みはチェック、確認が要るは「!」、
+// 送れなかったものは「×」。
 
 import { Icon } from "./Icon";
 
-export type MediaStatus = "unsent" | "awaiting" | "sent" | null;
+export type MediaStatus = "unsent" | "awaiting" | "sent" | "failed" | null;
 
 export type Media = {
   id: string;
@@ -88,6 +89,9 @@ function StatusMark({ status }: { status: MediaStatus }) {
   }
   if (status === "awaiting") {
     return <span className="mark awaiting">!</span>;
+  }
+  if (status === "failed") {
+    return <span className="mark failed">×</span>;
   }
   if (status === "unsent") {
     return <span className="mark unsent" />;

@@ -1,7 +1,7 @@
 // 送信中（§13）。**この画面を閉じても送信は続く。** 閉じる手段を必ず置く。
 
 import { useEffect, useMemo, useState } from "react";
-import { useLocation, useNavigate } from "react-router-dom";
+import { Link, useLocation, useNavigate } from "react-router-dom";
 
 import { request } from "../../api/client";
 import { useQuery } from "../../api/hooks";
@@ -118,10 +118,12 @@ export function SendingScreen() {
         ))
       )}
 
+      {/* **結果があるのは作業の履歴。** ホームの「やること」は残っている仕事しか
+          出さないので、送り終えると空になる（§13）。 */}
       <p className="muted" style={{ textAlign: "center" }}>
         この画面を閉じても送信は続きます。
         <br />
-        終わったら「やること」から結果を見られます。
+        終わったら 設定 › 詳しい情報 › <Link to="/settings/jobs">作業の履歴</Link> で結果を見られます。
       </p>
     </section>
   );

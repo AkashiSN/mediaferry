@@ -39,6 +39,104 @@ type SkippedStacks = { records: SkippedStack[] };
 /** 一度に出す件数。**打ち切ったことを黙らない**（下の「ほかにもある」）。 */
 const SKIP_PAGE = 50;
 
+/** 一度に送り直す件数。API の `GET /uploads` の既定と同じ上限に合わせる。 */
+const RETRY_PAGE = 200;
+
+/** 失敗した記録 1 件（送り直す対象）。 */
+type FailedRecord = { id: string };
+type FailedRecords = { records: FailedRecord[] };
+
+/** 送り直した結果の 1 文。**戻せなかった分を隠さない。** */
+export function resendNote(retried: number, skipped: number): string {
+  const parts = [
+    retried > 0 ? `${retried} 件を送り直しています。` : "送信を始め直しました。",
+  ];
+  if (skipped > 0) {
+    parts.push(`${skipped} 件は送り直せませんでした。`);
+  }
+  return parts.join("");
+}
+
+/**
+ * 送れなかったものと、送り直す操作（§8 / §9.10）。
+ *
+ * **`retry` と `upload` は順番が決まっている。** `retry` が `failed` を `pending`
+ * へ戻し、そのあとの `POST /destinations/{id}/upload` が積まれた `pending` を
+ * 拾って送る。逆に呼ぶと、`failed` のままの記録は拾われない。
+ *
+ * **失敗が 0 件でも押せる。** 送信の開始そのものに失敗した宛先の記録は `pending`
+ * のままなので、`upload` を積み直すだけで動き出す（`work/Send.tsx` の案内文が
+ * 指しているのはこの操作）。
+ */
+function Resend({
+  destination,
+  busy,
+  onResend,
+}: {
+  destination: Destination;
+  busy: boolean;
+  onResend: (
+    destination: Destination,
+    recordIds: string[],
+  ) => Promise<{ retried: number; skipped: number } | null>;
+}) {
+  const failed = useQuery<FailedRecords>(
+    `/uploads?destination_id=${destination.id}&state=failed&limit=${RETRY_PAGE}`,
+  );
+  const records = failed.data?.records ?? [];
+  const [note, setNote] = useState<string | null>(null);
+
+  async function resend() {
+    setNote(null);
+    const outcome = await onResend(
+      destination,
+      records.map((record) => record.id),
+    );
+    if (outcome !== null) {
+      setNote(resendNote(outcome.retried, outcome.skipped));
+    }
+    failed.reload();
+  }
+
+  return (
+    <section style={{ marginTop: 12 }}>
+      <div className="sechead">
+        <h3 style={{ fontSize: "13.5px", fontWeight: 600 }}>送れなかったもの</h3>
+      </div>
+      {failed.error !== null && failed.error !== undefined && <ErrorBanner error={failed.error} />}
+      <p className="small">
+        {failed.data === null
+          ? "読み込み中…"
+          : records.length === 0
+            ? "送れなかったものはありません。"
+            : `送れなかったもの ${records.length} 件`}
+      </p>
+      {records.length === RETRY_PAGE && (
+        <p role="note" className="small">
+          一度に送り直せるのは {RETRY_PAGE} 件までです（ほかにもあります）。
+        </p>
+      )}
+      {note !== null && (
+        <p role="status" className="small">
+          {note}
+        </p>
+      )}
+      <div className="acts" style={{ marginTop: 10 }}>
+        <button
+          type="button"
+          className="btn sm"
+          aria-label={`送り直す：${destination.name}`}
+          // 休止中の宛先は送信の対象にならないので、押しても何も起きない。
+          disabled={busy || !destination.enabled}
+          onClick={() => void resend()}
+        >
+          送り直す
+        </button>
+      </div>
+    </section>
+  );
+}
+
 function StackSkips({ destinationId }: { destinationId: string }) {
   const skipped = useQuery<SkippedStacks>(
     `/uploads?destination_id=${destinationId}&stack_state=skipped&limit=${SKIP_PAGE}`,
@@ -147,6 +245,36 @@ export function DestinationsScreen() {
     }
   }
 
+  /**
+   * 送れなかったものを送り直す。**一部が戻せなくても、戻せた分は送る**
+   * （`work/Send.tsx` の「一部の宛先が失敗しても進める」と同じ考え方）。
+   * 1 件も戻せなかったときだけ、送信を始めずに理由をバナーへ出す。
+   */
+  async function resend(
+    destination: Destination,
+    recordIds: string[],
+  ): Promise<{ retried: number; skipped: number } | null> {
+    setBusy(true);
+    setError(null);
+    try {
+      const results = await Promise.allSettled(
+        recordIds.map((id) => request(`/uploads/${id}/retry`, { method: "POST" })),
+      );
+      const skipped = results.filter((result) => result.status === "rejected");
+      if (recordIds.length > 0 && skipped.length === recordIds.length) {
+        throw skipped[0].reason;
+      }
+      await request(`/destinations/${destination.id}/upload`, { method: "POST" });
+      destinations.reload();
+      return { retried: recordIds.length - skipped.length, skipped: skipped.length };
+    } catch (caught) {
+      setError(caught);
+      return null;
+    } finally {
+      setBusy(false);
+    }
+  }
+
   const all = destinations.data?.destinations ?? [];
 
   return (
@@ -219,6 +347,7 @@ export function DestinationsScreen() {
               )}
             </div>
           </div>
+          <Resend destination={destination} busy={busy} onResend={resend} />
           <StackSkips destinationId={destination.id} />
           <div className="acts" style={{ marginTop: 14 }}>
             <button

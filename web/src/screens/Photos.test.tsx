@@ -2,7 +2,7 @@
 
 import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { MemoryRouter } from "react-router-dom";
+import { MemoryRouter, Route, Routes, useLocation } from "react-router-dom";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { stubApi } from "../test/api";
@@ -54,7 +54,7 @@ describe("写真の画面", () => {
     await waitFor(() =>
       expect(
         calls().some(
-          (c) => c.path === "/media?status=unsent&destination_id=d1" && c.method === "GET",
+          (c) => c.path === "/media?status=unsent&destination_id=d1&page_size=200" && c.method === "GET",
         ),
       ).toBe(true),
     );
@@ -144,7 +144,7 @@ describe("写真の画面", () => {
     await waitFor(() =>
       expect(
         calls().some(
-          (c) => c.path === "/media?status=unsent&destination_id=d2" && c.method === "GET",
+          (c) => c.path === "/media?status=unsent&destination_id=d2&page_size=200" && c.method === "GET",
         ),
       ).toBe(true),
     );
@@ -313,5 +313,182 @@ describe("選んだものの合計", () => {
     // 隠れた big.JPG ぶんの 30 GiB を数え落とさない。
     expect(screen.getByText(/2 件を選択中/)).toBeInTheDocument();
     expect(screen.getByText(/30 GiB/)).toBeInTheDocument();
+  });
+});
+
+// レビュー指摘（Critical #1）: 1 度に読む件数を渡さないと API の既定（50 件）で
+// 切れ、そのうえ「すべて：50 件」と断言してしまう。
+describe("読み込む件数と、切れていることの表示", () => {
+  beforeEach(() => {
+    document.cookie = "XSRF-TOKEN=token; path=/";
+  });
+  afterEach(() => vi.restoreAllMocks());
+
+  it("宛先を伴わない絞り込みでも、1 度に読む件数を渡す", async () => {
+    const { calls } = stubApi({
+      "/media": { media: [], total: 0, page: 1, page_size: 200 },
+      "/destinations": { destinations: [] },
+    });
+    render(
+      <MemoryRouter>
+        <PhotosScreen />
+      </MemoryRouter>,
+    );
+    await waitFor(() =>
+      expect(calls().some((c) => c.path === "/media?page_size=200" && c.method === "GET")).toBe(
+        true,
+      ),
+    );
+  });
+
+  it("件数は、読めた分とサーバ側の総数の両方を出す", async () => {
+    stubApi({
+      "/media": {
+        media: [
+          media("a", "2026-08-18T15:12:00+09:00"),
+          media("b", "2026-08-18T14:03:00+09:00"),
+        ],
+        total: 3421,
+        page: 1,
+        page_size: 200,
+      },
+      "/destinations": { destinations: [] },
+    });
+    render(
+      <MemoryRouter>
+        <PhotosScreen />
+      </MemoryRouter>,
+    );
+    // **「すべて：2 件」と断言しない。** 3421 件のうち 2 件しか読めていない。
+    expect(await screen.findByText("すべて：2 / 3421 件")).toBeInTheDocument();
+  });
+
+  it("宛先を選ぶ前は、まだ読んでいない総数を出さない", async () => {
+    stubApi({
+      "/media": { media: [], total: 3421, page: 1, page_size: 200 },
+      "/destinations": {
+        destinations: [
+          { id: "d1", name: "家", enabled: true },
+          { id: "d2", name: "職場", enabled: true },
+        ],
+      },
+    });
+    render(
+      <MemoryRouter>
+        <PhotosScreen />
+      </MemoryRouter>,
+    );
+    await userEvent.click(await screen.findByRole("button", { name: /まだ送っていない/ }));
+    await screen.findByText(/宛先を選んでください/);
+    expect(screen.queryByText(/3421/)).toBeNull();
+  });
+});
+
+// レビュー指摘（Critical #2）: 送信の失敗が、どの画面からも見えない。
+describe("送れなかったものの絞り込み", () => {
+  beforeEach(() => {
+    document.cookie = "XSRF-TOKEN=token; path=/";
+  });
+  afterEach(() => vi.restoreAllMocks());
+
+  it("「送れなかった」で絞ると、その宛先の失敗を問い合わせる", async () => {
+    const { calls } = stubApi({
+      "/media": { media: [], total: 0, page: 1, page_size: 200 },
+      "/destinations": { destinations: [{ id: "d1", name: "家", enabled: true }] },
+    });
+    render(
+      <MemoryRouter>
+        <PhotosScreen />
+      </MemoryRouter>,
+    );
+    await userEvent.click(await screen.findByRole("button", { name: "送れなかった" }));
+    await waitFor(() =>
+      expect(
+        calls().some(
+          (c) => c.path === "/media?status=failed&destination_id=d1&page_size=200" && c.method === "GET",
+        ),
+      ).toBe(true),
+    );
+  });
+
+  it("送れなかったものには、その印を出す", async () => {
+    stubApi({
+      "/media": {
+        media: [media("a", "2026-08-18T14:03:00+09:00")],
+        total: 1,
+        page: 1,
+        page_size: 200,
+      },
+      "/destinations": { destinations: [{ id: "d1", name: "家", enabled: true }] },
+    });
+    const { container } = render(
+      <MemoryRouter>
+        <PhotosScreen />
+      </MemoryRouter>,
+    );
+    await userEvent.click(await screen.findByRole("button", { name: "送れなかった" }));
+    await waitFor(() => expect(container.querySelector(".tile .mark.failed")).not.toBeNull());
+  });
+
+  it("宛先が無ければ、「送れなかった」も選べない", async () => {
+    stubApi({
+      "/media": { media: [], total: 0, page: 1, page_size: 200 },
+      "/destinations": { destinations: [] },
+    });
+    render(
+      <MemoryRouter>
+        <PhotosScreen />
+      </MemoryRouter>,
+    );
+    expect(await screen.findByRole("button", { name: "送れなかった" })).toBeDisabled();
+  });
+});
+
+// レビュー指摘（Important #2）: 「写真を自分で選ぶ」で往復すると、選んだ宛先が消える。
+describe("送るへ戻すとき", () => {
+  beforeEach(() => {
+    document.cookie = "XSRF-TOKEN=token; path=/";
+  });
+  afterEach(() => vi.restoreAllMocks());
+
+  /** `/send` へ渡った `location.state` を画面に出すだけの受け皿。 */
+  function SendProbe() {
+    const location = useLocation();
+    const state = location.state as { ids?: string[]; destinationIds?: string[] } | null;
+    return (
+      <div>
+        <p data-testid="send-ids">{(state?.ids ?? []).join(",")}</p>
+        <p data-testid="send-destinations">{(state?.destinationIds ?? []).join(",")}</p>
+      </div>
+    );
+  }
+
+  it("選んだ写真と一緒に、絞り込んでいた宛先も持って帰る", async () => {
+    stubApi({
+      "/media": {
+        media: [media("a", "2026-08-18T14:03:00+09:00")],
+        total: 1,
+        page: 1,
+        page_size: 200,
+      },
+      "/destinations": {
+        destinations: [
+          { id: "d1", name: "家", enabled: true },
+          { id: "d2", name: "職場", enabled: true },
+        ],
+      },
+    });
+    render(
+      <MemoryRouter initialEntries={["/photos?status=unsent&destination_id=d2"]}>
+        <Routes>
+          <Route path="/photos" element={<PhotosScreen />} />
+          <Route path="/send" element={<SendProbe />} />
+        </Routes>
+      </MemoryRouter>,
+    );
+    await userEvent.click(await screen.findByRole("button", { name: /a\.JPG/ }));
+    await userEvent.click(screen.getByRole("button", { name: "送る" }));
+    expect(await screen.findByTestId("send-ids")).toHaveTextContent("a");
+    expect(screen.getByTestId("send-destinations")).toHaveTextContent("d2");
   });
 });
