@@ -1,5 +1,9 @@
 # 実 USB での確認手順（Phase 1）
 
+**2026-08-20〜21 に 1〜12 番を実機で通した。** 結果と、そこで見つかった不具合は
+[`history/hardware-verification.md`](history/hardware-verification.md) にある。
+**11 番は不合格**（実装の前提が崩れた）。5・8 番は修正後の踏み直しが残っている。
+
 自動テストは実カードを扱えない。マウントは開発コンテナ（入れ子の非特権 LXC）
 では AppArmor に阻まれるので、**TrueNAS ホストで実行する**。
 
@@ -134,6 +138,17 @@ TZ=UTC stat -c '%y %n' /path/to/DCIM/DJI_001/DJI_20260817143000_0001_D.MP4
   `timestamps.py` の `_wall_clock` を、mtime をプロファイルの `timezone` で
   描画する形へ変える必要がある
 
+**mtime は「録画終端」であって開始ではない。** ファイル名の時刻と直接比べるのでは
+なく、**開始 + `duration` と比べる**（DJI では終端の 2 秒ほど後になる。ファイルを
+閉じるまでの時間）。
+
+**カードをマウントし直さなくても測れる。** 公開時にソースの mtime をそのまま保つ
+ので、取り込んだライブラリ側の実体で同じことが分かる。
+
+> **2026-08-21 の結果: 不合格。** DJI Osmo Pocket 4 は `OffsetFromUtc` を書いていた
+> （UTC 描画で 9 時間ずれ、`+09:00` 描画で終端の +2.00 秒）。直すべき 3 か所は
+> [`history/hardware-verification.md`](history/hardware-verification.md) にある。
+
 Linux の exfat ドライバは `OffsetFromUtc` の valid bit が立っていればその
 オフセットで UTC へ変換し、立っていないときだけマウントの `time_offset`
 （既定 0）を使う（`fs/exfat/misc.c` の `exfat_get_entry_time`）。
@@ -150,6 +165,11 @@ ffprobe -v error -print_format json -show_streams /path/to/DJI_....MP4
 ```
 
 - `mjpeg` のストリームに `"attached_pic": 1` が立っている → 判定は正しい
+
+**`ffprobe` はホストに無い。** アプリのコンテナ越しに叩く
+（`docker exec <app のコンテナ> ffprobe …`）。
+
+> **2026-08-21 の結果: 合格。** `mjpeg`（index 5）に `attached_pic=1` が立っていた。
 - 立っていない → `keep_streams.video` が `primary` の間は影響しないが、`all` を
   使うプロファイルを足すときに `_is_thumbnail` の判定を増やす必要がある
 
@@ -201,6 +221,27 @@ TZ=UTC stat -c '%y %n' /path/to/MVI_0001.MOV
 - 1 枚だけ手で送って、Immich 側で資産として見えるか
 - 見えないなら、`generic-dcim` と同じく `canon-eos` からも CR2 を外すか、
   RAW を送らない選択肢を設定に足す（Phase 6 のスタッキングと合わせて考える）
+
+### 17. RAW+JPEG の組が実カードで成立するか
+
+**Phase 6 のスタッキングの前提**（`docs/design.md` §9.11）。組と認めるのは 4 条件で、
+うち 3 つが実データ依存。
+
+- 同じ stem（`IMG_0001.JPG` と `IMG_0001.CR2`）
+- `captured_at` が**秒まで一致**
+- `captured_at_source` が同じ
+
+**要は `exifread` が実機の CR2 から `DateTimeOriginal` を読めるか。** 読めなければ
+JPG は `exif`・CR2 は `mtime` fallback になって出所が食い違い、**理由つきの見送りと
+して画面に出る**（黙って誤動作はしない）。
+
+```bash
+uv run python -c "import exifread,sys; f=open(sys.argv[1],'rb'); print(exifread.process_file(f).get('EXIF DateTimeOriginal'))" /path/to/IMG_0001.CR2
+```
+
+- 読めて、同じ stem の JPG と秒まで一致する → 組が成立する
+- 読めない → `stack` は見送りになる。CR2 を送らない選択肢を設定に足すかを、
+  16 番（Immich が CR2 を受け取るか）と合わせて判断する
 
 ## 関連
 
