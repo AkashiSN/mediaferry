@@ -2,7 +2,7 @@
 
 import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { MemoryRouter } from "react-router-dom";
+import { MemoryRouter, Route, Routes } from "react-router-dom";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { stubApi } from "../test/api";
@@ -137,6 +137,30 @@ describe("ホーム", () => {
         api.calls().some((call) => call.path === "/volumes/v1/close" && call.method === "POST"),
       ).toBe(true),
     );
+  });
+
+  it("「中身を見る」を押すと、カードの中身のページへ行く（Ruling 30）", async () => {
+    // プロトタイプのカードの帯には「中身を見る」があるが、Home にはまだ入口が
+    // 無かった。作業ページ（Task 9）を作っても辿り着けないので、ここに足す。
+    // ルートを生やすのは Task 12 なので、ここでは遷移先を直に確かめる。
+    stubApi({
+      "/dashboard": EMPTY_DASHBOARD,
+      "/devices": { volumes: [actionableVolume] },
+      "/jobs": { jobs: [] },
+      "/settings": { settings: [{ key: "AUTO_IMPORT", value: "trusted" }], warnings: [] },
+    });
+    render(
+      <MemoryRouter initialEntries={["/"]}>
+        <Routes>
+          <Route path="/" element={<HomeScreen />} />
+          <Route path="/card" element={<div>カードの中身のページ</div>} />
+        </Routes>
+      </MemoryRouter>,
+    );
+
+    await userEvent.click(await screen.findByRole("link", { name: "中身を見る" }));
+
+    expect(await screen.findByText("カードの中身のページ")).toBeInTheDocument();
   });
 
   it("進行中の作業があれば、ファイル名と件数で出す", async () => {

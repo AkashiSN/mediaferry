@@ -6,6 +6,10 @@
 // **信頼登録は「以後このカードを挿すだけで NAS へコピーする」という許可**なので、
 // 確認を取り、そのうえで**信頼の限界**（同じ UUID の別のカードや復元したカードを
 // 取り違えうること）を書く（§12.1）。
+//
+// 自動取り込みの判定（`autoImportOutlook` / `autoImportState`）は
+// `work/CardDetail.tsx` にある。画面と確認ダイアログが同じ関数を見るように、
+// 判定はそこ 1 か所にだけ持つ。
 
 import { useState } from "react";
 import { Link } from "react-router-dom";
@@ -14,6 +18,7 @@ import { request } from "../api/client";
 import { useQuery } from "../api/hooks";
 import { ConfirmDialog, type Confirmation } from "../components/ConfirmDialog";
 import { ErrorBanner } from "../components/ErrorBanner";
+import { autoImportOutlook, autoImportState } from "./work/CardDetail";
 
 type Volume = {
   volume_instance_id: string;
@@ -28,71 +33,6 @@ type Volume = {
 type Devices = { volumes: Volume[] };
 type Setting = { key: string; value: string | null };
 type Settings = { settings: Setting[] };
-
-/** 自動取り込みの見通し。**`watcher.py` の `CANDIDATES` と同じ条件を見る。**
- *
- * 画面の文言と確認ダイアログの両方がここを見る。片方だけで判定すると、
- * 同意の内容と実挙動がずれる（それが起きた）。
- *
- * **`pending` を `blocked` と混ぜない。** 初回の観測は必ず
- * `identity_confidence = low` だが、その観測で指紋を憶えるので、一覧を取り直すと
- * 同じ挿入のまま `high` になり次の tick で積まれる（`_identity_confidence`）。
- * 「いまは始まりません」と書くと、**数秒後に始まる経路を否定する**ことになる。
- *
- * **ただし `pending` は約束ではない。** `fs_uuid` が無い媒体や、同じ UUID の別
- * presence が併存している間は、何度観測しても `high` にならない。API は `low` の
- * 理由を返さないので画面は区別できない。**だから条件形で書く**（「確かめられた
- * 場合は」）。同意の対象は変わらないので、確認ダイアログはそのまま出す。
- */
-export type Outlook =
-  | { state: "starts"; reason: null }
-  | { state: "pending"; reason: string }
-  | { state: "blocked"; reason: string };
-
-export function autoImportOutlook(volume: Volume, autoImport: string | null): Outlook {
-  if (autoImport === null) {
-    // **読めていない値を `trusted` と仮定しない。** 実設定が off でも
-    // 「いまの中身を数秒後にコピー」と誤って同意を取ることになる。
-    return { state: "blocked", reason: "設定をまだ読めていない" };
-  }
-  if (autoImport !== "trusted") {
-    return { state: "blocked", reason: "AUTO_IMPORT が off な" };
-  }
-  if (volume.provisional) {
-    return { state: "blocked", reason: "対象の中身がまだ見つかっていない" };
-  }
-  if (volume.identity_confidence !== "high") {
-    return { state: "pending", reason: "このカードだと確かめられた場合" };
-  }
-  return { state: "starts", reason: null };
-}
-
-/** そのカードで自動取り込みがどうなるか（§12.1）。 */
-export function autoImportState(volume: Volume, autoImport: string | null): string {
-  const outlook = autoImportOutlook(volume, autoImport);
-  // **承認すると、いま挿してあるこのカードの中身が対象になる。** watcher は
-  // 毎 tick、現在 live な presence から候補を組み直すので、条件が揃っていれば
-  // 承認の数秒後に取り込みが始まる。「次に挿したときから」と書くと、同意の
-  // 対象を取り違えさせる。**逆に、条件が揃っていないのに断言もしない。**
-  if (!volume.trusted) {
-    switch (outlook.state) {
-      case "starts":
-        return "未承認です。承認すると、いま入っている中身も含めて、数秒後から自動で取り込みます。";
-      case "pending":
-        return `未承認です。承認すると、${outlook.reason}に、いま入っている中身も含めて自動で取り込みます。`;
-      case "blocked":
-        return `未承認です。承認しても、${outlook.reason}ので、いまは自動取り込みは始まりません。`;
-    }
-  }
-  switch (outlook.state) {
-    case "starts":
-      return "信頼済み。挿すと自動で取り込みます。";
-    case "pending":
-      return `信頼済み。${outlook.reason}に自動で取り込みます。`;
-    case "blocked":
-      return `信頼済みですが、${outlook.reason}ので、いまは自動取り込みは始まりません。`;
-  }
-}
 
 export function DevicesScreen() {
   const devices = useQuery<Devices>("/devices");

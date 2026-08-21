@@ -14,7 +14,7 @@ import { ErrorBanner } from "../components/ErrorBanner";
 import { Icon } from "../components/Icon";
 import { JobCard } from "../components/JobCard";
 import type { Job } from "../components/JobProgress";
-import { autoImportOutlook, autoImportState } from "./Devices";
+import { autoImportOutlook, autoImportState } from "./work/CardDetail";
 import { useEvents } from "../hooks/useEvents";
 import { useReloadOnEvents } from "../hooks/useReloadOnEvents";
 import { tasksFrom } from "../hooks/useTasks";
@@ -333,6 +333,9 @@ function CardBanner({
                 このカードを信頼する
               </button>
             )}
+            <Link to="/card" className="btn sm">
+              中身を見る
+            </Link>
             <button
               type="button"
               className="btn sm"
