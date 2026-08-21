@@ -32,6 +32,12 @@ describe("画面の枠", () => {
     expect(screen.getByRole("link", { name: /ホーム/ })).toHaveAttribute("aria-current", "page");
   });
 
+  it("写真を開いているときは、写真が現在地でホームは外れる", () => {
+    renderAt("/photos");
+    expect(screen.getByRole("link", { name: /写真/ })).toHaveAttribute("aria-current", "page");
+    expect(screen.getByRole("link", { name: /ホーム/ })).not.toHaveAttribute("aria-current", "page");
+  });
+
   it("やることの件数をホームに添える。0 件のときは出さない", () => {
     const { unmount } = renderAt("/", 3);
     expect(screen.getByRole("link", { name: /ホーム/ })).toHaveTextContent("3");
