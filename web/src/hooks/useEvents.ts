@@ -20,11 +20,20 @@ export type JobEvent = {
  * **受け取った総数も返す。** 配列は上限で切るので、上限に達した後は長さが
  * 変わらない —— 長さだけを見ていると、長い取り込みの途中から一覧の取り直しが
  * 止まる。
+ *
+ * **`connected` は 3 状態。** まだ一度も繋がっていない（`null`）と、明示的に
+ * 切れた（`false`）を区別する。マウント直後は必ず `null` を経由するので、
+ * `!connected` で判定すると開くたびに「切れている」バナーが一瞬光ってしまう。
+ * 画面側は `connected === false`（＝一度は繋がって、その後切れた）だけを見る。
  */
-export function useEvents(limit = 200): { events: JobEvent[]; received: number; connected: boolean } {
+export function useEvents(limit = 200): {
+  events: JobEvent[];
+  received: number;
+  connected: boolean | null;
+} {
   const [events, setEvents] = useState<JobEvent[]>([]);
   const [received, setReceived] = useState(0);
-  const [connected, setConnected] = useState(false);
+  const [connected, setConnected] = useState<boolean | null>(null);
   const source = useRef<EventSource | null>(null);
 
   useEffect(() => {

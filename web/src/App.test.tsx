@@ -1,0 +1,155 @@
+// ルート表そのものの試験（§13）。**個々の画面の試験は画面を直に描くので、
+// ここでは踏まない。** `App` が実際に配線している経路・ナビの現在地・
+// `taskCount` の配線・ログイン前に叩かないことの 4 つだけを見る。
+//
+// 各画面は `<section aria-label>` を持つので、accessible name が付いた
+// `<section>` は `region` ロールになる。パスの誤字も、隣の画面の element と
+// 取り違える書き間違いも、どちらもこの `region` の名前で捕まる。
+
+import { render, screen, waitFor } from "@testing-library/react";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+
+import { App } from "./App";
+import { stubApi } from "./test/api";
+
+const AUTHENTICATED = { required: false, authenticated: true };
+
+const EMPTY_DASHBOARD = {
+  media_total: 0,
+  destinations: [],
+  running_jobs: 0,
+  recent_imports: [],
+  orphans: 0,
+  missing: 0,
+  warnings: [],
+  merge_candidates: 0,
+  unsent_total: 0,
+  awaiting_total: 0,
+};
+
+/** どの画面を開いても落ちないだけの最小限の応答。個々の中身は問わない。 */
+const BASE_ROUTES = {
+  "/auth/session": AUTHENTICATED,
+  "/settings": { settings: [], warnings: [] },
+  "/dashboard": EMPTY_DASHBOARD,
+  "/devices": { volumes: [] },
+  "/jobs": { jobs: [] },
+  "/profiles": { profiles: [] },
+  "/destinations": { destinations: [] },
+  "/media": { media: [], total: 0, page: 1, page_size: 50 },
+  "/merge-groups?status=skipped": { groups: [] },
+  "/merge-groups": { groups: [] },
+  "/media/stale-derived": { stale: [] },
+  "/uploads?state=awaiting_datetime_approval": { records: [] },
+  "/uploads": { records: [] },
+};
+
+/** ルート表（brief のとおり 13 本）。 */
+const ROUTES: readonly [string, string][] = [
+  ["/", "ホーム"],
+  ["/card", "カードの中身"],
+  ["/merge", "つなぐ"],
+  ["/approve", "確認"],
+  ["/send", "送る"],
+  ["/sending", "送信中"],
+  ["/photos", "写真"],
+  ["/settings", "設定"],
+  ["/settings/destinations", "送り先"],
+  ["/settings/profiles", "カメラの種類"],
+  ["/settings/general", "詳しい設定"],
+  ["/settings/jobs", "作業の履歴"],
+  ["/settings/merge-history", "つないだ動画の記録"],
+];
+
+beforeEach(() => {
+  document.cookie = "XSRF-TOKEN=token; path=/";
+});
+afterEach(() => vi.restoreAllMocks());
+
+describe("ルート表", () => {
+  it.each(ROUTES)("%s は「%s」の画面を描く", async (path, label) => {
+    stubApi(BASE_ROUTES);
+    window.history.pushState({}, "", path);
+    render(<App />);
+    expect(await screen.findByRole("region", { name: label })).toBeInTheDocument();
+  });
+});
+
+describe("ナビの現在地（App の配線として）", () => {
+  // `Layout.test.tsx` は `Layout` を直に描くので、`App` 側でそのルートが実在
+  // することまでは見ていない。ここでは実際のルート経由で確かめる。
+
+  it("/merge を開いている間もホームが現在地のまま", async () => {
+    stubApi(BASE_ROUTES);
+    window.history.pushState({}, "", "/merge");
+    render(<App />);
+    await screen.findByRole("region", { name: "つなぐ" });
+    expect(screen.getByRole("link", { name: /ホーム/ })).toHaveAttribute("aria-current", "page");
+  });
+
+  it("/sending を開いている間もホームが現在地のまま", async () => {
+    stubApi(BASE_ROUTES);
+    window.history.pushState({}, "", "/sending");
+    render(<App />);
+    await screen.findByRole("region", { name: "送信中" });
+    expect(screen.getByRole("link", { name: /ホーム/ })).toHaveAttribute("aria-current", "page");
+  });
+
+  it("/photos を開いていると写真が現在地", async () => {
+    stubApi(BASE_ROUTES);
+    window.history.pushState({}, "", "/photos");
+    render(<App />);
+    await screen.findByRole("region", { name: "写真" });
+    expect(screen.getByRole("link", { name: /写真/ })).toHaveAttribute("aria-current", "page");
+    expect(screen.getByRole("link", { name: /ホーム/ })).not.toHaveAttribute("aria-current", "page");
+  });
+
+  it("/settings/jobs を開いていると設定が現在地で、ホームは外れる", async () => {
+    stubApi(BASE_ROUTES);
+    window.history.pushState({}, "", "/settings/jobs");
+    render(<App />);
+    await screen.findByRole("region", { name: "作業の履歴" });
+    // **完全一致で見る。** `JobHistoryScreen` 自身が「設定へ」という別のリンクを
+    // 持つので、正規表現の部分一致だと 2 件ヒットして曖昧になる。
+    expect(screen.getByRole("link", { name: "設定" })).toHaveAttribute("aria-current", "page");
+    expect(screen.getByRole("link", { name: "ホーム" })).not.toHaveAttribute("aria-current", "page");
+  });
+});
+
+describe("taskCount の配線", () => {
+  it("やることの種類数（合計でも、いずれか 1 つの値でもない）をピルへ渡す", async () => {
+    // merge_candidates: 5, unsent_total: 7, awaiting_total: 0 → 種類は 2 つ
+    // （つなぐ・送る）。合計の 12、いずれか単独の 5 や 7 と区別する。
+    stubApi({
+      ...BASE_ROUTES,
+      "/dashboard": { ...EMPTY_DASHBOARD, merge_candidates: 5, unsent_total: 7, awaiting_total: 0 },
+    });
+    window.history.pushState({}, "", "/");
+    render(<App />);
+    const home = await screen.findByRole("link", { name: /ホーム/ });
+    await waitFor(() => expect(home).toHaveTextContent("2"));
+    expect(home).not.toHaveTextContent("5");
+    expect(home).not.toHaveTextContent("7");
+    expect(home).not.toHaveTextContent("12");
+  });
+
+  it("やることが 1 つも無ければ、ピルを出さない", async () => {
+    stubApi(BASE_ROUTES); // merge_candidates / unsent_total / awaiting_total はすべて 0
+    window.history.pushState({}, "", "/");
+    render(<App />);
+    await screen.findByRole("region", { name: "ホーム" });
+    const home = screen.getByRole("link", { name: /ホーム/ });
+    await waitFor(() => expect(home.textContent).not.toMatch(/[0-9]/));
+  });
+});
+
+describe("ログイン前は叩かない", () => {
+  it("認証が要って未ログインなら、/dashboard も /settings も叩かない", async () => {
+    const api = stubApi({ ...BASE_ROUTES, "/auth/session": { required: true, authenticated: false } });
+    window.history.pushState({}, "", "/");
+    render(<App />);
+    await screen.findByRole("region", { name: "ログイン" });
+    expect(api.calls().some((c) => c.path === "/dashboard")).toBe(false);
+    expect(api.calls().some((c) => c.path === "/settings")).toBe(false);
+  });
+});

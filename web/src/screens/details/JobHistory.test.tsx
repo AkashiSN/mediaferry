@@ -298,40 +298,39 @@ describe("作業の履歴", () => {
     );
   });
 
-  it("進捗の接続が切れていると、そう出す", async () => {
+  it("開いた直後は、接続が切れているとは出さない（まだ繋がったことが無いだけなので）", async () => {
     stubApi({ "/jobs": { jobs: [] } });
     render(
       <MemoryRouter>
         <JobHistoryScreen />
       </MemoryRouter>,
     );
-    expect(await screen.findByRole("status")).toHaveTextContent("進捗の接続が切れています");
+    await screen.findByText("作業の記録はまだありません。");
+    expect(screen.queryByRole("status")).not.toBeInTheDocument();
   });
 
-  it("つながっている間は、接続が切れているという表示を出さない", async () => {
+  it("接続が切れたら、そう出す", async () => {
     stubApi({ "/jobs": { jobs: [] } });
     render(
       <MemoryRouter>
         <JobHistoryScreen />
       </MemoryRouter>,
     );
-    await screen.findByRole("status");
-    openStream();
-    await waitFor(() => expect(screen.queryByRole("status")).not.toBeInTheDocument());
-  });
-
-  it("つながった後に切れたら、また表示を出す", async () => {
-    stubApi({ "/jobs": { jobs: [] } });
-    render(
-      <MemoryRouter>
-        <JobHistoryScreen />
-      </MemoryRouter>,
-    );
-    await screen.findByRole("status");
-    openStream();
-    await waitFor(() => expect(screen.queryByRole("status")).not.toBeInTheDocument());
     failStream();
     expect(await screen.findByRole("status")).toHaveTextContent("進捗の接続が切れています");
+  });
+
+  it("つながったら、表示を消す", async () => {
+    stubApi({ "/jobs": { jobs: [] } });
+    render(
+      <MemoryRouter>
+        <JobHistoryScreen />
+      </MemoryRouter>,
+    );
+    failStream();
+    await screen.findByRole("status");
+    openStream();
+    await waitFor(() => expect(screen.queryByRole("status")).not.toBeInTheDocument());
   });
 
   it(

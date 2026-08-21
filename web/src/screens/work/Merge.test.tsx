@@ -246,6 +246,9 @@ describe("つなぐ", () => {
     await waitFor(() => expect(screen.getByText(/library\/OUT\.MP4/)).toBeInTheDocument());
     expect(screen.getByText(/2 GiB/)).toBeInTheDocument();
     expect(screen.getByText(/検証: pass/)).toBeInTheDocument();
+    // 現行のグループの出力は消せない（消せるのは details/MergeHistory.tsx の
+    // 使っていない出力だけ）。
+    expect(screen.queryByRole("button", { name: /このファイルを消す/ })).toBeNull();
   });
 
   it("「つなぐ」は検出済みの候補を結合する", async () => {

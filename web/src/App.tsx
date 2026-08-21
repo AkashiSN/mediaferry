@@ -28,18 +28,19 @@ type Session = { required: boolean; authenticated: boolean };
 type Settings = { warnings: Warning[] };
 
 /**
- * 認証を済ませた後だけ描画する部分。**`taskCount` はここで 1 回だけ引く**
- * （画面ごとに数えさせない方針）。`App` 本体に置くと、ログイン確認が終わる前の
- * 描画でも `/dashboard` の `useEffect` が走ってしまうので、別のコンポーネントに
- * 切り出してマウント自体をログイン後まで遅らせる。
+ * 認証を済ませた後だけ描画する部分。**`taskCount` も `/settings` の警告も
+ * ここで 1 回だけ引く**（画面ごとに数えさせない方針）。`App` 本体に置くと、
+ * ログイン確認が終わる前の描画でも `useEffect` が走ってしまうので、別の
+ * コンポーネントに切り出してマウント自体をログイン後まで遅らせる。
  */
-function AuthedApp({ warnings }: { warnings: Warning[] }) {
+function AuthedApp() {
+  const settings = useQuery<Settings>("/settings");
   const dashboard = useQuery<DashboardCounts>("/dashboard");
   const taskCount = tasksFrom(dashboard.data).length;
 
   return (
     <BrowserRouter>
-      <Layout warnings={warnings} taskCount={taskCount}>
+      <Layout warnings={settings.data?.warnings ?? []} taskCount={taskCount}>
         <Routes>
           <Route path="/" element={<HomeScreen />} />
           <Route path="/card" element={<CardDetailScreen />} />
@@ -62,7 +63,6 @@ function AuthedApp({ warnings }: { warnings: Warning[] }) {
 
 export function App() {
   const [session, setSession] = useState<Session | null>(null);
-  const settings = useQuery<Settings>("/settings", [session?.authenticated]);
 
   const load = useCallback(() => {
     request<Session>("/auth/session")
@@ -78,5 +78,5 @@ export function App() {
   if (session.required && !session.authenticated) {
     return <LoginScreen onSignedIn={load} />;
   }
-  return <AuthedApp warnings={settings.data?.warnings ?? []} />;
+  return <AuthedApp />;
 }

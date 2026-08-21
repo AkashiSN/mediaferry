@@ -90,7 +90,7 @@ export function JobHistoryScreen() {
 
       <ErrorBanner error={error ?? jobs.error} onDismiss={() => setError(null)} />
 
-      {!connected && (
+      {connected === false && (
         <p role="status">進捗の接続が切れています。再接続を待っています…</p>
       )}
 
