@@ -11,7 +11,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { ApprovalsScreen } from "./Approvals";
 import { DestinationsScreen } from "./Destinations";
 import { DevicesScreen } from "./Devices";
-import { LibraryScreen, summarise } from "./Library";
+import { LibraryScreen } from "./Library";
 import { MergesScreen } from "./Merges";
 import { DashboardScreen } from "./Dashboard";
 import { JobsScreen } from "./Jobs";
@@ -218,21 +218,8 @@ describe("日時の承認", () => {
   });
 });
 
-describe("送信の結果を隠さない", () => {
-  it("断られた組と、開始に失敗した宛先を文に出す", () => {
-    expect(summarise(4, [{ reason: "結合中のグループの構成ファイル" }], ["backup"], 1)).toContain(
-      "送れない組が 1 件",
-    );
-    expect(summarise(4, [{ reason: "結合中のグループの構成ファイル" }], ["backup"], 1)).toContain(
-      "backup",
-    );
-  });
-
-  it("何も問題が無ければ、余計なことを言わない", () => {
-    const message = summarise(2, [], [], 2);
-    expect(message).toBe("2 組を作り、2 宛先で送信を始めました。");
-  });
-});
+// `summarise` の単体テストは `work/Send.test.tsx` にある（Task 7 で `Library.tsx` から
+// `work/Send.tsx` へ移した）。
 
 // 「選んだものは絞り込みで隠れても合計を保つ」は `Photos.test.tsx` が写真の
 // グリッドに対して検証する。旧ライブラリの表（行のチェックボックス・「名前」の

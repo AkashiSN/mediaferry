@@ -22,7 +22,7 @@ export function describe(confirmation: Confirmation): { title: string; body: Rea
   switch (confirmation.kind) {
     case "upload":
       return {
-        title: "この内容で送信しますか",
+        title: "この内容で送りますか",
         body: (
           <ul>
             <li>{confirmation.count} 件</li>

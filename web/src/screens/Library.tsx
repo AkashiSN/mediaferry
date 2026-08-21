@@ -9,6 +9,7 @@ import { ConfirmDialog } from "../components/ConfirmDialog";
 import { ErrorBanner } from "../components/ErrorBanner";
 import { useEvents } from "../hooks/useEvents";
 import { useReloadOnEvents } from "../hooks/useReloadOnEvents";
+import { summarise } from "./work/Send";
 
 type Media = {
   id: string;
@@ -28,24 +29,6 @@ type Pair = {
 };
 type PairResult = { pairs: Pair[] };
 type Destinations = { destinations: { id: string; name: string; enabled: boolean }[] };
-
-/** 送信の結果を 1 文にする（**断られた組と、開始に失敗した宛先を隠さない**）。 */
-export function summarise(
-  total: number,
-  rejected: { reason: string | null }[],
-  failures: string[],
-  started: number,
-): string {
-  const parts = [`${total - rejected.length} 組を作り、${started} 宛先で送信を始めました。`];
-  if (rejected.length > 0) {
-    const reasons = [...new Set(rejected.map((pair) => pair.reason ?? "理由不明"))];
-    parts.push(`送れない組が ${rejected.length} 件ありました（${reasons.join(" / ")}）。`);
-  }
-  if (failures.length > 0) {
-    parts.push(`開始できなかった宛先: ${failures.join(" / ")}。転送先の画面から再試行できます。`);
-  }
-  return parts.join("");
-}
 
 export function LibraryScreen() {
   const [params, setParams] = useSearchParams();
