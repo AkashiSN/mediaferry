@@ -119,6 +119,7 @@ export function DestinationsScreen() {
 
   async function archive(destination: Destination) {
     setBusy(true);
+    setError(null);
     try {
       await request(`/destinations/${destination.id}/archive`, { method: "POST" });
       destinations.reload();
@@ -132,12 +133,17 @@ export function DestinationsScreen() {
 
   /** 送り先 1 件への操作。失敗はバナーに出す（黙って何も起きないのを避ける）。 */
   async function act(path: string, options: { method: string; body?: unknown }) {
+    // **飛んでいる間は押させない。** `busy` を立てないと、ボタンの `disabled` は
+    // 常に偽で、二重に送れてしまう（効かないガードは無いガードより悪い）。
+    setBusy(true);
     setError(null);
     try {
       await request(path, options);
       destinations.reload();
     } catch (caught) {
       setError(caught);
+    } finally {
+      setBusy(false);
     }
   }
 

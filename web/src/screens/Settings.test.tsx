@@ -77,11 +77,16 @@ type Sent = { path: string; method: string; body: unknown };
 function stubRoutes(
   reply: (path: string, method: string) => [number, unknown] | undefined,
   fallback: Record<string, unknown> = {},
-): { sent: () => Sent[] } {
+  hold: (path: string, method: string) => boolean = () => false,
+): { sent: () => Sent[]; release: () => void } {
   const sent: Sent[] = [];
+  let open: () => void = () => undefined;
+  const gate = new Promise<void>((resolve) => {
+    open = resolve;
+  });
   vi.stubGlobal(
     "fetch",
-    vi.fn((input: string, init?: RequestInit) => {
+    vi.fn(async (input: string, init?: RequestInit) => {
       const path = input.replace(/^\/api/, "");
       const method = init?.method ?? "GET";
       sent.push({
@@ -90,10 +95,14 @@ function stubRoutes(
         body: init?.body === undefined ? null : (JSON.parse(String(init.body)) as unknown),
       });
       const [status, body] = reply(path, method) ?? [200, fallback[path] ?? {}];
-      return Promise.resolve(new Response(JSON.stringify(body), { status }));
+      // **応答を握ったままにできる。** 要求が飛んでいる間に何が押せるかを見る。
+      if (hold(path, method)) {
+        await gate;
+      }
+      return new Response(JSON.stringify(body), { status });
     }),
   );
-  return { sent: () => [...sent] };
+  return { sent: () => [...sent], release: () => open() };
 }
 
 /** その文字列を含む行。**行ごとの表示は、その行の中だけで確かめる。** */
@@ -111,6 +120,8 @@ beforeEach(() => {
 
 afterEach(() => {
   vi.restoreAllMocks();
+  // `window.prompt` も差し替えるので、テストごとに戻す。
+  vi.unstubAllGlobals();
 });
 
 describe("設定のトップ", () => {
@@ -139,6 +150,9 @@ describe("設定のトップ", () => {
     await waitFor(() =>
       expect(screen.getByText(/送信はどちらの設定でも常に手動/)).toBeInTheDocument(),
     );
+    // 切り替えが何の設定なのかと、切ったときにどうなるかも画面に出す。
+    expect(screen.getByText("信頼したカードを自動で取り込む")).toBeInTheDocument();
+    expect(screen.getByText(/オフにすると、信頼したカードでも毎回/)).toBeInTheDocument();
   });
 
   it("送り先は名前と、いま使えるかどうかを出す", async () => {
@@ -169,6 +183,9 @@ describe("設定のトップ", () => {
 
     expect(await screen.findByText("DJI Osmo Pocket")).toBeInTheDocument();
     expect(screen.queryByText("昔のカメラ")).toBeNull();
+    expect(
+      screen.getByText(/挿したカードがどの機種かを見分けるための決まりです/),
+    ).toBeInTheDocument();
   });
 
   it("自動取り込みを切り替えると、切り替えた先の値で保存する", async () => {
@@ -218,6 +235,24 @@ describe("設定のトップ", () => {
     expect(await screen.findByRole("alert")).toHaveTextContent(/環境変数で固定されています/);
   });
 
+  it("入り切りの見た目は、いまの値のとおりにする", async () => {
+    // **読めていない値や off を「オン」に倒さない**（挿すだけでコピーされると
+    // 誤解させる）。
+    stubApi(ROUTES);
+    renderTop();
+
+    await waitFor(() => expect(screen.getByRole("switch")).toHaveAttribute("aria-checked", "true"));
+  });
+
+  it("オフのときはオフに見せる", async () => {
+    stubApi({ ...ROUTES, "/settings": { settings: [{ ...AUTO_ON, value: "off" }], warnings: [] } });
+    renderTop();
+
+    await waitFor(() =>
+      expect(screen.getByRole("switch")).toHaveAttribute("aria-checked", "false"),
+    );
+  });
+
   it("それぞれの中身への入口を出す", async () => {
     stubApi(ROUTES);
     renderTop();
@@ -233,6 +268,7 @@ describe("設定のトップ", () => {
     for (const [name, href] of entries) {
       expect(await screen.findByRole("link", { name })).toHaveAttribute("href", href);
     }
+    expect(screen.getByText(/ふだんは見なくて大丈夫です/)).toBeInTheDocument();
   });
 });
 
@@ -294,6 +330,7 @@ describe("env 由来の設定", () => {
     renderGeneral();
 
     const field = await screen.findByLabelText(/LOG_LEVEL/);
+    expect(field).toHaveValue("info");
     fireEvent.change(field, { target: { value: "debug" } });
     fireEvent.blur(field);
 
@@ -302,6 +339,20 @@ describe("env 由来の設定", () => {
         { path: "/settings", method: "PUT", body: { key: "LOG_LEVEL", value: "debug" } },
       ]),
     );
+  });
+
+  it("値を変えていなければ保存しない", async () => {
+    // 送ると DB に行ができ、出所が「既定のまま」から「この画面で設定」に変わる。
+    // **欄を通り過ぎただけで出所が動いて見えるのを避ける。**
+    const api = stubRoutes(() => undefined, {
+      "/settings": { settings: [LOG_LEVEL], warnings: [] },
+    });
+    renderGeneral();
+
+    fireEvent.blur(await screen.findByLabelText(/LOG_LEVEL/));
+
+    await waitFor(() => expect(api.sent().length).toBeGreaterThan(0));
+    expect(api.sent().filter((call) => call.method === "PUT")).toEqual([]);
   });
 
   it("どこから来た値か、変えるといつ効くかを日本語で出す", async () => {
@@ -392,6 +443,23 @@ describe("カメラの種類", () => {
       expect(screen.getByRole("button", { name: /複製/ })).toBeInTheDocument(),
     );
     expect(screen.queryByRole("button", { name: /^編集/ })).not.toBeInTheDocument();
+    // **`aria-label` と表示は別々の式**なので、読み上げだけ直っていても意味が無い。
+    expect(screen.getByRole("button", { name: /複製/ })).toHaveTextContent("複製して変える");
+  });
+
+  it("設定へ戻れて、版の決まりを書く", async () => {
+    stubRoutes(() => undefined, FALLBACK);
+    renderProfiles();
+
+    expect(await screen.findByRole("link", { name: /設定へ/ })).toHaveAttribute(
+      "href",
+      "/settings",
+    );
+    // **過去の解釈は変わらない**（§6）。保存が既存データに触らないことの説明。
+    expect(
+      screen.getByText(/挿したカードがどの機種かを見分けるための決まりです/),
+    ).toBeInTheDocument();
+    expect(screen.getByText(/そのとき使った版のまま変わりません/)).toBeInTheDocument();
   });
 
   it("ビルトインには「候補から外す」を出さない", async () => {
@@ -428,8 +496,13 @@ describe("カメラの種類", () => {
     }, FALLBACK);
     renderProfiles();
 
-    await userEvent.click(await screen.findByRole("button", { name: "編集：私のカメラ" }));
-    await screen.findByLabelText(/カメラの種類の定義（YAML）/);
+    const edit = await screen.findByRole("button", { name: "編集：私のカメラ" });
+    expect(edit).toHaveTextContent("編集");
+    await userEvent.click(edit);
+    // **開いた定義そのものを見る。** 1 件だけ読み直す経路が変わると中身が空になる。
+    expect(await screen.findByLabelText(/カメラの種類の定義（YAML）/)).toHaveDisplayValue(
+      /filename_pattern/,
+    );
     await userEvent.click(screen.getByRole("button", { name: "保存する" }));
 
     expect(await screen.findByText(/版 2/)).toBeInTheDocument();
@@ -438,36 +511,148 @@ describe("カメラの種類", () => {
     ).toHaveLength(1);
   });
 
-  it("保存している間は、もう一度押せない", async () => {
+  it("保存している間は、どのボタンも押せない", async () => {
     // **二重に送らせない。** 保存は版を 1 つ増やすので、2 回走れば版が 2 つ増える。
-    let release: () => void = () => undefined;
-    const held = new Promise<void>((resolve) => {
-      release = resolve;
-    });
-    vi.stubGlobal(
-      "fetch",
-      vi.fn(async (input: string, init?: RequestInit) => {
-        const path = input.replace(/^\/api/, "");
-        const method = init?.method ?? "GET";
+    // 行の操作も同じ `busy` で閉じる（保存中に複製や再計算が走ると版が入れ違う）。
+    const api = stubRoutes(
+      (path, method) => {
+        if (path === "/profiles/my-camera" && method === "GET") {
+          return [200, { ...MINE, definition: DEFINITION }];
+        }
         if (path === "/profiles/my-camera" && method === "PUT") {
-          await held;
-          return new Response(JSON.stringify({ ...MINE, revision: 2, definition: DEFINITION }));
+          return [200, { ...MINE, revision: 2, definition: DEFINITION }];
         }
-        if (path === "/profiles/my-camera") {
-          return new Response(JSON.stringify({ ...MINE, definition: DEFINITION }));
-        }
-        return new Response(JSON.stringify(FALLBACK[path as keyof typeof FALLBACK] ?? {}));
-      }),
+        return undefined;
+      },
+      FALLBACK,
+      (path, method) => path === "/profiles/my-camera" && method === "PUT",
     );
     renderProfiles();
 
     await userEvent.click(await screen.findByRole("button", { name: "編集：私のカメラ" }));
     await screen.findByLabelText(/カメラの種類の定義（YAML）/);
-    const save = screen.getByRole("button", { name: "保存する" });
-    await userEvent.click(save);
+    await userEvent.click(screen.getByRole("button", { name: "保存する" }));
 
-    await waitFor(() => expect(save).toBeDisabled());
-    release();
+    await waitFor(() => expect(screen.getByRole("button", { name: "保存する" })).toBeDisabled());
+    for (const name of [
+      "やめる",
+      "編集：私のカメラ",
+      "候補から外す：私のカメラ",
+      "撮影日時を再計算する：私のカメラ",
+      "私のカメラ を SD_CARD で試す",
+      "複製して変える：DJI Osmo Pocket",
+      "新しく作る",
+    ]) {
+      expect(screen.getByRole("button", { name })).toBeDisabled();
+    }
+
+    api.release();
+    expect(await screen.findByText(/版 2/)).toBeInTheDocument();
+  });
+
+  it("複製している間は、もう一度押せない", async () => {
+    const api = stubRoutes(
+      (path, method) =>
+        path === "/profiles/dji-osmo/duplicate" && method === "POST"
+          ? [200, { ...MINE, slug: "my-dji", definition: DEFINITION }]
+          : undefined,
+      FALLBACK,
+      (path, method) => path === "/profiles/dji-osmo/duplicate" && method === "POST",
+    );
+    renderProfiles();
+
+    await userEvent.click(
+      await screen.findByRole("button", { name: "複製して変える：DJI Osmo Pocket" }),
+    );
+    await userEvent.click(screen.getByRole("button", { name: "複製する" }));
+
+    await waitFor(() => expect(screen.getByRole("button", { name: "複製する" })).toBeDisabled());
+    expect(screen.getByRole("button", { name: "やめる" })).toBeDisabled();
+
+    api.release();
+    await waitFor(() => expect(screen.queryByRole("button", { name: "複製する" })).toBeNull());
+  });
+
+  it("編集を開けなかったら、その理由を画面に出す", async () => {
+    stubRoutes(
+      (path, method) =>
+        path === "/profiles/my-camera" && method === "GET"
+          ? [404, { error: { code: "not_found", detail: "" } }]
+          : undefined,
+      FALLBACK,
+    );
+    renderProfiles();
+
+    await userEvent.click(await screen.findByRole("button", { name: "編集：私のカメラ" }));
+
+    expect(await screen.findByRole("alert")).toHaveTextContent(/見つかりませんでした/);
+  });
+
+  it("複製できなかったら、その理由を画面に出す", async () => {
+    // slug が重なると 409 が返る。**利用者がふつうに踏む経路。**
+    stubRoutes(
+      (path, method) =>
+        path === "/profiles/dji-osmo/duplicate" && method === "POST"
+          ? [409, { error: { code: "conflict", detail: "" } }]
+          : undefined,
+      FALLBACK,
+    );
+    renderProfiles();
+
+    await userEvent.click(
+      await screen.findByRole("button", { name: "複製して変える：DJI Osmo Pocket" }),
+    );
+    await userEvent.click(screen.getByRole("button", { name: "複製する" }));
+
+    expect(await screen.findByRole("alert")).toHaveTextContent(/いまの状態ではこの操作はできません/);
+  });
+
+  it("候補から外せなかったら、その理由を画面に出す", async () => {
+    stubRoutes(
+      (path, method) =>
+        path === "/profiles/my-camera/archive" && method === "POST"
+          ? [409, { error: { code: "conflict", detail: "" } }]
+          : undefined,
+      FALLBACK,
+    );
+    renderProfiles();
+
+    await userEvent.click(await screen.findByRole("button", { name: "候補から外す：私のカメラ" }));
+    await userEvent.click(await screen.findByRole("button", { name: "実行する" }));
+
+    expect(await screen.findByRole("alert")).toHaveTextContent(/いまの状態ではこの操作はできません/);
+  });
+
+  it("再計算を起動できなかったら、その理由を画面に出す", async () => {
+    stubRoutes(
+      (path, method) =>
+        path === "/profiles/my-camera/recompute" && method === "POST"
+          ? [409, { error: { code: "conflict", detail: "" } }]
+          : undefined,
+      FALLBACK,
+    );
+    renderProfiles();
+
+    await userEvent.click(
+      await screen.findByRole("button", { name: "撮影日時を再計算する：私のカメラ" }),
+    );
+
+    expect(await screen.findByRole("alert")).toHaveTextContent(/いまの状態ではこの操作はできません/);
+  });
+
+  it("判定を試せなかったら、その理由を画面に出す", async () => {
+    stubRoutes(
+      (path, method) =>
+        path.includes("/test") && method === "POST"
+          ? [404, { error: { code: "not_found", detail: "" } }]
+          : undefined,
+      FALLBACK,
+    );
+    renderProfiles();
+
+    await userEvent.click(await screen.findByRole("button", { name: "私のカメラ を SD_CARD で試す" }));
+
+    expect(await screen.findByRole("alert")).toHaveTextContent(/見つかりませんでした/);
   });
 
   it("新規作成は POST を呼び、作られたものを出す", async () => {
@@ -550,6 +735,7 @@ describe("カメラの種類", () => {
       await screen.findByRole("button", { name: "複製して変える：DJI Osmo Pocket" }),
     );
     fireEvent.change(screen.getByLabelText("新しい slug"), { target: { value: "my-dji" } });
+    expect(screen.getByLabelText("表示名")).toHaveValue("DJI Osmo Pocket の複製");
     await userEvent.click(screen.getByRole("button", { name: "複製する" }));
 
     expect(await screen.findByLabelText(/カメラの種類の定義（YAML）/)).toBeInTheDocument();
@@ -570,7 +756,9 @@ describe("カメラの種類", () => {
     const api = stubRoutes(() => undefined, FALLBACK);
     renderProfiles();
 
-    await userEvent.click(await screen.findByRole("button", { name: "候補から外す：私のカメラ" }));
+    const drop = await screen.findByRole("button", { name: "候補から外す：私のカメラ" });
+    expect(drop).toHaveTextContent("候補から外す");
+    await userEvent.click(drop);
 
     expect(await screen.findByRole("dialog")).toBeInTheDocument();
     expect(api.sent().some((call) => call.path.includes("archive"))).toBe(false);
@@ -627,9 +815,9 @@ describe("カメラの種類", () => {
     }, FALLBACK);
     renderProfiles();
 
-    await userEvent.click(
-      await screen.findByRole("button", { name: "撮影日時を再計算する：私のカメラ" }),
-    );
+    const again = await screen.findByRole("button", { name: "撮影日時を再計算する：私のカメラ" });
+    expect(again).toHaveTextContent("撮影日時を再計算する");
+    await userEvent.click(again);
 
     expect(await screen.findByRole("link", { name: /進み具合/ })).toHaveAttribute(
       "href",
@@ -713,11 +901,23 @@ describe("送り先", () => {
     );
   }
 
+  it("設定へ戻れる", async () => {
+    stubApi({ "/destinations": { destinations: [] } });
+    renderDestinations();
+
+    expect(await screen.findByRole("link", { name: /設定へ/ })).toHaveAttribute(
+      "href",
+      "/settings",
+    );
+  });
+
   it("退役は確認を経てから", async () => {
     const api = stubApi({ "/destinations": { destinations: [HOME] }, "/uploads": NO_SKIPS });
     renderDestinations();
 
-    await userEvent.click(await screen.findByRole("button", { name: "退役させる：居間の Immich" }));
+    const retire = await screen.findByRole("button", { name: "退役させる：居間の Immich" });
+    expect(retire).toHaveTextContent("退役させる");
+    await userEvent.click(retire);
 
     expect(await screen.findByRole("dialog")).toBeInTheDocument();
     expect(api.calls().some((call) => call.path.includes("archive"))).toBe(false);
@@ -767,8 +967,14 @@ describe("送り先", () => {
     });
     renderDestinations();
 
-    expect(await screen.findByRole("button", { name: "使う：居間の Immich" })).toBeInTheDocument();
+    const resume = await screen.findByRole("button", { name: "使う：居間の Immich" });
+    // **`aria-label` と表示は別々の式。** 読み上げだけ直っていると、画面には
+    // 逆の言葉が出たままになる。
+    expect(resume).toHaveTextContent("使う");
     expect(screen.queryByRole("button", { name: "休止する：居間の Immich" })).toBeNull();
+    // **休止中を「使えます」と出さない**（状態の印には言葉を添える。§13）。
+    expect(screen.getByText(/休止中：送り先の候補に出ません/)).toBeInTheDocument();
+    expect(screen.queryByText(/使えます/)).toBeNull();
   });
 
   it("操作が失敗したら、その理由を画面に出す", async () => {
@@ -790,9 +996,9 @@ describe("送り先", () => {
     const api = stubApi({ "/destinations": { destinations: [HOME] }, "/uploads": NO_SKIPS });
     renderDestinations();
 
-    await userEvent.click(
-      await screen.findByRole("button", { name: "つながるか確かめる：居間の Immich" }),
-    );
+    const check = await screen.findByRole("button", { name: "つながるか確かめる：居間の Immich" });
+    expect(check).toHaveTextContent("つながるか確かめる");
+    await userEvent.click(check);
 
     await waitFor(() =>
       expect(
@@ -803,11 +1009,171 @@ describe("送り先", () => {
     );
   });
 
+  it("使える送り先には、使えると書く", async () => {
+    stubApi({ "/destinations": { destinations: [HOME] }, "/uploads": NO_SKIPS });
+    renderDestinations();
+
+    expect(await screen.findByText(/使えます/)).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "休止する：居間の Immich" })).toHaveTextContent(
+      "休止する",
+    );
+  });
+
   it("最後に確かめた日時を、読める形で出す", async () => {
     stubApi({ "/destinations": { destinations: [HOME] }, "/uploads": NO_SKIPS });
     renderDestinations();
 
     expect(await screen.findByText(/2026年8月18日 05:03/)).toBeInTheDocument();
+  });
+
+  it("まだ確かめていない送り先には、そう書く", async () => {
+    stubApi({
+      "/destinations": { destinations: [{ ...HOME, verified_at: null }] },
+      "/uploads": NO_SKIPS,
+    });
+    renderDestinations();
+
+    expect(await screen.findByText(/まだ確かめていません/)).toBeInTheDocument();
+  });
+
+  it("名前を変えると、新しい名前だけを送る", async () => {
+    vi.stubGlobal("prompt", vi.fn(() => "新しい名前"));
+    const sent: Sent[] = [];
+    stubApi({ "/destinations": { destinations: [HOME] }, "/uploads": NO_SKIPS }, (path, init) => {
+      if (init?.body !== undefined) {
+        sent.push({
+          path,
+          method: init.method ?? "GET",
+          body: JSON.parse(String(init.body)) as unknown,
+        });
+      }
+    });
+    renderDestinations();
+
+    const rename = await screen.findByRole("button", { name: "名前を変える：居間の Immich" });
+    expect(rename).toHaveTextContent("名前を変える");
+    await userEvent.click(rename);
+
+    await waitFor(() =>
+      expect(sent).toEqual([
+        { path: "/destinations/d1", method: "PATCH", body: { name: "新しい名前" } },
+      ]),
+    );
+  });
+
+  it("名前の変更をやめたら、何も送らない", async () => {
+    vi.stubGlobal("prompt", vi.fn(() => null));
+    const api = stubApi({ "/destinations": { destinations: [HOME] }, "/uploads": NO_SKIPS });
+    renderDestinations();
+
+    await userEvent.click(await screen.findByRole("button", { name: "名前を変える：居間の Immich" }));
+
+    expect(api.calls().some((call) => call.method === "PATCH")).toBe(false);
+  });
+
+  it("状態の再確認は、再確認の口を叩く", async () => {
+    // **接続の検証（`verify`）と取り違えない。** 見る先が違う。
+    const api = stubApi({ "/destinations": { destinations: [HOME] }, "/uploads": NO_SKIPS });
+    renderDestinations();
+
+    const recheck = await screen.findByRole("button", { name: "状態を再確認する：居間の Immich" });
+    expect(recheck).toHaveTextContent("状態を再確認する");
+    await userEvent.click(recheck);
+
+    await waitFor(() =>
+      expect(
+        api
+          .calls()
+          .filter((call) => call.path === "/destinations/d1/recheck" && call.method === "POST"),
+      ).toHaveLength(1),
+    );
+    expect(api.calls().some((call) => call.path.endsWith("/verify"))).toBe(false);
+  });
+
+  it("送り先を操作している間は、もう一度押せない", async () => {
+    const api = stubRoutes(
+      () => undefined,
+      { "/destinations": { destinations: [HOME] } },
+      (path, method) => path === "/destinations/d1" && method === "PATCH",
+    );
+    renderDestinations();
+
+    await userEvent.click(await screen.findByRole("button", { name: "休止する：居間の Immich" }));
+
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: "休止する：居間の Immich" })).toBeDisabled(),
+    );
+    for (const name of [
+      "名前を変える：居間の Immich",
+      "つながるか確かめる：居間の Immich",
+      "状態を再確認する：居間の Immich",
+      "退役させる：居間の Immich",
+      "接続を検証して追加する",
+    ]) {
+      expect(screen.getByRole("button", { name })).toBeDisabled();
+    }
+
+    api.release();
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: "休止する：居間の Immich" })).toBeEnabled(),
+    );
+  });
+
+  it("追加に失敗したら、その理由を画面に出す", async () => {
+    // URL が拒まれる（400）、届かない（502）、鍵が違う（401）はどれもここへ来る。
+    stubRoutes(
+      (path, method) =>
+        path === "/destinations" && method === "POST"
+          ? [502, { error: { code: "destination_unreachable", detail: "" } }]
+          : undefined,
+      { "/destinations": { destinations: [] } },
+    );
+    renderDestinations();
+
+    fireEvent.change(await screen.findByLabelText("名前"), { target: { value: "新しい送り先" } });
+    fireEvent.change(screen.getByLabelText("接続先 URL"), {
+      target: { value: "http://immich.invalid" },
+    });
+    fireEvent.change(screen.getByLabelText(/API キー/), { target: { value: "秘密" } });
+    await userEvent.click(screen.getByRole("button", { name: /接続を検証して追加する/ }));
+
+    expect(await screen.findByRole("alert")).toHaveTextContent(/転送先に接続できません/);
+  });
+
+  it("退役を始めるときは、古い失敗の表示を消す", async () => {
+    // 前の操作の赤いバナーが残ったままだと、いま何が失敗しているのか読めない。
+    stubRoutes(
+      (path, method) =>
+        path === "/destinations/d1" && method === "PATCH"
+          ? [404, { error: { code: "not_found", detail: "" } }]
+          : undefined,
+      { "/destinations": { destinations: [HOME] } },
+    );
+    renderDestinations();
+
+    await userEvent.click(await screen.findByRole("button", { name: "休止する：居間の Immich" }));
+    await screen.findByRole("alert");
+
+    await userEvent.click(screen.getByRole("button", { name: "退役させる：居間の Immich" }));
+    await userEvent.click(await screen.findByRole("button", { name: "実行する" }));
+
+    await waitFor(() => expect(screen.queryByRole("alert")).toBeNull());
+  });
+
+  it("退役に失敗したら、その理由を画面に出す", async () => {
+    stubRoutes(
+      (path, method) =>
+        path === "/destinations/d1/archive" && method === "POST"
+          ? [409, { error: { code: "conflict", detail: "" } }]
+          : undefined,
+      { "/destinations": { destinations: [HOME] } },
+    );
+    renderDestinations();
+
+    await userEvent.click(await screen.findByRole("button", { name: "退役させる：居間の Immich" }));
+    await userEvent.click(await screen.findByRole("button", { name: "実行する" }));
+
+    expect(await screen.findByRole("alert")).toHaveTextContent(/いまの状態ではこの操作はできません/);
   });
 
   it("同じライブラリを指す送り先があれば知らせる", async () => {
@@ -869,6 +1235,47 @@ describe("送り先", () => {
             name: "新しい送り先",
             base_url: "http://immich.invalid",
             public_url: null,
+            api_key: "秘密",
+          },
+        },
+      ]),
+    );
+    // **送った後、鍵を欄に残さない**（同じ画面を開いたままにする人がいる）。
+    await waitFor(() => expect(key).toHaveValue(""));
+  });
+
+  it("表示用 URL を入れたら、その値も送る", async () => {
+    const sent: Sent[] = [];
+    stubApi({ "/destinations": { destinations: [] } }, (path, init) => {
+      if (init?.body !== undefined) {
+        sent.push({
+          path,
+          method: init.method ?? "GET",
+          body: JSON.parse(String(init.body)) as unknown,
+        });
+      }
+    });
+    renderDestinations();
+
+    fireEvent.change(await screen.findByLabelText("名前"), { target: { value: "送り先" } });
+    fireEvent.change(screen.getByLabelText("接続先 URL"), {
+      target: { value: "http://immich.invalid" },
+    });
+    fireEvent.change(screen.getByLabelText("表示用 URL（任意）"), {
+      target: { value: "http://immich.invalid/see" },
+    });
+    fireEvent.change(screen.getByLabelText(/API キー/), { target: { value: "秘密" } });
+    await userEvent.click(screen.getByRole("button", { name: /接続を検証して追加する/ }));
+
+    await waitFor(() =>
+      expect(sent).toEqual([
+        {
+          path: "/destinations",
+          method: "POST",
+          body: {
+            name: "送り先",
+            base_url: "http://immich.invalid",
+            public_url: "http://immich.invalid/see",
             api_key: "秘密",
           },
         },

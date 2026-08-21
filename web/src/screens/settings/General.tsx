@@ -59,11 +59,17 @@ export function GeneralScreen() {
   const [error, setError] = useState<unknown>(null);
   const [busy, setBusy] = useState(false);
 
-  async function save(key: string, value: string) {
+  async function save(setting: Setting, value: string) {
+    // **変わっていない値は送らない。** 送ると DB に行ができ、その項目の出所が
+    // 「既定のまま」から「この画面で設定」に変わる（欄を通り過ぎただけで出所が
+    // 動いて見える）。
+    if (value === (setting.value ?? "")) {
+      return;
+    }
     setBusy(true);
     setError(null);
     try {
-      await request("/settings", { method: "PUT", body: { key, value } });
+      await request("/settings", { method: "PUT", body: { key: setting.key, value } });
       settings.reload();
     } catch (caught) {
       setError(caught);
@@ -120,7 +126,7 @@ export function GeneralScreen() {
                 placeholder="（未設定）"
                 // **変えられない項目は押しても入らない。** 値は出すが、書けない。
                 disabled={busy || !setting.writable}
-                onBlur={(event) => void save(setting.key, event.currentTarget.value)}
+                onBlur={(event) => void save(setting, event.currentTarget.value)}
               />
             </li>
           ))}
