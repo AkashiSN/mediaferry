@@ -484,11 +484,35 @@ describe("カメラの種類", () => {
       "href",
       "/settings",
     );
+    // **画面の名乗り**（§13「プロファイル」は出さない）。見出しと、読み上げが
+    // 画面の範囲を掴むための節の名前の両方を見る。
+    expect(screen.getByRole("heading", { level: 1, name: "カメラの種類" })).toBeInTheDocument();
+    expect(screen.getByRole("region", { name: "カメラの種類" })).toBeInTheDocument();
     // **過去の解釈は変わらない**（§6）。保存が既存データに触らないことの説明。
     expect(
       screen.getByText(/挿したカードがどの機種かを見分けるための決まりです/),
     ).toBeInTheDocument();
     expect(screen.getByText(/そのとき使った版のまま変わりません/)).toBeInTheDocument();
+  });
+
+  // **1 つのカメラ ＝ 1 つのまとまり。** 区切りの無い 1 枚の板に見出しと操作を
+  // 積むと、ボタンが上下どちらのカメラのものか読めない（実機で「ボタンがどこか
+  // 分かりにくい」と言われた）。見出しをカメラの名前の `h2` にし、そのカメラの
+  // 操作をその節の中だけに置く。
+  it("1 つのカメラの操作は、そのカメラのまとまりの中にだけ置く", async () => {
+    stubRoutes(() => undefined, FALLBACK);
+    renderProfiles();
+
+    const heading = await screen.findByRole("heading", { name: "私のカメラ" });
+    const group = heading.closest("section");
+    expect(group).not.toBeNull();
+    const mine = within(group!);
+    expect(mine.getByRole("button", { name: "撮影日時を再計算する：私のカメラ" })).toBeInTheDocument();
+    expect(mine.getByRole("button", { name: "私のカメラ を SD_CARD で試す" })).toBeInTheDocument();
+    // **隣のカメラの操作は入らない。** ここが緩いと、1 枚の板に全部並んだ
+    // ままでも通ってしまう。
+    expect(mine.queryByRole("button", { name: /DJI Osmo Pocket/ })).toBeNull();
+    expect(mine.queryByRole("heading", { name: "DJI Osmo Pocket" })).toBeNull();
   });
 
   it("ビルトインには「候補から外す」を出さない", async () => {
@@ -767,11 +791,16 @@ describe("カメラの種類", () => {
     await userEvent.click(
       await screen.findByRole("button", { name: "複製して変える：DJI Osmo Pocket" }),
     );
+    // **どちらの欄かを名前で見分けられる。** 複製の欄と定義の欄は続けて開くので、
+    // 読み上げでは節の名前が唯一の手がかりになる。
+    const panel = screen.getByRole("region", { name: "複製" });
+    expect(within(panel).getByRole("heading", { name: "複製して変える" })).toBeInTheDocument();
     fireEvent.change(screen.getByLabelText("新しい slug"), { target: { value: "my-dji" } });
     expect(screen.getByLabelText("表示名")).toHaveValue("DJI Osmo Pocket の複製");
     await userEvent.click(screen.getByRole("button", { name: "複製する" }));
 
     expect(await screen.findByLabelText(/カメラの種類の定義（YAML）/)).toBeInTheDocument();
+    expect(screen.getByRole("region", { name: "定義の編集" })).toBeInTheDocument();
     expect(
       api
         .sent()
@@ -812,6 +841,27 @@ describe("カメラの種類", () => {
     ).toHaveLength(1);
   });
 
+  it("外している間は、確認をもう一度押せない", async () => {
+    const api = stubRoutes(
+      () => undefined,
+      FALLBACK,
+      (path, method) => path === "/profiles/my-camera/archive" && method === "POST",
+    );
+    renderProfiles();
+
+    await userEvent.click(await screen.findByRole("button", { name: "候補から外す：私のカメラ" }));
+    await userEvent.click(await screen.findByRole("button", { name: "実行する" }));
+
+    // **2 度押しで 2 回外れない。** 確認は要求が終わるまで閉じないので、閉じる
+    // までの間ボタンを止めておく必要がある。
+    await waitFor(() => expect(screen.getByRole("button", { name: "実行する" })).toBeDisabled());
+    api.release();
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+    expect(
+      api.sent().filter((call) => call.path === "/profiles/my-camera/archive"),
+    ).toHaveLength(1);
+  });
+
   it("接続中のカードで判定を試せる", async () => {
     stubRoutes((path, method) => {
       if (path.includes("/test") && method === "POST") {
@@ -824,6 +874,30 @@ describe("カメラの種類", () => {
     await userEvent.click(await screen.findByRole("button", { name: "私のカメラ を SD_CARD で試す" }));
 
     expect(await screen.findByText(/DCIM が無い/)).toBeInTheDocument();
+  });
+
+  it("一致したときは一致したと出し、どのカードで試したかを送る", async () => {
+    // **一致・不一致は別の枝**なので、片方だけでは文言の取り違えが残る。
+    // **どのカードで試したかは問い合わせの一部**（`volume_instance_id`）で、
+    // 落ちるとサーバは別のカードを見る。
+    const api = stubRoutes((path, method) => {
+      if (path.includes("/test") && method === "POST") {
+        return [200, { matched: true, reason: null }];
+      }
+      return undefined;
+    }, FALLBACK);
+    renderProfiles();
+
+    await userEvent.click(await screen.findByRole("button", { name: "私のカメラ を SD_CARD で試す" }));
+
+    expect(await screen.findByText("「私のカメラ」と SD_CARD: 一致します")).toBeInTheDocument();
+    expect(api.sent().filter((call) => call.path.includes("/test"))).toEqual([
+      {
+        path: "/profiles/my-camera/test?volume_instance_id=v1",
+        method: "POST",
+        body: null,
+      },
+    ]);
   });
 
   it("名前の無いカードでも、どのカードで試すのかが分かる", async () => {

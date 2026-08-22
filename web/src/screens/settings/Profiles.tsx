@@ -7,6 +7,10 @@
 //
 // **slug は画面に出す。** 作成後は変えられない識別子で、複製のときに利用者自身が
 // 決めるもの（ライブラリのパスに使う）。表示名を主に出し、slug は補助的に添える。
+//
+// **カメラ 1 台につき板 1 枚**（`settings/Destinations.tsx` の送り先と同じ形）。
+// 操作は 2 行に分ける: 上は**この決まりや取り込み済みの日時を変える**もの、下は
+// **判定を見るだけで何も変えない**「試す」。
 
 import { dump, load, YAMLException } from "js-yaml";
 import { useState } from "react";
@@ -242,6 +246,17 @@ export function ProfilesScreen() {
           <Icon name="back" size={16} />
           設定へ
         </Link>
+        {/* **作る操作は一覧の外に置く。** 一覧はカメラ 1 台につき 1 枚の板なので、
+            末尾に混ぜると最後のカメラの操作に見える。 */}
+        <button
+          type="button"
+          className="btn sm outline"
+          style={{ marginLeft: "auto" }}
+          disabled={busy}
+          onClick={openTemplate}
+        >
+          新しく作る
+        </button>
       </div>
       <h1 className="page title-lg">カメラの種類</h1>
 
@@ -346,72 +361,86 @@ export function ProfilesScreen() {
         </section>
       )}
 
-      <section className="card pad">
-        <ul style={{ display: "flex", flexDirection: "column", gap: 16, listStyle: "none", padding: 0 }}>
-          {(profiles.data?.profiles ?? []).map((profile) => (
-            <li key={profile.slug} className="row">
-              <div className="grow">
-                <div style={{ fontSize: "13.5px", fontWeight: 600 }}>{profile.name}</div>
-                <div className="small">
-                  {profile.slug} ・ 版 {profile.revision}
-                  {/* ビルトインは次のアプリ更新で上書きされるので編集させない（§6）。 */}
-                  {profile.builtin && " ・ 最初から入っているので編集できません"}
-                  {profile.archived && " ・ 候補から外してあります"}
-                </div>
-              </div>
-              <div className="acts">
-                {profile.builtin ? (
-                  <button
-                    type="button"
-                    className="btn sm quiet"
-                    aria-label={`複製して変える：${profile.name}`}
-                    disabled={busy}
-                    onClick={() =>
-                      setDuplicating({
-                        source: profile.slug,
-                        slug: `${profile.slug}-copy`,
-                        name: `${profile.name} の複製`,
-                      })
-                    }
-                  >
-                    複製して変える
-                  </button>
-                ) : (
-                  <button
-                    type="button"
-                    className="btn sm"
-                    aria-label={`編集：${profile.name}`}
-                    disabled={busy}
-                    onClick={() => void openEditor(profile.slug)}
-                  >
-                    編集
-                  </button>
-                )}
-                {!profile.builtin && !profile.archived && (
-                  <button
-                    type="button"
-                    className="btn sm quiet"
-                    aria-label={`候補から外す：${profile.name}`}
-                    disabled={busy}
-                    onClick={() =>
-                      setConfirming({
-                        confirmation: { kind: "archive_profile", slug: profile.slug },
-                        slug: profile.slug,
-                      })
-                    }
-                  >
-                    候補から外す
-                  </button>
-                )}
-                <button
-                  type="button"
-                  className="btn sm quiet"
-                  aria-label={`撮影日時を再計算する：${profile.name}`}
-                  disabled={busy}
-                  onClick={() => void recompute(profile)}
-                >
-                  撮影日時を再計算する
-                </button>
+      {/* **カメラ 1 台を 1 枚の板にする。** 区切りの無い 1 枚に見出しと操作を
+          積むと、ボタンが上下どちらのカメラのものか読めない。1 件ずつ板に分ける
+          のは `settings/Destinations.tsx` の送り先と同じ形。 */}
+      {(profiles.data?.profiles ?? []).map((profile) => (
+        <section key={profile.slug} className="card pad">
+          <div className="rowtop">
+            <div className="grow">
+              <h2 style={{ fontSize: 16, fontWeight: 650 }}>{profile.name}</h2>
+              <p className="small ident" style={{ marginTop: 4 }}>
+                {profile.slug} ・ 版 {profile.revision}
+                {/* ビルトインは次のアプリ更新で上書きされるので編集させない（§6）。 */}
+                {profile.builtin && " ・ 最初から入っているので編集できません"}
+                {profile.archived && " ・ 候補から外してあります"}
+              </p>
+            </div>
+          </div>
+          {/* このカメラの決まりを変える操作。**枠のある素のボタン**で出す。 */}
+          <div className="acts" style={{ marginTop: 14 }}>
+            {profile.builtin ? (
+              <button
+                type="button"
+                className="btn sm"
+                aria-label={`複製して変える：${profile.name}`}
+                disabled={busy}
+                onClick={() =>
+                  setDuplicating({
+                    source: profile.slug,
+                    slug: `${profile.slug}-copy`,
+                    name: `${profile.name} の複製`,
+                  })
+                }
+              >
+                複製して変える
+              </button>
+            ) : (
+              <button
+                type="button"
+                className="btn sm"
+                aria-label={`編集：${profile.name}`}
+                disabled={busy}
+                onClick={() => void openEditor(profile.slug)}
+              >
+                編集
+              </button>
+            )}
+            <button
+              type="button"
+              className="btn sm"
+              aria-label={`撮影日時を再計算する：${profile.name}`}
+              disabled={busy}
+              onClick={() => void recompute(profile)}
+            >
+              撮影日時を再計算する
+            </button>
+            {!profile.builtin && !profile.archived && (
+              <button
+                type="button"
+                className="btn sm quiet"
+                aria-label={`候補から外す：${profile.name}`}
+                disabled={busy}
+                onClick={() =>
+                  setConfirming({
+                    confirmation: { kind: "archive_profile", slug: profile.slug },
+                    slug: profile.slug,
+                  })
+                }
+              >
+                候補から外す
+              </button>
+            )}
+          </div>
+          {/* **試すだけの操作は、変える操作と混ぜない。** 上の 2 つはこのカメラの
+              決まりや取り込み済みの日時を変えるが、こちらは判定を見るだけで何も
+              変わらない。行を分けて、そう書き添える。 */}
+          {cards.length > 0 && (
+            <>
+              <p className="small" style={{ marginTop: 14 }}>
+                いま挿さっているカードで、この決まりが当たるか試せます（何も変わりません）。
+              </p>
+              <div className="acts" style={{ marginTop: 8 }}>
                 {cards.map((volume) => {
                   const label = volumeLabel(cards, volume);
                   return (
@@ -428,15 +457,10 @@ export function ProfilesScreen() {
                   );
                 })}
               </div>
-            </li>
-          ))}
-        </ul>
-        <div className="acts" style={{ marginTop: 14 }}>
-          <button type="button" className="btn sm outline" disabled={busy} onClick={openTemplate}>
-            新しく作る
-          </button>
-        </div>
-      </section>
+            </>
+          )}
+        </section>
+      ))}
 
       {confirming && (
         <ConfirmDialog

@@ -395,6 +395,85 @@ test("狭い画面のボタンは 44px 以上", async ({ page }) => {
 });
 
 /**
+ * **押せるものが押せると見えるか。** 色は計算後の値でしか分からないので、実ブラウザ
+ * でしか捕まらない —— RTL はクラス名が付いていることしか見ず、44px の検査は大きさ
+ * しか測らない。**枠も地も透明なボタンは、本文と同じ「灰色の文字」に見える。**
+ *
+ * 手がかりを 2 つのどちらかに求める: **地が背後と違う色で塗ってある**か、
+ * **幅のある枠が透明でない**か。どちらも無いものを返す。
+ *
+ * 背後の色は、`background-color` が透明でない最初の祖先から取る（透明な入れ物を
+ * いくつ挟んでも、実際に見えている地はその色）。
+ */
+async function flatControls(page: Page): Promise<string[]> {
+  return page.evaluate(() => {
+    const clear = (color: string) => color === "transparent" || /,\s*0\)$/.test(color);
+    const ground = (element: Element): string => {
+      for (let node = element.parentElement; node !== null; node = node.parentElement) {
+        const color = getComputedStyle(node).backgroundColor;
+        if (!clear(color)) {
+          return color;
+        }
+      }
+      return "";
+    };
+    const found: string[] = [];
+    for (const control of document.querySelectorAll<HTMLElement>("main button")) {
+      const rect = control.getBoundingClientRect();
+      if (rect.width === 0 || rect.height === 0) {
+        continue;
+      }
+      const style = getComputedStyle(control);
+      const filled = !clear(style.backgroundColor) && style.backgroundColor !== ground(control);
+      const framed =
+        parseFloat(style.borderTopWidth) > 0 && !clear(style.borderTopColor);
+      if (!filled && !framed) {
+        const label = (control.textContent ?? "").trim().replace(/\s+/g, " ").slice(0, 24);
+        found.push(
+          `「${label}」は 地 ${style.backgroundColor} / 枠 ${style.borderTopWidth} ` +
+            `${style.borderTopColor} で、背後（${ground(control)}）と見分けが付かない`,
+        );
+      }
+    }
+    return found;
+  });
+}
+
+// **`.quiet` は 7 画面が使う**ので、カメラの種類だけを見ても足りない。全画面を巡り、
+// 押せるものが本文の灰色の文字に埋もれていないかを見る。ライトとダークの両方で
+// 測るのは、手がかりをトークンから取っているため（片方だけ潰れる直し方がある）。
+for (const colorScheme of ["light", "dark"] as const) {
+  test(`${colorScheme} で、押せるものが押せると分かる`, async ({ page }) => {
+    await page.emulateMedia({ colorScheme });
+    await signIn(page);
+    // 44px の検査と同じく、**最初の 1 件で止めない**。全画面ぶんを集めて見せる。
+    const flat: string[] = [];
+    let profileButtons = 0;
+    for (const path of SCREENS) {
+      await page.goto(app.url + path);
+      await settled(page);
+      if (path === "/settings/profiles") {
+        profileButtons = await page.locator("main button").count();
+      }
+      // **下に貼り付く帯は、1 枚選ぶまで描かれない。** 帯の地はトークンの外
+      // （暗い帯）なので、選ばずに通り過ぎると帯の上の弱い操作が一度も測られない。
+      if (path === "/photos") {
+        await page.locator("main button.tile").first().click({ timeout: 60_000 });
+        await expect(page.locator(".actionbar")).toBeVisible();
+      }
+      for (const problem of await flatControls(page)) {
+        flat.push(`${path} の ${problem}`);
+      }
+    }
+    // **空振りで緑にしない。** カメラの種類にはビルトインが 3 つあり、1 つにつき
+    // 「複製して変える」「撮影日時を再計算する」と、挿してあるカードのぶんの
+    // 「試す」が並ぶ。ここが 0 のまま通ると、何も測らずに緑になる。
+    expect(profileButtons, "カメラの種類の画面に操作が無い").toBeGreaterThanOrEqual(6);
+    expect(flat, flat.join("\n")).toEqual([]);
+  });
+}
+
+/**
  * 文字が入れ物からはみ出している要素を集める。
  *
  * **これは実ブラウザでしか捕まらない。** RTL はレイアウトを見ないので、見出しに

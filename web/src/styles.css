@@ -170,7 +170,13 @@ ul { margin: 0; }
 .btn.primary:hover { filter: brightness(1.08); }
 .btn.outline { border-color: var(--accent); color: var(--accent); font-weight: 600; }
 .btn.warnish { border-color: var(--warn-line); color: var(--warn); font-weight: 600; }
-.btn.quiet { border-color: transparent; background: transparent; color: var(--ink-2); }
+/* **いちばん弱い強調。それでも押せると分かること**（§13）。枠と地を両方透かすと
+   本文の灰色の文字と見分けが付かなくなるので、**枠は残し、地をわずかに沈める**。
+   下に置いているのは文字の色（`--ink-2`）と、地が `--surface` より暗いこと。
+   強さの順は primary > outline > 素の `.btn` > `.quiet`。
+   `.quiet` は 7 画面が使う（カメラの種類・写真・送り先・ホーム・送る・設定・
+   結合の記録）。**どれも本物の操作**なので、手がかりはクラス側に持たせる。 */
+.btn.quiet { border-color: var(--line); background: var(--surface-2); color: var(--ink-2); }
 .btn.danger { border-color: var(--danger-line); color: var(--danger); font-weight: 600; }
 .btn.sm { height: 36px; padding: 0 14px; font-size: 13px; }
 .btn.big { height: 50px; padding: 0 26px; font-size: 15.5px; }
@@ -249,6 +255,11 @@ h1.page.title-lg { font-size: 24px; }
   display: flex; align-items: center; gap: 14px; flex-wrap: wrap;
   padding: 12px 14px 12px 20px; border-radius: 14px;
   background: #211f1c; color: #fff; box-shadow: var(--shadow-lg);
+}
+/* 帯の地はライトでもダークでも暗いので、トークンの `--surface-2` は使えない
+   （明るい塊が浮く）。帯の上でだけ、白を薄く重ねて弱い操作を作る。 */
+.actionbar .btn.quiet {
+  border-color: rgba(255, 255, 255, .3); background: rgba(255, 255, 255, .14); color: #fff;
 }
 
 .backdrop {

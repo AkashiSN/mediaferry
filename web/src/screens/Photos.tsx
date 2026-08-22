@@ -300,7 +300,6 @@ export function PhotosScreen() {
           <button
             type="button"
             className="btn quiet"
-            style={{ color: "rgba(255,255,255,.7)" }}
             onClick={() => setSelected(new Map())}
           >
             やめる
