@@ -35,6 +35,34 @@ def test_the_guard_is_on_in_the_real_process(tmp_path):
         assert client.post("/api/merge-groups/detect", json={}).status_code == 403
 
 
+def test_the_app_keeps_answering_after_filling_the_pipe(tmp_path):
+    """**出力を汲み出さないとアプリが止まる。**
+
+    アプリの stdout はパイプで、既定のバッファは 64 KiB。誰も読まないまま埋まると、
+    書き手は `pipe_write` で永久にブロックし、**listen はしているのに応答しない**
+    状態になる。要求 1 件につきアクセスログが 1 行（60 バイト前後）出るので、
+    2000 件でバッファの倍以上を吐かせ、そのあとも答えることを確かめる。
+
+    止まっているときは要求が返らないので、待ちを短く切って失敗させる。
+    """
+    with system_app(tmp_path) as app:
+        with httpx.Client(base_url=app.url, timeout=10.0) as client:
+            for _ in range(2000):
+                assert client.get("/api/health").status_code == 200
+        # 溜めた出力は、失敗の報告に使えるよう残っている。
+        assert "/api/health" in app.output()
+
+
+def test_a_failed_start_is_reported_with_the_output(tmp_path, monkeypatch):
+    """**落ちたときは出力を添える。** 汲み出しに回しても、この性質は残る."""
+    monkeypatch.setenv("MEDIAFERRY_LOG_LEVEL", "そんな段階はない")
+    with pytest.raises(RuntimeError) as caught, system_app(tmp_path):
+        pass
+    assert "起動に失敗した" in str(caught.value)
+    assert "Traceback" in str(caught.value)
+    assert "そんな段階はない" in str(caught.value)
+
+
 def test_authentication_can_be_turned_on(tmp_path):
     with system_app(tmp_path, password="correct horse") as app, app.client() as client:
         assert client.get("/api/jobs").status_code == 401
