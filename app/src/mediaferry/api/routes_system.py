@@ -17,6 +17,7 @@ from ..db.profiles import (
     ProfileRegistry,
     UnknownProfile,
 )
+from ..db.selection import SENDABLE_CLAUSE
 from ..settings import SettingInvalid, SettingLocked, SettingsService, startup_warnings
 from .deps import conn as get_conn
 from .deps import state as get_state
@@ -63,6 +64,29 @@ def dashboard(state=Depends(get_state), conn=Depends(get_conn)) -> dict[str, Any
         "missing": conn.execute(
             "SELECT count(*) AS n FROM media_file WHERE missing_at IS NOT NULL"
         ).fetchone()["n"],
+        # **「つなぐ」で操作できるグループの数**（§13 の「やること」）。merged は
+        # 済み、skipped は破棄、supersede 済みは組み直しの旧版なので、どれも
+        # 押せるボタンが無い。
+        "merge_candidates": conn.execute(
+            "SELECT count(*) AS n FROM merge_group"
+            " WHERE status IN ('detected', 'failed') AND superseded_by_id IS NULL"
+        ).fetchone()["n"],
+        # **和を取らない。** 2 つの宛先に未送信の 1 件は 1 件。休止中の宛先は
+        # 送り先に選べないので、それしか無ければ「やること」は無い。
+        "unsent_total": conn.execute(
+            "SELECT count(*) AS n FROM media_file m WHERE EXISTS ("  # noqa: S608
+            " SELECT 1 FROM upload_destination d"
+            "  WHERE d.archived_at IS NULL AND d.enabled = 1"
+            "    AND NOT EXISTS (SELECT 1 FROM upload_record u"
+            "                    WHERE u.media_file_id = m.id AND u.destination_id = d.id"
+            "                      AND u.invalidated_at IS NULL))"
+            f" AND {SENDABLE_CLAUSE}"
+        ).fetchone()["n"],
+        # **宛先をまたいだ合計。** 承認待ちは宛先ごとの操作なので、和で問題ない。
+        "awaiting_total": conn.execute(
+            "SELECT count(*) AS n FROM upload_record"
+            " WHERE state = 'awaiting_datetime_approval' AND invalidated_at IS NULL"
+        ).fetchone()["n"],
         "warnings": [
             {"code": warning.code, "message": warning.message}
             for warning in startup_warnings(settings)
@@ -97,8 +121,6 @@ def _destination_summary(conn, row) -> dict[str, Any]:  # noqa: ANN001
         "failed": counts["failed"],
         "awaiting_approval": counts["awaiting_datetime_approval"],
         "pending": counts["pending"],
-        # **「まだ送っていない」＝ この宛先の記録がまだ無いもの。** 失敗や承認待ちは
-        # 既に記録があるので別に数える（画面はそれぞれ違う操作を出す）。
         # スタックの結果（§9.11）。**無効化された記録は数えない。**
         #
         # **`stacked` は「組の数」。** 1 つのスタックに 2 件以上のレコードが属する
@@ -114,10 +136,14 @@ def _destination_summary(conn, row) -> dict[str, Any]:  # noqa: ANN001
             " WHERE destination_id = ? AND stack_state = 'skipped' AND invalidated_at IS NULL",
             (row["id"],),
         ).fetchone()["n"],
+        # **「まだ送っていない」＝ この宛先の有効な記録がまだ無く、いま送れるもの。**
+        # 失敗や承認待ちは既に記録があるので別に数える（画面はそれぞれ違う操作を出す）。
+        # `/media?status=unsent`（`routes_media._status_clause`）と同じ定義を使う。
         "unsent": conn.execute(
-            "SELECT count(*) AS n FROM media_file m WHERE NOT EXISTS ("
+            "SELECT count(*) AS n FROM media_file m WHERE NOT EXISTS ("  # noqa: S608
             " SELECT 1 FROM upload_record u WHERE u.media_file_id = m.id"
-            "  AND u.destination_id = ? AND u.invalidated_at IS NULL)",
+            "  AND u.destination_id = ? AND u.invalidated_at IS NULL)"
+            f" AND {SENDABLE_CLAUSE}",
             (row["id"],),
         ).fetchone()["n"],
     }

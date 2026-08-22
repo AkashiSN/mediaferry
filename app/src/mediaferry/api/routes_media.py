@@ -11,6 +11,7 @@ from ..adapters.thumbnails import ThumbnailFailed, quantise
 from ..core.listing import DEFAULT_PAGE_SIZE, escape_like, page_bounds
 from ..db.media import MediaRepository
 from ..db.merges import GroupNotEditable
+from ..db.selection import SENDABLE_CLAUSE
 from .deps import conn as get_conn
 from .deps import state as get_state
 from .errors import ApiError, ErrorCode
@@ -104,7 +105,11 @@ def _status_clause(status: str) -> str:
         " AND u.destination_id = ? AND u.invalidated_at IS NULL"
     )
     if status == "unsent":
-        return f"NOT EXISTS ({existing} AND u.state = 'complete')"
+        # **「まだ送っていない」＝ この宛先の有効な記録がまだ無く、いま送れるもの。**
+        # `failed` は再試行という別の操作、`pending` は既に積んである。
+        # **積んだまま claim されない `pending` はここに出てこない。** `/dashboard` の
+        # 宛先ごとの `pending` 件数で別に見せる（`status=pending` でも個別に絞れる）。
+        return f"NOT EXISTS ({existing}) AND {SENDABLE_CLAUSE}"  # noqa: S608 - 定数のみ
     known = {
         "sent": "complete",
         "failed": "failed",

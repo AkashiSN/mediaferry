@@ -1,19 +1,353 @@
-/* 最小限の見た目。**外部の書体もスクリプトも読まない**（CSP。§14）。 */
+/* 色・間隔のトークンと部品の見た目。
+ * 値は docs/history/phase7-prototype.html の <style> からそのまま取る。
+ * **外部の書体もスクリプトも読まない**（CSP。§14）。書体は system-ui、アイコンは
+ * インライン SVG（Icon.tsx）。ライトとダークの両方を :root と
+ * prefers-color-scheme: dark で定義する。
+ */
+*, *::before, *::after { box-sizing: border-box; }
+
 :root {
   color-scheme: light dark;
-  font-family: system-ui, sans-serif;
+  --bg: #f6f4f0;
+  --surface: #ffffff;
+  --surface-2: #faf8f5;
+  --line: #e6e1d8;
+  --line-2: #efece5;
+  --ink: #1c1917;
+  --ink-2: #6d665e;
+  --ink-3: #9a938a;
+  --accent: #1a6b64;
+  --accent-ink: #ffffff;
+  --accent-soft: #eef6f4;
+  --accent-line: #bcd9d4;
+  --accent-deep: #12524d;
+  --warn: #7d4900;
+  --warn-soft: #fdf8ee;
+  --warn-line: #ecd9b4;
+  --warn-dot: #c8901f;
+  --ok: #3a7350;
+  --danger: #a32a1c;
+  --danger-line: #e6d3d0;
+  --track: #ece7de;
+  --scrim: rgba(28, 25, 23, .48);
+  --shadow: 0 1px 2px rgba(28, 25, 23, .05);
+  --shadow-lg: 0 18px 44px rgba(28, 25, 23, .3);
+  --t0: #cdd8d2; --t1: #d9d2c4; --t2: #cfd4de; --t3: #ddd0cd;
+  --t4: #d2dccd; --t5: #d8cfd8; --t6: #ccd6da; --t7: #dbd3c8;
 }
-body { margin: 0; }
-.layout { display: flex; gap: 1.5rem; }
-.layout nav ul { list-style: none; padding: 0.5rem; }
-.layout main { flex: 1; padding: 1rem; }
-table { border-collapse: collapse; }
-th, td { border-bottom: 1px solid rgb(128 128 128 / 40%); padding: 0.25rem 0.5rem; text-align: left; }
-.tiles { display: flex; gap: 1rem; }
-.error-banner { background: rgb(200 0 0 / 15%); padding: 0.5rem; margin-bottom: 0.5rem; }
-.warning-banner { background: rgb(200 140 0 / 20%); padding: 0.5rem; margin-bottom: 0.5rem; }
-.dialog-backdrop { position: fixed; inset: 0; background: rgb(0 0 0 / 40%); display: grid; place-items: center; }
-.dialog { background: Canvas; padding: 1rem; max-width: 32rem; }
-.dialog-actions { display: flex; gap: 0.5rem; justify-content: flex-end; }
-.actions { display: flex; gap: 0.5rem; }
-.filters { display: flex; gap: 0.75rem; flex-wrap: wrap; align-items: end; margin-bottom: 0.5rem; }
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #141311;
+    --surface: #1d1b18;
+    --surface-2: #1a1815;
+    --line: #302d28;
+    --line-2: #282520;
+    --ink: #efeae2;
+    --ink-2: #a9a29a;
+    --ink-3: #7d776f;
+    --accent: #5cb5aa;
+    --accent-ink: #0c211f;
+    --accent-soft: #17302d;
+    --accent-line: #2a544f;
+    --accent-deep: #8bd4cb;
+    --warn: #e0a75c;
+    --warn-soft: #26200f;
+    --warn-line: #453820;
+    --warn-dot: #d9962f;
+    --ok: #6bab80;
+    --danger: #e08272;
+    --danger-line: #4a2c26;
+    --track: #2b2823;
+    --scrim: rgba(0, 0, 0, .62);
+    --shadow: 0 1px 2px rgba(0, 0, 0, .3);
+    --shadow-lg: 0 18px 44px rgba(0, 0, 0, .55);
+    --t0: #33403c; --t1: #403a2f; --t2: #333845; --t3: #423734;
+    --t4: #363f33; --t5: #3d3540; --t6: #313c40; --t7: #3f3a31;
+  }
+}
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--ink);
+  font-family: system-ui, -apple-system, "Hiragino Kaku Gothic ProN", "Noto Sans JP", "Yu Gothic UI", Meiryo, sans-serif;
+  -webkit-font-smoothing: antialiased;
+  text-wrap: pretty;
+  font-size: 15px;
+  line-height: 1.6;
+}
+
+button { font-family: inherit; cursor: pointer; }
+h1, h2, h3 { margin: 0; line-height: 1.4; }
+p { margin: 0; }
+ul { margin: 0; }
+
+/* ---- 骨格：広いときは左の柱、狭いときは上の帯。DOM は 1 つ ---- */
+.main { min-width: 0; padding: 26px 32px 40px; }
+.wrap { max-width: 1040px; margin: 0 auto; display: flex; flex-direction: column; gap: 22px; }
+
+.nav { grid-area: nav; padding: 20px 14px 16px; display: flex; flex-direction: column; gap: 3px; background: var(--surface-2); }
+
+@media (min-width: 900px) {
+  .layout { display: grid; grid-template-columns: 248px minmax(0, 1fr); grid-template-areas: "nav main"; min-height: 100vh; }
+  .nav { border-right: 1px solid var(--line); height: 100vh; position: sticky; top: 0; flex-direction: column; }
+}
+@media (max-width: 899px) {
+  /* **帯は画面の上に置き、流れの中に残したまま貼り付く**（`position: sticky`）。
+     場所を取ったままなので本文の側にナビの高さぶんの余白が要らず、**ナビの高さを
+     知っている場所が CSS の 1 か所で済む**。下に貼り付く操作バー（`.actionbar` /
+     `.sendbar`）とも競合しない。 */
+  .layout { display: block; }
+  .nav {
+    position: sticky; top: 0; z-index: 20;
+    display: grid; grid-template-columns: repeat(3, minmax(0, 1fr));
+    border-bottom: 1px solid var(--line);
+    padding: max(6px, env(safe-area-inset-top)) 8px 6px;
+  }
+  /* 狭い画面では名乗りを出さない。**3 項目と一緒に 1 行へ並べると、320px で
+     「ホーム」の字が欠ける**（実測：名乗り 84px ＋ 項目 70px × 3 で、文字に
+     渡せるのが 34px しかない。要るのは 40px）。 */
+  .nav .brand { display: none; }
+  /* 44px の押せる領域を保ったまま、いちばん狭い 320px でも 3 つを 1 行に収める
+     （実測：項目 1 つが 99px、中身はアイコン 20px ＋ 文字 40px ＋ 件数 20px と
+     余白で 94px）。 */
+  .nav .navitem { justify-content: center; gap: 6px; padding: 0 2px; }
+  .nav .navlabel { flex: 0 1 auto; font-size: 13px; white-space: nowrap; }
+  .nav .pill { margin-left: 0; min-width: 20px; height: 18px; padding: 0 5px; font-size: 11px; }
+  .main { padding: 16px 16px calc(24px + env(safe-area-inset-bottom)); }
+  .wrap { gap: 18px; }
+}
+
+.brand { display: flex; align-items: center; gap: 10px; padding: 6px 8px 18px; }
+.brand b { font-size: 15px; font-weight: 650; letter-spacing: .02em; }
+
+.navitem {
+  display: flex; align-items: center; gap: 11px; width: 100%;
+  height: 44px; padding: 0 11px; border: none; border-radius: 9px;
+  background: transparent; color: var(--ink-2); font-size: 14.5px; text-align: left;
+  text-decoration: none;
+}
+.navitem[aria-current="page"] { background: var(--accent-soft); color: var(--accent-deep); font-weight: 650; }
+.navitem .count { margin-left: auto; font-size: 12.5px; color: var(--ink-3); }
+.navitem[aria-current="page"] .count { color: var(--accent-deep); }
+.pill {
+  margin-left: auto; min-width: 22px; height: 20px; padding: 0 6px; border-radius: 10px;
+  background: var(--accent); color: var(--accent-ink); font-size: 12px; font-weight: 650;
+  display: flex; align-items: center; justify-content: center;
+}
+
+/* ---- 部品 ---- */
+.card { border: 1px solid var(--line); border-radius: 11px; background: var(--surface); box-shadow: var(--shadow); }
+.pad { padding: 16px 18px; }
+.hl { border-color: var(--accent-line); background: var(--accent-soft); }
+.wn { border-color: var(--warn-line); background: var(--warn-soft); }
+
+.warning-banner {
+  border: 1px solid var(--warn-line); background: var(--warn-soft); color: var(--warn);
+  border-radius: 11px; padding: 12px 16px; margin-bottom: 16px;
+}
+
+/* `.warning-banner` と同じ作りで、色だけ danger 系にする（`ErrorBanner.tsx`）。 */
+.error-banner {
+  display: flex; align-items: center; gap: 12px;
+  border: 1px solid var(--danger-line); background: var(--surface); color: var(--danger);
+  border-radius: 11px; padding: 12px 16px; margin-bottom: 16px;
+}
+.error-banner span { flex: 1; }
+.error-banner button {
+  flex: 0 0 auto; height: 36px; padding: 0 14px; border-radius: 8px;
+  border: 1px solid var(--danger-line); background: transparent; color: var(--danger); font-size: 13px;
+}
+
+.btn {
+  display: inline-flex; align-items: center; justify-content: center; gap: 8px;
+  height: 44px; padding: 0 18px; border: 1px solid var(--line); border-radius: 9px;
+  background: var(--surface); color: var(--ink); font-size: 14px; white-space: nowrap;
+}
+.btn:hover { border-color: var(--ink-3); }
+.btn.primary { border-color: var(--accent); background: var(--accent); color: var(--accent-ink); font-weight: 650; }
+.btn.primary:hover { filter: brightness(1.08); }
+.btn.outline { border-color: var(--accent); color: var(--accent); font-weight: 600; }
+.btn.warnish { border-color: var(--warn-line); color: var(--warn); font-weight: 600; }
+/* **いちばん弱い強調。それでも押せると分かること**（§13）。枠と地を両方透かすと
+   本文の灰色の文字と見分けが付かなくなるので、**枠は残し、地をわずかに沈める**。
+   下に置いているのは文字の色（`--ink-2`）と、地が `--surface` より暗いこと。
+   強さの順は primary > outline > 素の `.btn` > `.quiet`。
+   `.quiet` は 7 画面が使う（カメラの種類・写真・送り先・ホーム・送る・設定・
+   結合の記録）。**どれも本物の操作**なので、手がかりはクラス側に持たせる。 */
+.btn.quiet { border-color: var(--line); background: var(--surface-2); color: var(--ink-2); }
+.btn.danger { border-color: var(--danger-line); color: var(--danger); font-weight: 600; }
+.btn.sm { height: 36px; padding: 0 14px; font-size: 13px; }
+.btn.big { height: 50px; padding: 0 26px; font-size: 15.5px; }
+.btn:disabled { opacity: .45; cursor: not-allowed; }
+
+/* **本文と操作が 1 行に収まらないときは、操作を次の行へ落とす。** `.grow` の
+   基準は 0 なので、折り返さないと隣の操作に押されて幅 0 まで縮み、本文の文字が
+   箱の外へ流れ出る（`web/e2e/journey.spec.ts` の「文字が入れ物からはみ出さない」）。 */
+.row { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+.rowtop { display: flex; align-items: flex-start; gap: 14px; flex-wrap: wrap; }
+.acts { display: flex; gap: 8px; flex-wrap: wrap; }
+.grow { flex: 1; min-width: 0; }
+.muted { color: var(--ink-2); font-size: 13px; }
+.small { color: var(--ink-3); font-size: 12.5px; }
+/* カードに添える補足の行。**カードの中身なので、カードの内側の余白の中に置く**
+   （負の余白で引き寄せると、行がカードの縁を跨いで描かれる）。 */
+.card-note { margin-top: 8px; }
+/* 機械が付けた名前（env のキー、slug、ライブラリ内のパス）は、空白も改行の機会も
+   無い 1 語として扱われるので、狭い欄では箱の外へ流れ出る（`/` では折り返さない）。
+   **途中で折り返してでも箱に収める。** */
+.ident { overflow-wrap: anywhere; }
+.sechead { display: flex; align-items: baseline; gap: 10px; }
+.sechead h2 { font-size: 15px; font-weight: 650; }
+h1.page { font-size: 21px; font-weight: 650; }
+h1.page.title-lg { font-size: 24px; }
+.iconbox {
+  width: 40px; height: 40px; flex: 0 0 40px; border-radius: 9px;
+  background: var(--line-2); display: flex; align-items: center; justify-content: center; color: var(--ink-2);
+}
+.iconbox.on { background: var(--surface); border: 1px solid var(--accent-line); color: var(--accent); }
+.iconbox.wn { background: var(--warn-soft); border: 1px solid var(--warn-line); color: var(--warn-dot); }
+
+.bar { height: 8px; border-radius: 4px; background: var(--track); overflow: hidden; }
+.bar > i { display: block; height: 100%; background: var(--accent); transition: width .12s linear; }
+
+.chips { display: flex; gap: 8px; flex-wrap: wrap; }
+.chip {
+  display: inline-flex; align-items: center; gap: 7px; height: 40px; padding: 0 15px;
+  border: 1px solid var(--line); border-radius: 20px; background: var(--surface);
+  color: var(--ink-2); font-size: 13.5px;
+}
+.chip[aria-pressed="true"] { border-color: var(--accent); background: var(--accent); color: var(--accent-ink); font-weight: 650; }
+.chip:disabled { opacity: .5; }
+
+.grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(132px, 1fr)); gap: 10px; }
+@media (max-width: 899px) { .grid { grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; } }
+.tile {
+  position: relative; aspect-ratio: 1; border-radius: 9px; border: none; padding: 0;
+  display: flex; align-items: center; justify-content: center; color: rgba(128, 128, 128, .6);
+}
+.tile.sel { box-shadow: 0 0 0 3px var(--accent); }
+.tile .mark {
+  position: absolute; left: 7px; bottom: 7px; width: 18px; height: 18px; border-radius: 50%;
+  display: flex; align-items: center; justify-content: center; font-size: 11px; font-weight: 700;
+}
+.tile .mark.unsent { border: 2px solid #fff; box-shadow: 0 0 0 1px rgba(0, 0, 0, .18); }
+.tile .mark.sent { background: var(--ok); color: #fff; }
+.tile .mark.awaiting { background: var(--warn-dot); color: #fff; }
+.tile .mark.failed { background: var(--danger); color: #fff; }
+.tile .check {
+  position: absolute; top: 7px; left: 7px; width: 21px; height: 21px; border-radius: 50%;
+  background: var(--accent); color: var(--accent-ink); display: flex; align-items: center; justify-content: center;
+}
+.tile .dur {
+  position: absolute; right: 6px; bottom: 6px; font-size: 10.5px; color: #fff;
+  background: rgba(28, 25, 23, .6); border-radius: 4px; padding: 1px 5px;
+}
+.t0 { background: var(--t0); } .t1 { background: var(--t1); } .t2 { background: var(--t2); } .t3 { background: var(--t3); }
+.t4 { background: var(--t4); } .t5 { background: var(--t5); } .t6 { background: var(--t6); } .t7 { background: var(--t7); }
+
+.legend { display: flex; gap: 16px; flex-wrap: wrap; font-size: 12px; color: var(--ink-2); }
+.legend span { display: inline-flex; align-items: center; gap: 6px; }
+.lg { width: 12px; height: 12px; border-radius: 50%; display: inline-flex; align-items: center; justify-content: center; font-size: 8px; font-weight: 700; color: #fff; }
+
+/* **下に貼り付く操作バー。** 画面の幅によらず流れの中で貼り付くので、上の帯とも
+   本文とも重ならない。`env(safe-area-inset-bottom)` は端末の下端の持ち手を避ける。 */
+.actionbar {
+  position: sticky; bottom: max(12px, env(safe-area-inset-bottom)); z-index: 10;
+  display: flex; align-items: center; gap: 14px; flex-wrap: wrap;
+  padding: 12px 14px 12px 20px; border-radius: 14px;
+  background: #211f1c; color: #fff; box-shadow: var(--shadow-lg);
+}
+/* 帯の地はライトでもダークでも暗いので、トークンの `--surface-2` は使えない
+   （明るい塊が浮く）。帯の上でだけ、白を薄く重ねて弱い操作を作る。 */
+.actionbar .btn.quiet {
+  border-color: rgba(255, 255, 255, .3); background: rgba(255, 255, 255, .14); color: #fff;
+}
+
+.backdrop {
+  position: fixed; inset: 0; background: var(--scrim); z-index: 40;
+  display: grid; place-items: center; padding: 20px;
+}
+.dialog {
+  width: min(560px, 100%); max-height: 88vh; overflow: auto;
+  border-radius: 16px; background: var(--surface); box-shadow: var(--shadow-lg); padding: 26px 26px 22px;
+}
+/* `components/ConfirmDialog.tsx` と `screens/work/Merge.tsx` の「構成を変える」
+ * ダイアログが使うクラス名（`.backdrop` / `.dialog` と中身は同じで、名前だけ違う）。 */
+.dialog-backdrop {
+  position: fixed; inset: 0; background: var(--scrim); z-index: 40;
+  display: grid; place-items: center; padding: 20px;
+}
+.dialog-actions { display: flex; gap: 10px; margin-top: 22px; }
+.dialog-actions button {
+  height: 44px; padding: 0 18px; border: 1px solid var(--line); border-radius: 9px;
+  background: var(--surface); color: var(--ink); font-size: 14px;
+}
+.dialog-actions button:last-child {
+  flex: 1; border-color: var(--accent); background: var(--accent); color: var(--accent-ink); font-weight: 650;
+}
+.dialog-actions button:disabled { opacity: .45; cursor: not-allowed; }
+.factlist { border: 1px solid var(--line); border-radius: 12px; overflow: hidden; }
+.factlist > div { display: flex; align-items: center; gap: 14px; padding: 13px 16px; border-bottom: 1px solid var(--line-2); }
+.factlist > div:last-child { border-bottom: none; background: var(--surface-2); }
+.factlist dt { flex: 0 0 96px; font-size: 13px; color: var(--ink-2); }
+.factlist dd { margin: 0; font-size: 16px; font-weight: 650; }
+
+.toast {
+  position: fixed; left: 50%; top: 16px; transform: translateX(-50%); z-index: 60;
+  background: #211f1c; color: #fff; border-radius: 11px; padding: 13px 18px;
+  font-size: 13.5px; box-shadow: var(--shadow-lg); max-width: min(520px, calc(100% - 32px));
+}
+
+.switch {
+  width: 50px; height: 30px; border-radius: 15px; border: none; padding: 3px;
+  background: var(--track); display: flex; align-items: center; transition: background .15s;
+  flex: 0 0 auto;
+}
+.switch[aria-checked="true"] { background: var(--accent); justify-content: flex-end; }
+.switch i { display: block; width: 24px; height: 24px; border-radius: 50%; background: #fff; box-shadow: 0 1px 3px rgba(0, 0, 0, .3); }
+.switch:disabled { opacity: .45; cursor: not-allowed; }
+/* **押せる領域は 44px 以上**（§13）。広い画面では 30px のままでよい。 */
+@media (max-width: 899px) {
+  .switch { width: 66px; height: 44px; border-radius: 22px; padding: 5px; }
+  .switch i { width: 34px; height: 34px; }
+}
+
+/* 入力欄。**高さは押せる大きさに揃える**（§13）。 */
+.field {
+  width: 100%; height: 44px; padding: 0 12px;
+  border: 1px solid var(--line); border-radius: 9px;
+  background: var(--surface); color: var(--ink);
+  font-family: inherit; font-size: 14px;
+}
+.field:disabled { background: var(--surface-2); color: var(--ink-2); cursor: not-allowed; }
+textarea.field {
+  height: auto; padding: 10px 12px; line-height: 1.55;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 13px;
+}
+/* 見出しと入力欄を縦に並べる 1 組（`label` がそのまま欄の名前になる）。 */
+.formrow { display: flex; flex-direction: column; gap: 6px; font-size: 13px; color: var(--ink-2); }
+
+.parts { display: flex; gap: 4px; flex: 0 0 auto; }
+.parts > div { width: 52px; height: 52px; border-radius: 3px; display: flex; align-items: center; justify-content: center; color: rgba(128, 128, 128, .6); }
+.parts > div:first-child { border-radius: 7px 3px 3px 7px; }
+.parts > div:last-child { border-radius: 3px 7px 7px 3px; }
+@media (max-width: 899px) { .parts { width: 100%; } .parts > div { flex: 1; width: auto; height: 54px; } }
+
+/* 狭いときは、落とした操作を横いっぱいに広げる（折り返しそのものは `.row` の既定） */
+@media (max-width: 899px) {
+  .acts { width: 100%; }
+  .acts > .btn { flex: 1 1 auto; }
+  .rowtop > .grow, .row > .grow { flex: 1 1 60%; }
+  /* **押せる領域は 44px 以上**（§13）。広い画面では 36px / 40px のままでよい。 */
+  .btn.sm { height: 44px; }
+  .chip { height: 44px; }
+}
+
+.sendbar { position: sticky; bottom: max(12px, env(safe-area-inset-bottom)); }
+
+.empty { text-align: center; padding: 46px 20px; }
+.stepdots { display: flex; gap: 6px; }
+.stepdots > i { flex: 1; height: 5px; border-radius: 3px; background: var(--track); }
+.stepdots > i.on { background: var(--accent); }

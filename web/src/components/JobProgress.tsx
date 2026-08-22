@@ -1,7 +1,9 @@
-// ジョブの進捗（§13）。**ファイル名と件数で示す。**
+// 進行中の作業の進捗（§13）。**ファイル名と件数で示す。**
+//
+// ここにあるのは、進捗の型と、それを 1 行の日本語に写す関数だけ。描くのは
+// `JobCard.tsx` と `work/Sending.tsx`。
 
-import type { JobEvent } from "../hooks/useEvents";
-import { formatBytes } from "./ConfirmDialog";
+import { formatBytes } from "../utils/formatBytes";
 
 /** 走っている間だけ入る（終わると API が落とす）。 */
 export type JobProgressValue = {
@@ -23,10 +25,14 @@ export type Job = {
   status: string;
   created_at: string;
   started_at?: string | null;
+  // **走っている間は無い**（終わった時点で API が入れる）。
+  finished_at?: string | null;
   progress?: JobProgressValue | null;
 };
 
-const PHASES: Record<string, string> = { copy: "コピー中", merge: "結合中" };
+// サーバが返す phase を §13 の言葉に写す（`merge` → **つなぐ**）。**内部の名前を
+// そのまま出さない**ので、写せないものだけ生の値のまま出す。
+const PHASES: Record<string, string> = { copy: "コピー中", merge: "つないでいます" };
 
 /** **速度と残りは画面で出す。** サーバに持たせると心拍の間隔に依存した値を残すことになる。 */
 export function progressLine(progress: JobProgressValue, bytesPerSecond: number | null): string {
@@ -63,17 +69,6 @@ function formatDuration(seconds: number): string {
     return `${Math.round(seconds / 60)} 分`;
   }
   return `${(seconds / 3600).toFixed(1)} 時間`;
-}
-
-export function JobProgress({ job, events }: { job: Job; events: JobEvent[] }) {
-  const mine = events.filter((event) => event.job_id === job.id);
-  const latest = mine.at(-1);
-  return (
-    <div className="job-progress">
-      <span className="job-status">{statusLabel(job.status)}</span>
-      {latest ? <span className="job-message">{latest.message}</span> : null}
-    </div>
-  );
 }
 
 export function statusLabel(status: string): string {

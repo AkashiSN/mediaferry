@@ -159,7 +159,7 @@ class Stacker:
             return "skipped"
 
         if not rule.enabled:
-            return refuse("プロファイルがスタックを使わない")
+            return refuse("カメラの種類がスタックを使わない")
         candidates = self._candidates(row, media, destination_id, epoch)
         if candidates is None:
             return refuse("カード上の観測が残っていない")

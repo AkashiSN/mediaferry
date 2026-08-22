@@ -17,10 +17,12 @@ import subprocess
 import sys
 import threading
 import time
+from collections import deque
 from collections.abc import Iterator
 from contextlib import closing, contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import IO
 
 import httpx
 
@@ -34,6 +36,41 @@ from ..fake_immich import FakeImmich
 # 起動を待つ上限。CI の遅い環境でも足りる長さにする。
 STARTUP_TIMEOUT_SECONDS = 30.0
 
+# 溜めておく出力の行数。読みたいのは失敗の直前なので末尾だけ残し、長く動かしても
+# 記憶を食い潰さないように切る。
+OUTPUT_LINES_KEPT = 2000
+
+
+class _Drain:
+    """アプリの出力を背景のスレッドで汲み出して溜める.
+
+    **誰も読まないとアプリが止まる。** 出力先はパイプで、既定のバッファ（64 KiB）が
+    埋まると書き手は `pipe_write` でブロックし、**listen したまま答えない**状態になる。
+    要求 1 件につきアクセスログが 1 行出るので、画面を少し巡るだけで埋まる。
+
+    ファイルへ流す手もあるが、**落ちたときに出力を添えて報告する**性質を保ったまま
+    後片付け（作る・消す・読み直す）を増やさずに済むので、記憶に溜める側を採る。
+    """
+
+    def __init__(self, stream: IO[str]) -> None:
+        # `deque` の `append` と反復は錠が要らない（`maxlen` で古い行から捨てる）。
+        self._lines: deque[str] = deque(maxlen=OUTPUT_LINES_KEPT)
+        self._stream = stream
+        self._thread = threading.Thread(target=self._pump, daemon=True)
+        self._thread.start()
+
+    def _pump(self) -> None:
+        for line in self._stream:
+            self._lines.append(line)
+
+    def text(self) -> str:
+        """溜めてある出力（多いときは末尾 `OUTPUT_LINES_KEPT` 行）."""
+        return "".join(self._lines)
+
+    def wait_for_eof(self, timeout: float) -> None:
+        """書き手が閉じるまで待つ（残りを取りこぼさずに報告するため）."""
+        self._thread.join(timeout)
+
 
 @dataclass
 class SystemApp:
@@ -44,10 +81,15 @@ class SystemApp:
     immich_urls: list[str]
     password: str | None
     process: subprocess.Popen = field(repr=False)
+    drain: _Drain = field(repr=False)
 
     def client(self) -> httpx.Client:
         """ブラウザと同じ形で叩くクライアント（Host はループバック）."""
         return httpx.Client(base_url=self.url, timeout=30.0, follow_redirects=False)
+
+    def output(self) -> str:
+        """アプリがこれまでに吐いた出力."""
+        return self.drain.text()
 
 
 def _free_port() -> int:
@@ -202,14 +244,18 @@ def system_app(
         text=True,
     )
     url = f"http://127.0.0.1:{port}"
+    # **起こしたらすぐ汲み出しにかかる。** 起動の途中でもログは出る。
+    assert process.stdout is not None
+    drain = _Drain(process.stdout)
     try:
-        _wait_until_ready(url, process)
+        _wait_until_ready(url, process, drain)
         yield SystemApp(
             url=url,
             data_root=data_root,
             immich_urls=[server.url for server in servers],
             password=password,
             process=process,
+            drain=drain,
         )
     finally:
         process.terminate()
@@ -268,13 +314,14 @@ def _a_canon_volume() -> VolumeInfo:
     )
 
 
-def _wait_until_ready(url: str, process: subprocess.Popen) -> None:
+def _wait_until_ready(url: str, process: subprocess.Popen, drain: _Drain) -> None:
     """`/health` が返るまで待つ. **落ちていたら出力を添えて失敗させる。**"""
     deadline = time.monotonic() + STARTUP_TIMEOUT_SECONDS
     while time.monotonic() < deadline:
         if process.poll() is not None:
-            output = process.stdout.read() if process.stdout else ""
-            raise RuntimeError(f"起動に失敗した（終了コード {process.returncode}）\n{output}")
+            # 汲み出しが最後の 1 行を拾い切るのを待ってから読む。
+            drain.wait_for_eof(timeout=5.0)
+            raise RuntimeError(f"起動に失敗した（終了コード {process.returncode}）\n{drain.text()}")
         try:
             response = httpx.get(f"{url}/api/health", timeout=1.0)
         except httpx.HTTPError:

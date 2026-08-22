@@ -1,4 +1,4 @@
-// デバイス（§13）。判定結果と確度、信頼登録、スキャン、取り込み。
+// カードの中身（§13）。判定結果と確度、信頼登録、スキャン、取り込み。
 //
 // **複数のボリュームを同時に扱う。** Osmo は内蔵ストレージと SD カードが同じ形で
 // 見えるので、1 枚だけを前提にすると片方が操作できない。
@@ -8,16 +8,20 @@
 // 取り違えうること）を書く（§12.1）。
 
 import { useState } from "react";
-import { Link } from "react-router-dom";
+import { Link, useNavigate } from "react-router-dom";
 
-import { request } from "../api/client";
-import { useQuery } from "../api/hooks";
-import { ConfirmDialog, type Confirmation } from "../components/ConfirmDialog";
-import { ErrorBanner } from "../components/ErrorBanner";
+import { request } from "../../api/client";
+import { useQuery } from "../../api/hooks";
+import { ConfirmDialog, type Confirmation } from "../../components/ConfirmDialog";
+import { ErrorBanner } from "../../components/ErrorBanner";
+import { Icon } from "../../components/Icon";
 
-type Volume = {
+/** カード 1 枚（`GET /devices` の 1 要素）。**判定関数がここにあるので、型もここに
+ * 1 つだけ置く**（ホームの帯も同じものを描く）。 */
+export type Volume = {
   volume_instance_id: string;
-  fs_label: string | null;
+  // API は空文字を返す（`None` にはならない）。ラベルの有無は `""` で見る。
+  fs_label: string;
   profile_slug: string | null;
   identity_confidence: string | null;
   provisional: boolean;
@@ -28,6 +32,61 @@ type Volume = {
 type Devices = { volumes: Volume[] };
 type Setting = { key: string; value: string | null };
 type Settings = { settings: Setting[] };
+type Profile = { slug: string; name: string };
+type Profiles = { profiles: Profile[] };
+
+/** カードの表示名。**内部の UUID を画面に出さない**（§13）。
+ *
+ * API の `fs_label` は空文字であって `null` ではないので、`??` は素通りする
+ * （`??` を使うと常にラベルが勝ち、フォールバックが一度も効かない）。ラベルが
+ * 無いカードには人間向けの既定名を使う。複数枚が同時にラベル無しだと同じ名前に
+ * なるので、そのときだけ連番で見分けられるようにする（UUID は使わない）。
+ */
+export function volumeLabel(
+  volumes: readonly { volume_instance_id: string; fs_label: string }[],
+  volume: { volume_instance_id: string; fs_label: string },
+): string {
+  if (volume.fs_label !== "") {
+    return volume.fs_label;
+  }
+  const unnamed = volumes.filter((candidate) => candidate.fs_label === "");
+  if (unnamed.length <= 1) {
+    return "名前の無いカード";
+  }
+  const position = unnamed.findIndex(
+    (candidate) => candidate.volume_instance_id === volume.volume_instance_id,
+  );
+  return `名前の無いカード ${position + 1}`;
+}
+
+/** カメラの種類の表示名。**slug をそのまま画面に出さない**（§13）。
+ *
+ * `/profiles` から引いた表示名を出し、**見つからない（未登録・まだ読めていない）
+ * ときだけ** slug にフォールバックする。 */
+export function profileDisplayName(
+  slug: string | null,
+  profiles: readonly Profile[],
+): string {
+  if (slug === null) {
+    return "対象外";
+  }
+  return profiles.find((profile) => profile.slug === slug)?.name ?? slug;
+}
+
+/** 同定の確度を利用者向けの日本語にする（§8）。
+ *
+ * **実際に取りうる値は `high` と `low` の 2 つだけ**（`_identity_confidence`）。
+ * それ以外（読めていない等）では何も出さない。 */
+export function confidenceLabel(identityConfidence: string | null): string | null {
+  switch (identityConfidence) {
+    case "high":
+      return "確かめられています";
+    case "low":
+      return "まだ確かめられていません";
+    default:
+      return null;
+  }
+}
 
 /** 自動取り込みの見通し。**`watcher.py` の `CANDIDATES` と同じ条件を見る。**
  *
@@ -56,7 +115,9 @@ export function autoImportOutlook(volume: Volume, autoImport: string | null): Ou
     return { state: "blocked", reason: "設定をまだ読めていない" };
   }
   if (autoImport !== "trusted") {
-    return { state: "blocked", reason: "AUTO_IMPORT が off な" };
+    // **内部の設定キーを理由に出さない**（§13）。この文字列は画面にも確認
+    // ダイアログにもそのまま出る。`Settings.tsx` の項目名に合わせる。
+    return { state: "blocked", reason: "「信頼したカードを自動で取り込む」が切ってある" };
   }
   if (volume.provisional) {
     return { state: "blocked", reason: "対象の中身がまだ見つかっていない" };
@@ -94,14 +155,16 @@ export function autoImportState(volume: Volume, autoImport: string | null): stri
   }
 }
 
-export function DevicesScreen() {
+export function CardDetailScreen() {
   const devices = useQuery<Devices>("/devices");
   const settings = useQuery<Settings>("/settings");
+  const profiles = useQuery<Profiles>("/profiles");
   const [error, setError] = useState<unknown>(null);
   const [busy, setBusy] = useState<string | null>(null);
   const [confirming, setConfirming] = useState<{ confirmation: Confirmation; id: string } | null>(
     null,
   );
+  const navigate = useNavigate();
 
   // **未解決・失敗は `null` のまま持つ。** 既定値へ倒すと、同意の内容が実挙動と
   // ずれる（`watcher.py` は積まないのに「コピーされます」と書く）。
@@ -124,48 +187,98 @@ export function DevicesScreen() {
     }
   }
 
+  const volumes = devices.data?.volumes ?? [];
+  const profileList = profiles.data?.profiles ?? [];
+
   return (
-    <section aria-label="デバイス">
-      <h1>デバイス</h1>
+    <section aria-label="カードの中身" className="wrap">
+      <div className="row">
+        <button type="button" className="btn sm" onClick={() => navigate("/")}>
+          <Icon name="back" size={16} />
+          ホームへ
+        </button>
+      </div>
+      <h1 className="page title-lg">カードの中身</h1>
+
       <ErrorBanner
-        error={error ?? devices.error ?? settings.error}
+        error={error ?? devices.error ?? settings.error ?? profiles.error}
         onDismiss={() => setError(null)}
       />
+
+      {/* **内部の設定キーを画面に出さない**（§13）。`Settings.tsx` の項目名と
+          同じ言葉で書く —— 同じものが画面ごとに違う名前で出ると、どれとどれが
+          同じ設定なのか読む側には分からない。
+
+          **行き先はボタンで置く。** 文の途中のリンクは行の高さしか無く、
+          §13「押せる領域は 44px 以上」を満たせない。 */}
       {autoImport === "off" && (
-        <p role="note">
-          自動取り込みは無効です（AUTO_IMPORT = off）。信頼済みのカードを挿しても
-          取り込みは始まりません。<Link to="/settings">設定</Link>で変えられます。
-        </p>
+        <>
+          <p role="note">
+            「信頼したカードを自動で取り込む」が切ってあります。信頼済みのカードを
+            挿しても取り込みは始まりません。
+          </p>
+          <div className="acts">
+            <Link to="/settings" className="btn sm">
+              設定を開く
+            </Link>
+          </div>
+        </>
       )}
-      {(devices.data?.volumes ?? []).length === 0 && <p>接続中のカードはありません。</p>}
-      <ul>
-        {(devices.data?.volumes ?? []).map((volume) => {
-          const label = volume.fs_label ?? volume.volume_instance_id;
+
+      {volumes.length === 0 ? (
+        <div className="card pad empty">
+          <h2 style={{ fontSize: 17, fontWeight: 650 }}>接続中のカードはありません</h2>
+        </div>
+      ) : (
+        volumes.map((volume) => {
+          const label = volumeLabel(volumes, volume);
+          const profileName = profileDisplayName(volume.profile_slug, profileList);
+          const confidence = confidenceLabel(volume.identity_confidence);
+          const actionable = volume.profile_slug !== null;
           return (
-            <li key={volume.volume_instance_id}>
-              <h2>{label}</h2>
-              <p>
-                判定: {volume.profile_slug ?? "対象外"}
-                {volume.identity_confidence ? `（確度 ${volume.identity_confidence}）` : ""}
-              </p>
-              {/* **理由は常に出す**（§13）。対象外なら「なぜ外れたか」、一致なら
-                  「なぜそのプロファイルに決まったか」で、どちらもプロファイルを
-                  直す手がかりになる。黙って消えると原因が分からない。 */}
-              <p role="note">
-                {volume.profile_slug === null ? "対象外の理由" : "判定の理由"}:{" "}
-                {volume.reason ?? "不明"}
-              </p>
-              {/* **「対象だが中身が無い」は対象外ではない**（§6 / Phase 0 の発見 B）。 */}
-              {volume.provisional && (
-                <p role="note">
-                  {volume.profile_slug} の対象ですが、取り込む中身がまだありません。
+            <section key={volume.volume_instance_id} className="card pad">
+              <div className="rowtop">
+                <div className="iconbox on">
+                  <Icon name="card" />
+                </div>
+                <div className="grow">
+                  <h2 style={{ fontSize: 16, fontWeight: 650 }}>{label}</h2>
+                  <p className="small" style={{ marginTop: 4 }}>
+                    判定: {profileName}
+                    {confidence !== null ? `（確度：${confidence}）` : ""}
+                  </p>
+                  {/* **理由は常に出す**（§13）。対象外なら「なぜ外れたか」、一致なら
+                      「なぜそのプロファイルに決まったか」で、どちらもプロファイルを
+                      直す手がかりになる。黙って消えると原因が分からない。 */}
+                  <p role="note" className="small" style={{ marginTop: 4 }}>
+                    {volume.profile_slug === null ? "対象外の理由" : "判定の理由"}:{" "}
+                    {volume.reason ?? "不明"}
+                  </p>
+                  {/* **「対象だが中身が無い」は対象外ではない**（§6 / Phase 0 の発見 B）。 */}
+                  {volume.provisional && (
+                    <p role="note" className="small" style={{ marginTop: 4 }}>
+                      {profileName} の対象ですが、取り込む中身がまだありません。
+                    </p>
+                  )}
+                </div>
+              </div>
+              {actionable && (
+                <p
+                  className="muted"
+                  style={{
+                    marginTop: 14,
+                    paddingTop: 14,
+                    borderTop: "1px solid var(--line-2)",
+                  }}
+                >
+                  {autoImportState(volume, autoImport)}
                 </p>
               )}
-              {volume.profile_slug !== null && <p>{autoImportState(volume, autoImport)}</p>}
-              <div className="actions">
-                {!volume.trusted && volume.profile_slug !== null && (
+              <div className="acts" style={{ marginTop: 14 }}>
+                {!volume.trusted && actionable && (
                   <button
                     type="button"
+                    className="btn outline"
                     // 設定を読めていない間は押させない（同意の内容を作れない）。
                     disabled={busy !== null || autoImport === null}
                     onClick={() =>
@@ -183,10 +296,11 @@ export function DevicesScreen() {
                     {label} を信頼する
                   </button>
                 )}
-                {volume.profile_slug !== null && (
+                {actionable && (
                   <>
                     <button
                       type="button"
+                      className="btn sm"
                       disabled={busy !== null}
                       onClick={() => void act(volume.volume_instance_id, "scan")}
                     >
@@ -194,6 +308,7 @@ export function DevicesScreen() {
                     </button>
                     <button
                       type="button"
+                      className="btn primary"
                       disabled={busy !== null}
                       onClick={() => void act(volume.volume_instance_id, "import")}
                     >
@@ -203,16 +318,18 @@ export function DevicesScreen() {
                 )}
                 <button
                   type="button"
+                  className="btn sm"
                   disabled={busy !== null}
                   onClick={() => void act(volume.volume_instance_id, "close")}
                 >
                   {label} を取り外す
                 </button>
               </div>
-            </li>
+            </section>
           );
-        })}
-      </ul>
+        })
+      )}
+
       {confirming && (
         <ConfirmDialog
           confirmation={confirming.confirmation}

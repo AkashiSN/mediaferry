@@ -78,7 +78,7 @@ def resolve_group(
 ) -> Group | Refusal:
     """4 条件（§6）で組を決める. 同じ組はどの member から呼んでも同じになる."""
     if not rule.enabled:
-        return Refusal("プロファイルがスタックを使わない")
+        return Refusal("カメラの種類がスタックを使わない")
     if extension_of(primary.rel_path) not in rule.extensions:
         return Refusal("この拡張子は組の対象ではない")
     keys = {c.source_key for c in candidates if c.media_file_id == primary.media_file_id}
