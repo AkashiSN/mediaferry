@@ -223,6 +223,134 @@ test("空の DB から、ホーム起点の主要動線が通る", async ({ page
   expect(logs.join("\n")).not.toContain("test-api-key");
 });
 
+/**
+ * 下に貼り付く帯が、ナビや他の固定要素に隠れていないかを見る。
+ *
+ * **矩形の重なりでしか捕まらない。** 44px の検査は「小さすぎないか」しか見ず、
+ * はみ出しの検査は要素 1 つの中しか見ないので、**別の固定要素が上に乗って
+ * 押せなくなっている**状態はどちらの網にも掛からない。帯とナビの矩形が重なって
+ * いないかを見て、そのうえで帯の中の押せるものの中心に何がいちばん手前にあるかを
+ * 見る（ナビ以外の固定要素も、これで捕まる）。
+ *
+ * **角では測らない。** 帯には 14px の丸みがあり、角の内側 4px は帯の外なので、
+ * そこを突くと背後の要素が返って嘘の重なりになる。
+ */
+async function covering(page: Page, selector: string): Promise<string[]> {
+  return page.evaluate((target) => {
+    const bar = document.querySelector(target);
+    const nav = document.querySelector("nav");
+    if (bar === null || nav === null) {
+      return [`${target} かナビが無い`];
+    }
+    const rect = bar.getBoundingClientRect();
+    const navRect = nav.getBoundingClientRect();
+    const problems: string[] = [];
+    const box = (r: DOMRect) =>
+      `top ${Math.round(r.top)} / bottom ${Math.round(r.bottom)}`;
+    if (rect.top < 0 || rect.bottom > window.innerHeight) {
+      problems.push(`${target} が画面の外にある（${box(rect)}）`);
+    }
+    // 辺が接するだけは重なりではない（`<` で見る）。
+    const overlaps =
+      rect.left < navRect.right &&
+      navRect.left < rect.right &&
+      rect.top < navRect.bottom &&
+      navRect.top < rect.bottom;
+    if (overlaps) {
+      problems.push(`${target}（${box(rect)}）がナビ（${box(navRect)}）と重なっている`);
+    }
+    for (const control of bar.querySelectorAll("button, a")) {
+      const spot = control.getBoundingClientRect();
+      const x = spot.left + spot.width / 2;
+      const y = spot.top + spot.height / 2;
+      const front = document.elementFromPoint(x, y);
+      const label = (control.textContent ?? "").trim().slice(0, 12);
+      if (front === null) {
+        problems.push(`${target} の「${label}」が画面の外`);
+      } else if (!bar.contains(front)) {
+        problems.push(
+          `${target} の「${label}」が <${front.tagName.toLowerCase()} ` +
+            `class="${front.className}"> に覆われている`,
+        );
+      }
+    }
+    return problems;
+  }, selector);
+}
+
+// **狭い画面のナビは画面の上に 1 行で置く。**
+//
+// 高さの上限を 72px にする根拠: 中身は 44px の押せる領域が 1 行だけで、上下 6px の
+// 余白と 1px の境界を足して実測 57px（ホームに件数のバッジが出ると 58px）。1 行に
+// 収まらなくなると 44px の行が 2 つと余白で 100px を超える（下の帯だったときの
+// 実測は 390×844 で 116px）。72px はその間に取ってあり、書体の差で数 px 動いても
+// 1 行のうちは通る。
+test("狭い画面のナビは画面の上にあり、1 行に収まる", async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 844 });
+  await signIn(page);
+  const nav = await page.evaluate(() => {
+    const element = document.querySelector("nav")!;
+    const rect = element.getBoundingClientRect();
+    const main = document.querySelector("main")!.getBoundingClientRect();
+    const links = [...element.querySelectorAll("a")].map((link) => {
+      const box = link.getBoundingClientRect();
+      return { top: Math.round(box.top), height: Math.round(box.height) };
+    });
+    return {
+      position: getComputedStyle(element).position,
+      top: Math.round(rect.top),
+      bottom: Math.round(rect.bottom),
+      height: Math.round(rect.height),
+      mainTop: Math.round(main.top),
+      links,
+    };
+  });
+
+  // 1. 画面の上にあり、本文より前に場所を取る。
+  expect(nav.top).toBe(0);
+  expect(nav.bottom).toBeLessThanOrEqual(nav.mainTop);
+  // **流れの中に置いたまま貼り付く**ので、本文の側にナビの高さぶんの余白が要らない。
+  expect(nav.position).toBe("sticky");
+
+  // 2. 1 行に収まっている（上端が 3 つとも同じで、帯の高さが 1 行ぶん）。
+  expect(nav.links).toHaveLength(3);
+  expect(new Set(nav.links.map((link) => link.top)).size).toBe(1);
+  expect(nav.height, `ナビの高さが ${nav.height}px`).toBeLessThanOrEqual(72);
+  // 3. 押せる領域は 44px 以上のまま（§13）。
+  for (const link of nav.links) {
+    expect(link.height).toBeGreaterThanOrEqual(44);
+  }
+
+  // 4. 巻いても上に残る。**画面が短くて巻けないときは 0 のままなので、この行は
+  //    何も主張しない**（巻ける画面でだけ `top` のずれを捕まえる）。
+  const scrolled = await page.evaluate(() => {
+    window.scrollTo(0, 400);
+    return Math.round(document.querySelector("nav")!.getBoundingClientRect().top);
+  });
+  expect(scrolled).toBe(0);
+});
+
+test("狭い画面で、下に貼り付く操作バーが隠れない", async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 844 });
+  await signIn(page);
+  await page.goto(app.url + "/photos");
+  await settled(page);
+
+  // **実際に 1 枚選んでバーを出してから測る。** 選んでいない間はバーが無い。
+  const tile = page.locator("main button.tile").first();
+  await expect(tile).toBeVisible({ timeout: 60_000 });
+  await tile.click();
+  await expect(page.locator(".actionbar")).toBeVisible();
+  const overActionbar = await covering(page, ".actionbar");
+  expect(overActionbar, overActionbar.join(" / ")).toEqual([]);
+
+  await page.goto(app.url + "/send");
+  await settled(page);
+  await expect(page.locator(".sendbar")).toBeVisible();
+  const overSendbar = await covering(page, ".sendbar");
+  expect(overSendbar, overSendbar.join(" / ")).toEqual([]);
+});
+
 test("内部の名前と Markdown の記号を画面に出さない", async ({ page }) => {
   await signIn(page);
   for (const path of SCREENS) {

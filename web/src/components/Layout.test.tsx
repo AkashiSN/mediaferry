@@ -21,6 +21,8 @@ describe("画面の枠", () => {
     renderAt("/");
     const navs = screen.getAllByRole("navigation");
     expect(navs).toHaveLength(1);
+    // 帯には名前を付ける（読み上げが「ナビゲーション」だけにならないように）。
+    expect(screen.getByRole("navigation", { name: "画面" })).toBeInTheDocument();
     expect(screen.getAllByRole("link")).toHaveLength(3);
     expect(screen.getByRole("link", { name: /ホーム/ })).toBeInTheDocument();
     expect(screen.getByRole("link", { name: /写真/ })).toBeInTheDocument();
