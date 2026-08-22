@@ -527,6 +527,90 @@ for (const width of [390, 900, 1280]) {
   });
 }
 
+/**
+ * **箱の中身のはずのものが、箱の外に出ていないか。**
+ *
+ * 上の「はみ出し」の検査は、**子が親の箱に収まっているか**しか見ない。カードの
+ * 外へ**兄弟として**置かれた行は親が違うので対象外で、負の余白でカードの下の縁へ
+ * 引き上げても素通りする（実測でカードの下端に 8px 食い込んだまま緑だった）。
+ * 44px の検査は大きさしか測らず、禁止語の検査は `innerText` を読むだけなので、
+ * **カードに属する行がカードの縁を跨いで描かれる壊れ方**はどの網にも掛からない。
+ *
+ * 流れの中に並ぶ兄弟は、ふつう重ならない。重なるのは負の余白で引き寄せたときか、
+ * 位置指定で持ち上げたときだけ。そこで、**カードの矩形と、同じ親を持つ他の要素の
+ * 矩形が重なっていないこと**を見る。
+ *
+ * **貼り付く要素は外す。** ナビ・下の帯・確認の scrim は重なるのが仕事なので、
+ * 流れの中にあるもの（`static` と `relative`）だけを測る。
+ */
+async function crossingCardEdges(page: Page): Promise<string[]> {
+  return page.evaluate(() => {
+    const problems: string[] = [];
+    const inFlow = (element: Element) => {
+      const position = getComputedStyle(element).position;
+      return position === "static" || position === "relative";
+    };
+    let cards = 0;
+    for (const card of document.querySelectorAll("main section.card")) {
+      const rect = card.getBoundingClientRect();
+      if (rect.width === 0 || rect.height === 0 || card.parentElement === null) {
+        continue;
+      }
+      cards += 1;
+      for (const sibling of card.parentElement.children) {
+        if (sibling === card || !inFlow(sibling)) {
+          continue;
+        }
+        const other = sibling.getBoundingClientRect();
+        if (other.width === 0 || other.height === 0) {
+          continue;
+        }
+        // 辺が接するだけは重なりではない（`<` で見る）。
+        const overlaps =
+          rect.left < other.right &&
+          other.left < rect.right &&
+          rect.top < other.bottom &&
+          other.top < rect.bottom;
+        if (overlaps) {
+          const label = (sibling.textContent ?? "").trim().replace(/\s+/g, " ").slice(0, 24);
+          problems.push(
+            `<${sibling.tagName.toLowerCase()} class="${sibling.className}">「${label}」` +
+              `（top ${Math.round(other.top)}）がカード` +
+              `（top ${Math.round(rect.top)} / bottom ${Math.round(rect.bottom)}）と重なっている`,
+          );
+        }
+      }
+    }
+    // 測るカードが 1 枚も無ければ、この画面では何も主張していない。
+    return cards === 0 ? [] : problems;
+  });
+}
+
+// **狭い画面で測る。** 390px はカードの中身が 1 行に収まらなくなる幅で、縁を跨ぐ
+// 行がいちばん目立つ。
+test("カードの中身が、カードの箱の外に出ていない", async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 844 });
+  await signIn(page);
+  // 44px の検査と同じく、**最初の 1 件で止めない**。全画面ぶんを集めてから見せる。
+  const crossing: string[] = [];
+  let historyCards = 0;
+  for (const path of SCREENS) {
+    await page.goto(app.url + path);
+    await settled(page);
+    if (path === "/settings/jobs") {
+      historyCards = await page.locator("main section.card").count();
+    }
+    for (const problem of await crossingCardEdges(page)) {
+      crossing.push(`${path} の ${problem}`);
+    }
+  }
+  // **空振りで緑にしない。** 終わった作業に補足（終わった日時・最後の文言）を
+  // 添えるのは作業の履歴なので、そこにカードが 1 枚も無いまま通ると何も測らずに
+  // 緑になる（このファイルの先頭の動線が取り込みと送信を走らせている）。
+  expect(historyCards, "作業の履歴にカードが無い").toBeGreaterThan(0);
+  expect(crossing, crossing.join("\n")).toEqual([]);
+});
+
 for (const colorScheme of ["light", "dark"] as const) {
   test(`${colorScheme} で本文と背景が同じ色にならない`, async ({ page }) => {
     await page.emulateMedia({ colorScheme });

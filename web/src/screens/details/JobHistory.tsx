@@ -47,6 +47,26 @@ export function JobHistoryScreen() {
 
   const rows = jobs.data?.jobs ?? [];
 
+  /**
+   * カードに添える補足の行を組み立てる。
+   *
+   * **終わった日時を出すのは、設定の入口が「取り込みや送信がいつ終わったか」を
+   * 約束しているから**（`Settings.tsx`）。システム時刻は UTC で保存されるので、
+   * 現地時刻に見えないよう印を添える（`formatSystemDateTime`）。
+   */
+  function notesFor(job: Job): string[] {
+    const notes: string[] = [];
+    if (job.finished_at) {
+      notes.push(`終わった日時: ${formatSystemDateTime(job.finished_at)}`);
+    }
+    // 進捗が無い（終わった）ジョブには、届いた最後のイベントの文言を添える。
+    const latest = job.progress ? undefined : latestByJob.get(job.id);
+    if (latest) {
+      notes.push(latest.message);
+    }
+    return notes;
+  }
+
   return (
     <section aria-label="作業の履歴" className="wrap">
       <div className="row">
@@ -69,25 +89,13 @@ export function JobHistoryScreen() {
         </div>
       ) : (
         rows.map((job) => (
-          <div key={job.id}>
-            <JobCard
-              job={job}
-              rate={averageRate(job)}
-              onCancel={CANCELLABLE_STATUSES.includes(job.status) ? (id) => void cancel(id) : undefined}
-            />
-            {/* Settings.tsx の入口が「いつ終わったか」を約束しているので、終わった
-                ジョブには終了日時を添える。システム時刻は UTC なので印を付ける。 */}
-            {job.finished_at && (
-              <p className="small" style={{ marginTop: -8, marginBottom: 8, paddingLeft: 4 }}>
-                終わった日時: {formatSystemDateTime(job.finished_at)}
-              </p>
-            )}
-            {!job.progress && latestByJob.get(job.id) && (
-              <p className="small" style={{ marginTop: -8, marginBottom: 8, paddingLeft: 4 }}>
-                {latestByJob.get(job.id)?.message}
-              </p>
-            )}
-          </div>
+          <JobCard
+            key={job.id}
+            job={job}
+            rate={averageRate(job)}
+            onCancel={CANCELLABLE_STATUSES.includes(job.status) ? (id) => void cancel(id) : undefined}
+            notes={notesFor(job)}
+          />
         ))
       )}
     </section>

@@ -137,6 +137,45 @@ describe("作業の履歴", () => {
     expect(await screen.findByText(/終わった日時: 2026年8月21日 00:10（UTC）/)).toBeInTheDocument();
   });
 
+  it("終わった日時と最後の文言は、カードの中に描く（箱の外に出さない）", async () => {
+    stubApi({
+      "/jobs": {
+        jobs: [
+          {
+            id: "j1",
+            type: "merge",
+            status: "succeeded",
+            created_at: "2026-08-21T00:00:00+00:00",
+            started_at: "2026-08-21T00:00:00+00:00",
+            finished_at: "2026-08-21T00:10:00+00:00",
+            progress: null,
+          },
+        ],
+      },
+    });
+    render(
+      <MemoryRouter>
+        <JobHistoryScreen />
+      </MemoryRouter>,
+    );
+
+    // カードの外に兄弟として置くと、狭い画面で縁からはみ出して見える。**補足は
+    // カードの中身**なので、カードの矩形の内側に描く。
+    const when = await screen.findByText(/終わった日時:/);
+    expect(when.closest("section.card")).not.toBeNull();
+
+    emitJob({
+      job_id: "j1",
+      seq: 1,
+      level: "info",
+      message: "継ぎ目を検証しています",
+      data: null,
+      at: "2026-08-21T00:00:00+00:00",
+    });
+    const last = await screen.findByText("継ぎ目を検証しています");
+    expect(last.closest("section.card")).not.toBeNull();
+  });
+
   it("走っている作業には、終わった日時を出さない", async () => {
     stubApi({
       "/jobs": {

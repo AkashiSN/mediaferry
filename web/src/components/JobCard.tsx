@@ -16,10 +16,16 @@ export function JobCard({
   job,
   rate,
   onCancel,
+  notes,
 }: {
   job: Job;
   rate: number | null;
   onCancel?: (jobId: string) => void;
+  /**
+   * この作業に添える補足の行（終わった日時、届いた最後の文言など）。**空の行は
+   * 描かない。**
+   */
+  notes?: string[];
 }) {
   const title = JOB_TYPE_LABELS[job.type] ?? job.type;
   return (
@@ -49,6 +55,18 @@ export function JobCard({
           <i style={{ width: `${barPercent(job.progress)}%` }} />
         </div>
       )}
+      {/* **補足はカードの中で描く。** 添える文言は呼び出し元ごとに違う（作業の履歴は
+          終わった日時と最後の文言を添え、ホームと送信中は何も添えない）が、箱を
+          描いているのはこのカードなので、行の置き場所もここが持つ。呼び出し元が
+          カードの外に兄弟として並べると、カードの内側の余白ではなく外枠に揃い、
+          縁からはみ出して見える。 */}
+      {(notes ?? [])
+        .filter((note) => note !== "")
+        .map((note, index) => (
+          <p key={index} className="small card-note">
+            {note}
+          </p>
+        ))}
     </section>
   );
 }
