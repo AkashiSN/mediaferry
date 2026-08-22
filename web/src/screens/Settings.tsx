@@ -84,7 +84,7 @@ export function SettingsScreen() {
 
   return (
     <section aria-label="設定" className="wrap">
-      <h1 className="page lg">設定</h1>
+      <h1 className="page title-lg">設定</h1>
 
       <ErrorBanner
         error={error ?? settings.error ?? destinations.error ?? profiles.error}

@@ -78,7 +78,7 @@ function AuthedApp() {
 function NotFoundScreen() {
   return (
     <section aria-label="その画面はありません" className="wrap">
-      <h1 className="page lg">その画面はありません</h1>
+      <h1 className="page title-lg">その画面はありません</h1>
       <p className="muted">
         住所が変わったか、書き間違いかもしれません。ホームから開き直してください。
       </p>

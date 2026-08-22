@@ -76,7 +76,7 @@ export function MergeHistoryScreen() {
           設定へ
         </Link>
       </div>
-      <h1 className="page lg">つないだ動画の記録</h1>
+      <h1 className="page title-lg">つないだ動画の記録</h1>
 
       <ErrorBanner
         error={error ?? discarded.error ?? stale.error}
@@ -96,7 +96,7 @@ export function MergeHistoryScreen() {
               <li key={group.id} className="rowtop">
                 <ul className="grow" style={{ listStyle: "none", padding: 0 }}>
                   {group.members.map((member) => (
-                    <li key={member.media_file_id} className="small">
+                    <li key={member.media_file_id} className="small ident">
                       {member.rel_path}
                     </li>
                   ))}
@@ -139,7 +139,7 @@ export function MergeHistoryScreen() {
             {staleItems.map((item) => (
               <li key={item.id} className="rowtop">
                 <div className="grow">
-                  <code className="small">{item.rel_path}</code>
+                  <code className="small ident">{item.rel_path}</code>
                   <div className="small">
                     {formatBytes(item.size_bytes)} ・
                     {item.reason === "superseded" ? "組み直しで置き換わった" : "別々にした組"}

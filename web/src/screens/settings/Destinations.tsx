@@ -421,7 +421,7 @@ export function DestinationsScreen() {
           設定へ
         </Link>
       </div>
-      <h1 className="page lg">送り先</h1>
+      <h1 className="page title-lg">送り先</h1>
 
       <ErrorBanner error={error ?? destinations.error} onDismiss={() => setError(null)} />
 

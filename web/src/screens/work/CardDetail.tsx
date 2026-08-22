@@ -198,7 +198,7 @@ export function CardDetailScreen() {
           ホームへ
         </button>
       </div>
-      <h1 className="page lg">カードの中身</h1>
+      <h1 className="page title-lg">カードの中身</h1>
 
       <ErrorBanner
         error={error ?? devices.error ?? settings.error ?? profiles.error}

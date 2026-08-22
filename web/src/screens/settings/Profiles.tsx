@@ -243,7 +243,7 @@ export function ProfilesScreen() {
           設定へ
         </Link>
       </div>
-      <h1 className="page lg">カメラの種類</h1>
+      <h1 className="page title-lg">カメラの種類</h1>
 
       <ErrorBanner error={error ?? profiles.error} onDismiss={() => setError(null)} />
 

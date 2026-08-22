@@ -266,6 +266,60 @@ test("狭い画面のボタンは 44px 以上", async ({ page }) => {
   expect(tooSmall, tooSmall.join(" / ")).toEqual([]);
 });
 
+/**
+ * 文字が入れ物からはみ出している要素を集める。
+ *
+ * **これは実ブラウザでしか捕まらない。** RTL はレイアウトを見ないので、見出しに
+ * 12px 四方の丸のクラスが当たっても「要素があり、文字も入っている」で緑になる。
+ * 44px の検査はボタンとリンクしか測らず、禁止語の検査は `innerText` を読むだけ
+ * なので、**文字が箱の外へ流れ出る壊れ方はどの網にも掛からない。**
+ *
+ * 見るのは末端の文字要素だけ。自分で横スクロールする箱（省略記号を出す欄など）は
+ * はみ出して当たり前なので外す。
+ */
+async function spilling(page: Page): Promise<string[]> {
+  return page.evaluate(() => {
+    const found: string[] = [];
+    for (const element of document.querySelectorAll<HTMLElement>("main *, nav *")) {
+      const text = (element.innerText ?? "").trim();
+      if (text === "" || element.children.length > 0) {
+        continue;
+      }
+      if (getComputedStyle(element).overflowX !== "visible") {
+        continue;
+      }
+      // 1px は端数の丸め。それを超えたら文字が箱に収まっていない。
+      if (element.scrollWidth > element.clientWidth + 1) {
+        const label = text.replace(/\s+/g, " ").slice(0, 24);
+        found.push(
+          `<${element.tagName.toLowerCase()} class="${element.className}">「${label}」` +
+            `が 幅 ${element.clientWidth}px の箱に ${element.scrollWidth}px 必要`,
+        );
+      }
+    }
+    return found;
+  });
+}
+
+// **狭いところと、柱が出たばかりのところの両方で測る。** 390px は帯のとき、
+// 900px は左の柱が出て本文の幅がいちばん狭くなるとき、1280px はふだんの幅。
+for (const width of [390, 900, 1280]) {
+  test(`${width}px で文字が入れ物からはみ出さない`, async ({ page }) => {
+    await page.setViewportSize({ width, height: 844 });
+    await signIn(page);
+    // 44px の検査と同じく、**最初の 1 件で止めない**。全画面ぶんを集めて見せる。
+    const spills: string[] = [];
+    for (const path of SCREENS) {
+      await page.goto(app.url + path);
+      await settled(page);
+      for (const spill of await spilling(page)) {
+        spills.push(`${path} の ${spill}`);
+      }
+    }
+    expect(spills, spills.join("\n")).toEqual([]);
+  });
+}
+
 for (const colorScheme of ["light", "dark"] as const) {
   test(`${colorScheme} で本文と背景が同じ色にならない`, async ({ page }) => {
     await page.emulateMedia({ colorScheme });

@@ -163,16 +163,23 @@ ul { margin: 0; }
 .btn.big { height: 50px; padding: 0 26px; font-size: 15.5px; }
 .btn:disabled { opacity: .45; cursor: not-allowed; }
 
-.row { display: flex; align-items: center; gap: 12px; }
-.rowtop { display: flex; align-items: flex-start; gap: 14px; }
+/* **本文と操作が 1 行に収まらないときは、操作を次の行へ落とす。** `.grow` の
+   基準は 0 なので、折り返さないと隣の操作に押されて幅 0 まで縮み、本文の文字が
+   箱の外へ流れ出る（`web/e2e/journey.spec.ts` の「文字が入れ物からはみ出さない」）。 */
+.row { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+.rowtop { display: flex; align-items: flex-start; gap: 14px; flex-wrap: wrap; }
 .acts { display: flex; gap: 8px; flex-wrap: wrap; }
 .grow { flex: 1; min-width: 0; }
 .muted { color: var(--ink-2); font-size: 13px; }
 .small { color: var(--ink-3); font-size: 12.5px; }
+/* 機械が付けた名前（env のキー、slug、ライブラリ内のパス）は、空白も改行の機会も
+   無い 1 語として扱われるので、狭い欄では箱の外へ流れ出る（`/` では折り返さない）。
+   **途中で折り返してでも箱に収める。** */
+.ident { overflow-wrap: anywhere; }
 .sechead { display: flex; align-items: baseline; gap: 10px; }
 .sechead h2 { font-size: 15px; font-weight: 650; }
 h1.page { font-size: 21px; font-weight: 650; }
-h1.page.lg { font-size: 24px; }
+h1.page.title-lg { font-size: 24px; }
 .iconbox {
   width: 40px; height: 40px; flex: 0 0 40px; border-radius: 9px;
   background: var(--line-2); display: flex; align-items: center; justify-content: center; color: var(--ink-2);
@@ -300,9 +307,8 @@ textarea.field {
 .parts > div:last-child { border-radius: 3px 7px 7px 3px; }
 @media (max-width: 899px) { .parts { width: 100%; } .parts > div { flex: 1; width: auto; height: 54px; } }
 
-/* 狭いときは、本文を潰さずにボタンを次の行へ落とす */
+/* 狭いときは、落とした操作を横いっぱいに広げる（折り返しそのものは `.row` の既定） */
 @media (max-width: 899px) {
-  .row, .rowtop { flex-wrap: wrap; }
   .acts { width: 100%; }
   .acts > .btn { flex: 1 1 auto; }
   .rowtop > .grow, .row > .grow { flex: 1 1 60%; }

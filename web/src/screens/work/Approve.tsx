@@ -103,7 +103,7 @@ export function ApproveScreen() {
         </button>
       </div>
       <div>
-        <h1 className="page lg">
+        <h1 className="page title-lg">
           写真の日時を直していいか確かめます
         </h1>
         <p className="muted" style={{ marginTop: 7 }}>

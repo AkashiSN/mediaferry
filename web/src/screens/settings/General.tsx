@@ -86,7 +86,7 @@ export function GeneralScreen() {
           設定へ
         </Link>
       </div>
-      <h1 className="page lg">詳しい設定</h1>
+      <h1 className="page title-lg">詳しい設定</h1>
 
       <ErrorBanner error={error ?? settings.error} onDismiss={() => setError(null)} />
 
@@ -100,7 +100,8 @@ export function GeneralScreen() {
           {(settings.data?.settings ?? []).map((setting) => (
             <li key={setting.key} className="row">
               <div className="grow">
-                <div style={{ fontSize: "13.5px", fontWeight: 600 }}>
+                {/* キー名は区切りが無いので、欄が狭いときは途中で折り返す。 */}
+                <div className="ident" style={{ fontSize: "13.5px", fontWeight: 600 }}>
                   {setting.key}
                   {/* env 由来は TrueNAS のアプリ設定で固定されている（§12）。 */}
                   {setting.locked && (

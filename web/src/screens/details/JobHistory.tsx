@@ -55,7 +55,7 @@ export function JobHistoryScreen() {
           設定へ
         </Link>
       </div>
-      <h1 className="page lg">作業の履歴</h1>
+      <h1 className="page title-lg">作業の履歴</h1>
 
       <ErrorBanner error={error ?? jobs.error} onDismiss={() => setError(null)} />
 
