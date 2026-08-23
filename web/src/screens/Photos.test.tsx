@@ -361,8 +361,8 @@ describe("読み込む件数と、切れていることの表示", () => {
     expect(await screen.findByText("すべて：2 / 3421 件")).toBeInTheDocument();
   });
 
-  // main にはファイル名の検索があった。**無くすと、200 件より古いものは
-  // どの画面からも辿れない**（API は `q` を受け付けたまま）。
+  // **1 度に読むのは 200 件まで。** 検索が無いと、それより古いものはどの画面からも
+  // 辿れない（API は `q` を受け付ける）。
   it("ファイル名でさがせる", async () => {
     const { calls } = stubApi({
       "/media": { media: [], total: 0, page: 1, page_size: 200 },
@@ -455,6 +455,126 @@ describe("読み込む件数と、切れていることの表示", () => {
     );
     await screen.findByText("すべて：1 / 1 件");
     expect(screen.queryByRole("button", { name: "次の 200 件" })).toBeNull();
+  });
+
+  // **前のページの行に、新しいページの番号を付けない。** 応答が返るまでは
+  // 前の 200 件が並んだままなので、URL の `page` で数えると
+  // 「201–400 / 250 件」のように総数を超えた案内が出る。
+  it("次のページを読んでいる間は、いま出している行の番号を出す", async () => {
+    let release!: () => void;
+    const held = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const first = {
+      media: [media("a", "2026-08-18T15:12:00+09:00")],
+      total: 250,
+      page: 1,
+      page_size: 200,
+    };
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: string) => {
+        const path = input.replace(/^\/api/, "");
+        if (path.includes("page=2")) {
+          await held;
+          return new Response(
+            JSON.stringify({ ...first, page: 2, media: [media("b", "2026-08-17T15:12:00+09:00")] }),
+            { status: 200 },
+          );
+        }
+        if (path.startsWith("/media")) {
+          return new Response(JSON.stringify(first), { status: 200 });
+        }
+        return new Response(JSON.stringify({ destinations: [] }), { status: 200 });
+      }),
+    );
+    render(
+      <MemoryRouter>
+        <PhotosScreen />
+      </MemoryRouter>,
+    );
+    expect(await screen.findByText("1–1 / 250 件")).toBeInTheDocument();
+
+    await userEvent.click(screen.getByRole("button", { name: "次の 200 件" }));
+
+    // まだ 1 ページ目の行が並んでいる。番号もその行のもの。
+    expect(screen.getByText("1–1 / 250 件")).toBeInTheDocument();
+    release();
+    await waitFor(() => expect(screen.getByText("201–201 / 250 件")).toBeInTheDocument());
+  });
+
+  it("宛先を変えたら、1 ページ目に戻す", async () => {
+    // 3 ページ目のまま別の宛先へ移ると、当てはまるものが 1 ページ分しか
+    // 無いときに空の一覧だけが出る。
+    const { calls } = stubApi({
+      "/media": { media: [], total: 3421, page: 3, page_size: 200 },
+      "/destinations": {
+        destinations: [
+          { id: "d1", name: "家", enabled: true },
+          { id: "d2", name: "旅行", enabled: true },
+        ],
+      },
+    });
+    render(
+      <MemoryRouter initialEntries={["/photos?status=failed&destination_id=d1&page=3"]}>
+        <PhotosScreen />
+      </MemoryRouter>,
+    );
+    await userEvent.click(await screen.findByRole("button", { name: "旅行" }));
+
+    await waitFor(() =>
+      expect(calls().some((c) => c.path.includes("destination_id=d2"))).toBe(true),
+    );
+    expect(calls().some((c) => c.path.includes("destination_id=d2") && c.path.includes("page=3"))).toBe(
+      false,
+    );
+  });
+
+  // 絞り込みを変えた瞬間に印だけが変わると、送信済みの 200 枚に赤い × が付く。
+  it("絞り込みを変えて読んでいる間は、前の行に新しい印を付けない", async () => {
+    let release!: () => void;
+    const held = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: string) => {
+        const path = input.replace(/^\/api/, "");
+        if (path.includes("status=failed")) {
+          await held;
+          return new Response(
+            JSON.stringify({ media: [], total: 0, page: 1, page_size: 200 }),
+            { status: 200 },
+          );
+        }
+        if (path.startsWith("/media")) {
+          return new Response(
+            JSON.stringify({
+              media: [media("a", "2026-08-18T15:12:00+09:00")],
+              total: 1,
+              page: 1,
+              page_size: 200,
+            }),
+            { status: 200 },
+          );
+        }
+        return new Response(
+          JSON.stringify({ destinations: [{ id: "d1", name: "家", enabled: true }] }),
+          { status: 200 },
+        );
+      }),
+    );
+    const { container } = render(
+      <MemoryRouter initialEntries={["/photos?status=sent&destination_id=d1"]}>
+        <PhotosScreen />
+      </MemoryRouter>,
+    );
+    await waitFor(() => expect(container.querySelector(".tile .mark.sent")).not.toBeNull());
+
+    await userEvent.click(screen.getByRole("button", { name: "送れなかった" }));
+
+    expect(container.querySelector(".tile .mark.failed")).toBeNull();
+    release();
   });
 
   it("絞り込みを変えたら、1 ページ目に戻す", async () => {

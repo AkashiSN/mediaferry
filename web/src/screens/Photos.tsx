@@ -151,7 +151,11 @@ export function PhotosScreen() {
 
   // 宛先ごとの絞り込みが効いている間は、返ってきた行はすべてその状態。
   // それ以外（すべて／動画）は宛先ごとの状態が定まらないので、印を出さない。
-  const impliedStatus: MediaStatus = DESTINATION_SCOPED.has(filter) ? (filter as MediaStatus) : null;
+  //
+  // **新しい絞り込みの結果が返るまでは、印を出さない。** 前の絞り込みの行が
+  // 並んだままなので、被せると送信済みの 200 枚に赤い × が付く。
+  const impliedStatus: MediaStatus =
+    !media.stale && DESTINATION_SCOPED.has(filter) ? (filter as MediaStatus) : null;
   const rows: Media[] = useMemo(() => {
     if (needsDestination) {
       return [];
@@ -170,8 +174,12 @@ export function PhotosScreen() {
   );
 
   // いま出しているのが何件目から何件目か（ページ送りの案内）。
-  const firstIndex = rows.length === 0 ? 0 : (page - 1) * PAGE_SIZE + 1;
-  const lastIndex = (page - 1) * PAGE_SIZE + rows.length;
+  // **番号は URL ではなく、いま並んでいる行が属するページから数える**（応答の
+  // `page`）。URL で数えると、次のページを読んでいる間だけ「201–400 / 250 件」の
+  // ように、前のページの行に新しい番号が付く。
+  const shownPage = media.data?.page ?? 1;
+  const firstIndex = rows.length === 0 ? 0 : (shownPage - 1) * PAGE_SIZE + 1;
+  const lastIndex = (shownPage - 1) * PAGE_SIZE + rows.length;
 
   // 探している言葉は URL が持つ。**欄は URL の値で作り直す**（`key`）ので、
   // 戻る操作や、他の画面から `q` 付きで来たときにも中身が合う。
@@ -216,6 +224,9 @@ export function PhotosScreen() {
   function selectDestination(id: string) {
     const nextParams = new URLSearchParams(params);
     nextParams.set("destination_id", id);
+    // **宛先を変えたら 1 ページ目へ戻す**（絞り込みや検索と同じ）。3 ページ目の
+    // まま移ると、当てはまるものが 1 ページ分しか無いときに空の一覧だけが出る。
+    nextParams.delete("page");
     setParams(nextParams);
   }
 

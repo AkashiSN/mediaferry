@@ -1,6 +1,6 @@
 // 画面が使う読み取りの共通形（読み込み中・失敗・再取得）。
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { request } from "./client";
 
@@ -8,6 +8,9 @@ export type Query<T> = {
   data: T | null;
   error: unknown;
   loading: boolean;
+  /** いま持っている `data` が、**別の問い合わせのもの**（取得が終わっていない）。
+   * 出せる値はあるが、いまの絞り込みやページのものではない。 */
+  stale: boolean;
   reload: () => void;
 };
 
@@ -23,6 +26,9 @@ export function useQuery<T>(path: string, deps: unknown[] = []): Query<T> {
   const [error, setError] = useState<unknown>(null);
   const [loading, setLoading] = useState(true);
   const [nonce, setNonce] = useState(0);
+  // どの問い合わせの結果を持っているか。**新しい条件の結果が返るまで、前の結果に
+  // 新しい条件の意味を被せない**（前のページの行に新しい番号を付けない、など）。
+  const [loadedPath, setLoadedPath] = useState<string | null>(null);
   // 効果の中から「いま出せる値があるか」を見るための写し（`data` を依存に
   // 入れると、取得のたびに取得し直しになる）。
   const held = useRef<T | null>(null);
@@ -43,6 +49,7 @@ export function useQuery<T>(path: string, deps: unknown[] = []): Query<T> {
       .then((body) => {
         held.current = body;
         setData(body);
+        setLoadedPath(path);
         setError(null);
       })
       .catch((caught: unknown) => {
@@ -59,7 +66,13 @@ export function useQuery<T>(path: string, deps: unknown[] = []): Query<T> {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [path, nonce, ...deps]);
 
-  return { data, error, loading, reload };
+  // **同じ中身なら同じ物を返す。** これをそのまま context の値にする画面が
+  // あるので（`api/dashboard.tsx`）、毎回作り直すと購読側が描き直しになる。
+  const stale = data !== null && loadedPath !== path;
+  return useMemo(
+    () => ({ data, error, loading, stale, reload }),
+    [data, error, loading, stale, reload],
+  );
 }
 
 export type Mutation = {
