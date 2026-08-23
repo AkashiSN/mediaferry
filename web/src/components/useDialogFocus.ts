@@ -73,7 +73,28 @@ export function useDialogFocus(
     document.addEventListener("keydown", onKeyDown);
     return () => {
       document.removeEventListener("keydown", onKeyDown);
-      opener?.focus();
+      restoreFocus(opener);
     };
   }, [dialog]);
+}
+
+/**
+ * 開く前に触っていたところへ焦点を戻す。
+ *
+ * **戻る先が押せなくなっていることがある。** 実行すると走っている間だけ開いた
+ * ボタンが `disabled` になるので、そのまま戻そうとすると焦点が `body` へ落ち、
+ * キーボードだけの人は画面の頭からやり直しになる。戻せないときは、そのボタンが
+ * 居た画面（`section[aria-label]`）へ入れる。
+ */
+function restoreFocus(opener: HTMLElement | null): void {
+  opener?.focus();
+  if (opener !== null && document.activeElement === opener) {
+    return;
+  }
+  const screen = opener?.closest("section[aria-label]");
+  if (screen instanceof HTMLElement) {
+    // 焦点を受けるためだけの `tabindex`（Tab の順番には入れない）。
+    screen.tabIndex = -1;
+    screen.focus();
+  }
 }

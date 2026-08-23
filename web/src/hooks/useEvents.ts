@@ -62,6 +62,11 @@ function open(): void {
     broadcast((subscriber) => subscriber.onConnected(true));
   };
   source.onerror = () => {
+    // **もう共有していない接続の悲鳴は聞かない。** 開き直したあとに古い接続が
+    // 鳴ると、繋がっている表示を偽で塗り替えてしまう。
+    if (source !== stream) {
+      return;
+    }
     shared = false;
     broadcast((subscriber) => subscriber.onConnected(false));
     if (source.readyState === EventSource.CLOSED) {
@@ -82,6 +87,11 @@ function open(): void {
 
 /** 諦められた接続を捨て、少し待ってから開き直す。 */
 function reopenLater(): void {
+  // **待ちを二重に積まない。** `onerror` は同じ接続で何度も鳴りうるので、
+  // 上書きすると先の待ちが生き残ったまま両方が開き、1 タブ 2 本になる。
+  if (reopenTimer !== null) {
+    return;
+  }
   stream?.close();
   stream = null;
   const delay = REOPEN_DELAYS_MS[Math.min(failures, REOPEN_DELAYS_MS.length - 1)];
@@ -156,4 +166,24 @@ export function useEvents(limit = 200): {
   );
 
   return { events, received, connected };
+}
+
+/**
+ * 届いた数だけを見る。**イベントの中身は溜めない。**
+ *
+ * 取り直しの合図にしか使わない購読者（`api/dashboard.tsx`）が `useEvents` を
+ * 呼ぶと、読まない 200 件の控えをもう 1 組持つことになる。
+ */
+export function useEventCount(): number {
+  const [received, setReceived] = useState(0);
+  useEffect(
+    () =>
+      subscribe({
+        onEvent: () => setReceived((previous) => previous + 1),
+        onConnected: () => undefined,
+        onReset: () => setReceived((previous) => previous + 1),
+      }),
+    [],
+  );
+  return received;
 }

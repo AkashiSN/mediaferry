@@ -245,4 +245,25 @@ describe("キーボードだけで扱える", () => {
 
     expect(document.activeElement).toBe(opener);
   });
+
+  // **戻る先が押せなくなっていることがある。** 実行すると走っている間だけ開いた
+  // ボタンが `disabled` になるので、そこへ戻そうとすると焦点が `body` へ落ち、
+  // キーボードだけの人は画面の頭からやり直しになる。
+  it("戻る先が押せなくなっていたら、その画面の中へ戻す", () => {
+    render(
+      <section aria-label="つなぐ">
+        <button type="button">開いたボタン</button>
+      </section>,
+    );
+    const opener = screen.getByRole("button", { name: "開いたボタン" });
+    opener.focus();
+
+    const dialog = render(
+      <ConfirmDialog confirmation={UPLOAD} onConfirm={() => {}} onCancel={() => {}} />,
+    );
+    (opener as HTMLButtonElement).disabled = true;
+    dialog.unmount();
+
+    expect(document.activeElement).toBe(screen.getByRole("region", { name: "つなぐ" }));
+  });
 });

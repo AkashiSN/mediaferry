@@ -151,6 +151,19 @@ describe("進捗の購読", () => {
     expect(screen.getByText("a:0:true")).toBeInTheDocument();
   });
 
+  // **1 タブ 1 本を守る。** `onerror` は同じ接続で何度も鳴りうるので、待ちを
+  // 上書きすると、先の待ちがそのまま生き残って 2 本開く。
+  it("同じ接続で何度エラーが鳴っても、開き直すのは 1 本", () => {
+    vi.useFakeTimers();
+    render(<Watcher label="a" />);
+    act(() => killStream());
+    act(() => killStream());
+    act(() => killStream());
+    act(() => vi.advanceTimersByTime(60_000));
+    expect(streamCount()).toBe(2);
+    expect(liveStreamCount()).toBe(1);
+  });
+
   it("開き直しは、待ってから 1 本だけ", () => {
     // すぐ開き直すと、上限に当たっている間（`MAX_CONNECTIONS`）サーバを叩き続ける。
     vi.useFakeTimers();
