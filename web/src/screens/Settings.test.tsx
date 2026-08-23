@@ -10,6 +10,7 @@ import userEvent from "@testing-library/user-event";
 import { MemoryRouter } from "react-router-dom";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
+import { DashboardProvider } from "../api/dashboard";
 import { stubApi } from "../test/api";
 import { SettingsScreen } from "./Settings";
 import { DestinationsScreen } from "./settings/Destinations";
@@ -403,6 +404,26 @@ describe("env 由来の設定", () => {
     api.release();
   });
 
+  // 裁定「設定の保存は、その欄だけを止める」。止めないと、飛んでいる間に打ち直した
+  // 文字が、応答が返った瞬間に打ちかけの値ごと捨てられて消える。
+  it("保存している間は、その欄だけを止める", async () => {
+    const api = stubRoutes(
+      () => undefined,
+      { "/settings": { settings: [LOG_LEVEL, HTTP_PORT], warnings: [] } },
+      (path, method) => path === "/settings" && method === "PUT",
+    );
+    renderGeneral();
+
+    const level = await screen.findByLabelText(/LOG_LEVEL/);
+    fireEvent.change(level, { target: { value: "debug" } });
+    fireEvent.blur(level);
+
+    await waitFor(() => expect(screen.getByLabelText(/LOG_LEVEL/)).toBeDisabled());
+    expect(screen.getByLabelText(/HTTP_PORT/)).toBeEnabled();
+    api.release();
+    await waitFor(() => expect(screen.getByLabelText(/LOG_LEVEL/)).toBeEnabled());
+  });
+
   // 欄が打った文字を持ったままだと、**サーバが正規化・拒否した値と画面が食い違う。**
   it("保存できたら、サーバが持っている値を出す", async () => {
     let stored = "info";
@@ -511,10 +532,38 @@ describe("カメラの種類", () => {
   function renderProfiles() {
     render(
       <MemoryRouter>
-        <ProfilesScreen />
+        <DashboardProvider>
+          <ProfilesScreen />
+        </DashboardProvider>
       </MemoryRouter>,
     );
   }
+
+  // 版が上がると、その版で作った結合物が送る候補から外れる（`SENDABLE_CLAUSE`）。
+  // 保存はジョブにならないので、取り直さないと枠の数が古いまま残る。
+  it("保存したあと、枠の集計を取り直す", async () => {
+    const api = stubRoutes((path, method) => {
+      if (path === "/profiles/my-camera" && method === "GET") {
+        return [200, { ...MINE, definition: DEFINITION }];
+      }
+      if (path === "/profiles/my-camera" && method === "PUT") {
+        return [200, { ...MINE, revision: 2, definition: DEFINITION }];
+      }
+      return undefined;
+    }, FALLBACK);
+    renderProfiles();
+
+    await waitFor(() =>
+      expect(api.sent().filter((call) => call.path === "/dashboard")).toHaveLength(1),
+    );
+    await userEvent.click(await screen.findByRole("button", { name: "編集：私のカメラ" }));
+    await screen.findByLabelText(/カメラの種類の定義（YAML）/);
+    await userEvent.click(screen.getByRole("button", { name: "保存する" }));
+
+    await waitFor(() =>
+      expect(api.sent().filter((call) => call.path === "/dashboard").length).toBeGreaterThan(1),
+    );
+  });
 
   it("ビルトインには複製しか出さない", async () => {
     stubApi({
@@ -1058,6 +1107,13 @@ describe("送り先", () => {
     verified_at: "2026-08-18T05:03:00Z",
   };
   const NO_SKIPS = { records: [] };
+  /** 送り先に対して叩く先。**登録しておく**（`stubApi` は知らないパスを 404 で返す）。 */
+  const DESTINATION_ACTIONS = {
+    "/destinations/d1": { id: "d1" },
+    "/destinations/d1/archive": { id: "d1" },
+    "/destinations/d1/verify": { ok: true },
+    "/destinations/d1/recheck": { ok: true },
+  };
 
   function renderDestinations() {
     render(
@@ -1083,7 +1139,7 @@ describe("送り先", () => {
   });
 
   it("退役は確認を経てから", async () => {
-    const api = stubApi({ "/destinations": { destinations: [HOME] }, "/uploads": NO_SKIPS });
+    const api = stubApi({ "/destinations": { destinations: [HOME] }, "/uploads": NO_SKIPS, ...DESTINATION_ACTIONS });
     renderDestinations();
 
     const retire = await screen.findByRole("button", { name: "退役させる：居間の Immich" });
@@ -1095,7 +1151,7 @@ describe("送り先", () => {
   });
 
   it("確認して実行すると 1 回だけ退役させ、確認を閉じる", async () => {
-    const api = stubApi({ "/destinations": { destinations: [HOME] }, "/uploads": NO_SKIPS });
+    const api = stubApi({ "/destinations": { destinations: [HOME] }, "/uploads": NO_SKIPS, ...DESTINATION_ACTIONS });
     renderDestinations();
 
     await userEvent.click(await screen.findByRole("button", { name: "退役させる：居間の Immich" }));
@@ -1111,7 +1167,7 @@ describe("送り先", () => {
 
   it("休止と再開は、いまの状態の逆を送る", async () => {
     const sent: Sent[] = [];
-    stubApi({ "/destinations": { destinations: [HOME] }, "/uploads": NO_SKIPS }, (path, init) => {
+    stubApi({ "/destinations": { destinations: [HOME] }, "/uploads": NO_SKIPS, ...DESTINATION_ACTIONS }, (path, init) => {
       if (init?.body !== undefined) {
         sent.push({
           path,
@@ -1164,7 +1220,7 @@ describe("送り先", () => {
   });
 
   it("つながるか確かめる操作は、その送り先だけを叩く", async () => {
-    const api = stubApi({ "/destinations": { destinations: [HOME] }, "/uploads": NO_SKIPS });
+    const api = stubApi({ "/destinations": { destinations: [HOME] }, "/uploads": NO_SKIPS, ...DESTINATION_ACTIONS });
     renderDestinations();
 
     const check = await screen.findByRole("button", { name: "つながるか確かめる：居間の Immich" });
@@ -1181,7 +1237,7 @@ describe("送り先", () => {
   });
 
   it("使える送り先には、使えると書く", async () => {
-    stubApi({ "/destinations": { destinations: [HOME] }, "/uploads": NO_SKIPS });
+    stubApi({ "/destinations": { destinations: [HOME] }, "/uploads": NO_SKIPS, ...DESTINATION_ACTIONS });
     renderDestinations();
 
     expect(await screen.findByText(/使えます/)).toBeInTheDocument();
@@ -1191,7 +1247,7 @@ describe("送り先", () => {
   });
 
   it("最後に確かめた日時を、読める形で出す", async () => {
-    stubApi({ "/destinations": { destinations: [HOME] }, "/uploads": NO_SKIPS });
+    stubApi({ "/destinations": { destinations: [HOME] }, "/uploads": NO_SKIPS, ...DESTINATION_ACTIONS });
     renderDestinations();
 
     // システム時刻（clock が作る UTC）はそのまま出すと現地時刻に見えるので、印を添える。
@@ -1211,7 +1267,7 @@ describe("送り先", () => {
   it("名前を変えると、新しい名前だけを送る", async () => {
     vi.stubGlobal("prompt", vi.fn(() => "新しい名前"));
     const sent: Sent[] = [];
-    stubApi({ "/destinations": { destinations: [HOME] }, "/uploads": NO_SKIPS }, (path, init) => {
+    stubApi({ "/destinations": { destinations: [HOME] }, "/uploads": NO_SKIPS, ...DESTINATION_ACTIONS }, (path, init) => {
       if (init?.body !== undefined) {
         sent.push({
           path,
@@ -1235,7 +1291,7 @@ describe("送り先", () => {
 
   it("名前の変更をやめたら、何も送らない", async () => {
     vi.stubGlobal("prompt", vi.fn(() => null));
-    const api = stubApi({ "/destinations": { destinations: [HOME] }, "/uploads": NO_SKIPS });
+    const api = stubApi({ "/destinations": { destinations: [HOME] }, "/uploads": NO_SKIPS, ...DESTINATION_ACTIONS });
     renderDestinations();
 
     await userEvent.click(await screen.findByRole("button", { name: "名前を変える：居間の Immich" }));
@@ -1245,7 +1301,7 @@ describe("送り先", () => {
 
   it("状態の再確認は、再確認の口を叩く", async () => {
     // **接続の検証（`verify`）と取り違えない。** 見る先が違う。
-    const api = stubApi({ "/destinations": { destinations: [HOME] }, "/uploads": NO_SKIPS });
+    const api = stubApi({ "/destinations": { destinations: [HOME] }, "/uploads": NO_SKIPS, ...DESTINATION_ACTIONS });
     renderDestinations();
 
     const recheck = await screen.findByRole("button", { name: "状態を再確認する：居間の Immich" });
@@ -1375,7 +1431,7 @@ describe("送り先", () => {
 
   it("追加は API キーを送るが、既存のキーは画面に出さない", async () => {
     const sent: Sent[] = [];
-    stubApi({ "/destinations": { destinations: [HOME] }, "/uploads": NO_SKIPS }, (path, init) => {
+    stubApi({ "/destinations": { destinations: [HOME] }, "/uploads": NO_SKIPS, ...DESTINATION_ACTIONS }, (path, init) => {
       if (init?.body !== undefined) {
         sent.push({
           path,
@@ -1473,14 +1529,14 @@ describe("送り先", () => {
 
   it("見送りが無いときは、無いと書く", async () => {
     // **出ていないことが仕様に見える**のを避ける。
-    stubApi({ "/destinations": { destinations: [HOME] }, "/uploads": NO_SKIPS });
+    stubApi({ "/destinations": { destinations: [HOME] }, "/uploads": NO_SKIPS, ...DESTINATION_ACTIONS });
     renderDestinations();
 
     expect(await screen.findByText(/見送りはありません/)).toBeInTheDocument();
   });
 
   it("見送りだけを問い合わせる", async () => {
-    const api = stubApi({ "/destinations": { destinations: [HOME] }, "/uploads": NO_SKIPS });
+    const api = stubApi({ "/destinations": { destinations: [HOME] }, "/uploads": NO_SKIPS, ...DESTINATION_ACTIONS });
     renderDestinations();
 
     await waitFor(() =>

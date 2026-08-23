@@ -74,6 +74,18 @@ export function GeneralScreen() {
     });
   }
 
+  /** 保存した値のままなら捨てる。**打ち足した分は残す**（打った文字を消さない）。 */
+  function forgetIfUnchanged(key: string, saved: string) {
+    setDrafts((current) => {
+      if (current[key] !== saved) {
+        return current;
+      }
+      const next = { ...current };
+      delete next[key];
+      return next;
+    });
+  }
+
   async function save(setting: Setting, value: string) {
     // **変わっていない値は送らない。** 送ると DB に行ができ、その項目の出所が
     // 「既定のまま」から「この画面で設定」に変わる（欄を通り過ぎただけで出所が
@@ -86,7 +98,7 @@ export function GeneralScreen() {
     setError(null);
     try {
       await request("/settings", { method: "PUT", body: { key: setting.key, value } });
-      forget(setting.key);
+      forgetIfUnchanged(setting.key, value);
       settings.reload();
     } catch (caught) {
       setError(caught);
@@ -144,7 +156,10 @@ export function GeneralScreen() {
                 value={drafts[setting.key] ?? setting.value ?? ""}
                 placeholder="（未設定）"
                 // **変えられない項目は押しても入らない。** 値は出すが、書けない。
-                disabled={!setting.writable}
+                // **保存が飛んでいる間も、その欄だけ止める**（画面ぜんぶは止めない）。
+                // 止めないと、飛んでいる間に打ち直した文字が、応答が返った瞬間に
+                // 打ちかけの値ごと捨てられて消える。
+                disabled={!setting.writable || saving === setting.key}
                 onChange={(event) => {
                   const value = event.currentTarget.value;
                   setDrafts((current) => ({ ...current, [setting.key]: value }));

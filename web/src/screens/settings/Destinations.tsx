@@ -7,10 +7,11 @@ import { useState } from "react";
 import { Link } from "react-router-dom";
 
 import { request } from "../../api/client";
+import { ApiError } from "../../api/errors";
 import { useDashboardReload } from "../../api/dashboard";
 import { useMutation, useQuery } from "../../api/hooks";
 import { ConfirmDialog } from "../../components/ConfirmDialog";
-import { ErrorBanner } from "../../components/ErrorBanner";
+import { ErrorBanner, UserFacingError } from "../../components/ErrorBanner";
 import { Icon } from "../../components/Icon";
 import { fileName } from "../../components/MediaTile";
 import { formatSystemDateTime } from "../../utils/formatDateTime";
@@ -284,6 +285,18 @@ export function sharesLibrary(all: Destination[], one: Destination): boolean {
   return all.some((other) => other.id !== one.id && other.remote_user_id === one.remote_user_id);
 }
 
+/** 失敗を画面に出す 1 文にする（`ErrorBanner` と同じ判断）。 */
+function readable(error: unknown): string {
+  return error instanceof ApiError || error instanceof UserFacingError
+    ? error.message
+    : "送信を始められませんでした。";
+}
+
+/** 戻せなかった件数を、失敗の文に添える（**隠さない**）。 */
+function withSkipped(message: string, skipped: number): string {
+  return skipped > 0 ? `${message}（${skipped} 件は送り直せませんでした）` : message;
+}
+
 export function DestinationsScreen() {
   const destinations = useQuery<Destinations>("/destinations");
   const refreshTasks = useDashboardReload();
@@ -406,7 +419,13 @@ export function DestinationsScreen() {
       }
       outcome.retried = recordIds.length - skipped.length;
       outcome.skipped = skipped.length;
-      await request(`/destinations/${destination.id}/upload`, { method: "POST" });
+      try {
+        await request(`/destinations/${destination.id}/upload`, { method: "POST" });
+      } catch (caught) {
+        // **開始の失敗で、戻せなかったことを消さない。** `run` の catch は
+        // バナーを上書きするので、ここで 2 つを 1 文にまとめて投げる。
+        throw new UserFacingError(withSkipped(readable(caught), skipped.length));
+      }
       reloadAll();
     });
     return done ? outcome : null;

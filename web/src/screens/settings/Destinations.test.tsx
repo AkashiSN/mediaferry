@@ -32,6 +32,8 @@ function routes(failed: { id: string }[], destination = DESTINATION) {
     // 送り直すが叩く先。**登録しておく**（`stubApi` は知らないパスを 404 で返す）。
     ...Object.fromEntries(failed.map((record) => [`/uploads/${record.id}/retry`, { status: "ok" }])),
     "/destinations/d1/upload": { job_id: "j1" },
+    // 接続の設定の保存先。**登録しておく**（`stubApi` は知らないパスを 404 で返す）。
+    "/destinations/d1": { id: "d1" },
   };
 }
 
@@ -188,6 +190,40 @@ describe("送れなかったものを送り直す", () => {
     const posts = (globalThis.fetch as unknown as { mock: { calls: [string, RequestInit?][] } }).mock
       .calls;
     expect(posts.some(([path]) => path.includes("/destinations/d1/upload"))).toBe(true);
+  });
+
+  // **2 つの失敗のうち、後から起きた方だけを残さない。** 送信の開始に失敗すると
+  // `run` の catch がバナーを上書きするので、「1 件も戻せなかった」ことが消える。
+  it("戻せず、送信も始められなかったら、どちらも伝える", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn((input: string) => {
+        const path = input.replace(/^\/api/, "");
+        if (path === "/uploads/u1/retry") {
+          return Promise.resolve(
+            new Response(
+              JSON.stringify({ error: { code: "not_retryable", detail: "", meta: {} } }),
+              { status: 409 },
+            ),
+          );
+        }
+        if (path === "/destinations/d1/upload") {
+          return Promise.resolve(
+            new Response(JSON.stringify({ error: { code: "conflict", detail: "", meta: {} } }), {
+              status: 409,
+            }),
+          );
+        }
+        const body = routes([{ id: "u1" }])[path as keyof ReturnType<typeof routes>] ?? {};
+        return Promise.resolve(new Response(JSON.stringify(body), { status: 200 }));
+      }),
+    );
+    renderDestinations();
+    await userEvent.click(await screen.findByRole("button", { name: /送り直す/ }));
+
+    const banner = await screen.findByRole("alert");
+    expect(banner).toHaveTextContent("いまの状態ではこの操作はできません");
+    expect(banner).toHaveTextContent("1 件は送り直せませんでした");
   });
 
   it("休止中の送り先では押せない", async () => {

@@ -17,6 +17,7 @@ import { useState } from "react";
 import { Link } from "react-router-dom";
 
 import { request } from "../../api/client";
+import { useDashboardReload } from "../../api/dashboard";
 import { useMutation, useQuery } from "../../api/hooks";
 import { ConfirmDialog, type Confirmation } from "../../components/ConfirmDialog";
 import { ErrorBanner, UserFacingError } from "../../components/ErrorBanner";
@@ -87,6 +88,7 @@ export function ProfilesScreen() {
     null,
   );
   const edit = useMutation();
+  const refreshTasks = useDashboardReload();
 
   /** 編集を開く。**一覧は定義を持たない**ので 1 件だけ読み直す。 */
   async function openEditor(slug: string) {
@@ -151,6 +153,9 @@ export function ProfilesScreen() {
       );
       setEditing(null);
       profiles.reload();
+      // 版が上がると、その版で作った結合物が送る候補から外れる（`SENDABLE_CLAUSE`）。
+      // 保存はジョブにならないので、**枠の「やること」もここで直す。**
+      refreshTasks();
     });
   }
 
@@ -179,6 +184,7 @@ export function ProfilesScreen() {
       await request(`/profiles/${slug}/archive`, { method: "POST" });
       setNotice(`「${slug}」を候補から外しました。`);
       profiles.reload();
+      refreshTasks();
     });
     setConfirming(null);
   }
