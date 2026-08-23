@@ -17,6 +17,7 @@ class StubEventSource {
   onopen: (() => void) | null = null;
   onerror: (() => void) | null = null;
   closed = false;
+  readyState = StubEventSource.CONNECTING;
   private readonly listeners = new Map<string, Set<(event: MessageEvent<string>) => void>>();
   constructor(readonly url: string) {
     instances.push(this);
@@ -31,12 +32,21 @@ class StubEventSource {
   }
   close(): void {
     this.closed = true;
+    this.readyState = StubEventSource.CLOSED;
   }
 
   open(): void {
+    this.readyState = StubEventSource.OPEN;
     this.onopen?.();
   }
+  /** 一時的に切れた（ブラウザが自分で繋ぎ直す）。 */
   fail(): void {
+    this.readyState = StubEventSource.CONNECTING;
+    this.onerror?.();
+  }
+  /** 二度と繋ぎ直されない形で閉じられた（非 2xx への応答）。 */
+  kill(): void {
+    this.readyState = StubEventSource.CLOSED;
     this.onerror?.();
   }
   emit(type: string, data: unknown): void {
@@ -46,6 +56,12 @@ class StubEventSource {
     }
   }
 }
+
+// jsdom は `scrollIntoView` を持たない（レイアウトが無い）。**呼ぶ側で分岐しない**
+// ため、何もしない実装を置く。呼ばれたかを見たいテストは `vi.spyOn` で覗く。
+Element.prototype.scrollIntoView = function scrollIntoView() {
+  /* jsdom にレイアウトは無いので、何もしない */
+};
 
 let instances: StubEventSource[] = [];
 
@@ -86,12 +102,27 @@ export function openStream(): void {
   latestStream().open();
 }
 
-/** 接続が切れたことにする（`connected` を偽に戻す）。 */
+/** 接続が切れたことにする（`connected` を偽に戻す）。ブラウザは自分で繋ぎ直す。 */
 export function failStream(): void {
   latestStream().fail();
+}
+
+/**
+ * 非 2xx への応答で接続が閉じられたことにする。
+ *
+ * この閉じ方では `EventSource` は自分で繋ぎ直さない（`readyState` が `CLOSED` の
+ * まま止まる）。開き直すのは `useEvents` の仕事。
+ */
+export function killStream(): void {
+  latestStream().kill();
 }
 
 /** `job` イベントを 1 件配る。 */
 export function emitJob(event: Record<string, unknown>): void {
   latestStream().emit("job", event);
+}
+
+/** サーバが位置を作り直したことを知らせる（`api/routes_events.py`）。 */
+export function emitCursorReset(reason = "cursor_out_of_range"): void {
+  latestStream().emit("cursor_reset", { reason });
 }

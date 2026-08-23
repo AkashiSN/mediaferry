@@ -8,8 +8,10 @@ import { act, render, screen } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import {
+  emitCursorReset,
   emitJob,
   failStream,
+  killStream,
   latestStreamUrl,
   liveStreamCount,
   openStream,
@@ -17,7 +19,10 @@ import {
 } from "../test/setup";
 import { useEvents } from "./useEvents";
 
-afterEach(() => vi.restoreAllMocks());
+afterEach(() => {
+  vi.restoreAllMocks();
+  vi.useRealTimers();
+});
 
 function Watcher({ label }: { label: string }) {
   const { received, connected } = useEvents();
@@ -121,5 +126,79 @@ describe("進捗の購読", () => {
     render(<Watcher label="a" />);
     expect(streamCount()).toBe(2);
     expect(liveStreamCount()).toBe(1);
+  });
+
+  // サーバが位置を作り直したときに来る（DB を入れ替えた後の古いタブなど）。
+  // **黙って続けない。** 見落とした間の変化を取り直す合図として数に足す。
+  it("位置の作り直しも、取り直しの合図として数える", () => {
+    render(<Watcher label="a" />);
+    act(() => emitCursorReset());
+    expect(screen.getByText("a:1:null")).toBeInTheDocument();
+  });
+
+  it("非 2xx で閉じられたら、自分で開き直す", () => {
+    // `EventSource` が自分で繋ぎ直すのは、繋がった後に切れたときだけ。応答が
+    // 非 2xx だと `CLOSED` のまま止まるので、開き直さないと**そのタブの進捗が
+    // 二度と動かない**（購読者は残るので、参照数での開き直しも起きない）。
+    vi.useFakeTimers();
+    render(<Watcher label="a" />);
+    act(() => killStream());
+    expect(screen.getByText("a:0:false")).toBeInTheDocument();
+    act(() => vi.advanceTimersByTime(1000));
+    expect(streamCount()).toBe(2);
+    expect(liveStreamCount()).toBe(1);
+    act(() => openStream());
+    expect(screen.getByText("a:0:true")).toBeInTheDocument();
+  });
+
+  it("開き直しは、待ってから 1 本だけ", () => {
+    // すぐ開き直すと、上限に当たっている間（`MAX_CONNECTIONS`）サーバを叩き続ける。
+    vi.useFakeTimers();
+    render(<Watcher label="a" />);
+    act(() => killStream());
+    act(() => vi.advanceTimersByTime(999));
+    expect(streamCount()).toBe(1);
+  });
+
+  it("続けて失敗するほど、開き直す間隔を延ばす", () => {
+    vi.useFakeTimers();
+    render(<Watcher label="a" />);
+    act(() => killStream());
+    act(() => vi.advanceTimersByTime(1000));
+    act(() => killStream());
+    act(() => vi.advanceTimersByTime(1000));
+    expect(streamCount()).toBe(2);
+    act(() => vi.advanceTimersByTime(1000));
+    expect(streamCount()).toBe(3);
+  });
+
+  it("一度繋がり直せば、次の失敗はまた最短で開き直す", () => {
+    vi.useFakeTimers();
+    render(<Watcher label="a" />);
+    act(() => killStream());
+    act(() => vi.advanceTimersByTime(1000));
+    act(() => openStream());
+    act(() => killStream());
+    act(() => vi.advanceTimersByTime(1000));
+    expect(streamCount()).toBe(3);
+  });
+
+  it("一時的に切れただけなら、開き直さない（ブラウザに任せる）", () => {
+    vi.useFakeTimers();
+    render(<Watcher label="a" />);
+    act(() => openStream());
+    act(() => failStream());
+    act(() => vi.advanceTimersByTime(60_000));
+    expect(streamCount()).toBe(1);
+  });
+
+  it("待っている間に全員が外れたら、開き直さない", () => {
+    vi.useFakeTimers();
+    const view = render(<Watcher label="a" />);
+    act(() => killStream());
+    view.unmount();
+    act(() => vi.advanceTimersByTime(60_000));
+    expect(streamCount()).toBe(1);
+    expect(liveStreamCount()).toBe(0);
   });
 });
