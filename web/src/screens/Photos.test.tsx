@@ -361,6 +361,123 @@ describe("読み込む件数と、切れていることの表示", () => {
     expect(await screen.findByText("すべて：2 / 3421 件")).toBeInTheDocument();
   });
 
+  // main にはファイル名の検索があった。**無くすと、200 件より古いものは
+  // どの画面からも辿れない**（API は `q` を受け付けたまま）。
+  it("ファイル名でさがせる", async () => {
+    const { calls } = stubApi({
+      "/media": { media: [], total: 0, page: 1, page_size: 200 },
+      "/destinations": { destinations: [] },
+    });
+    render(
+      <MemoryRouter>
+        <PhotosScreen />
+      </MemoryRouter>,
+    );
+    await userEvent.type(await screen.findByLabelText("ファイル名でさがす"), "DSC_0431");
+    await userEvent.click(screen.getByRole("button", { name: "さがす" }));
+
+    await waitFor(() =>
+      expect(calls().some((c) => c.path.includes("q=DSC_0431"))).toBe(true),
+    );
+  });
+
+  it("さがしている言葉は、絞り込みを変えても残る", async () => {
+    const { calls } = stubApi({
+      "/media": { media: [], total: 0, page: 1, page_size: 200 },
+      "/destinations": { destinations: [] },
+    });
+    render(
+      <MemoryRouter initialEntries={["/photos?q=DSC"]}>
+        <PhotosScreen />
+      </MemoryRouter>,
+    );
+    await userEvent.click(await screen.findByRole("button", { name: /動画/ }));
+    await waitFor(() =>
+      expect(calls().some((c) => c.path.includes("kind=video") && c.path.includes("q=DSC"))).toBe(
+        true,
+      ),
+    );
+  });
+
+  // 200 件で切れたまま次が無いと、**古いものはどの画面からも開けない**。
+  it("上限で切れているときは、次の 200 件へ進める", async () => {
+    const { calls } = stubApi({
+      "/media": {
+        media: [media("a", "2026-08-18T15:12:00+09:00")],
+        total: 3421,
+        page: 1,
+        page_size: 200,
+      },
+      "/destinations": { destinations: [] },
+    });
+    render(
+      <MemoryRouter>
+        <PhotosScreen />
+      </MemoryRouter>,
+    );
+    await userEvent.click(await screen.findByRole("button", { name: "次の 200 件" }));
+
+    await waitFor(() => expect(calls().some((c) => c.path.includes("page=2"))).toBe(true));
+  });
+
+  it("1 ページ目では、前へは戻れない", async () => {
+    stubApi({
+      "/media": {
+        media: [media("a", "2026-08-18T15:12:00+09:00")],
+        total: 3421,
+        page: 1,
+        page_size: 200,
+      },
+      "/destinations": { destinations: [] },
+    });
+    render(
+      <MemoryRouter>
+        <PhotosScreen />
+      </MemoryRouter>,
+    );
+    expect(await screen.findByRole("button", { name: "前の 200 件" })).toBeDisabled();
+  });
+
+  it("全部が 1 ページに収まっているときは、ページ送りを出さない", async () => {
+    stubApi({
+      "/media": {
+        media: [media("a", "2026-08-18T15:12:00+09:00")],
+        total: 1,
+        page: 1,
+        page_size: 200,
+      },
+      "/destinations": { destinations: [] },
+    });
+    render(
+      <MemoryRouter>
+        <PhotosScreen />
+      </MemoryRouter>,
+    );
+    await screen.findByText("すべて：1 / 1 件");
+    expect(screen.queryByRole("button", { name: "次の 200 件" })).toBeNull();
+  });
+
+  it("絞り込みを変えたら、1 ページ目に戻す", async () => {
+    // 3 ページ目のまま別の絞り込みへ移ると、当てはまるものが 1 ページ分しか
+    // 無いときに「ありません」と出る。
+    const { calls } = stubApi({
+      "/media": { media: [], total: 3421, page: 3, page_size: 200 },
+      "/destinations": { destinations: [] },
+    });
+    render(
+      <MemoryRouter initialEntries={["/photos?page=3"]}>
+        <PhotosScreen />
+      </MemoryRouter>,
+    );
+    await userEvent.click(await screen.findByRole("button", { name: /動画/ }));
+    await waitFor(() =>
+      expect(calls().some((c) => c.path.includes("kind=video"))).toBe(true),
+    );
+    expect(calls().some((c) => c.path.includes("kind=video") && c.path.includes("page="))).toBe(
+      false,
+    );
+  });
+
   it("宛先を選ぶ前は、まだ読んでいない総数を出さない", async () => {
     stubApi({
       "/media": { media: [], total: 3421, page: 1, page_size: 200 },

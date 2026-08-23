@@ -299,6 +299,17 @@ describe("設定のトップ", () => {
 
     expect(await screen.findByRole("link", { name: /^つなぐ/ })).toHaveAttribute("href", "/merge");
   });
+
+  // 同じ理由で「日時の確認」も常設にする。ホームの札は待っているものがある
+  // ときだけ出るので、0 件になるとこの画面へ入る道が無くなる。
+  it("日時の確認への入口が、詳しい情報に常設されている", async () => {
+    stubApi(ROUTES);
+    renderTop();
+    expect(await screen.findByRole("link", { name: /^日時の確認/ })).toHaveAttribute(
+      "href",
+      "/approve",
+    );
+  });
 });
 
 describe("env 由来の設定", () => {
@@ -368,6 +379,51 @@ describe("env 由来の設定", () => {
         { path: "/settings", method: "PUT", body: { key: "LOG_LEVEL", value: "debug" } },
       ]),
     );
+  });
+
+  // 保存は欄から離れたときに走る。**画面ぜんぶを disabled にすると、Tab で
+  // 移った先の欄がその瞬間に無効化され、焦点が body へ飛んで打った文字が消える。**
+  it("保存している間も、次の欄に打てる", async () => {
+    const api = stubRoutes(
+      () => undefined,
+      { "/settings": { settings: [LOG_LEVEL, HTTP_PORT], warnings: [] } },
+      (path, method) => path === "/settings" && method === "PUT",
+    );
+    renderGeneral();
+
+    const level = await screen.findByLabelText(/LOG_LEVEL/);
+    fireEvent.change(level, { target: { value: "debug" } });
+    fireEvent.blur(level);
+    await waitFor(() => expect(api.sent().some((call) => call.method === "PUT")).toBe(true));
+
+    const port = screen.getByLabelText(/HTTP_PORT/);
+    expect(port).toBeEnabled();
+    fireEvent.change(port, { target: { value: "9090" } });
+    expect(port).toHaveValue("9090");
+    api.release();
+  });
+
+  // 欄が打った文字を持ったままだと、**サーバが正規化・拒否した値と画面が食い違う。**
+  it("保存できたら、サーバが持っている値を出す", async () => {
+    let stored = "info";
+    const api = stubRoutes((path, method) => {
+      if (path === "/settings" && method === "PUT") {
+        stored = "debug";
+        return [200, { status: "ok", applies: "runtime" }];
+      }
+      if (path === "/settings") {
+        return [200, { settings: [{ ...LOG_LEVEL, value: stored }], warnings: [] }];
+      }
+      return undefined;
+    });
+    renderGeneral();
+
+    const field = await screen.findByLabelText(/LOG_LEVEL/);
+    fireEvent.change(field, { target: { value: "DEBUG" } });
+    fireEvent.blur(field);
+
+    await waitFor(() => expect(api.sent().some((call) => call.method === "PUT")).toBe(true));
+    await waitFor(() => expect(screen.getByLabelText(/LOG_LEVEL/)).toHaveValue("debug"));
   });
 
   it("値を変えていなければ保存しない", async () => {
@@ -535,6 +591,9 @@ describe("カメラの種類", () => {
     await screen.findByText("私のカメラ");
     expect(screen.getByText(/候補から外してあります/)).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "候補から外す：私のカメラ" })).toBeNull();
+    // **「試す」も出さない。** API は候補にあるものだけを見るので、押すと必ず
+    // 「見つかりませんでした」になる（押しても無駄なボタンを置かない）。
+    expect(screen.queryByRole("button", { name: /私のカメラ を .* で試す/ })).toBeNull();
   });
 
   it("保存すると PUT が飛び、上がった版が出る", async () => {

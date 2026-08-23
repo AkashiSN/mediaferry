@@ -265,6 +265,7 @@ describe("つないだ動画の記録", () => {
     const { calls } = stubApi({
       "/merge-groups?status=skipped": { groups: [] },
       "/media/stale-derived": { stale: [staleItem("s1", "derived/old.MP4")] },
+      "/media/s1": { status: "ok" },
     });
     render(
       <MemoryRouter>
@@ -279,6 +280,25 @@ describe("つないだ動画の記録", () => {
         calls().filter((c) => c.path === "/media/stale-derived" && c.method === "GET").length,
       ).toBeGreaterThan(before),
     );
+  });
+
+  // 設定 › 詳しい情報の「使っていないファイル」は `#stale` で来る。router は
+  // `#` を見ないので、自分で送らないと画面の上のほうを出したまま止まる。
+  it("#stale で開いたら、その節まで送る", async () => {
+    stubApi({
+      "/merge-groups?status=skipped": { groups: [] },
+      "/media/stale-derived": { stale: [staleItem("s1", "derived/old.MP4")] },
+    });
+    const scrolled: string[] = [];
+    vi.spyOn(Element.prototype, "scrollIntoView").mockImplementation(function (this: Element) {
+      scrolled.push(this.id);
+    });
+    render(
+      <MemoryRouter initialEntries={["/settings/merge-history#stale"]}>
+        <MergeHistoryScreen />
+      </MemoryRouter>,
+    );
+    await waitFor(() => expect(scrolled).toContain("stale"));
   });
 
   it("進捗のイベントが届いたら、一覧を取り直す", async () => {

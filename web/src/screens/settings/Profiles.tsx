@@ -17,7 +17,7 @@ import { useState } from "react";
 import { Link } from "react-router-dom";
 
 import { request } from "../../api/client";
-import { useQuery } from "../../api/hooks";
+import { useMutation, useQuery } from "../../api/hooks";
 import { ConfirmDialog, type Confirmation } from "../../components/ConfirmDialog";
 import { ErrorBanner, UserFacingError } from "../../components/ErrorBanner";
 import { Icon } from "../../components/Icon";
@@ -86,14 +86,11 @@ export function ProfilesScreen() {
   const [confirming, setConfirming] = useState<{ confirmation: Confirmation; slug: string } | null>(
     null,
   );
-  const [error, setError] = useState<unknown>(null);
-  const [busy, setBusy] = useState(false);
+  const edit = useMutation();
 
   /** 編集を開く。**一覧は定義を持たない**ので 1 件だけ読み直す。 */
   async function openEditor(slug: string) {
-    setBusy(true);
-    setError(null);
-    try {
+    await edit.run(async () => {
       const detail = await request<ProfileDetail>(`/profiles/${slug}`);
       setEditing({
         slug,
@@ -103,11 +100,7 @@ export function ProfilesScreen() {
       });
       setNotice(null);
       setRecomputeHint(null);
-    } catch (caught) {
-      setError(caught);
-    } finally {
-      setBusy(false);
-    }
+    });
   }
 
   function openTemplate() {
@@ -131,7 +124,7 @@ export function ProfilesScreen() {
       // 失敗が 2 度読み上げられる。**失敗はバナー側**（`role="alert"`）に置く。
       // 素の `Error` だと `ErrorBanner` が定型文へ潰して行番号が消えるので、
       // 「画面が書いた文言」として包む。
-      setError(
+      edit.fail(
         new UserFacingError(
           `YAML として読めません（${line} 行目）。字下げと引用符を確かめてください。`,
         ),
@@ -139,9 +132,7 @@ export function ProfilesScreen() {
       setNotice(null);
       return;
     }
-    setBusy(true);
-    setError(null);
-    try {
+    await edit.run(async () => {
       const saved = await request<ProfileDetail>(
         editing.slug === null ? "/profiles" : `/profiles/${editing.slug}`,
         { method: editing.slug === null ? "POST" : "PUT", body: { definition } },
@@ -160,70 +151,52 @@ export function ProfilesScreen() {
       );
       setEditing(null);
       profiles.reload();
-    } catch (caught) {
-      setError(caught);
-    } finally {
-      setBusy(false);
-    }
+    });
   }
 
   async function duplicate() {
     if (duplicating === null) {
       return;
     }
-    setBusy(true);
-    setError(null);
-    try {
-      const made = await request<ProfileDetail>(`/profiles/${duplicating.source}/duplicate`, {
+    // **作られた slug はサーバが決める**（正規化しうる）ので、応答から持ち帰る。
+    const made: { slug?: string } = {};
+    const done = await edit.run(async () => {
+      const created = await request<ProfileDetail>(`/profiles/${duplicating.source}/duplicate`, {
         method: "POST",
         body: { slug: duplicating.slug, name: duplicating.name },
       });
+      made.slug = created.slug;
       setDuplicating(null);
       profiles.reload();
+    });
+    if (done && made.slug !== undefined) {
       await openEditor(made.slug);
-    } catch (caught) {
-      setError(caught);
-    } finally {
-      setBusy(false);
     }
   }
 
   async function archive(slug: string) {
-    setBusy(true);
-    setError(null);
-    try {
+    await edit.run(async () => {
       await request(`/profiles/${slug}/archive`, { method: "POST" });
       setNotice(`「${slug}」を候補から外しました。`);
       profiles.reload();
-    } catch (caught) {
-      setError(caught);
-    } finally {
-      setConfirming(null);
-      setBusy(false);
-    }
+    });
+    setConfirming(null);
   }
 
   async function recompute(profile: Profile) {
-    setBusy(true);
-    setError(null);
-    try {
+    await edit.run(async () => {
       const started = await request<{ job_id: string }>(`/profiles/${profile.slug}/recompute`, {
         method: "POST",
       });
       setJobId(started.job_id);
       setRecomputeHint(null);
       setNotice(`「${profile.name}」の撮影日時を計算し直しています。ファイルは動きません。`);
-    } catch (caught) {
-      setError(caught);
-    } finally {
-      setBusy(false);
-    }
+    });
   }
 
   /** 判定を試す。**結果は一致・不一致どちらも理由付きで出す**（§13）。 */
   async function tryOn(profile: Profile, volume: Volume, label: string) {
-    setError(null);
-    try {
+    await edit.run(async () => {
       const result = await request<{ matched: boolean; reason: string | null }>(
         `/profiles/${profile.slug}/test?volume_instance_id=${volume.volume_instance_id}`,
         { method: "POST" },
@@ -232,9 +205,7 @@ export function ProfilesScreen() {
         `「${profile.name}」と ${label}: ` +
           (result.matched ? "一致します" : `一致しません（${result.reason ?? "理由不明"}）`),
       );
-    } catch (caught) {
-      setError(caught);
-    }
+    });
   }
 
   const cards = volumes.data?.volumes ?? [];
@@ -252,7 +223,7 @@ export function ProfilesScreen() {
           type="button"
           className="btn sm outline"
           style={{ marginLeft: "auto" }}
-          disabled={busy}
+          disabled={edit.busy}
           onClick={openTemplate}
         >
           新しく作る
@@ -260,7 +231,7 @@ export function ProfilesScreen() {
       </div>
       <h1 className="page title-lg">カメラの種類</h1>
 
-      <ErrorBanner error={error ?? profiles.error} onDismiss={() => setError(null)} />
+      <ErrorBanner error={edit.error ?? profiles.error} onDismiss={edit.clear} />
 
       <p className="muted">
         挿したカードがどの機種かを見分けるための決まりです。ふだん触る必要はありません。
@@ -316,7 +287,7 @@ export function ProfilesScreen() {
             <button
               type="button"
               className="btn primary"
-              disabled={busy}
+              disabled={edit.busy}
               onClick={() => void duplicate()}
             >
               複製する
@@ -324,7 +295,7 @@ export function ProfilesScreen() {
             <button
               type="button"
               className="btn sm"
-              disabled={busy}
+              disabled={edit.busy}
               onClick={() => setDuplicating(null)}
             >
               やめる
@@ -349,12 +320,12 @@ export function ProfilesScreen() {
             <button
               type="button"
               className="btn primary"
-              disabled={busy}
+              disabled={edit.busy}
               onClick={() => void saveProfile()}
             >
               保存する
             </button>
-            <button type="button" className="btn sm" disabled={busy} onClick={() => setEditing(null)}>
+            <button type="button" className="btn sm" disabled={edit.busy} onClick={() => setEditing(null)}>
               やめる
             </button>
           </div>
@@ -384,7 +355,7 @@ export function ProfilesScreen() {
                 type="button"
                 className="btn sm"
                 aria-label={`複製して変える：${profile.name}`}
-                disabled={busy}
+                disabled={edit.busy}
                 onClick={() =>
                   setDuplicating({
                     source: profile.slug,
@@ -400,7 +371,7 @@ export function ProfilesScreen() {
                 type="button"
                 className="btn sm"
                 aria-label={`編集：${profile.name}`}
-                disabled={busy}
+                disabled={edit.busy}
                 onClick={() => void openEditor(profile.slug)}
               >
                 編集
@@ -410,7 +381,7 @@ export function ProfilesScreen() {
               type="button"
               className="btn sm"
               aria-label={`撮影日時を再計算する：${profile.name}`}
-              disabled={busy}
+              disabled={edit.busy}
               onClick={() => void recompute(profile)}
             >
               撮影日時を再計算する
@@ -420,7 +391,7 @@ export function ProfilesScreen() {
                 type="button"
                 className="btn sm quiet"
                 aria-label={`候補から外す：${profile.name}`}
-                disabled={busy}
+                disabled={edit.busy}
                 onClick={() =>
                   setConfirming({
                     confirmation: { kind: "archive_profile", slug: profile.slug },
@@ -435,7 +406,10 @@ export function ProfilesScreen() {
           {/* **試すだけの操作は、変える操作と混ぜない。** 上の 2 つはこのカメラの
               決まりや取り込み済みの日時を変えるが、こちらは判定を見るだけで何も
               変わらない。行を分けて、そう書き添える。 */}
-          {cards.length > 0 && (
+          {/* **候補から外したものは試せない。** `GET /profiles/{slug}/try` は
+              候補にあるものだけを見るので（`api/routes_system.py`）、押すと必ず
+              「見つかりませんでした」になる。押しても無駄なボタンは置かない。 */}
+          {cards.length > 0 && !profile.archived && (
             <>
               <p className="small" style={{ marginTop: 14 }}>
                 いま挿さっているカードで、この決まりが当たるか試せます（何も変わりません）。
@@ -449,7 +423,7 @@ export function ProfilesScreen() {
                       type="button"
                       className="btn sm quiet"
                       aria-label={`${profile.name} を ${label} で試す`}
-                      disabled={busy}
+                      disabled={edit.busy}
                       onClick={() => void tryOn(profile, volume, label)}
                     >
                       {label} で試す
@@ -465,7 +439,7 @@ export function ProfilesScreen() {
       {confirming && (
         <ConfirmDialog
           confirmation={confirming.confirmation}
-          busy={busy}
+          busy={edit.busy}
           onCancel={() => setConfirming(null)}
           onConfirm={() => void archive(confirming.slug)}
         />

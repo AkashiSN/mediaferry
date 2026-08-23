@@ -57,15 +57,38 @@ function filterFromParams(params: URLSearchParams): FilterKey {
   return "all";
 }
 
-/** `/media` へ渡すクエリを組み立てる。宛先が決まっていない宛先ごとの絞り込みは、
- * 400 を避けるため素通りさせる（呼び出し側が別に「宛先を選んでください」を出す）。 */
-function buildMediaQuery(filter: FilterKey, destinationId: string | null): string {
+/** URL の検索パラメータから、いま見ているページ（1 始まり）を読む。 */
+function pageFromParams(params: URLSearchParams): number {
+  const page = Number.parseInt(params.get("page") ?? "1", 10);
+  return Number.isFinite(page) && page > 1 ? page : 1;
+}
+
+/**
+ * `/media` へ渡すクエリを組み立てる。宛先が決まっていない宛先ごとの絞り込みは、
+ * 400 を避けるため素通りさせる（呼び出し側が別に「宛先を選んでください」を出す）。
+ *
+ * **探している言葉とページも渡す。** どちらも落とすと、1 度に読む 200 件の外に
+ * あるものへ画面から辿り着けなくなる（API は `q` も `page` も受け付ける）。
+ */
+function buildMediaQuery(
+  filter: FilterKey,
+  destinationId: string | null,
+  params: URLSearchParams,
+): string {
   const query = new URLSearchParams();
   if (filter === "video") {
     query.set("kind", "video");
   } else if (DESTINATION_SCOPED.has(filter) && destinationId) {
     query.set("status", filter);
     query.set("destination_id", destinationId);
+  }
+  const wanted = params.get("q");
+  if (wanted) {
+    query.set("q", wanted);
+  }
+  const page = pageFromParams(params);
+  if (page > 1) {
+    query.set("page", String(page));
   }
   query.set("page_size", String(PAGE_SIZE));
   return query.toString();
@@ -115,7 +138,12 @@ export function PhotosScreen() {
     destinationRows.length === 1 ? destinationRows[0].id : chosenDestinationId;
   const needsDestination = DESTINATION_SCOPED.has(filter) && effectiveDestinationId === null;
 
-  const mediaQuery = buildMediaQuery(filter, needsDestination ? null : effectiveDestinationId);
+  const page = pageFromParams(params);
+  const mediaQuery = buildMediaQuery(
+    filter,
+    needsDestination ? null : effectiveDestinationId,
+    params,
+  );
   const media = useQuery<MediaPage>(`/media?${mediaQuery}`, [mediaQuery]);
   // 取り込みや送信が進んだら取り直す（**画面を再読み込みせずに進む**。§13）。
   const { received } = useEvents();
@@ -141,15 +169,47 @@ export function PhotosScreen() {
     [selected],
   );
 
+  // いま出しているのが何件目から何件目か（ページ送りの案内）。
+  const firstIndex = rows.length === 0 ? 0 : (page - 1) * PAGE_SIZE + 1;
+  const lastIndex = (page - 1) * PAGE_SIZE + rows.length;
+
+  // 探している言葉は URL が持つ。**欄は URL の値で作り直す**（`key`）ので、
+  // 戻る操作や、他の画面から `q` 付きで来たときにも中身が合う。
+  const wanted = params.get("q") ?? "";
+
   function selectFilter(next: FilterKey) {
     const nextParams = new URLSearchParams(params);
     nextParams.delete("kind");
     nextParams.delete("status");
+    // **絞り込みを変えたら 1 ページ目へ戻す。** 3 ページ目のまま移ると、
+    // 当てはまるものが 1 ページ分しか無いときに「ありません」と出る。
+    nextParams.delete("page");
     if (next === "video") {
       nextParams.set("kind", "video");
     } else if (next !== "all") {
       nextParams.set("status", next);
     }
+    setParams(nextParams);
+  }
+
+  function goToPage(next: number) {
+    const nextParams = new URLSearchParams(params);
+    if (next <= 1) {
+      nextParams.delete("page");
+    } else {
+      nextParams.set("page", String(next));
+    }
+    setParams(nextParams);
+  }
+
+  function search(wanted: string) {
+    const nextParams = new URLSearchParams(params);
+    if (wanted === "") {
+      nextParams.delete("q");
+    } else {
+      nextParams.set("q", wanted);
+    }
+    nextParams.delete("page");
     setParams(nextParams);
   }
 
@@ -181,6 +241,38 @@ export function PhotosScreen() {
       </div>
 
       <ErrorBanner error={media.error ?? destinations.error} />
+
+      {/* **ファイル名で探せるようにする。** 1 度に読むのは 200 件までなので、
+          これが無いと古いものへは画面から辿り着けない。 */}
+      <form
+        className="row"
+        onSubmit={(event) => {
+          event.preventDefault();
+          const typed = new FormData(event.currentTarget).get("q");
+          search(String(typed ?? "").trim());
+        }}
+      >
+        <label className="small" htmlFor="photo-search">
+          ファイル名でさがす
+        </label>
+        <input
+          key={wanted}
+          id="photo-search"
+          name="q"
+          className="field grow"
+          type="search"
+          defaultValue={wanted}
+          placeholder="DSC_0431"
+        />
+        <button type="submit" className="btn sm">
+          さがす
+        </button>
+        {params.get("q") && (
+          <button type="button" className="btn sm quiet" onClick={() => search("")}>
+            さがすのをやめる
+          </button>
+        )}
+      </form>
 
       <div className="chips">
         {FILTERS.map((f) => (
@@ -271,6 +363,34 @@ export function PhotosScreen() {
             </div>
           </section>
         ))
+      )}
+
+      {/* **1 ページに収まらないときだけ出す。** 収まっているのに前後のボタンが
+          あると、押せない操作が常に並ぶ。**ただし 2 ページ目以降では必ず出す** ——
+          住所に `page` を持ったまま件数の少ない絞り込みへ来ると、空の一覧から
+          戻る道が無くなる。 */}
+      {!needsDestination && (total > PAGE_SIZE || page > 1) && (
+        <div className="row" style={{ justifyContent: "center", gap: 12 }}>
+          <button
+            type="button"
+            className="btn sm"
+            disabled={page <= 1}
+            onClick={() => goToPage(page - 1)}
+          >
+            前の {PAGE_SIZE} 件
+          </button>
+          <span className="small">
+            {firstIndex}–{lastIndex} / {total} 件
+          </span>
+          <button
+            type="button"
+            className="btn sm"
+            disabled={lastIndex >= total}
+            onClick={() => goToPage(page + 1)}
+          >
+            次の {PAGE_SIZE} 件
+          </button>
+        </div>
       )}
 
       {selected.size > 0 && (

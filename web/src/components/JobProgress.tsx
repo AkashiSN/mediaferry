@@ -55,13 +55,15 @@ export function progressLine(progress: JobProgressValue, bytesPerSecond: number 
   if (bytesPerSecond && bytesPerSecond > 0) {
     parts.push(`${formatBytes(bytesPerSecond)}/秒`);
     if (total > done) {
-      parts.push(`残り約 ${formatDuration((total - done) / bytesPerSecond)}`);
+      parts.push(`残り約 ${formatRemaining((total - done) / bytesPerSecond)}`);
     }
   }
   return parts.join(" · ");
 }
 
-function formatDuration(seconds: number): string {
+/** 残り時間をおおまかな日本語にする。**動画の長さ（`分:秒`）とは別物**
+ * （`components/MediaTile.tsx` の `formatClipLength`）。 */
+function formatRemaining(seconds: number): string {
   if (seconds < 90) {
     return `${Math.max(1, Math.round(seconds))} 秒`;
   }

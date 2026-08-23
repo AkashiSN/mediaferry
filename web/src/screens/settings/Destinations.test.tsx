@@ -29,6 +29,9 @@ function routes(failed: { id: string }[], destination = DESTINATION) {
     "/destinations": { destinations: [destination] },
     [FAILED_PATH]: { records: failed },
     [SKIPPED_PATH]: { records: [] },
+    // 送り直すが叩く先。**登録しておく**（`stubApi` は知らないパスを 404 で返す）。
+    ...Object.fromEntries(failed.map((record) => [`/uploads/${record.id}/retry`, { status: "ok" }])),
+    "/destinations/d1/upload": { job_id: "j1" },
   };
 }
 
@@ -222,7 +225,10 @@ describe("送れなかったものを送り直す", () => {
     await waitFor(() => expect(button).toBeEnabled());
   });
 
-  it("1 件も戻せなければ、送信は始めずにバナーへ出す", async () => {
+  // **戻せなくても、止まっている送信は始め直す。** この操作は `pending` のまま
+  // 止まった記録を動かす唯一の手段で（`work/Send.tsx` の案内が指す先）、
+  // 「戻せた記録が 1 件も無い」はそれをやめる理由にならない。
+  it("1 件も戻せなくても、送信は始め直す（理由はバナーに出す）", async () => {
     vi.stubGlobal(
       "fetch",
       vi.fn((input: string) => {
@@ -247,7 +253,8 @@ describe("送れなかったものを送り直す", () => {
     );
     const posts = (globalThis.fetch as unknown as { mock: { calls: [string, RequestInit?][] } }).mock
       .calls;
-    expect(posts.some(([path]) => path.includes("/destinations/d1/upload"))).toBe(false);
+    expect(posts.some(([path]) => path.includes("/destinations/d1/upload"))).toBe(true);
+    expect(await screen.findByText(/1 件は送り直せませんでした。/)).toBeInTheDocument();
   });
 });
 
@@ -320,12 +327,33 @@ describe("スタックの見送り", () => {
   }
 
   it("読み込みが終わるまで、見送りが無いと断言しない", async () => {
-    const release = heldSkips([{ id: "s1", media_file_id: "m1", stack_reason: "組が送信中" }]);
+    const release = heldSkips([
+      { id: "s1", media_file_id: "m1", rel_path: "2026/08/21/DJI_0043.MP4", stack_reason: "組が送信中" },
+    ]);
     renderDestinations();
     await waitFor(() => expect(within(skipsSection()).getByText("読み込み中…")).toBeInTheDocument());
     expect(within(skipsSection()).queryByText("見送りはありません。")).toBeNull();
     release();
     await waitFor(() => expect(screen.getByText(/組が送信中/)).toBeInTheDocument());
+  });
+
+  // §13「内部の名前をそのまま出さない」。どのファイルの話かは、内部の ID では
+  // なくファイル名で言う。
+  it("見送りは、ファイル名と理由で出す", async () => {
+    const release = heldSkips([
+      {
+        id: "s1",
+        media_file_id: "0f6e5d4c-3b2a-1908-7766-554433221100",
+        rel_path: "2026/08/21/DJI_0043.MP4",
+        stack_reason: "相方が見つからない",
+      },
+    ]);
+    renderDestinations();
+    release();
+    await waitFor(() =>
+      expect(screen.getByText("DJI_0043.MP4: 相方が見つからない")).toBeInTheDocument(),
+    );
+    expect(screen.queryByText(/0f6e5d4c/)).toBeNull();
   });
 
   it("読み終えて 0 件なら、無いと書く", async () => {

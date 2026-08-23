@@ -7,10 +7,12 @@ import { useState } from "react";
 import { Link } from "react-router-dom";
 
 import { request } from "../../api/client";
-import { useQuery } from "../../api/hooks";
+import { useDashboardReload } from "../../api/dashboard";
+import { useMutation, useQuery } from "../../api/hooks";
 import { ConfirmDialog } from "../../components/ConfirmDialog";
 import { ErrorBanner } from "../../components/ErrorBanner";
 import { Icon } from "../../components/Icon";
+import { fileName } from "../../components/MediaTile";
 import { formatSystemDateTime } from "../../utils/formatDateTime";
 
 type Destination = {
@@ -31,6 +33,8 @@ type Destinations = { destinations: Destination[] };
 type SkippedStack = {
   id: string;
   media_file_id: string;
+  /** ファイルの位置（API が添える）。**内部の ID は画面に出さない**（§13）。 */
+  rel_path: string | null;
   stack_reason: string | null;
 };
 
@@ -168,7 +172,8 @@ function StackSkips({ destinationId }: { destinationId: string }) {
           <ul style={{ listStyle: "none", padding: 0 }}>
             {records.map((record) => (
               <li key={record.id} className="small">
-                {record.media_file_id}: {record.stack_reason ?? "理由不明"}
+                {record.rel_path ? fileName(record.rel_path) : "ファイル名が読めません"}:{" "}
+                {record.stack_reason ?? "理由不明"}
               </li>
             ))}
           </ul>
@@ -281,9 +286,21 @@ export function sharesLibrary(all: Destination[], one: Destination): boolean {
 
 export function DestinationsScreen() {
   const destinations = useQuery<Destinations>("/destinations");
-  const [error, setError] = useState<unknown>(null);
-  const [busy, setBusy] = useState(false);
+  const refreshTasks = useDashboardReload();
+  const edit = useMutation();
   const [archiving, setArchiving] = useState<Destination | null>(null);
+
+  /**
+   * 送り先を変えたら、**枠の「やること」も一緒に直す。**
+   *
+   * 送り先の増減・入り切りは「まだ送っていない」の数を動かすが、進捗の
+   * イベントは出さない。枠は画面を移っても再マウントしないので、呼ばないと
+   * ナビのバッジが古いまま残る。
+   */
+  function reloadAll() {
+    destinations.reload();
+    refreshTasks();
+  }
 
   async function submit(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -291,9 +308,7 @@ export function DestinationsScreen() {
     // （React の合成イベントは処理が終わると要素への参照を落とす）。
     const element = event.currentTarget;
     const form = new FormData(element);
-    setBusy(true);
-    setError(null);
-    try {
+    await edit.run(async () => {
       await request("/destinations", {
         method: "POST",
         body: {
@@ -304,26 +319,16 @@ export function DestinationsScreen() {
         },
       });
       element.reset();
-      destinations.reload();
-    } catch (caught) {
-      setError(caught);
-    } finally {
-      setBusy(false);
-    }
+      reloadAll();
+    });
   }
 
   async function archive(destination: Destination) {
-    setBusy(true);
-    setError(null);
-    try {
+    await edit.run(async () => {
       await request(`/destinations/${destination.id}/archive`, { method: "POST" });
-      destinations.reload();
-    } catch (caught) {
-      setError(caught);
-    } finally {
-      setBusy(false);
-      setArchiving(null);
-    }
+      reloadAll();
+    });
+    setArchiving(null);
   }
 
   /**
@@ -351,64 +356,60 @@ export function DestinationsScreen() {
     if (sameLibrary !== "") {
       body.same_library = sameLibrary === "yes";
     }
-    setBusy(true);
-    setError(null);
-    try {
+    await edit.run(async () => {
       await request(`/destinations/${destination.id}`, { method: "PATCH", body });
       // **鍵を画面に残さない。**
       element.reset();
-      destinations.reload();
-    } catch (caught) {
-      setError(caught);
-    } finally {
-      setBusy(false);
-    }
+      reloadAll();
+    });
   }
 
-  /** 送り先 1 件への操作。失敗はバナーに出す（黙って何も起きないのを避ける）。 */
+  /**
+   * 送り先 1 件への操作。失敗はバナーに出す（黙って何も起きないのを避ける）。
+   *
+   * **飛んでいる間は押させない。** `busy` を立てないと、ボタンの `disabled` は
+   * 常に偽で、二重に送れてしまう（効かないガードは無いガードより悪い）。
+   */
   async function act(path: string, options: { method: string; body?: unknown }) {
-    // **飛んでいる間は押させない。** `busy` を立てないと、ボタンの `disabled` は
-    // 常に偽で、二重に送れてしまう（効かないガードは無いガードより悪い）。
-    setBusy(true);
-    setError(null);
-    try {
+    await edit.run(async () => {
       await request(path, options);
-      destinations.reload();
-    } catch (caught) {
-      setError(caught);
-    } finally {
-      setBusy(false);
-    }
+      reloadAll();
+    });
   }
 
   /**
    * 送れなかったものを送り直す。**一部が戻せなくても、戻せた分は送る**
    * （`work/Send.tsx` の「一部の宛先が失敗しても進める」と同じ考え方）。
-   * 1 件も戻せなかったときだけ、送信を始めずに理由をバナーへ出す。
+   *
+   * **1 件も戻せなくても、送信そのものは始め直す。** この操作は `pending` の
+   * まま止まった記録を動かす唯一の手段で（`work/Send.tsx` の「開始できなかった
+   * 宛先」の案内が指す先）、戻せた記録が無いことはそれをやめる理由にならない。
+   * 戻せなかった理由は隠さずバナーへ出す。
    */
   async function resend(
     destination: Destination,
     recordIds: string[],
   ): Promise<{ retried: number; skipped: number } | null> {
-    setBusy(true);
-    setError(null);
-    try {
+    const outcome: { retried: number; skipped: number } = {
+      retried: recordIds.length,
+      skipped: 0,
+    };
+    const done = await edit.run(async () => {
       const results = await Promise.allSettled(
         recordIds.map((id) => request(`/uploads/${id}/retry`, { method: "POST" })),
       );
       const skipped = results.filter((result) => result.status === "rejected");
-      if (recordIds.length > 0 && skipped.length === recordIds.length) {
-        throw skipped[0].reason;
+      if (skipped.length > 0) {
+        // **戻せなかった理由を隠さない。** `run` は始めに 1 度だけ失敗を消すので、
+        // ここで出した文言はこの後の成功で消えない。
+        edit.fail(skipped[0].reason);
       }
+      outcome.retried = recordIds.length - skipped.length;
+      outcome.skipped = skipped.length;
       await request(`/destinations/${destination.id}/upload`, { method: "POST" });
-      destinations.reload();
-      return { retried: recordIds.length - skipped.length, skipped: skipped.length };
-    } catch (caught) {
-      setError(caught);
-      return null;
-    } finally {
-      setBusy(false);
-    }
+      reloadAll();
+    });
+    return done ? outcome : null;
   }
 
   const all = destinations.data?.destinations ?? [];
@@ -423,7 +424,7 @@ export function DestinationsScreen() {
       </div>
       <h1 className="page title-lg">送り先</h1>
 
-      <ErrorBanner error={error ?? destinations.error} onDismiss={() => setError(null)} />
+      <ErrorBanner error={edit.error ?? destinations.error} onDismiss={edit.clear} />
 
       <section className="card pad">
         <div className="sechead" style={{ marginBottom: 12 }}>
@@ -452,7 +453,7 @@ export function DestinationsScreen() {
             </label>
           </div>
           <div className="acts" style={{ marginTop: 14 }}>
-            <button type="submit" className="btn primary" disabled={busy}>
+            <button type="submit" className="btn primary" disabled={edit.busy}>
               接続を検証して追加する
             </button>
           </div>
@@ -485,19 +486,25 @@ export function DestinationsScreen() {
               )}
             </div>
           </div>
-          <ConnectionForm destination={destination} busy={busy} onSave={saveConnection} />
-          <Resend destination={destination} busy={busy} onResend={resend} />
+          <ConnectionForm destination={destination} busy={edit.busy} onSave={saveConnection} />
+          <Resend destination={destination} busy={edit.busy} onResend={resend} />
           <StackSkips destinationId={destination.id} />
           <div className="acts" style={{ marginTop: 14 }}>
             <button
               type="button"
               className="btn sm"
               aria-label={`名前を変える：${destination.name}`}
-              disabled={busy}
+              disabled={edit.busy}
               onClick={() => {
-                const name = window.prompt("新しい名前", destination.name);
-                if (name !== null && name !== destination.name) {
-                  void act(`/destinations/${destination.id}`, { method: "PATCH", body: { name } });
+                // **空の名前は送らない。** 名前は送り先を指す唯一の手掛かりで、
+                // 空にすると一覧も確認の本文も名前の無い行になる（API も 400 で
+                // 断るが、押せなくするのが一段目）。
+                const typed = window.prompt("新しい名前", destination.name)?.trim();
+                if (typed && typed !== destination.name) {
+                  void act(`/destinations/${destination.id}`, {
+                    method: "PATCH",
+                    body: { name: typed },
+                  });
                 }
               }}
             >
@@ -507,7 +514,7 @@ export function DestinationsScreen() {
               type="button"
               className="btn sm"
               aria-label={`${destination.enabled ? "休止する" : "使う"}：${destination.name}`}
-              disabled={busy}
+              disabled={edit.busy}
               onClick={() =>
                 void act(`/destinations/${destination.id}`, {
                   method: "PATCH",
@@ -521,7 +528,7 @@ export function DestinationsScreen() {
               type="button"
               className="btn sm"
               aria-label={`つながるか確かめる：${destination.name}`}
-              disabled={busy}
+              disabled={edit.busy}
               onClick={() =>
                 void act(`/destinations/${destination.id}/verify`, { method: "POST" })
               }
@@ -532,7 +539,7 @@ export function DestinationsScreen() {
               type="button"
               className="btn sm"
               aria-label={`状態を再確認する：${destination.name}`}
-              disabled={busy}
+              disabled={edit.busy}
               onClick={() =>
                 void act(`/destinations/${destination.id}/recheck`, { method: "POST" })
               }
@@ -543,7 +550,7 @@ export function DestinationsScreen() {
               type="button"
               className="btn sm quiet"
               aria-label={`退役させる：${destination.name}`}
-              disabled={busy}
+              disabled={edit.busy}
               onClick={() => setArchiving(destination)}
             >
               退役させる
@@ -555,7 +562,7 @@ export function DestinationsScreen() {
       {archiving && (
         <ConfirmDialog
           confirmation={{ kind: "archive_destination", name: archiving.name }}
-          busy={busy}
+          busy={edit.busy}
           onCancel={() => setArchiving(null)}
           onConfirm={() => void archive(archiving)}
         />

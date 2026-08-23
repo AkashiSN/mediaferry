@@ -11,7 +11,7 @@ import { useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
 
 import { request } from "../../api/client";
-import { useQuery } from "../../api/hooks";
+import { useMutation, useQuery } from "../../api/hooks";
 import { ConfirmDialog, type Confirmation } from "../../components/ConfirmDialog";
 import { ErrorBanner } from "../../components/ErrorBanner";
 import { Icon } from "../../components/Icon";
@@ -159,8 +159,7 @@ export function CardDetailScreen() {
   const devices = useQuery<Devices>("/devices");
   const settings = useQuery<Settings>("/settings");
   const profiles = useQuery<Profiles>("/profiles");
-  const [error, setError] = useState<unknown>(null);
-  const [busy, setBusy] = useState<string | null>(null);
+  const card = useMutation();
   const [confirming, setConfirming] = useState<{ confirmation: Confirmation; id: string } | null>(
     null,
   );
@@ -174,17 +173,11 @@ export function CardDetailScreen() {
       : (settings.data.settings.find((setting) => setting.key === "AUTO_IMPORT")?.value ?? null);
 
   async function act(volumeId: string, action: "trust" | "scan" | "import" | "close") {
-    setBusy(`${volumeId}:${action}`);
-    setError(null);
-    try {
+    await card.run(async () => {
       await request(`/volumes/${volumeId}/${action}`, { method: "POST" });
       devices.reload();
-    } catch (caught) {
-      setError(caught);
-    } finally {
-      setConfirming(null);
-      setBusy(null);
-    }
+    });
+    setConfirming(null);
   }
 
   const volumes = devices.data?.volumes ?? [];
@@ -201,8 +194,8 @@ export function CardDetailScreen() {
       <h1 className="page title-lg">カードの中身</h1>
 
       <ErrorBanner
-        error={error ?? devices.error ?? settings.error ?? profiles.error}
-        onDismiss={() => setError(null)}
+        error={card.error ?? devices.error ?? settings.error ?? profiles.error}
+        onDismiss={card.clear}
       />
 
       {/* **内部の設定キーを画面に出さない**（§13）。`Settings.tsx` の項目名と
@@ -280,7 +273,7 @@ export function CardDetailScreen() {
                     type="button"
                     className="btn outline"
                     // 設定を読めていない間は押させない（同意の内容を作れない）。
-                    disabled={busy !== null || autoImport === null}
+                    disabled={card.busy || autoImport === null}
                     onClick={() =>
                       setConfirming({
                         confirmation: {
@@ -301,7 +294,7 @@ export function CardDetailScreen() {
                     <button
                       type="button"
                       className="btn sm"
-                      disabled={busy !== null}
+                      disabled={card.busy}
                       onClick={() => void act(volume.volume_instance_id, "scan")}
                     >
                       {label} をスキャン
@@ -309,7 +302,7 @@ export function CardDetailScreen() {
                     <button
                       type="button"
                       className="btn primary"
-                      disabled={busy !== null}
+                      disabled={card.busy}
                       onClick={() => void act(volume.volume_instance_id, "import")}
                     >
                       {label} を取り込む
@@ -319,7 +312,7 @@ export function CardDetailScreen() {
                 <button
                   type="button"
                   className="btn sm"
-                  disabled={busy !== null}
+                  disabled={card.busy}
                   onClick={() => void act(volume.volume_instance_id, "close")}
                 >
                   {label} を取り外す
@@ -333,7 +326,7 @@ export function CardDetailScreen() {
       {confirming && (
         <ConfirmDialog
           confirmation={confirming.confirmation}
-          busy={busy !== null}
+          busy={card.busy}
           onCancel={() => setConfirming(null)}
           onConfirm={() => void act(confirming.id, "trust")}
         />

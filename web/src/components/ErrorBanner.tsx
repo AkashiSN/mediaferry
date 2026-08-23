@@ -1,5 +1,7 @@
 // 失敗の表示（§13）。**例外の文字列をそのまま出さない。**
 
+import { useState } from "react";
+
 import { ApiError } from "../api/errors";
 
 /**
@@ -12,8 +14,18 @@ import { ApiError } from "../api/errors";
  */
 export class UserFacingError extends Error {}
 
+/**
+ * 失敗を 1 本の帯で出す。
+ *
+ * **「閉じる」は必ず効く。** 呼び出し側は自分の state と `useQuery` の失敗を
+ * `??` で束ねて渡すが、`onDismiss` で消せるのは前者だけ。取り直しの失敗を
+ * 渡されているときに帯が消えないと、押しても何も起きないボタンになる。
+ * 閉じたものはここで覚え、**別の失敗が来たらまた出す**（同じ失敗が再び起きた
+ * ときも、例外は作り直されるので別物として出る）。
+ */
 export function ErrorBanner({ error, onDismiss }: { error: unknown; onDismiss?: () => void }) {
-  if (error === null || error === undefined) {
+  const [dismissed, setDismissed] = useState<unknown>(null);
+  if (error === null || error === undefined || error === dismissed) {
     return null;
   }
   const message =
@@ -24,7 +36,13 @@ export function ErrorBanner({ error, onDismiss }: { error: unknown; onDismiss?: 
     <div className="error-banner" role="alert">
       <span>{message}</span>
       {onDismiss ? (
-        <button type="button" onClick={onDismiss}>
+        <button
+          type="button"
+          onClick={() => {
+            setDismissed(error);
+            onDismiss();
+          }}
+        >
           閉じる
         </button>
       ) : null}

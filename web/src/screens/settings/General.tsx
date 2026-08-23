@@ -57,24 +57,41 @@ export function tierLabel(tier: string): string {
 export function GeneralScreen() {
   const settings = useQuery<Settings>("/settings");
   const [error, setError] = useState<unknown>(null);
-  const [busy, setBusy] = useState(false);
+  // 打ちかけの値。**保存できたら捨て、サーバが持っている値に戻す**（正規化された
+  // 値や、拒否されて変わらなかった値と画面が食い違わないように）。保存に失敗した
+  // ときは残す（打った文字を勝手に消さない）。
+  const [drafts, setDrafts] = useState<Record<string, string>>({});
+  // いま保存している項目。**画面ぜんぶを止めない。** 保存は欄から離れたときに
+  // 走るので、全体を無効にすると Tab で移った先の欄がその瞬間に無効化され、
+  // 焦点が外れて打った文字が落ちる。
+  const [saving, setSaving] = useState<string | null>(null);
+
+  function forget(key: string) {
+    setDrafts((current) => {
+      const next = { ...current };
+      delete next[key];
+      return next;
+    });
+  }
 
   async function save(setting: Setting, value: string) {
     // **変わっていない値は送らない。** 送ると DB に行ができ、その項目の出所が
     // 「既定のまま」から「この画面で設定」に変わる（欄を通り過ぎただけで出所が
     // 動いて見える）。
     if (value === (setting.value ?? "")) {
+      forget(setting.key);
       return;
     }
-    setBusy(true);
+    setSaving(setting.key);
     setError(null);
     try {
       await request("/settings", { method: "PUT", body: { key: setting.key, value } });
+      forget(setting.key);
       settings.reload();
     } catch (caught) {
       setError(caught);
     } finally {
-      setBusy(false);
+      setSaving(null);
     }
   }
 
@@ -117,16 +134,21 @@ export function GeneralScreen() {
                 </div>
                 <div className="small">
                   {sourceLabel(setting.source)} ・ {tierLabel(setting.tier)}
+                  {saving === setting.key && " ・ 保存しています…"}
                 </div>
               </div>
               <input
                 className="field"
                 style={{ flex: "1 1 200px" }}
                 aria-label={`${setting.key} の値`}
-                defaultValue={setting.value ?? ""}
+                value={drafts[setting.key] ?? setting.value ?? ""}
                 placeholder="（未設定）"
                 // **変えられない項目は押しても入らない。** 値は出すが、書けない。
-                disabled={busy || !setting.writable}
+                disabled={!setting.writable}
+                onChange={(event) => {
+                  const value = event.currentTarget.value;
+                  setDrafts((current) => ({ ...current, [setting.key]: value }));
+                }}
                 onBlur={(event) => void save(setting, event.currentTarget.value)}
               />
             </li>

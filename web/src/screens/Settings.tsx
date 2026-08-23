@@ -4,11 +4,10 @@
 // 自動取り込みは「信頼したカードを挿すだけで NAS へコピーするか」の切り替えで、
 // **送信の可否とは無関係**（送信はどちらの設定でも常に手動。§12.1）。
 
-import { useState } from "react";
 import { Link } from "react-router-dom";
 
 import { request } from "../api/client";
-import { useQuery } from "../api/hooks";
+import { useMutation, useQuery } from "../api/hooks";
 import { ErrorBanner } from "../components/ErrorBanner";
 import { Icon } from "../components/Icon";
 
@@ -21,10 +20,10 @@ type Profiles = { profiles: Profile[] };
 
 /** ふだんは見ないが、困ったときに要る画面（§13「詳しい情報」）。
  *
- * **「つなぐ」への常設の入口をここに置く。** ホームの「やること」に出るのは
- * 現行の候補があるときだけなので、候補が 1 つも見つかっていない状態では
- * つなぐ画面へ入る道が無くなる（ナビは 3 つで、`/merge` への導線は他に無い）。
- * 手でグループを作るのも、閾値を変えて探し直すのも、その画面にしかない。
+ * **「つなぐ」と「日時の確認」への常設の入口をここに置く。** ホームの「やること」
+ * に出るのは仕事が残っているときだけなので、0 件の状態では入る道が無くなる
+ * （ナビは 3 つで、`/merge` と `/approve` への導線は他に無い）。手でグループを
+ * 作るのも、閾値を変えて探し直すのも、つなぐ画面にしかない。
  */
 const DETAILS: readonly { to: string; title: string; note: string }[] = [
   { to: "/settings/jobs", title: "作業の履歴", note: "取り込みや送信がいつ終わったか" },
@@ -32,6 +31,13 @@ const DETAILS: readonly { to: string; title: string; note: string }[] = [
     to: "/merge",
     title: "つなぐ",
     note: "分かれた動画を探して 1 本にする。手で組むこともできます",
+  },
+  {
+    // ホームの「確認」の札は、待っているものがあるときだけ出る。**何を確認した
+    // のか・いま何が待っているのかを、札が出ていないときにも見られるようにする。**
+    to: "/approve",
+    title: "日時の確認",
+    note: "先に Immich にあった写真の日時を直していいか",
   },
   {
     to: "/settings/merge-history",
@@ -52,8 +58,7 @@ export function SettingsScreen() {
   const settings = useQuery<Settings>("/settings");
   const destinations = useQuery<Destinations>("/destinations");
   const profiles = useQuery<Profiles>("/profiles");
-  const [error, setError] = useState<unknown>(null);
-  const [busy, setBusy] = useState(false);
+  const toggling = useMutation();
 
   // **読めていない値を既定へ倒さない。** off なのに「オン」と出すと、挿しただけで
   // コピーされると誤解させる（`work/CardDetail.tsx` と同じ扱い）。
@@ -65,18 +70,14 @@ export function SettingsScreen() {
     if (autoImport === null) {
       return;
     }
-    setBusy(true);
-    setError(null);
-    try {
-      await request("/settings", {
+    const saved = await toggling.run(() =>
+      request("/settings", {
         method: "PUT",
         body: { key: "AUTO_IMPORT", value: on ? "off" : "trusted" },
-      });
+      }),
+    );
+    if (saved) {
       settings.reload();
-    } catch (caught) {
-      setError(caught);
-    } finally {
-      setBusy(false);
     }
   }
 
@@ -87,8 +88,8 @@ export function SettingsScreen() {
       <h1 className="page title-lg">設定</h1>
 
       <ErrorBanner
-        error={error ?? settings.error ?? destinations.error ?? profiles.error}
-        onDismiss={() => setError(null)}
+        error={toggling.error ?? settings.error ?? destinations.error ?? profiles.error}
+        onDismiss={toggling.clear}
       />
 
       <section className="card pad">
@@ -115,7 +116,7 @@ export function SettingsScreen() {
             aria-checked={on}
             aria-label="自動で取り込む"
             // 読めていない間と、固定されている間は押させない（送っても 409 で断られる）。
-            disabled={busy || autoImport === null || !autoImport.writable}
+            disabled={toggling.busy || autoImport === null || !autoImport.writable}
             onClick={() => void toggleAutoImport()}
           >
             <i />

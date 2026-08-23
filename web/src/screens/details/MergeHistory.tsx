@@ -5,11 +5,11 @@
 // **使っていない出力の一覧は消さない**（`id="stale"`）。置き換えられて `/merge-groups`
 // から見えなくなった出力は、ここからしか辿れない。
 
-import { useState } from "react";
-import { Link } from "react-router-dom";
+import { useEffect, useState } from "react";
+import { Link, useLocation } from "react-router-dom";
 
 import { request } from "../../api/client";
-import { useQuery } from "../../api/hooks";
+import { useMutation, useQuery } from "../../api/hooks";
 import { ConfirmDialog } from "../../components/ConfirmDialog";
 import type { Confirmation } from "../../components/ConfirmDialog";
 import { ErrorBanner } from "../../components/ErrorBanner";
@@ -39,8 +39,8 @@ function groupLabel(group: DiscardedGroup): string {
 export function MergeHistoryScreen() {
   const discarded = useQuery<DiscardedGroups>("/merge-groups?status=skipped");
   const stale = useQuery<Stale>("/media/stale-derived");
-  const [error, setError] = useState<unknown>(null);
-  const [busy, setBusy] = useState(false);
+  const { hash } = useLocation();
+  const deletion = useMutation();
   const [confirmation, setConfirmation] = useState<{
     value: Confirmation;
     run: () => Promise<void>;
@@ -50,21 +50,26 @@ export function MergeHistoryScreen() {
   useReloadOnEvents(received, stale.reload);
 
   async function act(path: string) {
-    setBusy(true);
-    setError(null);
-    try {
-      await request(path, { method: "DELETE" });
+    if (await deletion.run(() => request(path, { method: "DELETE" }))) {
       discarded.reload();
       stale.reload();
-    } catch (caught) {
-      setError(caught);
-    } finally {
-      setBusy(false);
-      setConfirmation(null);
     }
+    setConfirmation(null);
   }
 
   const discardedGroups = discarded.data?.groups ?? [];
+  // **`#stale` で来たら、そこまで送る。** router は住所の中の `#` を見ないので、
+  // 設定 › 詳しい情報の「使っていないファイル」から来ても、上のほうを出したまま
+  // 止まる（節そのものは画面のいちばん下にある）。読み込み終わりを待って送る
+  // —— 空のうちに送っても、行が増えた分だけずれる。
+  const staleReady = stale.loading;
+  useEffect(() => {
+    if (hash !== "#stale" || staleReady) {
+      return;
+    }
+    document.getElementById("stale")?.scrollIntoView({ block: "start" });
+  }, [hash, staleReady]);
+
   const staleItems = stale.data?.stale ?? [];
   const staleBytes = staleItems.reduce((sum, item) => sum + item.size_bytes, 0);
 
@@ -79,8 +84,8 @@ export function MergeHistoryScreen() {
       <h1 className="page title-lg">つないだ動画の記録</h1>
 
       <ErrorBanner
-        error={error ?? discarded.error ?? stale.error}
-        onDismiss={() => setError(null)}
+        error={deletion.error ?? discarded.error ?? stale.error}
+        onDismiss={deletion.clear}
       />
 
       <section className="card pad">
@@ -105,7 +110,7 @@ export function MergeHistoryScreen() {
                   type="button"
                   className="btn sm quiet"
                   aria-label={`消す：${groupLabel(group)}`}
-                  disabled={busy}
+                  disabled={deletion.busy}
                   onClick={() =>
                     setConfirmation({
                       value: { kind: "delete_merge_history", groupLabel: groupLabel(group) },
@@ -149,7 +154,7 @@ export function MergeHistoryScreen() {
                   type="button"
                   className="btn sm quiet"
                   aria-label={`このファイルを消す：${item.rel_path}`}
-                  disabled={busy}
+                  disabled={deletion.busy}
                   onClick={() =>
                     setConfirmation({
                       value: { kind: "delete_stale_derived", relPath: item.rel_path },
@@ -168,7 +173,7 @@ export function MergeHistoryScreen() {
       {confirmation && (
         <ConfirmDialog
           confirmation={confirmation.value}
-          busy={busy}
+          busy={deletion.busy}
           onCancel={() => setConfirmation(null)}
           onConfirm={() => void confirmation.run()}
         />
