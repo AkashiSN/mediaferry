@@ -159,8 +159,14 @@ class MergeRepository:
         先に古い方を破棄するか、組み直す。
         """
         with immediate(self._conn):
+            # **版はプロファイルの現行のもの。** 取り込んだときの版を写すと、
+            # カメラの種類を保存したあとに作った組は、`expected_digest`（現行の版で
+            # 計算し直す）と生まれた瞬間から食い違う。
             first = self._conn.execute(
-                "SELECT profile_id, profile_revision_id FROM media_file WHERE id = ?",
+                "SELECT m.profile_id AS profile_id,"
+                " p.current_revision_id AS profile_revision_id"
+                " FROM media_file m JOIN device_profile p ON p.id = m.profile_id"
+                " WHERE m.id = ?",
                 (media_ids[0],),
             ).fetchone()
             if first is None:
@@ -253,6 +259,13 @@ class MergeRepository:
             # 遅らせる（`PRAGMA defer_foreign_keys` は取引の終わりで自動的に戻る）。
             self._conn.execute("PRAGMA defer_foreign_keys = ON")
             self._point_at(group_id, new_id_value)
+            # **版は旧グループから複写せず、プロファイルの現行のものを読む。**
+            # 複写すると、`SENDABLE_CLAUSE` の「現行の版か」は通るのに
+            # `group_is_current` は通らない組ができる（数には出るのに送れない）。
+            revision_id = self._conn.execute(
+                "SELECT current_revision_id FROM device_profile WHERE id = ?",
+                (old["profile_id"],),
+            ).fetchone()["current_revision_id"]
             self._conn.execute(
                 "INSERT INTO merge_group (id, profile_id, profile_revision_id, status,"
                 " input_digest, detected_by, created_at, updated_at)"
@@ -260,7 +273,7 @@ class MergeRepository:
                 (
                     new_id_value,
                     old["profile_id"],
-                    old["profile_revision_id"],
+                    revision_id,
                     digest,
                     now,
                     now,

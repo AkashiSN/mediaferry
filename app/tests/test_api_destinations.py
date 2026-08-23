@@ -104,6 +104,19 @@ def test_renaming_does_not_create_a_revision(secret_env, immich, client, api_db)
     assert api_db.execute("SELECT name FROM upload_destination").fetchone()[0] == "family"
 
 
+def test_a_destination_cannot_be_renamed_to_nothing(secret_env, immich, client, api_db):
+    """**名前は画面が送り先を指し示す唯一の手掛かり**（§13。id は出さない）.
+
+    空にできると、確認の本文も送り先の一覧も名前の無い行になる。
+    """
+    destination_id = client.post("/api/destinations", json=a_body(immich)).json()["id"]
+
+    response = client.patch(f"/api/destinations/{destination_id}", json={"name": "  "})
+
+    assert response.status_code == 400
+    assert api_db.execute("SELECT name FROM upload_destination").fetchone()[0] == "home"
+
+
 def test_a_failed_verification_does_not_disable_the_destination(secret_env, immich, client, api_db):
     """検証に失敗した編集は、どの欄も反映しない（§12.3）."""
     destination_id = client.post("/api/destinations", json=a_body(immich)).json()["id"]
@@ -190,3 +203,42 @@ def test_an_unknown_field_in_a_patch_is_refused(secret_env, immich, client):
     assert error["code"] == "unknown_field"
     # **どの欄が知らない欄かを meta で返す**（画面がそのまま示せる）。
     assert error["meta"]["fields"] == ["basurl"]
+
+
+def test_a_rename_sent_with_the_connection_settings_is_applied(secret_env, immich, client, api_db):
+    """**検証した欄を黙って捨てない。** 名前と接続を一緒に送っても名前は変わる.
+
+    捨てていると、200 が返って `target_epoch` も動くので、押した人は名前が
+    変わったと信じる。画面に残るのは古い名前だけ。
+    """
+    destination_id = client.post("/api/destinations", json=a_body(immich)).json()["id"]
+
+    response = client.patch(
+        f"/api/destinations/{destination_id}",
+        json={"name": "居間の Immich", "base_url": immich.url, "api_key": API_KEY},
+    )
+
+    assert response.status_code == 200
+    assert api_db.execute("SELECT name FROM upload_destination").fetchone()[0] == "居間の Immich"
+
+
+def test_a_name_that_is_not_text_is_refused(secret_env, immich, client, api_db):
+    """**`str()` で何でも名前にしない。** dict を渡すと Python の repr が名前になる."""
+    destination_id = client.post("/api/destinations", json=a_body(immich)).json()["id"]
+
+    response = client.patch(f"/api/destinations/{destination_id}", json={"name": {"a": 1}})
+
+    assert response.status_code == 400
+    assert api_db.execute("SELECT name FROM upload_destination").fetchone()[0] == "home"
+
+
+def test_a_name_is_only_checked_when_it_would_be_used(secret_env, immich, client, api_db):
+    """**使わない欄で断らない。** 名前を送らない編集は、名前の検査の対象外."""
+    destination_id = client.post("/api/destinations", json=a_body(immich)).json()["id"]
+
+    response = client.patch(
+        f"/api/destinations/{destination_id}", json={"base_url": immich.url, "api_key": API_KEY}
+    )
+
+    assert response.status_code == 200
+    assert api_db.execute("SELECT name FROM upload_destination").fetchone()[0] == "home"

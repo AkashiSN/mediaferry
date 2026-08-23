@@ -288,6 +288,36 @@ def test_unevaluated_records_can_be_listed(secret_env, client, api_db):  # noqa:
     assert [row["id"] for row in body["records"]] == [made["open"]]
 
 
+def test_the_list_leaves_out_invalidated_records(secret_env, client, api_db):  # noqa: F811
+    """**無効になった記録は一覧に出さない。**
+
+    無効な記録には何もできない（承認は 409 `already_invalidated`、却下も 409）ので、
+    出すとカードが消せなくなる。ダッシュボードの件数（`awaiting_total` など）も
+    無効を除いて数えるため、出すと画面ごとに数が食い違う。
+    """
+    from mediaferry.clock import now_iso
+
+    _, made = a_stacked_and_a_skipped(api_db)
+    api_db.execute(
+        "UPDATE upload_record SET invalidated_at = ?, invalidated_reason = 'x' WHERE id = ?",
+        (now_iso(), made["skipped"]),
+    )
+
+    body = client.get("/api/uploads").json()
+
+    assert made["skipped"] not in [row["id"] for row in body["records"]]
+    assert made["stacked"] in [row["id"] for row in body["records"]]
+
+
+def test_a_record_carries_the_file_name_it_is_about(secret_env, client, api_db):  # noqa: F811
+    """**画面は内部の ID を出さない**（§13）ので、一覧にファイルの位置を添える."""
+    _, made = a_stacked_and_a_skipped(api_db)
+
+    records = {row["id"]: row for row in client.get("/api/uploads").json()["records"]}
+
+    assert records[made["skipped"]]["rel_path"]
+
+
 def test_an_unknown_stack_state_is_refused(secret_env, client):  # noqa: F811
     """**絞ったつもりで全件が出る**を作らない."""
     assert client.get("/api/uploads?stack_state=nonsense").status_code == 400
@@ -400,3 +430,81 @@ def test_retry_clears_the_stack_result(secret_env, client, api_db):  # noqa: F81
 
     row = api_db.execute("SELECT stack_state FROM upload_record WHERE id = ?", (record,)).fetchone()
     assert row["stack_state"] is None
+
+
+def test_a_refusal_does_not_put_internal_ids_in_what_the_screen_shows(world, client):
+    """**断る理由に内部の ID を混ぜない**（§13）.
+
+    画面は `bad_request` の `detail` をそのまま括弧で添えるので、ここに ID を
+    入れると利用者の画面に生の UUID が出る。
+    """
+    _, destination_id, media_id, _ = world
+
+    unknown_media = client.post(
+        "/api/uploads",
+        json={"media_ids": ["01J8XR-not-a-real-id"], "destination_ids": [destination_id]},
+    )
+    assert unknown_media.status_code == 400
+    assert "01J8XR-not-a-real-id" not in str(unknown_media.json())
+
+    unknown_destination = client.post(
+        "/api/uploads",
+        json={"media_ids": [media_id], "destination_ids": ["01J8XS-not-a-real-id"]},
+    )
+    assert unknown_destination.status_code == 400
+    assert "01J8XS-not-a-real-id" not in str(unknown_destination.json())
+
+
+def test_a_bad_filter_value_is_not_echoed_back(world, client):
+    """絞り込みの値も反射させない（`stack_state` は内部の語彙でもある）."""
+    response = client.get("/api/uploads?stack_state=not-a-real-state")
+
+    assert response.status_code == 400
+    assert "not-a-real-state" not in str(response.json())
+
+
+def test_the_approval_list_does_not_look_things_up_per_row(world, client, api_db, monkeypatch):
+    """**行ごとに引き直さない。** 確認の一覧は 1 度に 200 件出す（`APPROVE_PAGE`）.
+
+    差分（現在値・補正案）を作るために行ごとに `media_file` とカメラの種類を
+    引いていると、1 画面で数百本の問い合わせになる。一覧が継いで返す値で足りる。
+    """
+    from mediaferry.db.profiles import ProfileRegistry as Registry
+
+    from .test_schema_artifacts import a_media_file
+
+    profile = ProfileRegistry(api_db).current("dji-osmo")
+    revision_id = api_db.execute("SELECT current_revision_id FROM upload_destination").fetchone()[0]
+    destination_id = world[1]
+    for index in range(10):
+        media_id = a_media_file(
+            api_db,
+            (profile.profile_id, profile.revision_id),
+            rel_path=f"library/dji-osmo/DCIM/N{index}.MP4",
+        )
+        client.post(
+            "/api/uploads", json={"media_ids": [media_id], "destination_ids": [destination_id]}
+        )
+    api_db.execute(
+        "UPDATE upload_record SET state = 'awaiting_datetime_approval',"
+        " remote_asset_id = 'asset-1', destination_revision_id = ?",
+        (revision_id,),
+    )
+
+    looked_up: list[str] = []
+    original = Registry.by_id
+    monkeypatch.setattr(
+        Registry,
+        "by_id",
+        lambda self, profile_id: (looked_up.append(profile_id), original(self, profile_id))[1],
+    )
+
+    records = client.get("/api/uploads?state=awaiting_datetime_approval&limit=201").json()[
+        "records"
+    ]
+
+    assert len(records) == 10
+    assert all(record["proposed"] is not None for record in records)
+    # **行数に比例して増えない。** カメラの種類は 1 つしか無い。
+    assert len(set(looked_up)) == 1
+    assert len(looked_up) <= 1, looked_up

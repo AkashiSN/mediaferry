@@ -17,6 +17,7 @@ from ..db.profiles import (
     ProfileRegistry,
     UnknownProfile,
 )
+from ..db.selection import SENDABLE_CLAUSE
 from ..settings import SettingInvalid, SettingLocked, SettingsService, startup_warnings
 from .deps import conn as get_conn
 from .deps import state as get_state
@@ -63,6 +64,48 @@ def dashboard(state=Depends(get_state), conn=Depends(get_conn)) -> dict[str, Any
         "missing": conn.execute(
             "SELECT count(*) AS n FROM media_file WHERE missing_at IS NOT NULL"
         ).fetchone()["n"],
+        # **これからつなぐグループの数**（§13 の「やること」）。skipped は破棄、
+        # supersede 済みは組み直しの旧版なので、どれも押せるボタンが無い。
+        "merge_candidates": conn.execute(
+            "SELECT count(*) AS n FROM merge_group"
+            " WHERE status IN ('detected', 'failed') AND superseded_by_id IS NULL"
+        ).fetchone()["n"],
+        # **つないだが、人が中身を見るまで宙に浮いているグループの数。**
+        #
+        # 検証に落ちた結合物は送る候補に出ず（`SENDABLE_CLAUSE`）、構成ファイルも
+        # active な member なので出ない。ここで数えないと、ホームが「やることは
+        # ありません」と書く一方で、つなぐ画面には「中身を見て、これを使う」が
+        # 出ている状態になる。条件は `work/Merge.tsx` の `adoptable` と揃える。
+        #
+        # **現行の版で作った組だけを数える**（`SENDABLE_CLAUSE` と同じ条件）。
+        # カメラの種類を保存すると版が上がり、その版で作った出力は採用しても
+        # `group_is_current` が必ず断る —— 数えると、押しても送れないまま数だけが
+        # 0 に落ちる行き止まりになる。
+        "merge_review_total": conn.execute(
+            "SELECT count(*) AS n FROM merge_group g"
+            " WHERE g.status = 'merged' AND g.superseded_by_id IS NULL"
+            "   AND g.adopted_at IS NULL AND g.output_media_file_id IS NOT NULL"
+            "   AND g.profile_revision_id = ("
+            "     SELECT p.current_revision_id FROM device_profile p WHERE p.id = g.profile_id)"
+            "   AND json_valid(g.verification_json)"
+            "   AND json_type(g.verification_json, '$.passed') IS NOT 'true'"
+        ).fetchone()["n"],
+        # **和を取らない。** 2 つの宛先に未送信の 1 件は 1 件。休止中の宛先は
+        # 送り先に選べないので、それしか無ければ「やること」は無い。
+        "unsent_total": conn.execute(
+            "SELECT count(*) AS n FROM media_file m WHERE EXISTS ("  # noqa: S608
+            " SELECT 1 FROM upload_destination d"
+            "  WHERE d.archived_at IS NULL AND d.enabled = 1"
+            "    AND NOT EXISTS (SELECT 1 FROM upload_record u"
+            "                    WHERE u.media_file_id = m.id AND u.destination_id = d.id"
+            "                      AND u.invalidated_at IS NULL))"
+            f" AND {SENDABLE_CLAUSE}"
+        ).fetchone()["n"],
+        # **宛先をまたいだ合計。** 承認待ちは宛先ごとの操作なので、和で問題ない。
+        "awaiting_total": conn.execute(
+            "SELECT count(*) AS n FROM upload_record"
+            " WHERE state = 'awaiting_datetime_approval' AND invalidated_at IS NULL"
+        ).fetchone()["n"],
         "warnings": [
             {"code": warning.code, "message": warning.message}
             for warning in startup_warnings(settings)
@@ -97,8 +140,6 @@ def _destination_summary(conn, row) -> dict[str, Any]:  # noqa: ANN001
         "failed": counts["failed"],
         "awaiting_approval": counts["awaiting_datetime_approval"],
         "pending": counts["pending"],
-        # **「まだ送っていない」＝ この宛先の記録がまだ無いもの。** 失敗や承認待ちは
-        # 既に記録があるので別に数える（画面はそれぞれ違う操作を出す）。
         # スタックの結果（§9.11）。**無効化された記録は数えない。**
         #
         # **`stacked` は「組の数」。** 1 つのスタックに 2 件以上のレコードが属する
@@ -114,10 +155,14 @@ def _destination_summary(conn, row) -> dict[str, Any]:  # noqa: ANN001
             " WHERE destination_id = ? AND stack_state = 'skipped' AND invalidated_at IS NULL",
             (row["id"],),
         ).fetchone()["n"],
+        # **「まだ送っていない」＝ この宛先の有効な記録がまだ無く、いま送れるもの。**
+        # 失敗や承認待ちは既に記録があるので別に数える（画面はそれぞれ違う操作を出す）。
+        # `/media?status=unsent`（`routes_media._status_clause`）と同じ定義を使う。
         "unsent": conn.execute(
-            "SELECT count(*) AS n FROM media_file m WHERE NOT EXISTS ("
+            "SELECT count(*) AS n FROM media_file m WHERE NOT EXISTS ("  # noqa: S608
             " SELECT 1 FROM upload_record u WHERE u.media_file_id = m.id"
-            "  AND u.destination_id = ? AND u.invalidated_at IS NULL)",
+            "  AND u.destination_id = ? AND u.invalidated_at IS NULL)"
+            f" AND {SENDABLE_CLAUSE}",
             (row["id"],),
         ).fetchone()["n"],
     }
@@ -151,11 +196,15 @@ def write_setting(
     state=Depends(get_state),  # noqa: ANN001, B008
     conn=Depends(get_conn),  # noqa: ANN001, B008
 ) -> dict[str, str]:
+    if "key" not in body or "value" not in body:
+        # **`KeyError` の文字列を画面に出さない**（`str(KeyError("value"))` は
+        # `'value'`）。足りない項目は、画面が定型文で言える種類の失敗。
+        raise ApiError(400, ErrorCode.MISSING_FIELD, "key と value が要る")
     try:
         tier = SettingsService(conn, state.env).set(body["key"], body["value"])
     except SettingLocked as exc:
         raise ApiError(409, ErrorCode.SETTING_LOCKED, str(exc)) from exc
-    except (SettingInvalid, KeyError) as exc:
+    except SettingInvalid as exc:
         raise ApiError(400, ErrorCode.BAD_REQUEST, str(exc)) from exc
     # いつ効くかを返す。RESTART の値を変えて「反映されない」と見えるのを防ぐ。
     return {"status": "ok", "applies": tier.value}

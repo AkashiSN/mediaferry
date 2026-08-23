@@ -88,6 +88,24 @@ def test_an_unknown_path_is_also_enveloped(client):
     assert _error(response)["code"] == ErrorCode.NOT_FOUND
 
 
+def test_a_framework_http_error_does_not_leak_its_own_wording(client):
+    """フレームワークが投げる失敗の文言（英語）をそのまま返さない.
+
+    画面は `bad_request` に `detail` を添えて出す（どの項目が悪いかは定型文では
+    書けない）。ここを素通しにすると "Method Not Allowed" が利用者へ出る。
+    """
+    response = client.request("DELETE", "/api/jobs")
+
+    assert response.status_code == 405
+    error = _error(response)
+    assert error["code"] == ErrorCode.BAD_REQUEST
+    assert "Method Not Allowed" not in error["detail"]
+    # **添える理由が無いなら、添えない。** 画面は `bad_request` の `detail` を
+    # 括弧で添えるので、定型文を入れると「…受け付けられません（…受け付けられない）」
+    # という同語反復になる。
+    assert error["detail"] == ""
+
+
 def test_a_server_side_http_error_is_internal_not_bad_request(client, monkeypatch):
     """5xx を `bad_request` として返さない（画面が「入力を直せ」と誤案内する）."""
     from fastapi import HTTPException
@@ -101,3 +119,13 @@ def test_a_server_side_http_error_is_internal_not_bad_request(client, monkeypatc
 
     assert response.status_code == 503
     assert _error(response)["code"] == ErrorCode.INTERNAL
+
+
+def test_a_setting_written_without_a_value_says_what_is_missing(client):
+    """**Python の例外の文字列を画面に出さない。** `KeyError` は `'value'` と出る."""
+    response = client.put("/api/settings", json={"key": "AUTO_IMPORT"})
+
+    assert response.status_code == 400
+    error = _error(response)
+    assert error["code"] == ErrorCode.MISSING_FIELD
+    assert "'value'" not in error["detail"]

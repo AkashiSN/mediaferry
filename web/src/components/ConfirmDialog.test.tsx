@@ -2,8 +2,9 @@ import { render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
 
-import { ConfirmDialog, describe as describeConfirmation, formatBytes } from "./ConfirmDialog";
+import { ConfirmDialog, describe as describeConfirmation } from "./ConfirmDialog";
 import type { Confirmation } from "./ConfirmDialog";
+import { FORBIDDEN } from "../test/vocabulary";
 
 describe("不可逆な操作の確認", () => {
   it("送信は件数・合計サイズ・宛先名を出す（§13）", () => {
@@ -90,25 +91,179 @@ describe("不可逆な操作の確認", () => {
   });
 
   it("種類ごとに、必ず題と本文がある", () => {
-    const all: Confirmation[] = [
-      { kind: "upload", count: 1, totalBytes: 1, destinationNames: ["a"] },
-      { kind: "archive_destination", name: "a" },
-      { kind: "discard_merge_group", groupLabel: "a", publishedCount: 0 },
-      { kind: "adopt_failed_merge", groupLabel: "a", reason: "サイズ" },
-      { kind: "approve_datetime", current: "a", proposed: "b" },
-    ];
-    for (const confirmation of all) {
+    for (const confirmation of EVERY_KIND) {
       const { title, body } = describeConfirmation(confirmation);
       expect(title.length).toBeGreaterThan(0);
       expect(body).toBeTruthy();
     }
   });
+
+  // **Markdown は JSX の中で効かない。** `**強調**` と書くとアスタリスクが
+  // そのまま画面に出る。取り消せない操作の確認文で起きるといちばん読みにくい。
+  it("本文に Markdown の記号が残っていない", () => {
+    for (const confirmation of EVERY_KIND) {
+      const { unmount } = render(
+        <ConfirmDialog confirmation={confirmation} onConfirm={() => {}} onCancel={() => {}} />,
+      );
+      expect(screen.getByRole("dialog").textContent ?? "").not.toContain("**");
+      unmount();
+    }
+  });
+
+  // **確認の本文は、画面にあるボタンの名前で言う**（§13 の言い換え）。
+  it("本文が、もう無いボタンの名前を指していない", () => {
+    for (const confirmation of EVERY_KIND) {
+      const { unmount } = render(
+        <ConfirmDialog confirmation={confirmation} onConfirm={() => {}} onCancel={() => {}} />,
+      );
+      expect(screen.getByRole("dialog").textContent ?? "").not.toContain("候補を検出する");
+      unmount();
+    }
+  });
+
+  // **内部の名前を出さない**（§13）。E2E は全画面を巡るが、**ダイアログは開くまで
+  // 描かれない**ので、確認の本文にはここでしか届かない。一覧は E2E と共有する。
+  it("本文に内部の名前が出ていない", () => {
+    for (const confirmation of EVERY_KIND) {
+      const { unmount } = render(
+        <ConfirmDialog confirmation={confirmation} onConfirm={() => {}} onCancel={() => {}} />,
+      );
+      const text = screen.getByRole("dialog").textContent ?? "";
+      for (const word of FORBIDDEN) {
+        expect(text, `${confirmation.kind} に「${word}」が出ている`).not.toContain(word);
+      }
+      unmount();
+    }
+  });
 });
 
-describe("大きさの表示", () => {
-  it("人が読める単位にする", () => {
-    expect(formatBytes(512)).toBe("512 B");
-    expect(formatBytes(1536)).toBe("1.5 KiB");
-    expect(formatBytes(30 * 1024 ** 3)).toBe("30 GiB");
+/**
+ * `Confirmation` の全種類。**1 つでも欠けると、その本文は誰も読まない。**
+ *
+ * `Record<Confirmation["kind"], …>` にしてあるので、**union に種類を足すと
+ * ここが型エラーになる**（一覧だと黙って抜ける）。
+ */
+const BY_KIND: Record<Confirmation["kind"], Confirmation> = {
+  upload: { kind: "upload", count: 1, totalBytes: 1, destinationNames: ["a"] },
+  archive_destination: { kind: "archive_destination", name: "a" },
+  discard_merge_group: { kind: "discard_merge_group", groupLabel: "a", publishedCount: 1 },
+  delete_merge_history: { kind: "delete_merge_history", groupLabel: "a" },
+  delete_stale_derived: { kind: "delete_stale_derived", relPath: "derived/a.MP4" },
+  remerge_group: { kind: "remerge_group", groupLabel: "a" },
+  adopt_failed_merge: { kind: "adopt_failed_merge", groupLabel: "a", reason: "サイズ" },
+  approve_datetime: { kind: "approve_datetime", current: "a", proposed: "b" },
+  archive_profile: { kind: "archive_profile", slug: "a" },
+  trust_volume: { kind: "trust_volume", label: "a", state: "starts", reason: null },
+};
+
+// `trust_volume` は state で本文が丸ごと入れ替わるので、残り 2 つも巡る。
+const EVERY_KIND: Confirmation[] = [
+  ...Object.values(BY_KIND),
+  { kind: "trust_volume", label: "a", state: "pending", reason: "確かめられた場合" },
+  { kind: "trust_volume", label: "a", state: "blocked", reason: "設定が off な" },
+];
+
+
+// **取り消せない操作の確認なので、キーボードだけで扱えること。** `aria-modal="true"`
+// を名乗る以上、背後は無いことになっている —— そこへ焦点が抜けると、読み上げでは
+// 何も無い場所を触ることになる。
+describe("キーボードだけで扱える", () => {
+  const UPLOAD: Confirmation = {
+    kind: "upload",
+    count: 1,
+    totalBytes: 1024,
+    destinationNames: ["home"],
+  };
+
+  it("Escape で閉じる", async () => {
+    const onCancel = vi.fn();
+    render(<ConfirmDialog confirmation={UPLOAD} onConfirm={() => {}} onCancel={onCancel} />);
+
+    await userEvent.keyboard("{Escape}");
+
+    expect(onCancel).toHaveBeenCalledTimes(1);
+  });
+
+  it("実行中は Escape でも閉じない（「やめる」も押せない状態と揃える）", async () => {
+    const onCancel = vi.fn();
+    render(<ConfirmDialog confirmation={UPLOAD} onConfirm={() => {}} onCancel={onCancel} busy />);
+
+    await userEvent.keyboard("{Escape}");
+
+    expect(onCancel).not.toHaveBeenCalled();
+  });
+
+  it("開いたら焦点がダイアログの中に入る", () => {
+    render(<ConfirmDialog confirmation={UPLOAD} onConfirm={() => {}} onCancel={() => {}} />);
+
+    expect(screen.getByRole("dialog")).toContainElement(document.activeElement as HTMLElement);
+  });
+
+  it("Tab を押し続けても、背後の要素へ抜けない", async () => {
+    render(
+      <>
+        <button type="button">背後のボタン</button>
+        <ConfirmDialog confirmation={UPLOAD} onConfirm={() => {}} onCancel={() => {}} />
+      </>,
+    );
+    const dialog = screen.getByRole("dialog");
+
+    for (let press = 0; press < 5; press += 1) {
+      await userEvent.tab();
+      expect(dialog).toContainElement(document.activeElement as HTMLElement);
+    }
+    await userEvent.tab({ shift: true });
+    expect(dialog).toContainElement(document.activeElement as HTMLElement);
+  });
+
+  it("末尾から Tab で先頭へ、先頭から Shift+Tab で末尾へ回る", async () => {
+    render(<ConfirmDialog confirmation={UPLOAD} onConfirm={() => {}} onCancel={() => {}} />);
+    const cancel = screen.getByRole("button", { name: "やめる" });
+    const confirm = screen.getByRole("button", { name: "実行する" });
+
+    // 開いた直後は先頭（「やめる」）。
+    expect(document.activeElement).toBe(cancel);
+    await userEvent.tab();
+    expect(document.activeElement).toBe(confirm);
+    // **末尾からは先頭へ回る**（背後へ抜けない）。
+    await userEvent.tab();
+    expect(document.activeElement).toBe(cancel);
+    // **先頭からは末尾へ回る。**
+    await userEvent.tab({ shift: true });
+    expect(document.activeElement).toBe(confirm);
+  });
+
+  it("閉じたら、開く前に触っていたところへ焦点が戻る", () => {
+    render(<button type="button">開いたボタン</button>);
+    const opener = screen.getByRole("button", { name: "開いたボタン" });
+    opener.focus();
+
+    const dialog = render(
+      <ConfirmDialog confirmation={UPLOAD} onConfirm={() => {}} onCancel={() => {}} />,
+    );
+    dialog.unmount();
+
+    expect(document.activeElement).toBe(opener);
+  });
+
+  // **戻る先が押せなくなっていることがある。** 実行すると走っている間だけ開いた
+  // ボタンが `disabled` になるので、そこへ戻そうとすると焦点が `body` へ落ち、
+  // キーボードだけの人は画面の頭からやり直しになる。
+  it("戻る先が押せなくなっていたら、その画面の中へ戻す", () => {
+    render(
+      <section aria-label="つなぐ">
+        <button type="button">開いたボタン</button>
+      </section>,
+    );
+    const opener = screen.getByRole("button", { name: "開いたボタン" });
+    opener.focus();
+
+    const dialog = render(
+      <ConfirmDialog confirmation={UPLOAD} onConfirm={() => {}} onCancel={() => {}} />,
+    );
+    (opener as HTMLButtonElement).disabled = true;
+    dialog.unmount();
+
+    expect(document.activeElement).toBe(screen.getByRole("region", { name: "つなぐ" }));
   });
 });

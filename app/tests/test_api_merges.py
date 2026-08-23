@@ -224,6 +224,42 @@ def test_a_group_can_be_regrouped_by_hand(client, api_db):
     assert len(client.get(f"/api/merge-groups/{new_id}").json()["members"]) == 2
 
 
+def test_regrouping_down_to_one_part_is_refused(client, api_db):
+    """**つなぐ組は 2 件以上。** 手で作るときと同じ条件を、組み直しにも課す.
+
+    1 件だけの組にはつなぎ目が無く、画面は「なぜ同じ 1 本と判断したか」を
+    書けない（`Merge.tsx` の `gapSeconds`）。作れてしまうと、つなぎようのない
+    組が一覧に残る。
+    """
+    from .test_schema_artifacts import a_media_file
+
+    profile = ProfileRegistry(api_db).current("dji-osmo")
+    profile_ref = (profile.profile_id, profile.revision_id)
+    parts = [
+        a_media_file(api_db, profile_ref, rel_path=f"library/shrink/PART_{index}.MP4")
+        for index in range(2)
+    ]
+    group_id = a_merge_group(api_db, profile_ref, "digest-shrink")
+    for position, media in enumerate(parts):
+        api_db.execute(
+            "INSERT INTO merge_member (merge_group_id, media_file_id, position, active)"
+            " VALUES (?, ?, ?, 1)",
+            (group_id, media, position),
+        )
+
+    response = client.patch(
+        f"/api/merge-groups/{group_id}?action=regroup", json={"media_ids": parts[:1]}
+    )
+
+    assert response.status_code == 400
+    # **画面が理由を出せる code で断る**（§13）。`missing_field` は「必要な項目が
+    # 足りません」としか出ず、項目はあって短いだけ、という事実が落ちる。
+    error = response.json()["error"]
+    assert error["code"] == "bad_request"
+    assert error["detail"]
+    assert client.get(f"/api/merge-groups/{group_id}").json()["superseded_by_id"] is None
+
+
 def test_a_group_can_be_created_by_hand(client, api_db):
     """検出が拾えなかった並びを人が組む."""
     from .test_schema_artifacts import a_media_file
@@ -355,3 +391,105 @@ def test_a_group_without_an_output_says_so(client, api_db):
     profile = ProfileRegistry(api_db).current("dji-osmo")
     group_id = a_merge_group(api_db, (profile.profile_id, profile.revision_id), "digest-none")
     assert client.get(f"/api/merge-groups/{group_id}").json()["output"] is None
+
+
+def test_a_group_made_after_the_profile_changed_uses_the_current_revision(client, api_db):
+    """**手で作る組も、検出と同じリビジョンで指紋を作る**（§8 / §10）.
+
+    取り込んだときの版で指紋を作ると、カメラの種類を保存したあとに手で組んだ
+    ものは生まれた瞬間から食い違う。`group_is_current` は現行の版で計算し直す
+    ので、`POST /uploads` はその出力を永久に断り、`SENDABLE_CLAUSE` の
+    「現行の版か」も食い違ったまま数え続ける（押しても消せない数になる）。
+    """
+    from dataclasses import replace
+
+    from mediaferry.db.selection import expected_digest
+
+    registry = ProfileRegistry(api_db)
+    mine = registry.duplicate("dji-osmo", "rev-cam", "版のカメラ")
+    profile_ref = (mine.profile_id, mine.revision_id)
+    parts = [
+        a_media_file(api_db, profile_ref, rel_path=f"library/rev/PART_{index}.MP4")
+        for index in range(2)
+    ]
+    # 取り込んだあとにカメラの種類を保存する（版が上がる）。
+    registry.update("rev-cam", replace(mine.definition, name="名前を変えた"))
+    current = ProfileRegistry(api_db).current("rev-cam")
+
+    group_id = client.post("/api/merge-groups", json={"media_ids": parts}).json()["group_id"]
+
+    row = api_db.execute(
+        "SELECT profile_revision_id, input_digest FROM merge_group WHERE id = ?", (group_id,)
+    ).fetchone()
+    assert row["profile_revision_id"] == current.revision_id
+    assert row["input_digest"] == expected_digest(api_db, ProfileRegistry(api_db), group_id)
+
+
+def test_regrouping_after_the_profile_changed_uses_the_current_revision(client, api_db):
+    """組み直しも同じ。**旧グループの版を複写しない。**
+
+    複写すると、`SENDABLE_CLAUSE` の「現行の版か」は通るのに `group_is_current`
+    は通らない組ができる —— 数には出るのに、送ろうとすると必ず断られる。
+    """
+    from dataclasses import replace
+
+    from mediaferry.db.selection import expected_digest
+
+    registry = ProfileRegistry(api_db)
+    mine = registry.duplicate("dji-osmo", "regroup-cam", "組み直しのカメラ")
+    profile_ref = (mine.profile_id, mine.revision_id)
+    parts = [
+        a_media_file(api_db, profile_ref, rel_path=f"library/regroup-rev/PART_{index}.MP4")
+        for index in range(3)
+    ]
+    group_id = a_merge_group(api_db, profile_ref, "digest-regroup-rev")
+    for position, media in enumerate(parts):
+        api_db.execute(
+            "INSERT INTO merge_member (merge_group_id, media_file_id, position, active)"
+            " VALUES (?, ?, ?, 1)",
+            (group_id, media, position),
+        )
+    registry.update("regroup-cam", replace(mine.definition, name="名前を変えた"))
+    current = ProfileRegistry(api_db).current("regroup-cam")
+
+    new_id = client.patch(
+        f"/api/merge-groups/{group_id}?action=regroup", json={"media_ids": parts[:2]}
+    ).json()["group_id"]
+
+    row = api_db.execute(
+        "SELECT profile_revision_id, input_digest FROM merge_group WHERE id = ?", (new_id,)
+    ).fetchone()
+    assert row["profile_revision_id"] == current.revision_id
+    assert row["input_digest"] == expected_digest(api_db, ProfileRegistry(api_db), new_id)
+
+
+def test_a_group_says_when_its_camera_type_changed_since_it_was_made(client, api_db):
+    """**版が上がった組は、画面がそれと分かる形で受け取る**（§13）.
+
+    版が上がると `group_is_current` は必ず断るので、「中身を見て、これを使う」を
+    押しても送れるようにはならない。画面がその区別を持てないと、押しても何も
+    起きないボタンが残る。
+    """
+    import json
+    from dataclasses import replace
+
+    registry = ProfileRegistry(api_db)
+    mine = registry.duplicate("dji-osmo", "stale-cam", "版が上がるカメラ")
+    profile_ref = (mine.profile_id, mine.revision_id)
+    output = a_media_file(api_db, profile_ref, rel_path="library/stale/OUT.MP4", role="derived")
+    group_id = a_merge_group(
+        api_db,
+        profile_ref,
+        "digest-stale-view",
+        status="merged",
+        verification_json=json.dumps({"passed": False}),
+        output_media_file_id=output,
+    )
+
+    assert client.get(f"/api/merge-groups/{group_id}").json()["profile_changed"] is False
+
+    registry.update("stale-cam", replace(mine.definition, name="名前を変えた"))
+
+    assert client.get(f"/api/merge-groups/{group_id}").json()["profile_changed"] is True
+    listed = client.get("/api/merge-groups").json()["groups"]
+    assert [row["profile_changed"] for row in listed if row["id"] == group_id] == [True]

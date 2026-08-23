@@ -8,6 +8,7 @@ from mediaferry.db.profiles import ProfileRegistry
 from mediaferry.db.selection import (
     INCLUDE_FAILED_GROUP_MEMBERS,
     INCLUDE_UNADOPTED_DERIVED,
+    SENDABLE_CLAUSE,
     SelectionService,
 )
 
@@ -329,3 +330,96 @@ def test_the_digest_follows_the_member_position_not_the_insert_order(db, profile
     assert expected_digest(db, ProfileRegistry(db), group_id) == input_digest(
         [first, second], profile.definition.merge, profile.revision_id
     )
+
+
+def test_a_new_profile_revision_takes_the_merged_output_out_of_both(db):
+    """カメラの種類を保存すると、その版で作った結合物は選択肢から外れる.
+
+    `input_digest` はプロファイルのリビジョンを含む（`core/merge/digest.py`）ので、
+    保存して版が上がると `POST /uploads` はその派生物を必ず断る（`group_is_current`）。
+    **`SENDABLE_CLAUSE` がそれを数え続けると、ホームの「N 件をまだ送っていません」が
+    消せなくなる** —— 押しても全件 rejected で、件数は動かない。
+    """
+    from dataclasses import replace
+
+    registry = ProfileRegistry(db)
+    registry.sync_builtins()
+    mine = registry.duplicate("dji-osmo", "my-cam", "私のカメラ")
+    members = a_pair(db, mine, prefix="REV")
+    output = a_derived(db, mine, name="REV")
+    a_group(db, mine, members, output_id=output, verification=PASSED)
+
+    assert output in ids(SelectionService(db, ProfileRegistry(db)).selectable())
+
+    registry.update("my-cam", replace(mine.definition, name="名前を変えた"))
+
+    service_ids = ids(SelectionService(db, ProfileRegistry(db)).selectable())
+    clause_ids = {
+        row["id"]
+        for row in db.execute(f"SELECT m.id FROM media_file m WHERE {SENDABLE_CLAUSE}")  # noqa: S608
+    }
+    assert output not in service_ids
+    assert output not in clause_ids
+    # **構成ファイルは戻らない。** グループはまだ生きている（member は active の
+    # まま）ので、元のパートが選択肢に現れるわけではない。
+    assert {media_id for media_id, _ in members}.isdisjoint(clause_ids)
+
+
+def test_selectable_and_sendable_clause_agree(db, profile):
+    """`SelectionService.selectable()` の既定集合と `SENDABLE_CLAUSE` は一致する.
+
+    §10 の同じ条件を SQL の断片として 2 か所（`_ORIGINALS`/`_DERIVED` と
+    `SENDABLE_CLAUSE`）に持っているので、これが手作業の同期を守る唯一の
+    仕掛けになる。original・アクティブな member・合格した derived・不合格の
+    derived・採用済みの derived・supersede されたグループ・missing を
+    1 件ずつ含める（digest はどちらも現行の構成と一致させ、`SENDABLE_CLAUSE`
+    が見ない一致条件の差は別のテスト（`SelectionService` 側）で確かめる）。
+    """
+    plain_id = a_media_file(db, (profile.profile_id, profile.revision_id))
+
+    active_members = a_pair(db, profile, prefix="ACTIVE")
+    passed_output = a_derived(db, profile, name="PASSED")
+    a_group(db, profile, active_members, output_id=passed_output, verification=PASSED)
+
+    failed_members = a_pair(db, profile, prefix="FAILED")
+    failed_output = a_derived(db, profile, name="FAILED")
+    a_group(db, profile, failed_members, output_id=failed_output, verification=NOT_PASSED)
+
+    adopted_members = a_pair(db, profile, prefix="ADOPTED")
+    adopted_output = a_derived(db, profile, name="ADOPTED")
+    a_group(
+        db,
+        profile,
+        adopted_members,
+        output_id=adopted_output,
+        verification=NOT_PASSED,
+        adopted_at="2026-08-17T00:00:00+00:00",
+    )
+
+    superseded_members = a_pair(db, profile, prefix="SUPERSEDED")
+    superseded_output = a_derived(db, profile, name="SUPERSEDED")
+    old_group = a_group(db, profile, superseded_members, output_id=superseded_output)
+    newer_group = a_merge_group(db, (profile.profile_id, profile.revision_id), "digest-supersedes")
+    db.execute("UPDATE merge_group SET superseded_by_id = ? WHERE id = ?", (newer_group, old_group))
+
+    missing_id = a_media_file(
+        db, (profile.profile_id, profile.revision_id), missing_at="2026-08-17T00:00:00+00:00"
+    )
+
+    service_ids = ids(SelectionService(db, ProfileRegistry(db)).selectable())
+    clause_ids = {
+        row["id"]
+        for row in db.execute(f"SELECT m.id FROM media_file m WHERE {SENDABLE_CLAUSE}")  # noqa: S608
+    }
+
+    assert service_ids == clause_ids
+    # 題材が実際に判定を分けていることを確かめる（一致だけを見る手抜きを防ぐ）。
+    assert plain_id in service_ids
+    assert passed_output in service_ids
+    assert adopted_output in service_ids
+    assert {mid for mid, _ in superseded_members} <= service_ids
+    assert {mid for mid, _ in active_members}.isdisjoint(service_ids)
+    assert {mid for mid, _ in failed_members}.isdisjoint(service_ids)
+    assert failed_output not in service_ids
+    assert superseded_output not in service_ids
+    assert missing_id not in service_ids

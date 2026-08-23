@@ -78,7 +78,7 @@ def resolve_group(
 ) -> Group | Refusal:
     """4 条件（§6）で組を決める. 同じ組はどの member から呼んでも同じになる."""
     if not rule.enabled:
-        return Refusal("プロファイルがスタックを使わない")
+        return Refusal("カメラの種類がスタックを使わない")
     if extension_of(primary.rel_path) not in rule.extensions:
         return Refusal("この拡張子は組の対象ではない")
     keys = {c.source_key for c in candidates if c.media_file_id == primary.media_file_id}
@@ -129,7 +129,7 @@ def _refused(primary: Candidate, partners: Sequence[Candidate], rule: StackRule)
     for partner in partners:
         if partner.profile_id != primary.profile_id:
             # 規則が 1 つに決まらない（§9.11）。
-            return Refusal("相方が別のプロファイルに属している")
+            return Refusal("相方が別のカメラの種類に属している")
         if partner.invalidated or partner.state != "complete":
             return Refusal("相方はまだ送信が終わっていない")
         if partner.captured_at_source != primary.captured_at_source:

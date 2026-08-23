@@ -157,7 +157,10 @@ class UploadRepository:
         }
         missing = [media_id for media_id in media_ids if media_id not in rows]
         if missing:
-            raise UploadRequestInvalid(f"知らないメディア: {', '.join(missing)}")
+            # **内部の ID を理由に混ぜない**（§13）。この文言は画面にそのまま出る。
+            raise UploadRequestInvalid(
+                f"選んだファイルのうち {len(missing)} 件が見つからない。画面を開き直す"
+            )
         return rows
 
     def _load_destinations(self, destination_ids: Sequence[str]) -> dict[str, sqlite3.Row]:
@@ -167,7 +170,7 @@ class UploadRepository:
         for destination_id in destination_ids:
             row = self._destinations.get(destination_id)
             if row is None:
-                raise UploadRequestInvalid(f"知らない宛先: {destination_id}")
+                raise UploadRequestInvalid("その送り先は見つからない。設定 › 送り先を確かめる")
             if row["archived_at"] is not None:
                 raise UploadRequestInvalid(f"宛先「{row['name']}」は保管済み")
             if not row["enabled"]:
@@ -1062,26 +1065,42 @@ class UploadRepository:
 
         **未知の値を素通りさせない**（呼び出し側が 400 にする）。「絞ったつもりで
         全件が出る」を作らない。
+
+        **無効になった記録は出さない。** 承認も却下も送り直しも 409 で断られる
+        記録なので、出すと画面から消せないカードになる。件数（`/dashboard` の
+        `awaiting_total` など）も無効を除いて数えるため、出すと画面ごとに数が
+        食い違う。
+
+        **ファイルの位置も返す。** 画面は内部の ID を出さない（§13）ので、
+        どのファイルの話かを言うにはこれが要る。
         """
-        clauses, params = [], []
+        # 無効の除外は絞り込みではなく前提なので、常に置く。
+        clauses, params = ["r.invalidated_at IS NULL"], []
         if destination_id is not None:
-            clauses.append("destination_id = ?")
+            clauses.append("r.destination_id = ?")
             params.append(destination_id)
         if state is not None:
-            clauses.append("state = ?")
+            clauses.append("r.state = ?")
             params.append(state)
         if stack_state is not None:
             if stack_state == "unevaluated":
-                clauses.append("stack_state IS NULL")
+                clauses.append("r.stack_state IS NULL")
             elif stack_state in ("stacked", "skipped"):
-                clauses.append("stack_state = ?")
+                clauses.append("r.stack_state = ?")
                 params.append(stack_state)
             else:
-                raise UploadRequestInvalid(f"stack_state が不正: {stack_state}")
-        where = f" WHERE {' AND '.join(clauses)}" if clauses else ""
+                raise UploadRequestInvalid("絞り込みの指定が正しくない")
+        where = " AND ".join(clauses)
         return list(
             self._conn.execute(
-                f"SELECT * FROM upload_record{where} ORDER BY updated_at DESC LIMIT ?",  # noqa: S608
+                # **行ごとに引き直させない。** 承認待ちの差分（`_datetime_diff`）が
+                # 要る値も、ここで一緒に継いで返す（1 度に 200 件出す画面がある）。
+                "SELECT r.*, m.rel_path AS rel_path,"  # noqa: S608
+                "       m.profile_id AS media_profile_id,"
+                "       m.captured_at AS media_captured_at"
+                " FROM upload_record r"
+                " JOIN media_file m ON m.id = r.media_file_id"
+                f" WHERE {where} ORDER BY r.updated_at DESC LIMIT ?",
                 (*params, limit),
             )
         )

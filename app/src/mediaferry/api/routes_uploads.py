@@ -65,7 +65,9 @@ def list_uploads(
         rows = _uploads(conn, box).list_records(destination_id, state, limit, stack_state)
     except UploadRequestInvalid as exc:
         raise ApiError(400, ErrorCode.BAD_REQUEST, str(exc)) from exc
-    return {"records": [_view(row, conn) for row in rows]}
+    # カメラの種類は**行ごとに引き直さない**（1 度に 200 件出す画面がある）。
+    profiles = _ProfileCache(ProfileRegistry(conn))
+    return {"records": [_view(row, profiles) for row in rows]}
 
 
 @router.post("/uploads/{record_id}/retry")
@@ -205,7 +207,20 @@ def _uploads(conn, box) -> UploadRepository:  # noqa: ANN001
     return UploadRepository(conn, ProfileRegistry(conn), destinations)
 
 
-def _view(row, conn=None) -> dict[str, Any]:  # noqa: ANN001
+class _ProfileCache:
+    """1 応答の間だけ、カメラの種類を覚えておく（**同じものを何度も引かない**）."""
+
+    def __init__(self, registry: ProfileRegistry) -> None:
+        self._registry = registry
+        self._known: dict[str, Any] = {}
+
+    def by_id(self, profile_id: str):  # noqa: ANN202
+        if profile_id not in self._known:
+            self._known[profile_id] = self._registry.by_id(profile_id)
+        return self._known[profile_id]
+
+
+def _view(row, profiles: _ProfileCache | None = None) -> dict[str, Any]:  # noqa: ANN001
     """記録 1 件の表示. 承認待ちには**差分**を添える（§13）.
 
     **現在値はその場で取りに行かない。** 一覧の描画で N 件ぶんの HTTP を出すことに
@@ -216,6 +231,9 @@ def _view(row, conn=None) -> dict[str, Any]:  # noqa: ANN001
         "id": row["id"],
         "destination_id": row["destination_id"],
         "media_file_id": row["media_file_id"],
+        # 画面は内部の ID を出さない（§13）。**一覧はファイルの位置も持って返る**
+        # （`list_records` が `media_file` を継いで必ず添える）。
+        "rel_path": row["rel_path"],
         "state": row["state"],
         "selection_rule": row["selection_rule"],
         "origin": row["origin"],
@@ -234,26 +252,26 @@ def _view(row, conn=None) -> dict[str, Any]:  # noqa: ANN001
         "updated_at": row["updated_at"],
     }
     if row["state"] == "awaiting_datetime_approval":
-        view.update(_datetime_diff(row, conn))
+        view.update(_datetime_diff(row, profiles))
     return view
 
 
-def _datetime_diff(row, conn) -> dict[str, Any]:  # noqa: ANN001
-    """承認待ちの差分（現在値・補正案・同じかどうか）."""
+def _datetime_diff(row, profiles: _ProfileCache | None) -> dict[str, Any]:  # noqa: ANN001
+    """承認待ちの差分（現在値・補正案・同じかどうか）.
+
+    **`media_file` は引き直さない。** 一覧が撮影時刻とカメラの種類を継いで返すので
+    （`db/uploads.list_records`）、行ごとの問い合わせは要らない。
+    """
     proposed = None
-    if conn is not None:
-        media = conn.execute(
-            "SELECT * FROM media_file WHERE id = ?", (row["media_file_id"],)
-        ).fetchone()
-        if media is not None:
-            profile = ProfileRegistry(conn).by_id(media["profile_id"])
-            plan = datetime_plan(
-                profile.definition.immich,
-                profile.definition.timestamp.timezone_policy,
-                media["captured_at"],
-                row["origin"],
-            )
-            proposed = plan.proposed
+    if profiles is not None:
+        profile = profiles.by_id(row["media_profile_id"])
+        plan = datetime_plan(
+            profile.definition.immich,
+            profile.definition.timestamp.timezone_policy,
+            row["media_captured_at"],
+            row["origin"],
+        )
+        proposed = plan.proposed
     current = row["remote_datetime_original"]
     return {
         "remote_current": current,
