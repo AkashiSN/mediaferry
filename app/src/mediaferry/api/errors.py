@@ -102,11 +102,17 @@ def install_error_handlers(app: FastAPI) -> None:
 
     @app.exception_handler(StarletteHTTPException)
     async def _http_error(_: Request, exc: StarletteHTTPException) -> JSONResponse:
-        # ルータが直接投げたもの（404 の既定など）。code は状態から決める。
-        code = ErrorCode.NOT_FOUND if exc.status_code == 404 else ErrorCode.BAD_REQUEST
+        # フレームワークが投げたもの（経路が無いときの 404、method が違うときの
+        # 405 など）。code は状態から決める。
+        #
+        # **文言はこちらで書く。** 既定の `detail` は英語（"Method Not Allowed"）で、
+        # 画面は `bad_request` に `detail` を添えて出すため、素通しにすると
+        # そのまま利用者へ出る。
         if exc.status_code >= 500:
-            code = ErrorCode.INTERNAL
-        return _envelope(exc.status_code, code, str(exc.detail), {})
+            return _envelope(exc.status_code, ErrorCode.INTERNAL, "内部エラー", {})
+        if exc.status_code == 404:
+            return _envelope(exc.status_code, ErrorCode.NOT_FOUND, "その経路は無い", {})
+        return _envelope(exc.status_code, ErrorCode.BAD_REQUEST, "その要求は受け付けられない", {})
 
     @app.exception_handler(RequestValidationError)
     async def _validation_error(_: Request, exc: RequestValidationError) -> JSONResponse:

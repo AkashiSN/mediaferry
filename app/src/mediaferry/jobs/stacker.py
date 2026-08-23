@@ -188,7 +188,11 @@ class Stacker:
             raise DestinationUnusable(str(exc)) from exc
         except (ImmichRejected, ImmichProtocolError) as exc:
             # 再試行しても直らない。**理由を残して画面に出す。**
-            return refuse(f"相手が受け付けない: {exc}")
+            #
+            # **相手由来の文言は理由に混ぜない**（§13）。`stack_reason` は
+            # 設定 › 送り先にそのまま並ぶ。詳しい中身は作業の記録へ回す。
+            ctx.emit("warning", f"送り先が組を受け付けなかった: {exc}")
+            return refuse("送り先が組を受け付けなかった")
 
     def _candidates(
         self, row: sqlite3.Row, media: sqlite3.Row, destination_id: str, epoch: int

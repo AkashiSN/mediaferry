@@ -224,6 +224,37 @@ def test_a_group_can_be_regrouped_by_hand(client, api_db):
     assert len(client.get(f"/api/merge-groups/{new_id}").json()["members"]) == 2
 
 
+def test_regrouping_down_to_one_part_is_refused(client, api_db):
+    """**つなぐ組は 2 件以上。** 手で作るときと同じ条件を、組み直しにも課す.
+
+    1 件だけの組にはつなぎ目が無く、画面は「なぜ同じ 1 本と判断したか」を
+    書けない（`Merge.tsx` の `gapSeconds`）。作れてしまうと、つなぎようのない
+    組が一覧に残る。
+    """
+    from .test_schema_artifacts import a_media_file
+
+    profile = ProfileRegistry(api_db).current("dji-osmo")
+    profile_ref = (profile.profile_id, profile.revision_id)
+    parts = [
+        a_media_file(api_db, profile_ref, rel_path=f"library/shrink/PART_{index}.MP4")
+        for index in range(2)
+    ]
+    group_id = a_merge_group(api_db, profile_ref, "digest-shrink")
+    for position, media in enumerate(parts):
+        api_db.execute(
+            "INSERT INTO merge_member (merge_group_id, media_file_id, position, active)"
+            " VALUES (?, ?, ?, 1)",
+            (group_id, media, position),
+        )
+
+    response = client.patch(
+        f"/api/merge-groups/{group_id}?action=regroup", json={"media_ids": parts[:1]}
+    )
+
+    assert response.status_code == 400
+    assert client.get(f"/api/merge-groups/{group_id}").json()["superseded_by_id"] is None
+
+
 def test_a_group_can_be_created_by_hand(client, api_db):
     """検出が拾えなかった並びを人が組む."""
     from .test_schema_artifacts import a_media_file

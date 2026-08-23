@@ -412,15 +412,18 @@ def test_a_4xx_is_recorded_as_skipped(world):
     """**組ごとに決着させる。** 相方も自分の理由を持って見送りになる。"""
 
     def reject(payload):
-        return 400, {"message": "no"}
+        return 400, {"message": "relayed-remote-wording"}
 
     world.immich._create_stack = reject
 
     outcome = world.run()
 
     assert outcome.skipped == 2
-    assert "受け付けない" in world.row("IMG_1234.JPG")["stack_reason"]
-    assert "受け付けない" in world.row("IMG_1234.CR2")["stack_reason"]
+    assert "受け付けなかった" in world.row("IMG_1234.JPG")["stack_reason"]
+    assert "受け付けなかった" in world.row("IMG_1234.CR2")["stack_reason"]
+    # **相手の文言を理由に混ぜない**（§13）。`stack_reason` は 設定 › 送り先に
+    # そのまま並ぶ。
+    assert "relayed-remote-wording" not in world.row("IMG_1234.JPG")["stack_reason"]
 
 
 def test_records_of_an_old_epoch_are_never_touched(world):
@@ -616,7 +619,7 @@ def test_a_primary_change_that_does_not_take_is_refused(world):
     outcome = world.run()
 
     assert outcome.stacked == 0
-    assert "受け付けない" in world.row("IMG_1234.JPG")["stack_reason"]
+    assert "受け付けなかった" in world.row("IMG_1234.JPG")["stack_reason"]
 
 
 def test_a_repoint_during_the_get_does_not_scan_the_rest(world):

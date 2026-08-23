@@ -88,6 +88,20 @@ def test_an_unknown_path_is_also_enveloped(client):
     assert _error(response)["code"] == ErrorCode.NOT_FOUND
 
 
+def test_a_framework_http_error_does_not_leak_its_own_wording(client):
+    """フレームワークが投げる失敗の文言（英語）をそのまま返さない.
+
+    画面は `bad_request` に `detail` を添えて出す（どの項目が悪いかは定型文では
+    書けない）。ここを素通しにすると "Method Not Allowed" が利用者へ出る。
+    """
+    response = client.request("DELETE", "/api/jobs")
+
+    assert response.status_code == 405
+    error = _error(response)
+    assert error["code"] == ErrorCode.BAD_REQUEST
+    assert "Method Not Allowed" not in error["detail"]
+
+
 def test_a_server_side_http_error_is_internal_not_bad_request(client, monkeypatch):
     """5xx を `bad_request` として返さない（画面が「入力を直せ」と誤案内する）."""
     from fastapi import HTTPException

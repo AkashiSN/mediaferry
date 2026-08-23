@@ -197,9 +197,47 @@ def test_a_partner_without_a_remote_asset_id_refuses_the_group():
 def test_a_partner_of_another_profile_is_refused():
     """規則が 1 つに決まらない組は作らない（§9.11）."""
     assert (
-        "別のプロファイル"
+        "別のカメラの種類"
         in resolve_group(a_jpg(), [a_jpg(), a_cr2(profile_id="profile-2")], RULE).reason
     )
+
+
+def test_no_refusal_reason_uses_an_internal_word_or_a_foreign_value():
+    """見送りの理由は**そのまま画面に出る**（設定 › 送り先）.
+
+    `upload_record.stack_reason` に入り、`GET /uploads?stack_state=skipped` を
+    経て文字どおり描かれる。だから §13 の言い換え（`web/src/test/vocabulary.ts`
+    の禁止語）が効く場所で、**値を埋め込む余地も無い**（相手の応答や内部の ID が
+    混ざる経路になる）。E2E の禁止語巡回は空の DB に対して走るので、データに
+    依存するこの文字列には構造的に届かない —— ここで見る。
+    """
+    import ast
+    from pathlib import Path
+
+    import mediaferry.core.uploads.stacking
+    import mediaferry.jobs.stacker
+
+    forbidden = ("ジョブ", "転送先", "承認待ち", "ボリューム", "プロファイル", "マージ")
+    sources = [
+        Path(mediaferry.core.uploads.stacking.__file__),
+        Path(mediaferry.jobs.stacker.__file__),
+    ]
+    for source in sources:
+        for node in ast.walk(ast.parse(source.read_text(encoding="utf-8"))):
+            if not isinstance(node, ast.Call):
+                continue
+            name = node.func.id if isinstance(node.func, ast.Name) else None
+            if name not in ("Refusal", "refuse"):
+                continue
+            for argument in node.args:
+                assert not isinstance(argument, ast.JoinedStr), (
+                    f"{source.name}:{node.lineno} 見送りの理由に値を埋め込んでいる"
+                )
+                if isinstance(argument, ast.Constant) and isinstance(argument.value, str):
+                    for word in forbidden:
+                        assert word not in argument.value, (
+                            f"{source.name}:{node.lineno} 「{word}」は画面に出す言葉ではない"
+                        )
 
 
 def test_the_stem_prefix_keeps_the_directory():

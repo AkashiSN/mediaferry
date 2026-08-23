@@ -104,6 +104,19 @@ def test_renaming_does_not_create_a_revision(secret_env, immich, client, api_db)
     assert api_db.execute("SELECT name FROM upload_destination").fetchone()[0] == "family"
 
 
+def test_a_destination_cannot_be_renamed_to_nothing(secret_env, immich, client, api_db):
+    """**名前は画面が送り先を指し示す唯一の手掛かり**（§13。id は出さない）.
+
+    空にできると、確認の本文も送り先の一覧も名前の無い行になる。
+    """
+    destination_id = client.post("/api/destinations", json=a_body(immich)).json()["id"]
+
+    response = client.patch(f"/api/destinations/{destination_id}", json={"name": "  "})
+
+    assert response.status_code == 400
+    assert api_db.execute("SELECT name FROM upload_destination").fetchone()[0] == "home"
+
+
 def test_a_failed_verification_does_not_disable_the_destination(secret_env, immich, client, api_db):
     """検証に失敗した編集は、どの欄も反映しない（§12.3）."""
     destination_id = client.post("/api/destinations", json=a_body(immich)).json()["id"]

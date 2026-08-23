@@ -10,6 +10,7 @@ export type ApiErrorBody = {
 
 const MESSAGES: Record<string, string> = {
   not_authenticated: "ログインが要ります。",
+  bad_request: "この操作は受け付けられません。入力を確かめてください。",
   csrf_failed: "画面が古くなっています。再読み込みしてから操作してください。",
   cross_site_request: "この操作は受け付けられません。画面を開き直してください。",
   untrusted_host: "この名前ではアクセスできません。設定の TRUSTED_HOSTS を確認してください。",
@@ -53,7 +54,10 @@ export class ApiError extends Error {
 // （カメラの種類の定義は 1 枚の YAML なので、「形式が正しくありません」では
 // どの項目を直せばよいか分からない）。`detail` は API がこちらで書いた日本語
 // だけを入れる契約なので、添えても相手由来の値は出ない（§13）。
-const WITH_DETAIL = new Set(["validation_failed"]);
+//
+// `bad_request` は 400 の受け皿で、断る理由がそのつど違う（「slug は作成後に
+// 変更できない」「知らない status」…）。文面だけでは直しようがないので添える。
+const WITH_DETAIL = new Set(["validation_failed", "bad_request"]);
 
 /** 画面に出す日本語。**知らない code のときだけ** detail を添える。 */
 export function displayMessage(code: string, detail: string): string {

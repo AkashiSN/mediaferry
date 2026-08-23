@@ -35,4 +35,18 @@ describe("どこが悪いかを落とさない", () => {
   it("detail が無ければ、括弧だけの文にしない", () => {
     expect(new ApiError(400, "validation_failed", "").message).toBe("入力の形式が正しくありません。");
   });
+
+  // `bad_request` は 400 の受け皿で、いちばんよく出る。文面を持たないと、
+  // **こちらが意図して断った入力ミスまで「予期しないエラー」になる。**
+  it("400 の受け皿にも文面があり、断った理由を添える", () => {
+    const error = new ApiError(400, "bad_request", "slug は作成後に変更できない");
+    expect(error.message).not.toContain("予期しない");
+    expect(error.message).toContain("slug は作成後に変更できない");
+  });
+
+  it("bad_request で detail が無ければ、括弧だけの文にしない", () => {
+    expect(new ApiError(400, "bad_request", "").message).toBe(
+      "この操作は受け付けられません。入力を確かめてください。",
+    );
+  });
 });

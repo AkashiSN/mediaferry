@@ -148,8 +148,10 @@ def patch_group(  # noqa: ANN201
         return {"status": "ok"}
     if action == "regroup":
         media_ids = body.get("media_ids")
-        if not isinstance(media_ids, list) or not media_ids:
-            raise ApiError(400, ErrorCode.MISSING_FIELD, "media_ids が要る")
+        # **手で作るときと同じ条件を課す**（2 件以上）。1 件だけの組にはつなぎ目が
+        # 無く、つなぎようがない。
+        if not isinstance(media_ids, list) or len(media_ids) < 2:
+            raise ApiError(400, ErrorCode.MISSING_FIELD, "media_ids は 2 件以上が要る")
         digest = _digest_of(conn, media_ids)
         new_id = _edited(repo.supersede, group_id, media_ids, digest)
         return {"status": "ok", "group_id": new_id}

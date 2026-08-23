@@ -129,7 +129,7 @@ def _refused(primary: Candidate, partners: Sequence[Candidate], rule: StackRule)
     for partner in partners:
         if partner.profile_id != primary.profile_id:
             # 規則が 1 つに決まらない（§9.11）。
-            return Refusal("相方が別のプロファイルに属している")
+            return Refusal("相方が別のカメラの種類に属している")
         if partner.invalidated or partner.state != "complete":
             return Refusal("相方はまだ送信が終わっていない")
         if partner.captured_at_source != primary.captured_at_source:

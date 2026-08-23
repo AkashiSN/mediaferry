@@ -73,9 +73,16 @@ def edit_destination(
         raise ApiError(
             400, ErrorCode.UNKNOWN_FIELD, "知らない欄がある", {"fields": sorted(unknown)}
         )
+    name = body.get("name")
+    if name is not None:
+        # **名前は画面が送り先を指す唯一の手掛かり**（§13 は内部の id を出さない）。
+        # 空にできると、確認の本文も一覧も名前の無い行になる。
+        name = str(name).strip()
+        if not name:
+            raise ApiError(400, ErrorCode.BAD_REQUEST, "名前は空にできない")
     if set(body) <= {"name", "enabled"}:
         # 接続に関わらない編集は、検証もリビジョンも要らない。
-        repo.rename_or_toggle(destination_id, name=body.get("name"), enabled=body.get("enabled"))
+        repo.rename_or_toggle(destination_id, name=name, enabled=body.get("enabled"))
         return {"id": destination_id}
     base_url = body.get("base_url", current["base_url"])
     public_url = body.get("public_url", current["public_url"])
