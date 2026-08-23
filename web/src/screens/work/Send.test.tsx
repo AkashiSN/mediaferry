@@ -203,6 +203,89 @@ describe("対象の解決", () => {
     );
   });
 
+  // `captured_at` は秒より細かい桁を持つことがある（`2026-08-18T10:00:00.123456+09:00`）。
+  // **決め打ちの位置で切ると、時差の部分が壊れる** —— 絞り込みの端が別の時刻に
+  // なり、その日のはずのものが外れる。
+  it("秒より細かい桁があっても、その日の時差で絞る", async () => {
+    const { calls } = stubApi({
+      "/destinations": DESTINATIONS,
+      "/media": {
+        media: [
+          {
+            id: "m1",
+            rel_path: "a.JPG",
+            kind: "photo",
+            captured_at: "2026-08-18T10:00:00.123456+09:00",
+            size_bytes: 1024,
+          },
+        ],
+        total: 1,
+        page: 1,
+        page_size: 50,
+      },
+    });
+    renderSend();
+    await userEvent.click(
+      await screen.findByRole("radio", { name: /いちばん新しい撮影日のぶんだけ/ }),
+    );
+    await waitFor(() =>
+      expect(
+        calls().some((c) =>
+          c.path.includes(`captured_from=${encodeURIComponent("2026-08-18T00:00:00+09:00")}`),
+        ),
+      ).toBe(true),
+    );
+    expect(
+      calls().some((c) =>
+        c.path.includes(`captured_to=${encodeURIComponent("2026-08-18T23:59:59+09:00")}`),
+      ),
+    ).toBe(true);
+  });
+
+  // 時差の違うカメラが混ざると、**文字列の順と時刻の順がずれる**（`captured_at` は
+  // 現地の時差付き）。並びの先頭で選ぶと、古い方の日で絞ってしまう。
+  it("時差が混ざっていても、いちばん新しい瞬間の日で絞る", async () => {
+    const { calls } = stubApi({
+      "/destinations": DESTINATIONS,
+      "/media": {
+        media: [
+          // 文字列では "2026-08-19…" が先に来るが、瞬間は 08-18T23:00+09:00
+          // （= 08-18T14:00Z）より **古い** 08-19T00:30+00:00（= 08-19T00:30Z）…
+          // ではなく新しいので、時差を無視すると取り違える組み合わせを作る。
+          {
+            id: "m2",
+            rel_path: "b.JPG",
+            kind: "photo",
+            captured_at: "2026-08-19T02:00:00+09:00",
+            size_bytes: 1024,
+          },
+          {
+            id: "m1",
+            rel_path: "a.JPG",
+            kind: "photo",
+            captured_at: "2026-08-19T00:00:00-05:00",
+            size_bytes: 1024,
+          },
+        ],
+        total: 2,
+        page: 1,
+        page_size: 50,
+      },
+    });
+    renderSend();
+    await userEvent.click(
+      await screen.findByRole("radio", { name: /いちばん新しい撮影日のぶんだけ/ }),
+    );
+    // 実際の瞬間は m1（08-19T05:00Z）が m2（08-18T17:00Z）より新しい。
+    await waitFor(() =>
+      expect(
+        calls().some((c) =>
+          c.path.includes(`captured_from=${encodeURIComponent("2026-08-19T00:00:00-05:00")}`),
+        ),
+      ).toBe(true),
+    );
+  });
+
   it("「選んだもの」は 1 件ずつ取得して合計を出す", async () => {
     stubApi({
       "/destinations": DESTINATIONS,
@@ -636,5 +719,82 @@ describe("送信そのもの", () => {
     // **1 件失敗しても、d1 の送信は始まっている**（全部やり直しにしない）。
     expect(await screen.findByTestId("sending-jobs")).toHaveTextContent("job-1");
     expect(await screen.findByTestId("sending-note")).toHaveTextContent("開始できなかった宛先: 旅行用");
+    // **始まった数は、実際に始まった数。** 組が受け付けられただけの宛先を数えると、
+    // 同じ 1 文で「2 宛先で始めた」と「1 宛先は始められなかった」を並べることになる。
+    expect(await screen.findByTestId("sending-note")).toHaveTextContent(
+      "1 宛先で送信を始めました",
+    );
+  });
+});
+
+// 送ったあとで取り消せない以上、**確認に出した内容と、実際に送るものが同じ**で
+// なければならない。宛先を選び直すと対象は読み直しになるので、その間に確認へ
+// 進ませない・開いている確認は閉じる。
+describe("確認の内容と、実際に送るもの", () => {
+  const TWO_ENABLED = {
+    destinations: [
+      { id: "d1", name: "家の Immich", enabled: true },
+      { id: "d2", name: "旅行用 Immich", enabled: true },
+    ],
+  };
+  const MEDIA = {
+    media: [
+      { id: "m1", rel_path: "a.JPG", kind: "photo", captured_at: "2026-08-18T10:00:00+09:00", size_bytes: 1024 },
+    ],
+    total: 1,
+    page: 1,
+    page_size: 50,
+  };
+
+  it("宛先を選び直したら、開いている確認は閉じる", async () => {
+    stubApi({ "/destinations": TWO_ENABLED, "/media": MEDIA });
+    renderSend();
+    await userEvent.click(await screen.findByRole("button", { name: /家の Immich/ }));
+    await waitFor(() => expect(screen.getByRole("button", { name: /内容を確かめる/ })).toBeEnabled());
+    await userEvent.click(screen.getByRole("button", { name: /内容を確かめる/ }));
+    expect(screen.getByRole("dialog")).toBeInTheDocument();
+
+    await userEvent.click(screen.getByRole("button", { name: /旅行用 Immich/ }));
+    expect(screen.queryByRole("dialog")).toBeNull();
+  });
+
+  it("対象を読み直している間は、確認へ進めない", async () => {
+    let release: (() => void) | undefined;
+    let mediaCalls = 0;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn((input: string) => {
+        const path = input.replace(/^\/api/, "");
+        if (path.startsWith("/media")) {
+          mediaCalls += 1;
+          const body = new Response(JSON.stringify(MEDIA), { status: 200 });
+          if (mediaCalls === 1) {
+            return Promise.resolve(body);
+          }
+          // 2 巡目（宛先を足したあと）は、テストが放すまで返さない。
+          return new Promise<Response>((resolve) => {
+            const previous: (() => void) | undefined = release;
+            release = () => {
+              previous?.();
+              resolve(new Response(JSON.stringify(MEDIA), { status: 200 }));
+            };
+          });
+        }
+        if (path.startsWith("/destinations")) {
+          return Promise.resolve(new Response(JSON.stringify(TWO_ENABLED), { status: 200 }));
+        }
+        return Promise.resolve(new Response("{}", { status: 200 }));
+      }),
+    );
+    renderSend();
+    await userEvent.click(await screen.findByRole("button", { name: /家の Immich/ }));
+    await waitFor(() => expect(screen.getByRole("button", { name: /内容を確かめる/ })).toBeEnabled());
+
+    await userEvent.click(screen.getByRole("button", { name: /旅行用 Immich/ }));
+    // 前の宛先ぶんの一覧はまだ画面に残っているが、**確認に出せる内容ではない**。
+    expect(screen.getByRole("button", { name: /内容を確かめる/ })).toBeDisabled();
+
+    release?.();
+    await waitFor(() => expect(screen.getByRole("button", { name: /内容を確かめる/ })).toBeEnabled());
   });
 });

@@ -4,15 +4,17 @@
 // 「いま何が起きるのか」が読めなくなるため、設定 › 詳しい情報（`details/MergeHistory.tsx`）
 // に置く。
 
-import { useState } from "react";
+import { useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
 
 import { request } from "../../api/client";
-import { useQuery } from "../../api/hooks";
+import { useDashboardReload } from "../../api/dashboard";
+import { useMutation, useQuery } from "../../api/hooks";
 import { ConfirmDialog } from "../../components/ConfirmDialog";
 import type { Confirmation } from "../../components/ConfirmDialog";
 import { ErrorBanner } from "../../components/ErrorBanner";
 import { Icon } from "../../components/Icon";
+import { useDialogFocus } from "../../components/useDialogFocus";
 import { useEvents } from "../../hooks/useEvents";
 import { useReloadOnEvents } from "../../hooks/useReloadOnEvents";
 import { formatBytes } from "../../utils/formatBytes";
@@ -123,27 +125,38 @@ function ordered(members: Member[]): Member[] {
   return [...members].sort((a, b) => a.position - b.position);
 }
 
+/** 端数の丸めで生じる程度の重なりは、隙間なしとして扱う（秒）。 */
+const OVERLAP_TOLERANCE_SECONDS = 1;
+
 /**
  * パート間でいちばん大きい空白（秒）。**これが「なぜ同じ 1 本と判断したか」の根拠**。
  *
- * 隣り合うどちらかの長さが読めない（`duration_seconds === null`）と、そのつなぎ目の
- * 終端が計算できない。**0 として扱わない** —— 0 は「隙間なく続いている」という
- * 積極的な主張であり、読めなかっただけの部分を「別の撮影ではない」と断定してしまう。
- * その場合は `null`（分からない）を返す。
+ * **計算できなかったものを 0 にしない。** 0 は「隙間なく続いている」という積極的な
+ * 主張で、取り消せない結合をその根拠で確認させることになる。次のときは `null`
+ * （分からない）を返す。
+ *
+ * - 隣り合うどちらかの長さが読めない（`duration_seconds === null`）
+ * - 時刻が読めない（`captured_at` を解釈できない）
+ * - パートが重なって見える —— `captured_at` が撮影の開始ではないときに起きる
+ *   （カメラの種類の既定は `source: "mtime"` で、これはクリップの**終端**）
+ * - つなぎ目が 1 つも無い（パートが 1 つだけ。構成を変えるで外すと起きる）
  */
 function gapSeconds(members: Member[]): number | null {
   const sorted = ordered(members);
-  let max = 0;
+  let max: number | null = null;
   for (let i = 1; i < sorted.length; i += 1) {
     const previous = sorted[i - 1];
     if (previous.duration_seconds === null) {
       return null;
     }
     const previousEnd = Date.parse(previous.captured_at) + previous.duration_seconds * 1000;
-    const gapMs = Date.parse(sorted[i].captured_at) - previousEnd;
-    max = Math.max(max, gapMs / 1000);
+    const gap = (Date.parse(sorted[i].captured_at) - previousEnd) / 1000;
+    if (Number.isNaN(gap) || gap < -OVERLAP_TOLERANCE_SECONDS) {
+      return null;
+    }
+    max = Math.max(max ?? 0, gap);
   }
-  return Math.round(max * 10) / 10;
+  return max === null ? null : Math.round(Math.max(0, max) * 10) / 10;
 }
 
 function totalBytes(members: Member[]): number {
@@ -176,28 +189,36 @@ export function MergeScreen() {
   const media = useQuery<{ media: { id: string; rel_path: string }[] }>("/media?page_size=200");
   const [picked, setPicked] = useState<Set<string>>(new Set());
   const [regrouping, setRegrouping] = useState<Group | null>(null);
-  const [error, setError] = useState<unknown>(null);
+  const edit = useMutation();
   const { received } = useEvents();
   useReloadOnEvents(received, groups.reload);
-  const [confirmation, setConfirmation] = useState<{ value: Confirmation; run: () => Promise<void> } | null>(null);
-  const [busy, setBusy] = useState(false);
+  const [confirmation, setConfirmation] = useState<{
+    value: Confirmation;
+    run: () => Promise<unknown>;
+  } | null>(null);
+  const refreshTasks = useDashboardReload();
   const navigate = useNavigate();
 
-  async function act(path: string, body?: unknown, method?: "POST" | "PATCH" | "DELETE") {
-    setBusy(true);
-    setError(null);
-    try {
-      await request(path, {
+  /** 成功したかを返す。**失敗したのに後片付けを進めない**ため。 */
+  async function act(
+    path: string,
+    body?: unknown,
+    method?: "POST" | "PATCH" | "DELETE",
+  ): Promise<boolean> {
+    const done = await edit.run(() =>
+      request(path, {
         method: method ?? (path.includes("?action=") ? "PATCH" : "POST"),
         body,
-      });
+      }),
+    );
+    if (done) {
       groups.reload();
-    } catch (caught) {
-      setError(caught);
-    } finally {
-      setBusy(false);
-      setConfirmation(null);
+      // 破棄・採用・組み直しは進捗のイベントを出さない。**枠の「やること」も
+      // 一緒に直す。**
+      refreshTasks();
     }
+    setConfirmation(null);
+    return done;
   }
 
   function renderGroup(group: Group) {
@@ -225,7 +246,7 @@ export function MergeScreen() {
             </p>
             <p className="small" style={{ marginTop: 3, color: warn ? "var(--warn)" : undefined }}>
               {gap === null
-                ? "長さが読めないパートがあるので、つなぎ目の空白は分かりません。"
+                ? "パートの時刻と長さからは、つなぎ目の空白は分かりません。"
                 : warn
                   ? `つなぎ目に ${gap} 秒の空白があります。別の撮影かもしれないので、確かめてから決めてください。`
                   : "連番が続いていて、つなぎ目の空白は 0.0 秒です。だから同じ 1 本と判断しました。"}
@@ -257,12 +278,12 @@ export function MergeScreen() {
           </div>
           <div className="acts">
             {group.status === "detected" && (
-              <button type="button" className="btn outline" disabled={busy} onClick={() => void act(`/merge-groups/${group.id}/merge`)}>
+              <button type="button" className="btn outline" disabled={edit.busy} onClick={() => void act(`/merge-groups/${group.id}/merge`)}>
                 つなぐ
               </button>
             )}
             {group.status === "failed" && (
-              <button type="button" className="btn warnish" disabled={busy} onClick={() => void act(`/merge-groups/${group.id}/merge`)}>
+              <button type="button" className="btn warnish" disabled={edit.busy} onClick={() => void act(`/merge-groups/${group.id}/merge`)}>
                 再試行する
               </button>
             )}
@@ -272,7 +293,7 @@ export function MergeScreen() {
               <button
                 type="button"
                 className="btn sm"
-                disabled={busy}
+                disabled={edit.busy}
                 onClick={() =>
                   navigate("/send", { state: { ids: members.map((member) => member.media_file_id) } })
                 }
@@ -287,7 +308,7 @@ export function MergeScreen() {
               <button
                 type="button"
                 className="btn sm"
-                disabled={busy}
+                disabled={edit.busy}
                 onClick={() =>
                   setConfirmation({
                     value: {
@@ -306,7 +327,7 @@ export function MergeScreen() {
               <button
                 type="button"
                 className="btn sm"
-                disabled={busy}
+                disabled={edit.busy}
                 onClick={() =>
                   setConfirmation({
                     value: {
@@ -324,7 +345,7 @@ export function MergeScreen() {
               </button>
             )}
             {group.superseded_by_id === null && (
-              <button type="button" className="btn sm" disabled={busy} onClick={() => setRegrouping(group)}>
+              <button type="button" className="btn sm" disabled={edit.busy} onClick={() => setRegrouping(group)}>
                 構成を変える
               </button>
             )}
@@ -332,7 +353,7 @@ export function MergeScreen() {
               <button
                 type="button"
                 className="btn sm"
-                disabled={busy}
+                disabled={edit.busy}
                 onClick={() =>
                   setConfirmation({
                     value: {
@@ -374,10 +395,10 @@ export function MergeScreen() {
         </p>
       </div>
 
-      <ErrorBanner error={error ?? groups.error} onDismiss={() => setError(null)} />
+      <ErrorBanner error={edit.error ?? groups.error} onDismiss={edit.clear} />
 
       <div>
-        <button type="button" className="btn sm" disabled={busy} onClick={() => void act("/merge-groups/detect")}>
+        <button type="button" className="btn sm" disabled={edit.busy} onClick={() => void act("/merge-groups/detect")}>
           分かれた動画を探す
         </button>
       </div>
@@ -414,8 +435,16 @@ export function MergeScreen() {
         <button
           type="button"
           className="btn sm"
-          disabled={busy || picked.size < 2}
-          onClick={() => void act("/merge-groups", { media_ids: [...picked] }).then(() => setPicked(new Set()))}
+          disabled={edit.busy || picked.size < 2}
+          // **失敗したら選択を残す。** 消すと、やり直すのに選び直しからになる
+          // （失敗そのものは上の帯で知らせている）。
+          onClick={() =>
+            void act("/merge-groups", { media_ids: [...picked] }).then((ok) => {
+              if (ok) {
+                setPicked(new Set());
+              }
+            })
+          }
         >
           選んだ {picked.size} 件でグループを作る
         </button>
@@ -433,59 +462,107 @@ export function MergeScreen() {
       )}
 
       {regrouping && (
-        <div className="dialog-backdrop" role="presentation">
-          <div className="dialog" role="dialog" aria-modal="true" aria-label="構成を変える">
-            <h2>構成を変える</h2>
-            <p>
-              残すパートを選びます。新しいグループを作り、いまのグループはそちらへ
-              向け直します（公開済みのファイルは消えません）。
-            </p>
-            <ul>
-              {ordered(regrouping.members).map((member) => (
-                <li key={member.media_file_id}>
-                  <label>
-                    <input type="checkbox" defaultChecked value={member.media_file_id} name="member" />
-                    {member.rel_path}
-                  </label>
-                </li>
-              ))}
-            </ul>
-            {/* **効かないガードは置かない。** ここに `disabled={busy}` を書いても
-                一度も真にならない —— このダイアログを開く「構成を変える」自体が
-                `busy` の間は押せず、開いている間に `busy` を真にできる経路も無い
-                （どちらのボタンも `setRegrouping(null)` を先に呼ぶので、`busy` が
-                立つ時点でダイアログは消えている）。**二重送信を止めているのは
-                「押した瞬間に閉じる」こと**で、押せなさではない。 */}
-            <div className="dialog-actions">
-              <button type="button" onClick={() => setRegrouping(null)}>
-                やめる
-              </button>
-              <button
-                type="button"
-                onClick={() => {
-                  const checked = [
-                    ...document.querySelectorAll<HTMLInputElement>('input[name="member"]:checked'),
-                  ].map((input) => input.value);
-                  const target = regrouping;
-                  setRegrouping(null);
-                  void act(`/merge-groups/${target.id}?action=regroup`, { media_ids: checked });
-                }}
-              >
-                この構成にする
-              </button>
-            </div>
-          </div>
-        </div>
+        <RegroupDialog
+          group={regrouping}
+          onCancel={() => setRegrouping(null)}
+          onSubmit={(mediaIds) => {
+            const target = regrouping;
+            setRegrouping(null);
+            void act(`/merge-groups/${target.id}?action=regroup`, { media_ids: mediaIds });
+          }}
+        />
       )}
 
       {confirmation && (
         <ConfirmDialog
           confirmation={confirmation.value}
-          busy={busy}
+          busy={edit.busy}
           onCancel={() => setConfirmation(null)}
           onConfirm={() => void confirmation.run()}
         />
       )}
     </section>
+  );
+}
+
+/**
+ * 構成を変える（§13）。**残すパートを選び直し、新しいグループを作る。**
+ *
+ * **2 件以上でなければ確定できない**（`POST /merge-groups` と同じ条件。API も
+ * 400 で断る）。1 件だけの組にはつなぎ目が無く、つなぎようがない。
+ *
+ * **二重送信を止めているのは「押した瞬間に閉じる」こと。** 押せなさではない
+ * （このダイアログを開くボタン自体が `busy` の間は押せず、開いている間に `busy`
+ * を真にできる経路も無い）。
+ */
+function RegroupDialog({
+  group,
+  onCancel,
+  onSubmit,
+}: {
+  group: Group;
+  onCancel: () => void;
+  onSubmit: (mediaIds: string[]) => void;
+}) {
+  const members = ordered(group.members);
+  const [picked, setPicked] = useState<Set<string>>(
+    () => new Set(members.map((member) => member.media_file_id)),
+  );
+  const dialog = useRef<HTMLDivElement>(null);
+  useDialogFocus(dialog, onCancel);
+
+  return (
+    <div className="dialog-backdrop" role="presentation">
+      <div className="dialog" ref={dialog} role="dialog" aria-modal="true" aria-label="構成を変える">
+        <h2>構成を変える</h2>
+        <p>
+          残すパートを選びます。新しいグループを作り、いまのグループはそちらへ
+          向け直します（公開済みのファイルは消えません）。
+        </p>
+        <ul>
+          {members.map((member) => (
+            <li key={member.media_file_id}>
+              <label>
+                <input
+                  type="checkbox"
+                  checked={picked.has(member.media_file_id)}
+                  onChange={() =>
+                    setPicked((current) => {
+                      const next = new Set(current);
+                      if (next.has(member.media_file_id)) {
+                        next.delete(member.media_file_id);
+                      } else {
+                        next.add(member.media_file_id);
+                      }
+                      return next;
+                    })
+                  }
+                />
+                {member.rel_path}
+              </label>
+            </li>
+          ))}
+        </ul>
+        {picked.size < 2 && <p className="small">つなぐには 2 件以上えらんでください。</p>}
+        <div className="dialog-actions">
+          <button type="button" onClick={onCancel}>
+            やめる
+          </button>
+          <button
+            type="button"
+            disabled={picked.size < 2}
+            onClick={() =>
+              onSubmit(
+                members
+                  .map((member) => member.media_file_id)
+                  .filter((id) => picked.has(id)),
+              )
+            }
+          >
+            この構成にする
+          </button>
+        </div>
+      </div>
+    </div>
   );
 }

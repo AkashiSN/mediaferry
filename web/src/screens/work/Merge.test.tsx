@@ -244,6 +244,66 @@ describe("つなぐ", () => {
     expect(screen.queryByText(/別の撮影かもしれない/)).not.toBeInTheDocument();
   });
 
+  // 既定のテンプレートは `source: "mtime"` で、`captured_at` はファイルの最終
+  // 書き込み時刻＝**クリップの終端**になる。前パートの終端に長さを足した時刻より
+  // 次のパートの時刻が前になるので、空白は負になる。**0 に丸めると「隙間なく
+  // 続いている」という積極的な主張になり、取り消せない結合をその根拠で確認させる。**
+  it("パートが重なって見えるときは、空白を 0 と言わない", async () => {
+    const overlapping = {
+      ...GROUP,
+      id: "g20",
+      members: [
+        GROUP.members[0],
+        // 前パートの終端は 14:13:00。次のパートの時刻がそれより前＝重なっている。
+        { ...GROUP.members[1], captured_at: "2026-08-18T14:05:00+09:00" },
+      ],
+    };
+    stubApi({ ...ROUTES, "/merge-groups": { groups: [overlapping] } });
+    render(
+      <MemoryRouter>
+        <MergeScreen />
+      </MemoryRouter>,
+    );
+    await waitFor(() =>
+      expect(screen.getByText(/つなぎ目の空白は分かりません/)).toBeInTheDocument(),
+    );
+    expect(screen.queryByText(/連番が続いていて/)).toBeNull();
+    expect(screen.queryByText(/0\.0 秒/)).toBeNull();
+  });
+
+  it("時刻が読めないパートがあると、空白は分からないと言う", async () => {
+    const unparsable = {
+      ...GROUP,
+      id: "g21",
+      members: [GROUP.members[0], { ...GROUP.members[1], captured_at: "" }],
+    };
+    stubApi({ ...ROUTES, "/merge-groups": { groups: [unparsable] } });
+    render(
+      <MemoryRouter>
+        <MergeScreen />
+      </MemoryRouter>,
+    );
+    await waitFor(() =>
+      expect(screen.getByText(/つなぎ目の空白は分かりません/)).toBeInTheDocument(),
+    );
+    expect(screen.queryByText(/連番が続いていて/)).toBeNull();
+  });
+
+  it("パートが 1 つしかない組では、つなぎ目の話をしない", async () => {
+    // 構成を変えるでパートを 1 つまで外すと起きる。つなぎ目が無いので、
+    // 「空白は 0.0 秒です。だから同じ 1 本と判断しました」は言いようがない。
+    const single = { ...GROUP, id: "g22", members: [GROUP.members[0]] };
+    stubApi({ ...ROUTES, "/merge-groups": { groups: [single] } });
+    render(
+      <MemoryRouter>
+        <MergeScreen />
+      </MemoryRouter>,
+    );
+    await waitFor(() => expect(screen.getByText(/1 つに分かれています/)).toBeInTheDocument());
+    expect(screen.queryByText(/連番が続いていて/)).toBeNull();
+    expect(screen.queryByText(/別の撮影かもしれない/)).toBeNull();
+  });
+
   it("手動で作った組・結合に失敗した組は、見出しにそれと分かる印を出す", async () => {
     const manual = { ...GROUP, id: "g10", detected_by: "manual" };
     const failed = {
@@ -486,7 +546,14 @@ describe("つなぐ", () => {
   });
 
   it("「構成を変える」は、チェックを外した member を除いて regroup する", async () => {
-    const target = { ...GROUP, id: "g21" };
+    const target = {
+      ...GROUP,
+      id: "g21",
+      members: [
+        ...GROUP.members,
+        { ...GROUP.members[1], position: 2, media_file_id: "m3", rel_path: "library/DJI_0003.MP4" },
+      ],
+    };
     const { calls, bodies } = stubApiWithBodies({ ...ROUTES, "/merge-groups": { groups: [target] } });
     render(
       <MemoryRouter>
@@ -498,14 +565,52 @@ describe("つなぐ", () => {
     // 読み上げの名前（`aria-label`）と、見えている題は別の式。
     expect(within(dialog).getByRole("heading", { name: "構成を変える" })).toBeInTheDocument();
     const checkboxes = within(dialog).getAllByRole("checkbox");
-    expect(checkboxes).toHaveLength(2);
-    await userEvent.click(checkboxes[1]); // position 1（m2）のチェックを外す
+    expect(checkboxes).toHaveLength(3);
+    await userEvent.click(checkboxes[2]); // position 2（m3）のチェックを外す
     await userEvent.click(within(dialog).getByRole("button", { name: "この構成にする" }));
     await waitFor(() =>
       expect(calls().some((c) => c.path === "/merge-groups/g21?action=regroup" && c.method === "PATCH")).toBe(true),
     );
     const sent = bodies.find((b) => b.path === "/merge-groups/g21?action=regroup");
-    expect(sent?.body).toEqual({ media_ids: ["m1"] });
+    expect(sent?.body).toEqual({ media_ids: ["m1", "m2"] });
+  });
+
+  // つなぐ組は 2 件以上（`POST /merge-groups` と同じ条件。API も 400 で断る）。
+  // 1 件まで外せてしまうと、つなぎ目の無い組が一覧に残る。
+  it("1 件まで外したら、その構成にはできない", async () => {
+    const target = { ...GROUP, id: "g24" };
+    const { calls } = stubApiWithBodies({ ...ROUTES, "/merge-groups": { groups: [target] } });
+    render(
+      <MemoryRouter>
+        <MergeScreen />
+      </MemoryRouter>,
+    );
+    await userEvent.click(await screen.findByRole("button", { name: "構成を変える" }));
+    const dialog = await screen.findByRole("dialog", { name: "構成を変える" });
+    await userEvent.click(within(dialog).getAllByRole("checkbox")[1]);
+
+    expect(within(dialog).getByRole("button", { name: "この構成にする" })).toBeDisabled();
+    expect(calls().some((c) => c.method === "PATCH")).toBe(false);
+  });
+
+  // `aria-modal="true"` を名乗る以上、背後は「無い」ことになっている（§13）。
+  it("「構成を変える」は、開いたら中へ焦点が入り、Esc で閉じられる", async () => {
+    const target = { ...GROUP, id: "g25" };
+    stubApiWithBodies({ ...ROUTES, "/merge-groups": { groups: [target] } });
+    render(
+      <MemoryRouter>
+        <MergeScreen />
+      </MemoryRouter>,
+    );
+    const opener = await screen.findByRole("button", { name: "構成を変える" });
+    await userEvent.click(opener);
+    const dialog = await screen.findByRole("dialog", { name: "構成を変える" });
+    expect(dialog.contains(document.activeElement)).toBe(true);
+
+    await userEvent.keyboard("{Escape}");
+
+    expect(screen.queryByRole("dialog", { name: "構成を変える" })).toBeNull();
+    expect(document.activeElement).toBe(opener);
   });
 
   // **二重送信を止めているのは「押した瞬間に閉じる」こと。** ここに
@@ -571,6 +676,48 @@ describe("つなぐ", () => {
     await waitFor(() =>
       expect(calls().some((c) => c.path === "/merge-groups" && c.method === "POST")).toBe(true),
     );
+  });
+
+  // 失敗した選択を消すと、**やり直すのに選び直しからになる**（失敗は上の帯で
+  // 知らせている）。
+  it("グループを作れなかったときは、選んだものを残す", async () => {
+    const media = [
+      { id: "x1", rel_path: "library/X1.MP4" },
+      { id: "x2", rel_path: "library/X2.MP4" },
+    ];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn((input: string, init?: RequestInit) => {
+        const path = input.replace(/^\/api/, "");
+        if (path === "/merge-groups" && init?.method === "POST") {
+          return Promise.resolve(
+            new Response(JSON.stringify({ error: { code: "conflict", detail: "別の組にいる", meta: {} } }), {
+              status: 409,
+            }),
+          );
+        }
+        if (path.startsWith("/media")) {
+          return Promise.resolve(new Response(JSON.stringify({ media }), { status: 200 }));
+        }
+        if (path.startsWith("/merge-groups")) {
+          return Promise.resolve(new Response(JSON.stringify({ groups: [] }), { status: 200 }));
+        }
+        return Promise.resolve(new Response("{}", { status: 200 }));
+      }),
+    );
+    render(
+      <MemoryRouter>
+        <MergeScreen />
+      </MemoryRouter>,
+    );
+    await userEvent.click(await screen.findByText("手でグループを作る"));
+    const checkboxes = await screen.findAllByRole("checkbox");
+    await userEvent.click(checkboxes[0]);
+    await userEvent.click(checkboxes[1]);
+    await userEvent.click(screen.getByRole("button", { name: /選んだ 2 件でグループを作る/ }));
+
+    await waitFor(() => expect(screen.getByRole("alert")).toBeInTheDocument());
+    expect(screen.getByRole("button", { name: /選んだ 2 件でグループを作る/ })).toBeInTheDocument();
   });
 });
 

@@ -1,11 +1,15 @@
 // 送る（§13）。**取り消せないので、宛先 → 対象 → 確認の 3 段を 1 画面に縦に並べる。**
 // 別ページに分けると戻る操作が増えるだけで、選び直しがしにくくなる。
+//
+// **この画面だけは、進捗で取り直さない**（他の一覧は `useReloadOnEvents` を持つ）。
+// 対象は利用者が選んでいる最中のもので、裏で増減すると、確かめた内容と送るものが
+// 食い違う。新しく取り込まれたぶんは、送り終えて画面へ戻ったときに入る。
 
 import { useEffect, useMemo, useState } from "react";
 import { useLocation, useNavigate } from "react-router-dom";
 
 import { request } from "../../api/client";
-import { useQuery } from "../../api/hooks";
+import { useMutation, useQuery } from "../../api/hooks";
 import { ConfirmDialog } from "../../components/ConfirmDialog";
 import { ErrorBanner } from "../../components/ErrorBanner";
 import { Icon } from "../../components/Icon";
@@ -51,7 +55,29 @@ export function mergeMedia(pages: { media: Media[] }[]): Media[] {
   });
 }
 
-/** 送信の結果を 1 文にする（**断られた組と、開始に失敗した宛先を隠さない**）。 */
+/**
+ * いちばん新しい 1 件（**実際の瞬間で比べる**）。
+ *
+ * `captured_at` は現地の時差付きで保存されるので、時差の違うカメラが混ざると
+ * 文字列の大小は時刻の大小と一致しない。読めない値は候補にしない。
+ */
+function newest(media: Media[]): Media | undefined {
+  return media.reduce<Media | undefined>((best, item) => {
+    const at = Date.parse(item.captured_at);
+    if (Number.isNaN(at)) {
+      return best;
+    }
+    return best === undefined || at > Date.parse(best.captured_at) ? item : best;
+  }, undefined);
+}
+
+/**
+ * 送信の結果を 1 文にする（**断られた組と、開始に失敗した宛先を隠さない**）。
+ *
+ * `started` は**実際に送信が始まった宛先の数**。組が受け付けられただけの数を
+ * 渡すと、同じ 1 文で「2 宛先で始めた」と「1 宛先は始められなかった」を並べる
+ * ことになる（取り消せない操作の報告としては嘘になる）。
+ */
 export function summarise(
   total: number,
   rejected: { reason: string | null }[],
@@ -82,9 +108,11 @@ export function SendScreen() {
   // 始める（§13 の「宛先を先に決める」が往復で巻き戻らないように）。候補が
   // 1 つしかないときは黙ってそれを使う（`Photos.tsx` の宛先選びと同じ考え方）。
   const [targets, setTargets] = useState<Set<string>>(new Set(passed?.destinationIds ?? []));
-  const [confirming, setConfirming] = useState(false);
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<unknown>(null);
+  // **確認は「いまの対象」に結び付けて持つ。** 宛先や対象の種類が変わった時点で
+  // 中身が変わるので、開いたままにすると確かめたのと違うものが送られる。
+  const [confirmingFor, setConfirmingFor] = useState<string | null>(null);
+  // 送信そのものと、対象の解決の失敗。**画面が持つ失敗は 1 本**（帯も 1 本）。
+  const sending = useMutation();
   // 対象の解決で一部だけ外れたときの断り書き（隠さない。§13）。
   const [note, setNote] = useState<string | null>(null);
 
@@ -178,7 +206,7 @@ export function SendScreen() {
       }
 
       setTargetLoading(true);
-      setError(null);
+      sending.clear();
       setNote(null);
       try {
         if (preset === "selection") {
@@ -204,16 +232,22 @@ export function SendScreen() {
 
         let pages = await unsentPages(null);
         if (preset === "day0") {
-          // **いちばん新しい撮影日のぶんだけ。** 並びは `captured_at DESC` なので、
-          // 絞らずに 1 巡取った先頭が最新の撮影日（宛先が複数あるときは、その中で
-          // いちばん新しいもの）。その日の 0 時〜24 時で絞り直す。
-          const top = mergeMedia(pages)[0];
+          // **いちばん新しい撮影日のぶんだけ。** 絞らずに 1 巡取った中から、
+          // **実際の瞬間がいちばん新しいもの**を選び、その日の 0 時〜24 時で
+          // 絞り直す。
+          //
+          // **並び（`mergeMedia`）の先頭では選ばない。** 並びは API と同じ文字列
+          // 比較で、`captured_at` は現地の時差付きなので、時差の違うカメラが
+          // 混ざると文字の順と時刻の順がずれる。
+          const top = newest(mergeMedia(pages));
           if (top === undefined) {
             clear();
             return;
           }
           const day = top.captured_at.slice(0, 10);
-          const offset = top.captured_at.slice(19);
+          // **時差は末尾から読む。** 秒より細かい桁があると（`…:00.123456+09:00`）
+          // 決め打ちの位置では切れず、絞り込みの端が別の時刻になる。
+          const offset = /(Z|[+-]\d{2}:\d{2})$/.exec(top.captured_at)?.[0] ?? "";
           pages = await unsentPages({
             from: `${day}T00:00:00${offset}`,
             to: `${day}T23:59:59${offset}`,
@@ -229,7 +263,7 @@ export function SendScreen() {
         }
       } catch (caught) {
         if (!cancelled) {
-          setError(caught);
+          sending.fail(caught);
           setTargetMedia([]);
           setTargetTotal(0);
           setTargetTruncated(false);
@@ -254,6 +288,10 @@ export function SendScreen() {
     [targetMedia],
   );
 
+  // 開いた時点の対象（種類 × 宛先）。**変わったら確認はひとりでに閉じる。**
+  const targetKey = `${preset}:${chosenKey}`;
+  const confirming = confirmingFor === targetKey;
+
   /**
    * 送信は 2 段階（§10）。
    *
@@ -262,9 +300,7 @@ export function SendScreen() {
    * 失敗しても、成功した分は進める**（全部やり直しにしない）。
    */
   async function send() {
-    setBusy(true);
-    setError(null);
-    try {
+    const done = await sending.run(async () => {
       const created = (await request("/uploads", {
         method: "POST",
         body: { media_ids: targetMedia.map((media) => media.id), destination_ids: chosen.map((d) => d.id) },
@@ -287,12 +323,12 @@ export function SendScreen() {
           failures.push(destination.name);
         }
       }
-      const note = summarise(created.pairs.length, rejected, failures, accepted.size);
+      const note = summarise(created.pairs.length, rejected, failures, jobIds.length);
       navigate("/sending", { state: { jobIds, note } });
-    } catch (caught) {
-      setError(caught);
-      setConfirming(false);
-      setBusy(false);
+    });
+    if (!done) {
+      // 失敗はバナーに出るので、確認は閉じて選び直せるようにする。
+      setConfirmingFor(null);
     }
   }
 
@@ -335,7 +371,7 @@ export function SendScreen() {
       </button>
       <h1 className="page">Immich へ送る</h1>
 
-      <ErrorBanner error={error ?? destinationsQuery.error} onDismiss={() => setError(null)} />
+      <ErrorBanner error={sending.error ?? destinationsQuery.error} onDismiss={sending.clear} />
       {note && <p role="status">{note}</p>}
 
       <section>
@@ -456,11 +492,13 @@ export function SendScreen() {
             </div>
           )}
         </div>
+        {/* **読み直している間は押させない。** 手元の一覧は前の宛先ぶんのままで、
+            確認に出しても実際に送るものと一致しない。 */}
         <button
           type="button"
           className="btn primary big"
-          disabled={targetMedia.length === 0 || chosen.length === 0}
-          onClick={() => setConfirming(true)}
+          disabled={targetMedia.length === 0 || chosen.length === 0 || targetLoading}
+          onClick={() => setConfirmingFor(targetKey)}
         >
           内容を確かめる
         </button>
@@ -474,8 +512,8 @@ export function SendScreen() {
             totalBytes,
             destinationNames: chosen.map((d) => d.name),
           }}
-          busy={busy}
-          onCancel={() => setConfirming(false)}
+          busy={sending.busy}
+          onCancel={() => setConfirmingFor(null)}
           onConfirm={() => void send()}
         />
       )}
