@@ -34,9 +34,19 @@ export function stubApi(
       calls.push({ path, method: init?.method ?? "GET" });
       onCall?.(path, init);
       const key = matchRoute(path, routes);
-      return Promise.resolve(
-        new Response(JSON.stringify(key === undefined ? {} : routes[key]), { status: 200 }),
-      );
+      if (key === undefined) {
+        // **知らないパスを 200 で返さない。** 空の本文を返すと、登録し忘れた
+        // 経路が「空の応答」として素通りし、テストが中身を見ないまま緑になる。
+        return Promise.resolve(
+          new Response(
+            JSON.stringify({
+              error: { code: "not_found", detail: `stubApi に ${path} の登録が無い`, meta: {} },
+            }),
+            { status: 404 },
+          ),
+        );
+      }
+      return Promise.resolve(new Response(JSON.stringify(routes[key]), { status: 200 }));
     }),
   );
   return { calls: () => [...calls] };
