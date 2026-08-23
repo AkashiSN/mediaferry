@@ -15,6 +15,12 @@ export function isLive(job: Job): boolean {
   return LIVE_STATUSES.includes(job.status);
 }
 
+/** まだ止められるか（`db/jobs.py` の `request_cancel` が受け付ける状態）。
+ * `cancelling` は既に頼んであるので入れない。 */
+export function isCancellable(job: Job): boolean {
+  return job.status === "queued" || job.status === "running";
+}
+
 /** いま実際に走っているか（待機中は含まない）。 */
 function isRunning(job: Job): boolean {
   return job.status === "running" || job.status === "cancelling";

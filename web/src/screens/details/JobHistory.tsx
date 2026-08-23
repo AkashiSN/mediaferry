@@ -1,30 +1,25 @@
 // 作業の履歴（§13「詳しい情報」）。いま走っている作業はホームに出るので、ここは
 // 一覧と、終わった作業がいつ・どうなったかを見る場所。
 
-import { useState } from "react";
 import { Link } from "react-router-dom";
 
 import { request } from "../../api/client";
-import { useQuery } from "../../api/hooks";
+import { useMutation, useQuery } from "../../api/hooks";
 import { ErrorBanner } from "../../components/ErrorBanner";
 import { Icon } from "../../components/Icon";
 import { JobCard } from "../../components/JobCard";
 import type { Job } from "../../components/JobProgress";
 import { useEvents } from "../../hooks/useEvents";
-import { isLive, useJobPulse } from "../../hooks/useJobPulse";
+import { isCancellable, isLive, useJobPulse } from "../../hooks/useJobPulse";
 import { useReloadOnEvents } from "../../hooks/useReloadOnEvents";
 import { formatSystemDateTime } from "../../utils/formatDateTime";
 
 type Jobs = { jobs: Job[] };
 
-// 中止できる状態。待機中はすぐに取り消され、実行中はキャンセル中を経て取り消される
-// （`db/jobs.py` の `request_cancel`）。
-const CANCELLABLE_STATUSES = ["queued", "running"];
-
 export function JobHistoryScreen() {
   const jobs = useQuery<Jobs>("/jobs");
   const { events, received, connected } = useEvents();
-  const [error, setError] = useState<unknown>(null);
+  const cancelling = useMutation();
   useReloadOnEvents(received, jobs.reload);
 
   const running = (jobs.data?.jobs ?? []).some(isLive);
@@ -36,12 +31,8 @@ export function JobHistoryScreen() {
   const latestByJob = new Map(events.map((event) => [event.job_id, event]));
 
   async function cancel(jobId: string) {
-    setError(null);
-    try {
-      await request(`/jobs/${jobId}/cancel`, { method: "POST" });
+    if (await cancelling.run(() => request(`/jobs/${jobId}/cancel`, { method: "POST" }))) {
       jobs.reload();
-    } catch (caught) {
-      setError(caught);
     }
   }
 
@@ -77,7 +68,7 @@ export function JobHistoryScreen() {
       </div>
       <h1 className="page title-lg">作業の履歴</h1>
 
-      <ErrorBanner error={error ?? jobs.error} onDismiss={() => setError(null)} />
+      <ErrorBanner error={cancelling.error ?? jobs.error} onDismiss={cancelling.clear} />
 
       {connected === false && (
         <p role="status">進捗の接続が切れています。再接続を待っています…</p>
@@ -93,7 +84,8 @@ export function JobHistoryScreen() {
             key={job.id}
             job={job}
             rate={averageRate(job)}
-            onCancel={CANCELLABLE_STATUSES.includes(job.status) ? (id) => void cancel(id) : undefined}
+            onCancel={isCancellable(job) ? (id) => void cancel(id) : undefined}
+            cancelBusy={cancelling.busy}
             notes={notesFor(job)}
           />
         ))

@@ -17,6 +17,7 @@ export function JobCard({
   rate,
   onCancel,
   cancelLabel = "中止する",
+  cancelBusy = false,
   notes,
 }: {
   job: Job;
@@ -24,6 +25,9 @@ export function JobCard({
   onCancel?: (jobId: string) => void;
   /** 止めるボタンの文言。画面によって呼び方が違う（送信中は「送るのをやめる」）。 */
   cancelLabel?: string;
+  /** 止める要求が飛んでいる間は押せなくする。**2 度目は 409 で弾かれるだけ**なので、
+   * 押した人にはバナーしか残らない。 */
+  cancelBusy?: boolean;
   /**
    * この作業に添える補足の行（終わった日時、届いた最後の文言など）。**空の行は
    * 描かない。**
@@ -48,7 +52,12 @@ export function JobCard({
         {/* **押した先の扱いを持たない場所に、押せるボタンを置かない。** `onCancel`
             を渡さない呼び出し元では中止ボタンごと出さない。 */}
         {onCancel && (
-          <button type="button" className="btn sm" onClick={() => onCancel(job.id)}>
+          <button
+            type="button"
+            className="btn sm"
+            disabled={cancelBusy}
+            onClick={() => onCancel(job.id)}
+          >
             {cancelLabel}
           </button>
         )}

@@ -106,12 +106,53 @@ describe("送信中", () => {
       "/jobs": {
         jobs: [{ id: "j1", type: "upload", status: "running", created_at: "2026-08-18T00:00:00+00:00" }],
       },
+      "/jobs/j1/cancel": { status: "ok" },
     });
     renderSending({ jobIds: ["j1"] });
     await userEvent.click(await screen.findByRole("button", { name: "送るのをやめる" }));
     await waitFor(() =>
       expect(calls().some((c) => c.path === "/jobs/j1/cancel" && c.method === "POST")).toBe(true),
     );
+    // **止めた後は一覧を引き直す。** 叩いたところまでしか見ないと、画面が
+    // 「実行中」のままでも気付けない。
+    await waitFor(() =>
+      expect(calls().filter((c) => c.path === "/jobs").length).toBeGreaterThan(1),
+    );
+  });
+
+  // **二重に止めない。** 2 度目の要求は、1 度目で状態が動いた後に届くので
+  // `409` で弾かれ、押した人にはバナーだけが残る。
+  it("止めている間は、もう一度押せない", async () => {
+    let release!: () => void;
+    const held = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const sent: string[] = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: string) => {
+        const path = input.replace(/^\/api/, "");
+        if (path === "/jobs/j1/cancel") {
+          sent.push(path);
+          await held;
+          return new Response(JSON.stringify({ status: "ok" }), { status: 200 });
+        }
+        return new Response(
+          JSON.stringify({
+            jobs: [
+              { id: "j1", type: "upload", status: "running", created_at: "2026-08-18T00:00:00+00:00" },
+            ],
+          }),
+          { status: 200 },
+        );
+      }),
+    );
+    renderSending({ jobIds: ["j1"] });
+    const button = await screen.findByRole("button", { name: "送るのをやめる" });
+    await userEvent.click(button);
+    await waitFor(() => expect(button).toBeDisabled());
+    expect(sent).toHaveLength(1);
+    release();
   });
 
   it("終わっているジョブには「送るのをやめる」を出さない", async () => {

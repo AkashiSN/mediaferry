@@ -171,7 +171,12 @@ export function HomeScreen() {
         ))}
 
         {running && (
-          <JobCard job={running} rate={averageRate(running)} onCancel={(id) => void cancelJob(id)} />
+          <JobCard
+            job={running}
+            rate={averageRate(running)}
+            onCancel={(id) => void cancelJob(id)}
+            cancelBusy={card.busy}
+          />
         )}
 
         {dashboard.loading ? (

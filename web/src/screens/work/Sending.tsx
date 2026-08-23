@@ -1,14 +1,14 @@
 // 送信中（§13）。**この画面を閉じても送信は続く。** 閉じる手段を必ず置く。
 
-import { useMemo, useState } from "react";
+import { useMemo } from "react";
 import { Link, useLocation, useNavigate } from "react-router-dom";
 
 import { request } from "../../api/client";
-import { useQuery } from "../../api/hooks";
+import { useMutation, useQuery } from "../../api/hooks";
 import { ErrorBanner } from "../../components/ErrorBanner";
 import { JobCard } from "../../components/JobCard";
 import type { Job } from "../../components/JobProgress";
-import { isLive, useJobPulse } from "../../hooks/useJobPulse";
+import { isCancellable, isLive, useJobPulse } from "../../hooks/useJobPulse";
 
 type Jobs = { jobs: Job[] };
 
@@ -20,7 +20,7 @@ export function SendingScreen() {
   const note = passed?.note ?? null;
 
   const jobsQuery = useQuery<Jobs>("/jobs");
-  const [error, setError] = useState<unknown>(null);
+  const cancelling = useMutation();
 
   // **`Send.tsx` から渡された `jobIds` があれば、それだけを追う。** 渡されずに
   // この画面を直接開いた場合（閉じたあとにブラウザの戻る、再読み込み、1 件も
@@ -40,11 +40,8 @@ export function SendingScreen() {
   const averageRate = useJobPulse(running, jobsQuery.reload);
 
   async function cancel(jobId: string) {
-    try {
-      await request(`/jobs/${jobId}/cancel`, { method: "POST" });
+    if (await cancelling.run(() => request(`/jobs/${jobId}/cancel`, { method: "POST" }))) {
       jobsQuery.reload();
-    } catch (caught) {
-      setError(caught);
     }
   }
 
@@ -62,7 +59,7 @@ export function SendingScreen() {
         </button>
       </div>
 
-      <ErrorBanner error={error ?? jobsQuery.error} onDismiss={() => setError(null)} />
+      <ErrorBanner error={cancelling.error ?? jobsQuery.error} onDismiss={cancelling.clear} />
       {/* **断られた組と、開始に失敗した宛先を隠さない**（`Send.tsx` の `summarise`）。 */}
       {note && <p role="status">{note}</p>}
 
@@ -79,8 +76,9 @@ export function SendingScreen() {
             job={job}
             rate={averageRate(job)}
             cancelLabel="送るのをやめる"
+            cancelBusy={cancelling.busy}
             onCancel={
-              ["queued", "running"].includes(job.status) ? (id) => void cancel(id) : undefined
+              isCancellable(job) ? (id) => void cancel(id) : undefined
             }
           />
         ))
