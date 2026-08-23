@@ -212,10 +212,14 @@ def _view(row, conn=None) -> dict[str, Any]:  # noqa: ANN001
     なる。保存済みの観測（`remote_checked_at` の時点の値）を返し、画面が
     「いつ時点か」を示す。最新が要るなら宛先の再確認を回す。
     """
+    # **`sqlite3.Row` の `in` は値を見る**ので、列の有無は名前の一覧で確かめる。
+    columns = row.keys()
     view = {
         "id": row["id"],
         "destination_id": row["destination_id"],
         "media_file_id": row["media_file_id"],
+        # 画面は内部の ID を出さない（§13）。一覧はファイルの位置も持って返る。
+        "rel_path": row["rel_path"] if "rel_path" in columns else None,
         "state": row["state"],
         "selection_rule": row["selection_rule"],
         "origin": row["origin"],

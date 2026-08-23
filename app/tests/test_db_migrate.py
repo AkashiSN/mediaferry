@@ -308,6 +308,7 @@ def test_a_database_from_the_previous_release_still_opens(tmp_path):
         "0016_stack_needs_its_asset.sql": None,
         "0017_discard_frees_members.sql": None,
         "0018_clear_stale_progress.sql": None,
+        "0019_unsent_counts_by_media.sql": None,
     }
     shipped = sorted(path.name for path in MIGRATIONS_DIR.glob("*.sql"))
     assert shipped == sorted(frozen), "版を足したら、この一覧にも足す"
@@ -492,6 +493,35 @@ def test_the_derived_lookup_does_not_scan_members_per_row(tmp_path):
 
     assert "SCAN g" not in plan, plan
     assert "SCAN mm" not in plan, plan
+
+
+def test_the_unsent_count_looks_up_records_by_media_and_destination(tmp_path):
+    """`0019`。「まだ送っていない」の集計が、宛先の全レコードを走査しない.
+
+    ダッシュボードは media 1 件ごとに「この宛先の有効な記録があるか」を尋ねる。
+    条件は `media_file_id` と `destination_id` の 2 つの等値で、統計が無いと
+    SQLite は 1 列だけの `upload_record_claimable (destination_id, ...)` を選び
+    うる —— そうなると media 1 件ごとにその宛先の全レコードを読む（実測で
+    media 8,000 件のとき 5.6 秒。行数が倍になるたびに 4 倍）。
+
+    **統計に頼らずに決まることを見る。** ここで作るのは空の DB なので、
+    `sqlite_stat1` は無い。
+    """
+    conn = Database(tmp_path / "db.sqlite3").connect()
+    apply_migrations(conn)
+    plan = " | ".join(
+        row[3]
+        for row in conn.execute(
+            "EXPLAIN QUERY PLAN"
+            " SELECT count(*) FROM media_file m WHERE NOT EXISTS ("
+            "  SELECT 1 FROM upload_record u WHERE u.media_file_id = m.id"
+            "   AND u.destination_id = ? AND u.invalidated_at IS NULL)",
+            ("d1",),
+        )
+    )
+    conn.close()
+
+    assert "upload_record_live_pair" in plan, plan
 
 
 def test_the_recompute_keyset_is_bounded_by_the_profile(tmp_path):

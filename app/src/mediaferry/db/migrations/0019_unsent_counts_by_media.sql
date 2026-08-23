@@ -1,0 +1,21 @@
+-- **「まだ送っていない」を数えるための索引。**
+--
+-- ダッシュボードの `unsent_total` と宛先ごとの `unsent` は、media 1 件ごとに
+-- 「この宛先の有効な記録があるか」を問い合わせる（`api/routes_system.py`）。
+-- 既存の索引は `upload_record_by_media (media_file_id)` と
+-- `upload_record_claimable (destination_id, state)` の 2 つで、**この問い合わせは
+-- 両方に等値の条件を持つ**。統計（`sqlite_stat1`）が無い間、SQLite は
+-- `destination_id` の方を選ぶことがあり、そうなると media 1 件ごとに**その宛先の
+-- 全レコードを走査する**（実測: media 4,000 件で 1.3 秒、8,000 件で 5.6 秒。
+-- 行数が倍になるたびに 4 倍）。
+--
+-- 2 列とも等値で当たる索引を置くと、統計の有無によらずこちらが選ばれる
+-- （実測: 同じ DB で 2.5 ms）。`invalidated_at IS NULL` は問い合わせ側の条件と
+-- 同じなので、部分索引にして小さく保つ。
+--
+-- **統計を取って解決しない。** `ANALYZE` でも同じ索引が選ばれるようになるが、
+-- 取り直すのは起動時しかなく、空の DB で取った統計（「どの表も 0 行」）が残ると
+-- 取り込みで行が増えたあとの選択が**統計が無いときより悪くなる**（結合の
+-- 構成ファイルを引く問い合わせが走査に落ちるのを確認した）。
+CREATE INDEX upload_record_live_pair
+    ON upload_record (media_file_id, destination_id) WHERE invalidated_at IS NULL;

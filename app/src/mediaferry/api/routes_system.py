@@ -64,12 +64,24 @@ def dashboard(state=Depends(get_state), conn=Depends(get_conn)) -> dict[str, Any
         "missing": conn.execute(
             "SELECT count(*) AS n FROM media_file WHERE missing_at IS NOT NULL"
         ).fetchone()["n"],
-        # **「つなぐ」で操作できるグループの数**（§13 の「やること」）。merged は
-        # 済み、skipped は破棄、supersede 済みは組み直しの旧版なので、どれも
-        # 押せるボタンが無い。
+        # **これからつなぐグループの数**（§13 の「やること」）。skipped は破棄、
+        # supersede 済みは組み直しの旧版なので、どれも押せるボタンが無い。
         "merge_candidates": conn.execute(
             "SELECT count(*) AS n FROM merge_group"
             " WHERE status IN ('detected', 'failed') AND superseded_by_id IS NULL"
+        ).fetchone()["n"],
+        # **つないだが、人が中身を見るまで宙に浮いているグループの数。**
+        #
+        # 検証に落ちた結合物は送る候補に出ず（`SENDABLE_CLAUSE`）、構成ファイルも
+        # active な member なので出ない。ここで数えないと、ホームが「やることは
+        # ありません」と書く一方で、つなぐ画面には「中身を見て、これを使う」が
+        # 出ている状態になる。条件は `work/Merge.tsx` の `adoptable` と揃える。
+        "merge_review_total": conn.execute(
+            "SELECT count(*) AS n FROM merge_group"
+            " WHERE status = 'merged' AND superseded_by_id IS NULL"
+            "   AND adopted_at IS NULL AND output_media_file_id IS NOT NULL"
+            "   AND json_valid(verification_json)"
+            "   AND json_type(verification_json, '$.passed') IS NOT 'true'"
         ).fetchone()["n"],
         # **和を取らない。** 2 つの宛先に未送信の 1 件は 1 件。休止中の宛先は
         # 送り先に選べないので、それしか無ければ「やること」は無い。

@@ -9,8 +9,13 @@
 `input_digest` の一致は SQL だけでは判定できない（現行の構成・設定・
 プロファイルリビジョンから計算し直す必要がある）ので、SQL で絞ってから
 Python で確かめる。この一致を見ないと、**グループを編集した後に旧派生物が
-選択肢へ戻る**（旧グループは `status = merged` のまま残るため）。`SENDABLE_CLAUSE`
-はこの一致を見ないので、設定を変えた後の古い派生物が数に残ることがある。
+選択肢へ戻る**（旧グループは `status = merged` のまま残るため）。
+
+`SENDABLE_CLAUSE` は digest そのものは比べられないが、**digest がずれる原因の
+うち SQL で見えるもの——プロファイルのリビジョン——は見る**。カメラの種類を
+保存すると版が上がり、その版で作った結合物は `POST /uploads` が必ず断る
+（`group_is_current`）。数え続けると、ホームの「N 件をまだ送っていません」が
+押しても消せないまま残る。
 
 安全条件 (a) と `selection_rule` ごとの条件 (c) は claim のときに評価する
 もので、`upload_record` と一緒に足す。
@@ -53,9 +58,14 @@ _DERIVED = (
 # 別名は `m`.** `_ORIGINALS` の member 条件・`_DERIVED` の group 条件と同じ §10 の
 # 条件を表している。**片方を変えたらもう片方も変える。**
 #
-# digest の一致（§10 の derived 条件の最後の 1 つ）はここに入れない。現行の構成と
-# プロファイルから計算し直す必要があり、SQL では書けない（`_matching_digests`）。
-# その結果、設定を変えた後の古い派生物が数に残ることがある。
+# digest そのもの（§10 の derived 条件の最後の 1 つ）はここでは計算できない。現行の
+# 構成とプロファイルから計算し直す必要があり、SQL では書けない（`_matching_digests`）。
+# **代わりに、digest がずれる原因のうち SQL で見えるものを見る**——グループが
+# 作られたときのプロファイルリビジョンが、いまも現行であること。
+#
+# 残る差は「member の sha1 が変わった（同じ相対パスに別の中身を取り込み直した）」
+# だけで、そのときこの断片は数に残す。構成を変えた場合は旧グループが supersede
+# されるので、上の条件で既に落ちる。
 #
 # `verification_json` は壊れた値が入りうる列なので `json_valid` で先に弾く。
 # `json_valid` が偽の行は SQLite が `json_type` を評価しないため
@@ -70,6 +80,8 @@ SENDABLE_CLAUSE = (
     " OR (m.role = 'derived' AND EXISTS ("
     "   SELECT 1 FROM merge_group g WHERE g.output_media_file_id = m.id"
     "    AND g.superseded_by_id IS NULL AND g.status = 'merged'"
+    "    AND g.profile_revision_id = ("
+    "      SELECT p.current_revision_id FROM device_profile p WHERE p.id = g.profile_id)"
     "    AND (g.adopted_at IS NOT NULL"
     "         OR (json_valid(g.verification_json)"
     "             AND json_type(g.verification_json, '$.passed') = 'true'))))"

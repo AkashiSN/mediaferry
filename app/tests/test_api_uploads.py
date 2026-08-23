@@ -288,6 +288,36 @@ def test_unevaluated_records_can_be_listed(secret_env, client, api_db):  # noqa:
     assert [row["id"] for row in body["records"]] == [made["open"]]
 
 
+def test_the_list_leaves_out_invalidated_records(secret_env, client, api_db):  # noqa: F811
+    """**無効になった記録は一覧に出さない。**
+
+    無効な記録には何もできない（承認は 409 `already_invalidated`、却下も 409）ので、
+    出すとカードが消せなくなる。ダッシュボードの件数（`awaiting_total` など）も
+    無効を除いて数えるため、出すと画面ごとに数が食い違う。
+    """
+    from mediaferry.clock import now_iso
+
+    _, made = a_stacked_and_a_skipped(api_db)
+    api_db.execute(
+        "UPDATE upload_record SET invalidated_at = ?, invalidated_reason = 'x' WHERE id = ?",
+        (now_iso(), made["skipped"]),
+    )
+
+    body = client.get("/api/uploads").json()
+
+    assert made["skipped"] not in [row["id"] for row in body["records"]]
+    assert made["stacked"] in [row["id"] for row in body["records"]]
+
+
+def test_a_record_carries_the_file_name_it_is_about(secret_env, client, api_db):  # noqa: F811
+    """**画面は内部の ID を出さない**（§13）ので、一覧にファイルの位置を添える."""
+    _, made = a_stacked_and_a_skipped(api_db)
+
+    records = {row["id"]: row for row in client.get("/api/uploads").json()["records"]}
+
+    assert records[made["skipped"]]["rel_path"]
+
+
 def test_an_unknown_stack_state_is_refused(secret_env, client):  # noqa: F811
     """**絞ったつもりで全件が出る**を作らない."""
     assert client.get("/api/uploads?stack_state=nonsense").status_code == 400

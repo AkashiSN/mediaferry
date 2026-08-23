@@ -332,6 +332,39 @@ def test_the_digest_follows_the_member_position_not_the_insert_order(db, profile
     )
 
 
+def test_a_new_profile_revision_takes_the_merged_output_out_of_both(db):
+    """カメラの種類を保存すると、その版で作った結合物は選択肢から外れる.
+
+    `input_digest` はプロファイルのリビジョンを含む（`core/merge/digest.py`）ので、
+    保存して版が上がると `POST /uploads` はその派生物を必ず断る（`group_is_current`）。
+    **`SENDABLE_CLAUSE` がそれを数え続けると、ホームの「N 件をまだ送っていません」が
+    消せなくなる** —— 押しても全件 rejected で、件数は動かない。
+    """
+    from dataclasses import replace
+
+    registry = ProfileRegistry(db)
+    registry.sync_builtins()
+    mine = registry.duplicate("dji-osmo", "my-cam", "私のカメラ")
+    members = a_pair(db, mine, prefix="REV")
+    output = a_derived(db, mine, name="REV")
+    a_group(db, mine, members, output_id=output, verification=PASSED)
+
+    assert output in ids(SelectionService(db, ProfileRegistry(db)).selectable())
+
+    registry.update("my-cam", replace(mine.definition, name="名前を変えた"))
+
+    service_ids = ids(SelectionService(db, ProfileRegistry(db)).selectable())
+    clause_ids = {
+        row["id"]
+        for row in db.execute(f"SELECT m.id FROM media_file m WHERE {SENDABLE_CLAUSE}")  # noqa: S608
+    }
+    assert output not in service_ids
+    assert output not in clause_ids
+    # **構成ファイルは戻らない。** グループはまだ生きている（member は active の
+    # まま）ので、元のパートが選択肢に現れるわけではない。
+    assert {media_id for media_id, _ in members}.isdisjoint(clause_ids)
+
+
 def test_selectable_and_sendable_clause_agree(db, profile):
     """`SelectionService.selectable()` の既定集合と `SENDABLE_CLAUSE` は一致する.
 

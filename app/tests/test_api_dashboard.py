@@ -20,6 +20,80 @@ def test_merge_candidates_counts_only_what_can_be_acted_on(client, db):
     assert client.get("/api/dashboard").json()["merge_candidates"] == 2
 
 
+def test_a_merged_group_that_failed_verification_is_its_own_task(client, db):
+    """**検証に落ちた結合物は、人が中身を見るまで宙に浮く。**
+
+    送る候補には出ず（`SENDABLE_CLAUSE` は `passed` か `adopted_at` を見る）、
+    構成ファイルも active な member なので出ない。`merge_candidates` にも
+    入らないと、ホームは「やることはありません」と書く一方で、つなぐ画面には
+    「中身を見て、これを使う」が出ている状態になる。
+    """
+    import json
+
+    profile = a_profile(db, slug="dash-review")
+    a_media_file(db, profile, rel_path="library/dash/OUT.MP4", role="derived")
+    output = db.execute(
+        "SELECT id FROM media_file WHERE rel_path = 'library/dash/OUT.MP4'"
+    ).fetchone()["id"]
+    a_merge_group(
+        db,
+        profile,
+        "d-review",
+        status="merged",
+        verification_json=json.dumps({"passed": False}),
+        output_media_file_id=output,
+    )
+
+    body = client.get("/api/dashboard").json()
+
+    assert body["merge_review_total"] == 1
+    # **つなぐ候補には数えない。** つなぐ操作はもう済んでいる。
+    assert body["merge_candidates"] == 0
+
+
+def test_a_merged_group_that_passed_is_not_a_task(client, db):
+    """合格した結合物は送る候補に出るので、確かめる仕事は残っていない."""
+    import json
+
+    profile = a_profile(db, slug="dash-passed")
+    a_media_file(db, profile, rel_path="library/dash/OK.MP4", role="derived")
+    output = db.execute(
+        "SELECT id FROM media_file WHERE rel_path = 'library/dash/OK.MP4'"
+    ).fetchone()["id"]
+    a_merge_group(
+        db,
+        profile,
+        "d-passed",
+        status="merged",
+        verification_json=json.dumps({"passed": True}),
+        output_media_file_id=output,
+    )
+
+    assert client.get("/api/dashboard").json()["merge_review_total"] == 0
+
+
+def test_an_adopted_group_is_not_a_task(client, db):
+    """採用済みは決着している（`work/Merge.tsx` の `adoptable` と同じ条件）."""
+    import json
+
+    profile = a_profile(db, slug="dash-adopted")
+    a_media_file(db, profile, rel_path="library/dash/ADOPTED.MP4", role="derived")
+    output = db.execute(
+        "SELECT id FROM media_file WHERE rel_path = 'library/dash/ADOPTED.MP4'"
+    ).fetchone()["id"]
+    a_merge_group(
+        db,
+        profile,
+        "d-adopted",
+        status="merged",
+        verification_json=json.dumps({"passed": False}),
+        output_media_file_id=output,
+        adopted_at="2026-08-20T00:00:00+00:00",
+    )
+
+    assert client.get("/api/dashboard").json()["merge_review_total"] == 0
+
+
 def test_merge_candidates_ignores_superseded_groups(client, db):
     profile = a_profile(db, slug="dash-superseded")
     newer = a_merge_group(db, profile, "d-newer", status="detected")

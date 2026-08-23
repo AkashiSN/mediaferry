@@ -1062,26 +1062,37 @@ class UploadRepository:
 
         **未知の値を素通りさせない**（呼び出し側が 400 にする）。「絞ったつもりで
         全件が出る」を作らない。
+
+        **無効になった記録は出さない。** 承認も却下も送り直しも 409 で断られる
+        記録なので、出すと画面から消せないカードになる。件数（`/dashboard` の
+        `awaiting_total` など）も無効を除いて数えるため、出すと画面ごとに数が
+        食い違う。
+
+        **ファイルの位置も返す。** 画面は内部の ID を出さない（§13）ので、
+        どのファイルの話かを言うにはこれが要る。
         """
-        clauses, params = [], []
+        # 無効の除外は絞り込みではなく前提なので、常に置く。
+        clauses, params = ["r.invalidated_at IS NULL"], []
         if destination_id is not None:
-            clauses.append("destination_id = ?")
+            clauses.append("r.destination_id = ?")
             params.append(destination_id)
         if state is not None:
-            clauses.append("state = ?")
+            clauses.append("r.state = ?")
             params.append(state)
         if stack_state is not None:
             if stack_state == "unevaluated":
-                clauses.append("stack_state IS NULL")
+                clauses.append("r.stack_state IS NULL")
             elif stack_state in ("stacked", "skipped"):
-                clauses.append("stack_state = ?")
+                clauses.append("r.stack_state = ?")
                 params.append(stack_state)
             else:
                 raise UploadRequestInvalid(f"stack_state が不正: {stack_state}")
-        where = f" WHERE {' AND '.join(clauses)}" if clauses else ""
+        where = " AND ".join(clauses)
         return list(
             self._conn.execute(
-                f"SELECT * FROM upload_record{where} ORDER BY updated_at DESC LIMIT ?",  # noqa: S608
+                "SELECT r.*, m.rel_path AS rel_path FROM upload_record r"  # noqa: S608
+                " JOIN media_file m ON m.id = r.media_file_id"
+                f" WHERE {where} ORDER BY r.updated_at DESC LIMIT ?",
                 (*params, limit),
             )
         )
