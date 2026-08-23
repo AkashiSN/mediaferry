@@ -1568,7 +1568,7 @@ claim では **(a) を必ず評価し、`selection_rule` に対応する現在�
 | GET | `/media` | 一覧。`status` / `profile` / `kind` / `from` / `to` / `q` / `page` |
 | GET | `/media/{id}` | 詳細 |
 | GET | `/media/{id}/thumbnail` | サムネイル（`at` で秒指定。10 秒刻みに丸め、1 本あたり 32 枚まで） |
-| GET | `/merge-groups` | 結合グループ一覧。**既定はいま操作できるものだけ**（`superseded_by_id IS NULL` かつ `status <> 'skipped'`）。履歴は `?status=skipped` で取る。**置き換えられた行は `status` を指定しても出さない** |
+| GET | `/merge-groups` | 結合グループ一覧。**既定はいま操作できるものだけ**（`superseded_by_id IS NULL` かつ `status <> 'skipped'`）。履歴は `?status=skipped` で取る。**置き換えられた行は `status` を指定しても出さない**。各行に **`profile_changed`**（作ったときからカメラの種類の版が上がったか）を添える —— 上がっていると `group_is_current` が必ず断るので、画面は採用のボタンを出さない |
 | POST | `/merge-groups/detect` | 結合グループの検出ジョブを開始（プロファイルごとに 1 本） |
 | POST | `/merge-groups/preview` | 閾値を変えたときの候補を再計算（保存しない） |
 | POST | `/merge-groups` | 手動でグループを作成。**2 件以上**（1 件の組にはつなぎ目が無い） |
@@ -1579,14 +1579,14 @@ claim では **(a) を必ず評価し、`selection_rule` に対応する現在�
 | POST | `/merge-groups/{id}/merge` | 結合ジョブを開始 |
 | GET | `/destinations` | 転送先の一覧。**API キーは応答に一切出さない**（マスク値も返さない） |
 | POST | `/destinations` | 転送先を作る。URL を検証してから接続を確かめ、`remote_user_id` を記録する |
-| PATCH | `/destinations/{id}` | 改名・有効無効の切り替え、または新しいリビジョン（URL・鍵の変更）を作る |
+| PATCH | `/destinations/{id}` | 改名・有効無効の切り替え、または新しいリビジョン（URL・鍵の変更）を作る。**両方を一度に送れる** —— 名前は接続の検証が通ってから当てる（失敗した編集はどの欄も反映しない） |
 | POST | `/destinations/{id}/verify` | 接続を検証し `remote_user_id` を取得・記録する |
 | POST | `/destinations/{id}/archive` | 転送先を退役させる（記録は残す） |
 | POST | `/destinations/{id}/upload` | その宛先の送信ジョブを開始（宛先ごとに 1 本、§9.10） |
 | POST | `/destinations/{id}/recheck` | その宛先の再確認ジョブを開始 |
 | GET | `/uploads/selectable` | §10 の選択肢。`destination_id` と `status` でフィルタ |
 | POST | `/uploads` | media × destination の組を作る。`media_ids` と **`destination_ids`（複数可）** |
-| GET | `/uploads` | 記録の一覧。`destination_id` / `state` で絞り込む |
+| GET | `/uploads` | 記録の一覧。`destination_id` / `state` / `stack_state` で絞り込む。**行にはファイルの位置（`rel_path`）も添える** —— 画面が内部の ID を出さずに名前で並べられるように（§13）。承認待ちの差分（`proposed`）も**行ごとに引き直さずに**この一覧の値から作る |
 | POST | `/uploads/{id}/retry` | `failed` を `pending` に戻す。`selection_rule` は書き換えない（§8） |
 | POST | `/uploads/{id}/requeue` | リモートから消えた資産を送り直す |
 | POST | `/uploads/{id}/approve` | 日時変更を承認して書き戻す（ジョブとして実行する） |
