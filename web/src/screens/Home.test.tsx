@@ -24,6 +24,20 @@ const EMPTY_DASHBOARD = {
   awaiting_total: 0,
 };
 
+/** ホームが必ず引く経路。個別のテストで上書きできるよう、先に広げる。 */
+const BASE_ROUTES: Record<string, unknown> = {
+  "/settings": { settings: [], warnings: [] },
+  "/profiles": { profiles: [] },
+};
+
+/** `stubApi` に既定を足す。**登録し忘れは 404 になる**ので、常に引く経路はここに置く。 */
+function stubHome(
+  routes: Record<string, unknown>,
+  onCall?: (path: string, init?: RequestInit) => unknown,
+) {
+  return stubApi({ ...BASE_ROUTES, ...routes }, onCall);
+}
+
 function renderHome() {
   return render(
     <MemoryRouter>
@@ -45,7 +59,7 @@ afterEach(() => {
 
 describe("ホーム", () => {
   it("やることを、在るものだけ出す", async () => {
-    stubApi({
+    stubHome({
       "/dashboard": { ...EMPTY_DASHBOARD, merge_candidates: 3, unsent_total: 48 },
       "/devices": { volumes: [] },
       "/jobs": { jobs: [] },
@@ -59,7 +73,7 @@ describe("ホーム", () => {
   // §13「内部の名前をそのまま出さない」「日時は人が読める形で出す」。相対パスも
   // 生の ISO 文字列も内部の表現で、どちらも画面に出すものではない。
   it("さっき取り込んだものは、ファイル名と読める日時で出す", async () => {
-    stubApi({
+    stubHome({
       "/dashboard": {
         ...EMPTY_DASHBOARD,
         recent_imports: [
@@ -80,7 +94,7 @@ describe("ホーム", () => {
   });
 
   it("やることが 1 つも無ければ、無いと書く", async () => {
-    stubApi({ "/dashboard": EMPTY_DASHBOARD, "/devices": { volumes: [] }, "/jobs": { jobs: [] } });
+    stubHome({ "/dashboard": EMPTY_DASHBOARD, "/devices": { volumes: [] }, "/jobs": { jobs: [] } });
     renderHome();
     await waitFor(() =>
       expect(screen.getByText("いま、やることはありません")).toBeInTheDocument(),
@@ -89,7 +103,7 @@ describe("ホーム", () => {
 
   it("読み込み中は「やることはありません」を出さない", () => {
     // **0 件と読み込み中を混ぜない。** 直後に 3 件現れると驚かせる。
-    stubApi({ "/dashboard": EMPTY_DASHBOARD, "/devices": { volumes: [] }, "/jobs": { jobs: [] } });
+    stubHome({ "/dashboard": EMPTY_DASHBOARD, "/devices": { volumes: [] }, "/jobs": { jobs: [] } });
     renderHome();
     expect(screen.queryByText("いま、やることはありません")).not.toBeInTheDocument();
   });
@@ -119,7 +133,7 @@ describe("ホーム", () => {
   });
 
   it("挿さっているカードを、信頼していなければそう書く", async () => {
-    stubApi({
+    stubHome({
       "/dashboard": EMPTY_DASHBOARD,
       "/devices": {
         volumes: [
@@ -144,7 +158,7 @@ describe("ホーム", () => {
 
   it("カメラの種類は、生の slug ではなく表示名を出す（§13）", async () => {
     // `work/CardDetail.tsx` の `profileDisplayName` と同じ引き当てを使う。
-    stubApi({
+    stubHome({
       "/dashboard": EMPTY_DASHBOARD,
       "/devices": {
         volumes: [
@@ -173,7 +187,7 @@ describe("ホーム", () => {
   });
 
   it("カメラの種類は、登録が無い slug だけフォールバックで出す", async () => {
-    stubApi({
+    stubHome({
       "/dashboard": EMPTY_DASHBOARD,
       "/devices": {
         volumes: [
@@ -212,7 +226,7 @@ describe("ホーム", () => {
   };
 
   it("「いま取り込む」を押すと、数えてから取り込み、分かれた動画まで探す", async () => {
-    const api = stubApi({
+    const api = stubHome({
       "/dashboard": EMPTY_DASHBOARD,
       "/devices": { volumes: [actionableVolume] },
       "/jobs": { jobs: [] },
@@ -241,7 +255,7 @@ describe("ホーム", () => {
   });
 
   it("対象外のカードには「いま取り込む」を出さない（探す先も無い）", async () => {
-    stubApi({
+    stubHome({
       "/dashboard": EMPTY_DASHBOARD,
       "/devices": { volumes: [{ ...actionableVolume, profile_slug: null }] },
       "/jobs": { jobs: [] },
@@ -254,11 +268,12 @@ describe("ホーム", () => {
   });
 
   it("「取り外す」を押すと、そのカードを取り外す", async () => {
-    const api = stubApi({
+    const api = stubHome({
       "/dashboard": EMPTY_DASHBOARD,
       "/devices": { volumes: [actionableVolume] },
       "/jobs": { jobs: [] },
       "/settings": { settings: [{ key: "AUTO_IMPORT", value: "trusted" }], warnings: [] },
+      "/volumes/v1/close": { status: "ok" },
     });
     renderHome();
 
@@ -269,12 +284,17 @@ describe("ホーム", () => {
         api.calls().some((call) => call.path === "/volumes/v1/close" && call.method === "POST"),
       ).toBe(true),
     );
+    // **取り外した後は一覧を引き直す。** 叩いたところまでしか見ないと、
+    // 画面が古いカードを出したままでも気付けない。
+    await waitFor(() =>
+      expect(api.calls().filter((call) => call.path === "/devices").length).toBeGreaterThan(1),
+    );
   });
 
   it("ラベルが無いカードが複数あると、見出しを連番で見分けられるようにする", async () => {
     // `CardBanner` は `work/CardDetail.tsx` の `volumeLabel` を使う。一覧全体を
     // 渡さないと、複数枚が同時にラベル無しのとき見分けが付かない。
-    stubApi({
+    stubHome({
       "/dashboard": EMPTY_DASHBOARD,
       "/devices": {
         volumes: [
@@ -298,7 +318,7 @@ describe("ホーム", () => {
   it("「中身を見る」を押すと、カードの中身のページへ行く（裁定 30）", async () => {
     // ホームのカードの帯からカードの中身へ行ける（§13）。**ここは帯の配線だけを
     // 見る** —— ルート表そのものは `App.test.tsx` が受け持つ。
-    stubApi({
+    stubHome({
       "/dashboard": EMPTY_DASHBOARD,
       "/devices": { volumes: [actionableVolume] },
       "/jobs": { jobs: [] },
@@ -321,7 +341,7 @@ describe("ホーム", () => {
   });
 
   it("進行中の作業があれば、ファイル名と件数で出す", async () => {
-    stubApi({
+    stubHome({
       "/dashboard": EMPTY_DASHBOARD,
       "/devices": { volumes: [] },
       "/jobs": {
@@ -353,7 +373,7 @@ describe("ホーム", () => {
   // 新しい順なので、先頭から「動いているもの」を拾うと**最後に積んだ待機中**を
   // 掴み、コピーの間ずっと「候補の検出・待機中」を出してしまう（進捗も出ない）。
   it("待っている作業より、動いている作業を出す", async () => {
-    stubApi({
+    stubHome({
       "/dashboard": EMPTY_DASHBOARD,
       "/devices": { volumes: [] },
       "/jobs": {
@@ -390,7 +410,7 @@ describe("ホーム", () => {
 
   it("中止するのは、いま出している作業", async () => {
     // 出しているのと違う作業を止めると、コピーは走り続けたまま別の予定が消える。
-    const api = stubApi({
+    const api = stubHome({
       "/dashboard": EMPTY_DASHBOARD,
       "/devices": { volumes: [] },
       "/jobs": {
@@ -406,6 +426,7 @@ describe("ホーム", () => {
           },
         ],
       },
+      "/jobs/j2/cancel": { status: "ok" },
     });
     renderHome();
     await userEvent.click(await screen.findByRole("button", { name: "中止する" }));
@@ -413,10 +434,13 @@ describe("ホーム", () => {
       expect(api.calls().some((call) => call.path === "/jobs/j2/cancel")).toBe(true),
     );
     expect(api.calls().some((call) => call.path === "/jobs/j3/cancel")).toBe(false);
+    await waitFor(() =>
+      expect(api.calls().filter((call) => call.path === "/jobs").length).toBeGreaterThan(1),
+    );
   });
 
   it("まだどれも動いていなければ、次に走る作業を出す", async () => {
-    stubApi({
+    stubHome({
       "/dashboard": EMPTY_DASHBOARD,
       "/devices": { volumes: [] },
       "/jobs": {
@@ -434,7 +458,7 @@ describe("ホーム", () => {
   // 裁定 8: 積んだまま送信が始まっていない `pending` は「まだ送っていない」から
   // 消えたので、止まった送信に気づけるよう送り先の行に別枠で出す。
   it("宛先に積んだまま止まっているものを「送信中」で出す", async () => {
-    stubApi({
+    stubHome({
       "/dashboard": {
         ...EMPTY_DASHBOARD,
         destinations: [
@@ -462,7 +486,7 @@ describe("ホーム", () => {
   // **送れなかったものは、ここに出さないとどの画面にも出ない。**「まだ送って
   // いない」にも「送信済み」にも入らない（`docs/design.md` §10）。
   it("送れなかったものがあれば、送り先の行に件数を出す", async () => {
-    stubApi({
+    stubHome({
       "/dashboard": {
         ...EMPTY_DASHBOARD,
         destinations: [
@@ -488,7 +512,7 @@ describe("ホーム", () => {
   });
 
   it("送れなかったものが無ければ、その枠は出さない", async () => {
-    stubApi({
+    stubHome({
       "/dashboard": {
         ...EMPTY_DASHBOARD,
         destinations: [
@@ -517,7 +541,7 @@ describe("ホーム", () => {
   // `docs/decisions.md` の「孤立ファイルは報告するだけ」の **報告** にあたる。
   // 消す操作は置かないが、黙ってもいけない。
   it("行き場の無いファイルと、見つからないファイルを報告する", async () => {
-    stubApi({
+    stubHome({
       "/dashboard": { ...EMPTY_DASHBOARD, orphans: 3, missing: 1 },
       "/devices": { volumes: [] },
       "/jobs": { jobs: [] },
@@ -531,28 +555,28 @@ describe("ホーム", () => {
   });
 
   it("どちらも 0 件なら、報告そのものを出さない", async () => {
-    stubApi({ "/dashboard": EMPTY_DASHBOARD, "/devices": { volumes: [] }, "/jobs": { jobs: [] } });
+    stubHome({ "/dashboard": EMPTY_DASHBOARD, "/devices": { volumes: [] }, "/jobs": { jobs: [] } });
     renderHome();
     await waitFor(() => expect(screen.getByText("いま、やることはありません")).toBeInTheDocument());
     expect(screen.queryByText(/どこにも結び付いていないファイル/)).toBeNull();
   });
 
   it("開いた直後は、接続が切れているとは出さない（まだ繋がったことが無いだけなので）", async () => {
-    stubApi({ "/dashboard": EMPTY_DASHBOARD, "/devices": { volumes: [] }, "/jobs": { jobs: [] } });
+    stubHome({ "/dashboard": EMPTY_DASHBOARD, "/devices": { volumes: [] }, "/jobs": { jobs: [] } });
     renderHome();
     await waitFor(() => expect(screen.getByText("いま、やることはありません")).toBeInTheDocument());
     expect(screen.queryByRole("status")).not.toBeInTheDocument();
   });
 
   it("接続が切れたら、そう出す", async () => {
-    stubApi({ "/dashboard": EMPTY_DASHBOARD, "/devices": { volumes: [] }, "/jobs": { jobs: [] } });
+    stubHome({ "/dashboard": EMPTY_DASHBOARD, "/devices": { volumes: [] }, "/jobs": { jobs: [] } });
     renderHome();
     failStream();
     expect(await screen.findByRole("status")).toHaveTextContent("進捗の接続が切れています");
   });
 
   it("つながったら、表示を消す", async () => {
-    stubApi({ "/dashboard": EMPTY_DASHBOARD, "/devices": { volumes: [] }, "/jobs": { jobs: [] } });
+    stubHome({ "/dashboard": EMPTY_DASHBOARD, "/devices": { volumes: [] }, "/jobs": { jobs: [] } });
     renderHome();
     failStream();
     await screen.findByRole("status");

@@ -232,6 +232,8 @@ describe("作業の履歴", () => {
           },
         ],
       },
+      // **叩く先も登録する**（`stubApi` は知らないパスを 404 で返す）。
+      "/jobs/j1/cancel": { status: "ok" },
     });
     render(
       <MemoryRouter>
@@ -245,6 +247,11 @@ describe("作業の履歴", () => {
     await userEvent.click(buttons[0]);
     await vi.waitFor(() =>
       expect(calls().some((c) => c.path === "/jobs/j1/cancel" && c.method === "POST")).toBe(true),
+    );
+    // **止めた後は一覧を引き直す。** 叩いたところまでしか見ないと、画面が
+    // 「実行中」のままでも気付けない。
+    await vi.waitFor(() =>
+      expect(calls().filter((c) => c.path === "/jobs").length).toBeGreaterThan(1),
     );
   });
 
