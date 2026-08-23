@@ -189,9 +189,11 @@ class Stacker:
         except (ImmichRejected, ImmichProtocolError) as exc:
             # 再試行しても直らない。**理由を残して画面に出す。**
             #
-            # **相手由来の文言は理由に混ぜない**（§13）。`stack_reason` は
-            # 設定 › 送り先にそのまま並ぶ。詳しい中身は作業の記録へ回す。
-            ctx.emit("warning", f"送り先が組を受け付けなかった: {exc}")
+            # **相手由来の文言も、こちらの method / path / 状態コードも混ぜない**
+            # （§13）。`stack_reason` は 設定 › 送り先に、作業の履歴の文言は
+            # 設定 › 作業の履歴に、どちらもそのまま並ぶ。詳しい中身は運用ログへ回す。
+            logger.warning("送り先が組を受け付けなかった: %s", exc)
+            ctx.emit("warning", "送り先が組を受け付けなかった")
             return refuse("送り先が組を受け付けなかった")
 
     def _candidates(

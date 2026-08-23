@@ -282,33 +282,23 @@ def test_a_database_from_the_previous_release_still_opens(tmp_path):
 
     書き換えると、前の版で作った DB は `MigrationError` で開けなくなる
     —— 移行が走る前に落ちるので、データを直す機会も無い。ここでは
-    「版のファイルは追加のみ」を、記録した checksum で固定する。値が変わったら
-    **新しい版を足す**（この一覧に 1 行足す）。
+    「版のファイルは追加のみ」を、記録した checksum（`migration_checksums.txt`）で
+    固定する。値が変わったら**新しい版を足す**（その一覧に 1 行足す）。
     """
     import hashlib
+    from pathlib import Path
 
     from mediaferry.db.migrate import MIGRATIONS_DIR
 
     frozen = {
-        "0001_jobs_and_settings.sql": None,
-        "0002_profiles_and_sources.sql": None,
-        "0003_artifacts_and_merges.sql": None,
-        "0004_destinations_and_uploads.sql": None,
-        "0005_fingerprint_remote_identity.sql": None,
-        "0006_scrub_stored_identifiers.sql": None,
-        "0007_reset_untrusted_remote_state.sql": None,
-        "0008_sessions.sql": None,
-        "0009_remote_datetime.sql": None,
-        "0010_auto_import.sql": None,
-        "0011_captured_at_revision.sql": None,
-        "0012_recompute_lookups.sql": None,
-        "0013_media_file_by_profile.sql": None,
-        "0014_media_file_listing.sql": None,
-        "0015_stacking.sql": None,
-        "0016_stack_needs_its_asset.sql": None,
-        "0017_discard_frees_members.sql": None,
-        "0018_clear_stale_progress.sql": None,
-        "0019_unsent_counts_by_media.sql": None,
+        name: digest
+        for name, digest in (
+            line.split()
+            for line in (Path(__file__).parent / "migration_checksums.txt")
+            .read_text(encoding="utf-8")
+            .splitlines()
+            if line.strip() and not line.startswith("#")
+        )
     }
     shipped = sorted(path.name for path in MIGRATIONS_DIR.glob("*.sql"))
     assert shipped == sorted(frozen), "版を足したら、この一覧にも足す"
@@ -316,8 +306,9 @@ def test_a_database_from_the_previous_release_still_opens(tmp_path):
     digests = {
         name: hashlib.sha256((MIGRATIONS_DIR / name).read_bytes()).hexdigest() for name in shipped
     }
-    recorded = tmp_path / "migration-checksums.txt"
-    recorded.write_text("\n".join(f"{name} {digest}" for name, digest in sorted(digests.items())))
+    # **中身そのものを固定する。** 名前の一覧だけを見ていると、既存の版を書き換えても
+    # 気付けない（書き換えると、前の版で作った DB が `MigrationError` で開けなくなる）。
+    assert digests == frozen, "既存の版は書き換えない。直したいことがあるなら新しい版を足す"
     # 記録は `schema_migration` にも入る。同じ計算で照合できることを確かめる。
     conn = Database(tmp_path / "db.sqlite3").connect()
     apply_migrations(conn)
