@@ -2,8 +2,12 @@
 //
 // 判断（承認・却下の条件、承認だけ確認を要ること）は変えない。読めなかった値を
 // 空欄にしない（空欄は「変更なし」に見える）。
+//
+// **ファイル名とサムネイルは `GET /uploads` の行から描く。** 1 件ずつ
+// `GET /media/{id}` を引くと、上限いっぱいの 200 件で 200 本の要求になり、
+// 承認のたびに全件を引き直すことになる。
 
-import { useEffect, useState } from "react";
+import { useState } from "react";
 import { useNavigate } from "react-router-dom";
 
 import { request } from "../../api/client";
@@ -12,7 +16,7 @@ import { useMutation, useQuery } from "../../api/hooks";
 import { ConfirmDialog } from "../../components/ConfirmDialog";
 import { ErrorBanner } from "../../components/ErrorBanner";
 import { Icon } from "../../components/Icon";
-import { fileName, MediaTile, type Media } from "../../components/MediaTile";
+import { fileName, MediaTile } from "../../components/MediaTile";
 import { useEvents } from "../../hooks/useEvents";
 import { useReloadOnEvents } from "../../hooks/useReloadOnEvents";
 import { formatDateTime, formatSystemDateTime } from "../../utils/formatDateTime";
@@ -21,6 +25,8 @@ type Record_ = {
   id: string;
   destination_id: string;
   media_file_id: string;
+  // 一覧が持つファイルの位置（§13 のためにファイル名を出す。内部の ID は出さない）。
+  rel_path: string | null;
   origin: string;
   remote_current: string | null;
   proposed: string | null;
@@ -36,13 +42,14 @@ type Destination = { id: string; name: string };
 type Destinations = { destinations: Destination[] };
 
 export function ApproveScreen() {
+  // **1 件多く読む。** ちょうど上限の件数だったときに「ほかにもあります」と
+  // 書かないため（読めた数だけでは、切れたのか出し切ったのかが分からない）。
   const records = useQuery<Records>(
-    `/uploads?state=awaiting_datetime_approval&limit=${APPROVE_PAGE}`,
+    `/uploads?state=awaiting_datetime_approval&limit=${APPROVE_PAGE + 1}`,
   );
   // **どの Immich を書き換えるのかを名前で出すため**に引く（§13。送り先が
   // 2 つあると、id だけでは画面から判別できない）。
   const destinations = useQuery<Destinations>("/destinations");
-  const [files, setFiles] = useState<Record<string, Media>>({});
   const decision = useMutation();
   const { received } = useEvents();
   useReloadOnEvents(received, records.reload);
@@ -59,34 +66,9 @@ export function ApproveScreen() {
     setApproving(null);
   }
 
-  const rows = records.data?.records ?? [];
-  // **依存は id の並びで見る。** 配列は毎回新しいので、そのまま依存に置くと
-  // 描画のたびに読み直しに行く。
-  const wantedKey = [...new Set(rows.map((record) => record.media_file_id))].join(",");
-
-  // どの写真かをサムネイルで見せるために、対象のファイルを引く。
-  // **1 件が読めなくても残りは出す**（`work/Send.tsx` の対象の解決と同じ考え方）。
-  useEffect(() => {
-    let cancelled = false;
-    const wanted = wantedKey === "" ? [] : wantedKey.split(",");
-    // **同期で setState しない**（連鎖レンダーになる）。対象が無いときも
-    // `allSettled` の解決を通して空へ戻す。
-    void Promise.allSettled(wanted.map((id) => request<Media>(`/media/${id}`))).then((results) => {
-      if (cancelled) {
-        return;
-      }
-      const found: Record<string, Media> = {};
-      for (const result of results) {
-        if (result.status === "fulfilled") {
-          found[result.value.id] = result.value;
-        }
-      }
-      setFiles(found);
-    });
-    return () => {
-      cancelled = true;
-    };
-  }, [wantedKey]);
+  const found = records.data?.records ?? [];
+  const truncated = found.length > APPROVE_PAGE;
+  const rows = truncated ? found.slice(0, APPROVE_PAGE) : found;
 
   /** 送り先の表示名。引けないときも**内部の ID は出さない**（§13）。 */
   function destinationName(id: string): string {
@@ -118,7 +100,7 @@ export function ApproveScreen() {
 
       {/* 裁定 20: ホームの件数は全件を数えるので、ここが上限で切れていることを
           言わないと、いくら片付けても数が合わないように見える。 */}
-      {rows.length === APPROVE_PAGE && (
+      {truncated && (
         <p role="note" className="small">
           先頭 {APPROVE_PAGE} 件だけを出しています（ほかにもあります）。
         </p>
@@ -134,19 +116,20 @@ export function ApproveScreen() {
             <div className="rowtop" style={{ flexWrap: "wrap" }}>
               {/* **どの写真かを見せる。** リモートの書き換えは取り消せないので、
                   対象を見ないまま承認させない（§13）。 */}
-              {files[record.media_file_id] && (
+              {record.rel_path && (
                 // `.tile` は `aspect-ratio: 1` で幅を親から取るので、幅を持つ枠に置く
                 // （`work/Send.tsx` の下見と同じ考え方）。
                 <div style={{ width: 72, flex: "0 0 auto" }}>
-                  <MediaTile media={files[record.media_file_id]} selected={false} />
+                  <MediaTile
+                    media={{ id: record.media_file_id, rel_path: record.rel_path }}
+                    selected={false}
+                  />
                 </div>
               )}
               <div className="grow">
                 {/* 内部の ID をそのまま出さない（§13）。読めないときはそう書く。 */}
                 <h2 style={{ fontSize: 15.5, fontWeight: 650 }}>
-                  {files[record.media_file_id]
-                    ? fileName(files[record.media_file_id].rel_path)
-                    : "ファイル名が読めません"}
+                  {record.rel_path ? fileName(record.rel_path) : "ファイル名が読めません"}
                 </h2>
                 <p className="small" style={{ marginTop: 4, marginBottom: 8 }}>
                   送り先: {destinationName(record.destination_id)}

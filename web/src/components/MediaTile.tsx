@@ -18,6 +18,11 @@ export type Media = {
   status?: MediaStatus;
 };
 
+/** タイルが実際に読む部分だけ。**一覧の 1 行から直に描ける**ようにするため、
+ * 撮影時刻や大きさは要求しない（`確認` は `GET /uploads` の行だけで描く）。 */
+export type TileMedia = Pick<Media, "id" | "rel_path"> &
+  Partial<Pick<Media, "kind" | "duration_seconds" | "status">>;
+
 /** `rel_path` の末尾（ファイル名）。**内部の相対パスを画面に出さない**（§13）ので、
  * タイルの `aria-label` も、ホームの「さっき取り込んだもの」もここを通す。 */
 export function fileName(relPath: string): string {
@@ -39,7 +44,7 @@ export function MediaTile({
   selected,
   onToggle,
 }: {
-  media: Media;
+  media: TileMedia;
   selected: boolean;
   onToggle?: (id: string) => void;
 }) {

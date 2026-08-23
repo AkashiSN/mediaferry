@@ -15,7 +15,7 @@ describe("確認", () => {
   // 裁定 20「打ち切ったことを黙らない」。一覧には上限があり、ホームの件数は
   // 全件を数える。黙って切ると、ホームの「N 件」といくら見比べても合わない。
   it("上限で切れているときは、ほかにもあると書く", async () => {
-    const records = Array.from({ length: APPROVE_PAGE }, (_, index) => ({
+    const records = Array.from({ length: APPROVE_PAGE + 1 }, (_, index) => ({
       id: `r${index}`,
       destination_id: "d1",
       media_file_id: `m${index}`,
@@ -25,7 +25,10 @@ describe("確認", () => {
       remote_checked_at: null,
       identical: false,
     }));
-    stubApi({ "/uploads?state=awaiting_datetime_approval": { records } });
+    stubApi({
+      "/destinations": { destinations: [{ id: "d1", name: "家の Immich" }] },
+      "/uploads?state=awaiting_datetime_approval": { records },
+    });
     render(
       <MemoryRouter>
         <ApproveScreen />
@@ -36,14 +39,43 @@ describe("確認", () => {
     ).toBeInTheDocument();
   });
 
+  // **ちょうど上限のときは切れていない。** 読めた数だけで判断すると、
+  // 出し切っているのに「ほかにもあります」と書く。
+  it("ちょうど上限の件数なら、切れているとは書かない", async () => {
+    const records = Array.from({ length: APPROVE_PAGE }, (_, index) => ({
+      id: `r${index}`,
+      destination_id: "d1",
+      media_file_id: `m${index}`,
+      rel_path: `library/2026/08/DJI_${index}.MP4`,
+      origin: "pre_existing",
+      remote_current: null,
+      proposed: "2026-08-14 20:02",
+      remote_checked_at: null,
+      identical: false,
+    }));
+    stubApi({
+      "/destinations": { destinations: [{ id: "d1", name: "家の Immich" }] },
+      "/uploads?state=awaiting_datetime_approval": { records },
+    });
+    render(
+      <MemoryRouter>
+        <ApproveScreen />
+      </MemoryRouter>,
+    );
+    await waitFor(() => expect(screen.getAllByRole("article")).toHaveLength(APPROVE_PAGE));
+    expect(screen.queryByText(/ほかにもあります/)).toBeNull();
+  });
+
   it("上限に達していなければ、余計なことは書かない", async () => {
     stubApi({
+      "/destinations": { destinations: [{ id: "d1", name: "家の Immich" }] },
       "/uploads?state=awaiting_datetime_approval": {
         records: [
           {
             id: "r1",
             destination_id: "d1",
             media_file_id: "m1",
+            rel_path: "library/2026/08/DJI_0001.MP4",
             origin: "pre_existing",
             remote_current: null,
             proposed: "2026-08-14 20:02",
@@ -65,12 +97,14 @@ describe("確認", () => {
   it("読めなかった値を空欄にしない", async () => {
     // **空欄は「変更なし」に見える。**
     stubApi({
+      "/destinations": { destinations: [{ id: "d1", name: "家の Immich" }] },
       "/uploads?state=awaiting_datetime_approval": {
         records: [
           {
             id: "r1",
             destination_id: "d1",
             media_file_id: "m1",
+            rel_path: "library/2026/08/DJI_0001.MP4",
             origin: "pre_existing",
             remote_current: null,
             proposed: "2026-08-14 20:02",
@@ -89,7 +123,10 @@ describe("確認", () => {
   });
 
   it("却下はリモートに触らないと画面に書く", async () => {
-    stubApi({ "/uploads?state=awaiting_datetime_approval": { records: [] } });
+    stubApi({
+      "/destinations": { destinations: [{ id: "d1", name: "家の Immich" }] },
+      "/uploads?state=awaiting_datetime_approval": { records: [] },
+    });
     render(
       <MemoryRouter>
         <ApproveScreen />
@@ -105,12 +142,14 @@ describe("確認", () => {
   it("承認は確認を取ってから API を叩く", async () => {
     // **不可逆な操作（リモートの書き換え）は確認を必須にする**（§13）。
     const { calls } = stubApi({
+      "/destinations": { destinations: [{ id: "d1", name: "家の Immich" }] },
       "/uploads?state=awaiting_datetime_approval": {
         records: [
           {
             id: "r1",
             destination_id: "d1",
             media_file_id: "m1",
+            rel_path: "library/2026/08/DJI_0001.MP4",
             origin: "pre_existing",
             remote_current: "2026-08-14 10:00",
             proposed: "2026-08-14 20:02",
@@ -119,6 +158,8 @@ describe("確認", () => {
           },
         ],
       },
+      // **叩く先も登録する**（`stubApi` は知らないパスを 404 で返す）。
+      "/uploads/r1/approve": { status: "ok" },
     });
     render(
       <MemoryRouter>
@@ -132,6 +173,11 @@ describe("確認", () => {
     await waitFor(() =>
       expect(calls().some((c) => c.path === "/uploads/r1/approve" && c.method === "POST")).toBe(true),
     );
+    // **叩いた後を見る。** 応答が失敗のままだと「叩いた」までしか試さないので、
+    // 一覧を引き直す枝が死んでいても気付けない。
+    await waitFor(() =>
+      expect(calls().filter((c) => c.path.startsWith("/uploads?state=")).length).toBeGreaterThan(1),
+    );
   });
 
   it("却下は確認なしで reject を叩く（approve と取り違えない）", async () => {
@@ -139,12 +185,14 @@ describe("確認", () => {
     // 確認は要らないが、その分だけ**承認と取り違えて叩くと確認なしで書き換わって
     // しまう**。path も method も具体的に見る。
     const { calls } = stubApi({
+      "/destinations": { destinations: [{ id: "d1", name: "家の Immich" }] },
       "/uploads?state=awaiting_datetime_approval": {
         records: [
           {
             id: "r1",
             destination_id: "d1",
             media_file_id: "m1",
+            rel_path: "library/2026/08/DJI_0001.MP4",
             origin: "pre_existing",
             remote_current: "2026-08-14 10:00",
             proposed: "2026-08-14 20:02",
@@ -153,6 +201,7 @@ describe("確認", () => {
           },
         ],
       },
+      "/uploads/r1/reject": { status: "ok" },
     });
     render(
       <MemoryRouter>
@@ -165,16 +214,21 @@ describe("確認", () => {
       expect(calls().some((c) => c.path === "/uploads/r1/reject" && c.method === "POST")).toBe(true),
     );
     expect(calls().some((c) => c.path.endsWith("/approve"))).toBe(false);
+    await waitFor(() =>
+      expect(calls().filter((c) => c.path.startsWith("/uploads?state=")).length).toBeGreaterThan(1),
+    );
   });
 
   it("直したい日時が読めなければ空欄にしない", async () => {
     stubApi({
+      "/destinations": { destinations: [{ id: "d1", name: "家の Immich" }] },
       "/uploads?state=awaiting_datetime_approval": {
         records: [
           {
             id: "r1",
             destination_id: "d1",
             media_file_id: "m1",
+            rel_path: "library/2026/08/DJI_0001.MP4",
             origin: "pre_existing",
             remote_current: "2026-08-14 10:00",
             proposed: null,
@@ -196,12 +250,14 @@ describe("確認", () => {
   // 「変更後 」で途切れる。
   it("直したい日時が読めなくても、確認ダイアログが途切れない", async () => {
     stubApi({
+      "/destinations": { destinations: [{ id: "d1", name: "家の Immich" }] },
       "/uploads?state=awaiting_datetime_approval": {
         records: [
           {
             id: "r1",
             destination_id: "d1",
             media_file_id: "m1",
+            rel_path: "library/2026/08/DJI_0001.MP4",
             origin: "pre_existing",
             remote_current: "2026-08-14 10:00",
             proposed: null,
@@ -210,6 +266,8 @@ describe("確認", () => {
           },
         ],
       },
+      // **叩く先も登録する**（`stubApi` は知らないパスを 404 で返す）。
+      "/uploads/r1/approve": { status: "ok" },
     });
     render(
       <MemoryRouter>
@@ -222,12 +280,14 @@ describe("確認", () => {
 
   it("内部の ID を見出しに出さない", async () => {
     stubApi({
+      "/destinations": { destinations: [{ id: "d1", name: "家の Immich" }] },
       "/uploads?state=awaiting_datetime_approval": {
         records: [
           {
             id: "r1",
             destination_id: "d1",
             media_file_id: "m1-uuid-should-not-appear",
+            rel_path: "library/2026/08/DJI_0001.MP4",
             origin: "pre_existing",
             remote_current: "2026-08-14 10:00",
             proposed: "2026-08-14 20:02",
@@ -248,12 +308,14 @@ describe("確認", () => {
 
   it("観測した時刻を人が読める形にする", async () => {
     stubApi({
+      "/destinations": { destinations: [{ id: "d1", name: "家の Immich" }] },
       "/uploads?state=awaiting_datetime_approval": {
         records: [
           {
             id: "r1",
             destination_id: "d1",
             media_file_id: "m1",
+            rel_path: "library/2026/08/DJI_0001.MP4",
             origin: "pre_existing",
             remote_current: "2026-08-14 10:00",
             proposed: "2026-08-14 20:02",
@@ -275,12 +337,14 @@ describe("確認", () => {
 
   it("変更が無い行では承認を促さない", async () => {
     stubApi({
+      "/destinations": { destinations: [{ id: "d1", name: "家の Immich" }] },
       "/uploads?state=awaiting_datetime_approval": {
         records: [
           {
             id: "r1",
             destination_id: "d1",
             media_file_id: "m1",
+            rel_path: "library/2026/08/DJI_0001.MP4",
             origin: "pre_existing",
             remote_current: "2026-08-14 20:02",
             proposed: "2026-08-14 20:02",
@@ -308,20 +372,12 @@ describe("何を、どこで書き換えるのか", () => {
     id: "r1",
     destination_id: "d2",
     media_file_id: "m1",
+    rel_path: "library/2026/08/DJI_0001.MP4",
     origin: "pre_existing",
     remote_current: "2026-08-14T10:00:00+09:00",
     proposed: "2026-08-14T20:02:00+09:00",
     remote_checked_at: "2026-08-14T09:00:00Z",
     identical: false,
-  };
-
-  const MEDIA = {
-    id: "m1",
-    rel_path: "library/2026/08/DJI_0001.MP4",
-    kind: "video",
-    captured_at: "2026-08-14T20:02:00+09:00",
-    size_bytes: 4294967296,
-    duration_seconds: 600,
   };
 
   function stubApprove(overrides: Record<string, unknown> = {}) {
@@ -333,7 +389,6 @@ describe("何を、どこで書き換えるのか", () => {
           { id: "d2", name: "外の Immich", enabled: true },
         ],
       },
-      "/media/m1": MEDIA,
       ...overrides,
     });
   }
@@ -345,6 +400,15 @@ describe("何を、どこで書き換えるのか", () => {
       </MemoryRouter>,
     );
   }
+
+  // **一覧が持っている値で描く。** 1 件ずつ引き直すと、上限いっぱい（200 件）の
+  // 確認で 200 本の要求が飛び、承認のたびに全件を引き直すことになる。
+  it("ファイル名は一覧の行から取る（1 件ずつ引き直さない）", async () => {
+    const { calls } = stubApprove();
+    renderApprove();
+    expect(await screen.findByRole("heading", { name: "DJI_0001.MP4" })).toBeInTheDocument();
+    expect(calls().some((call) => call.path.startsWith("/media/"))).toBe(false);
+  });
 
   it("どの写真かをサムネイルで出す", async () => {
     stubApprove();
@@ -380,7 +444,10 @@ describe("何を、どこで書き換えるのか", () => {
   });
 
   it("ファイルが読めないときも、UUID を見出しにしない", async () => {
-    stubApprove({ "/media/m1": { error: { code: "not_found", detail: "", meta: {} } } });
+    // 一覧が位置を持たない行（元のファイルが消えている等）。
+    stubApprove({
+      "/uploads?state=awaiting_datetime_approval": { records: [{ ...RECORD, rel_path: null }] },
+    });
     renderApprove();
     await screen.findByRole("button", { name: "承認する" });
     expect(screen.getByRole("heading", { name: "ファイル名が読めません" })).toBeInTheDocument();
@@ -414,6 +481,7 @@ describe("飛んでいる間と、失敗したとき", () => {
     id: "r1",
     destination_id: "d1",
     media_file_id: "m1",
+    rel_path: "library/2026/08/DJI_0001.MP4",
     origin: "pre_existing",
     remote_current: "2026-08-14T10:00:00+09:00",
     proposed: "2026-08-14T20:02:00+09:00",
