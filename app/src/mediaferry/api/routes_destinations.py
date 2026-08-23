@@ -77,7 +77,12 @@ def edit_destination(
     if name is not None:
         # **名前は画面が送り先を指す唯一の手掛かり**（§13 は内部の id を出さない）。
         # 空にできると、確認の本文も一覧も名前の無い行になる。
-        name = str(name).strip()
+        #
+        # **`str()` で何でも名前にしない。** dict を渡すと Python の repr
+        # （`{'a': 1}`）が名前になる。
+        if not isinstance(name, str):
+            raise ApiError(400, ErrorCode.BAD_REQUEST, "名前は文字で送る")
+        name = name.strip()
         if not name:
             raise ApiError(400, ErrorCode.BAD_REQUEST, "名前は空にできない")
     if set(body) <= {"name", "enabled"}:
@@ -107,6 +112,12 @@ def edit_destination(
             ErrorCode.SAME_LIBRARY_UNDECIDED,
             f"{exc}。same_library を true か false で指定する",
         ) from exc
+    # **接続と一緒に送られてきた名前・休止も適用する。** 検証してから捨てると、
+    # 200 が返るのに名前は古いまま残り、押した人には変わったように見える。
+    # **検証が通ってから**当てる（`add_revision` が失敗した編集は、どの欄も
+    # 反映しない）。
+    if name is not None or "enabled" in body:
+        repo.rename_or_toggle(destination_id, name=name, enabled=body.get("enabled"))
     # 参照が絶えた旧鍵を消す。ローテートしても漏洩面が減らないままにしない（§12.3）。
     repo.purge_superseded_credentials(destination_id)
     return {

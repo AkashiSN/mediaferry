@@ -108,11 +108,15 @@ def install_error_handlers(app: FastAPI) -> None:
         # **文言はこちらで書く。** 既定の `detail` は英語（"Method Not Allowed"）で、
         # 画面は `bad_request` に `detail` を添えて出すため、素通しにすると
         # そのまま利用者へ出る。
+        #
+        # **添える理由が無いなら空にする。** 画面は `bad_request` の `detail` を
+        # 括弧で添えるので、定型文を入れると「…受け付けられません（…受け付け
+        # られない）」という同語反復になる。
         if exc.status_code >= 500:
             return _envelope(exc.status_code, ErrorCode.INTERNAL, "内部エラー", {})
         if exc.status_code == 404:
             return _envelope(exc.status_code, ErrorCode.NOT_FOUND, "その経路は無い", {})
-        return _envelope(exc.status_code, ErrorCode.BAD_REQUEST, "その要求は受け付けられない", {})
+        return _envelope(exc.status_code, ErrorCode.BAD_REQUEST, "", {})
 
     @app.exception_handler(RequestValidationError)
     async def _validation_error(_: Request, exc: RequestValidationError) -> JSONResponse:

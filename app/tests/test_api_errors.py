@@ -100,6 +100,10 @@ def test_a_framework_http_error_does_not_leak_its_own_wording(client):
     error = _error(response)
     assert error["code"] == ErrorCode.BAD_REQUEST
     assert "Method Not Allowed" not in error["detail"]
+    # **添える理由が無いなら、添えない。** 画面は `bad_request` の `detail` を
+    # 括弧で添えるので、定型文を入れると「…受け付けられません（…受け付けられない）」
+    # という同語反復になる。
+    assert error["detail"] == ""
 
 
 def test_a_server_side_http_error_is_internal_not_bad_request(client, monkeypatch):
@@ -115,3 +119,13 @@ def test_a_server_side_http_error_is_internal_not_bad_request(client, monkeypatc
 
     assert response.status_code == 503
     assert _error(response)["code"] == ErrorCode.INTERNAL
+
+
+def test_a_setting_written_without_a_value_says_what_is_missing(client):
+    """**Python の例外の文字列を画面に出さない。** `KeyError` は `'value'` と出る."""
+    response = client.put("/api/settings", json={"key": "AUTO_IMPORT"})
+
+    assert response.status_code == 400
+    error = _error(response)
+    assert error["code"] == ErrorCode.MISSING_FIELD
+    assert "'value'" not in error["detail"]

@@ -189,11 +189,15 @@ def write_setting(
     state=Depends(get_state),  # noqa: ANN001, B008
     conn=Depends(get_conn),  # noqa: ANN001, B008
 ) -> dict[str, str]:
+    if "key" not in body or "value" not in body:
+        # **`KeyError` の文字列を画面に出さない**（`str(KeyError("value"))` は
+        # `'value'`）。足りない項目は、画面が定型文で言える種類の失敗。
+        raise ApiError(400, ErrorCode.MISSING_FIELD, "key と value が要る")
     try:
         tier = SettingsService(conn, state.env).set(body["key"], body["value"])
     except SettingLocked as exc:
         raise ApiError(409, ErrorCode.SETTING_LOCKED, str(exc)) from exc
-    except (SettingInvalid, KeyError) as exc:
+    except SettingInvalid as exc:
         raise ApiError(400, ErrorCode.BAD_REQUEST, str(exc)) from exc
     # いつ効くかを返す。RESTART の値を変えて「反映されない」と見えるのを防ぐ。
     return {"status": "ok", "applies": tier.value}
