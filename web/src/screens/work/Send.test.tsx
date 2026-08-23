@@ -5,6 +5,7 @@ import userEvent from "@testing-library/user-event";
 import { MemoryRouter, Route, Routes, useLocation } from "react-router-dom";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
+import { DashboardProvider } from "../../api/dashboard";
 import { stubApi } from "../../test/api";
 import { SendScreen, mergeMedia, summarise } from "./Send";
 
@@ -564,6 +565,55 @@ describe("写真の画面から戻ったとき", () => {
 });
 
 describe("送信そのもの", () => {
+  // **1 本も始まらなくても、枠の数は直す。** 進捗のイベントが出ないので、
+  // ここで取り直さないとホームの「N 件をまだ送っていません」が送る前のまま残る。
+  it("送ったあと、枠の集計を取り直す", async () => {
+    const api = stubApi({
+      "/dashboard": {
+        media_total: 0,
+        destinations: [],
+        running_jobs: 0,
+        recent_imports: [],
+        orphans: 0,
+        missing: 0,
+        warnings: [],
+        merge_candidates: 0,
+        merge_review_total: 0,
+        unsent_total: 1,
+        awaiting_total: 0,
+      },
+      "/destinations/d1/upload": { job_id: "job-1" },
+      "/destinations": DESTINATIONS,
+      "/media": {
+        media: [{ id: "m1", rel_path: "a.JPG", kind: "photo", captured_at: "2026-08-18T10:00:00+09:00", size_bytes: 1024 }],
+        total: 1,
+        page: 1,
+        page_size: 50,
+      },
+      "/uploads": {
+        pairs: [{ media_file_id: "m1", destination_id: "d1", result: "created", upload_record_id: "u1", reason: null }],
+      },
+    });
+    render(
+      <MemoryRouter initialEntries={["/send"]}>
+        <DashboardProvider>
+          <Routes>
+            <Route path="/send" element={<SendScreen />} />
+            <Route path="/sending" element={<SendingProbe />} />
+          </Routes>
+        </DashboardProvider>
+      </MemoryRouter>,
+    );
+    await waitFor(() => expect(screen.getByRole("button", { name: /内容を確かめる/ })).toBeEnabled());
+    await waitFor(() => expect(api.calls().filter((c) => c.path === "/dashboard")).toHaveLength(1));
+    await userEvent.click(screen.getByRole("button", { name: /内容を確かめる/ }));
+    await userEvent.click(screen.getByRole("button", { name: "実行する" }));
+
+    await waitFor(() =>
+      expect(api.calls().filter((c) => c.path === "/dashboard").length).toBeGreaterThan(1),
+    );
+  });
+
   it("2 段階で進み、成功したら送信中の画面へジョブと結果の文を持って移る", async () => {
     const api = stubApi({
       "/destinations/d1/upload": { job_id: "job-1" },

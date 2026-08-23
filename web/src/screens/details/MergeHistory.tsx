@@ -9,6 +9,7 @@ import { useEffect, useState } from "react";
 import { Link, useLocation } from "react-router-dom";
 
 import { request } from "../../api/client";
+import { useDashboardReload } from "../../api/dashboard";
 import { useMutation, useQuery } from "../../api/hooks";
 import { ConfirmDialog } from "../../components/ConfirmDialog";
 import type { Confirmation } from "../../components/ConfirmDialog";
@@ -41,6 +42,7 @@ export function MergeHistoryScreen() {
   const stale = useQuery<Stale>("/media/stale-derived");
   const { hash } = useLocation();
   const deletion = useMutation();
+  const refreshTasks = useDashboardReload();
   const [confirmation, setConfirmation] = useState<{
     value: Confirmation;
     run: () => Promise<void>;
@@ -53,6 +55,8 @@ export function MergeHistoryScreen() {
     if (await deletion.run(() => request(path, { method: "DELETE" }))) {
       discarded.reload();
       stale.reload();
+      // 消すのは進捗のイベントを出さない。**枠の「やること」も一緒に直す。**
+      refreshTasks();
     }
     setConfirmation(null);
   }

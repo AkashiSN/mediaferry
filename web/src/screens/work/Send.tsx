@@ -9,6 +9,7 @@ import { useEffect, useMemo, useState } from "react";
 import { useLocation, useNavigate } from "react-router-dom";
 
 import { request } from "../../api/client";
+import { useDashboardReload } from "../../api/dashboard";
 import { useMutation, useQuery } from "../../api/hooks";
 import { ConfirmDialog } from "../../components/ConfirmDialog";
 import { ErrorBanner } from "../../components/ErrorBanner";
@@ -113,6 +114,7 @@ export function SendScreen() {
   const [confirmingFor, setConfirmingFor] = useState<string | null>(null);
   // 送信そのものと、対象の解決の失敗。**画面が持つ失敗は 1 本**（帯も 1 本）。
   const sending = useMutation();
+  const refreshTasks = useDashboardReload();
   // 対象の解決で一部だけ外れたときの断り書き（隠さない。§13）。
   const [note, setNote] = useState<string | null>(null);
 
@@ -324,6 +326,9 @@ export function SendScreen() {
         }
       }
       const note = summarise(created.pairs.length, rejected, failures, jobIds.length);
+      // **1 本も始まらなかったときのために、ここで直す。** 進捗のイベントが
+      // 出ないので、枠の「やること」もホームの件数も送る前のまま残る。
+      refreshTasks();
       navigate("/sending", { state: { jobIds, note } });
     });
     if (!done) {

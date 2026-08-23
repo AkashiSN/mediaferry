@@ -7,6 +7,7 @@ import { MemoryRouter } from "react-router-dom";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { emitJob } from "../../test/setup";
+import { DashboardProvider } from "../../api/dashboard";
 import { stubApi } from "../../test/api";
 import { MergeHistoryScreen } from "./MergeHistory";
 
@@ -47,6 +48,43 @@ beforeEach(() => {
 afterEach(() => vi.restoreAllMocks());
 
 describe("つないだ動画の記録", () => {
+  // 消すのはジョブにならないので、取り直さないと枠の数（写真の合計・未送信）が
+  // 古いまま残る。
+  it("消したあと、枠の集計を取り直す", async () => {
+    const { calls } = stubApi({
+      "/dashboard": {
+        media_total: 1,
+        destinations: [],
+        running_jobs: 0,
+        recent_imports: [],
+        orphans: 0,
+        missing: 0,
+        warnings: [],
+        merge_candidates: 0,
+        merge_review_total: 0,
+        unsent_total: 0,
+        awaiting_total: 0,
+      },
+      "/merge-groups?status=skipped": { groups: [] },
+      "/media/stale-derived": { stale: [staleItem("s9", "derived/gone.MP4")] },
+      "/media/s9": { id: "s9" },
+    });
+    render(
+      <MemoryRouter>
+        <DashboardProvider>
+          <MergeHistoryScreen />
+        </DashboardProvider>
+      </MemoryRouter>,
+    );
+    await waitFor(() => expect(calls().filter((c) => c.path === "/dashboard")).toHaveLength(1));
+    await userEvent.click(await screen.findByRole("button", { name: /このファイルを消す/ }));
+    await userEvent.click(screen.getByRole("button", { name: "実行する" }));
+
+    await waitFor(() =>
+      expect(calls().filter((c) => c.path === "/dashboard").length).toBeGreaterThan(1),
+    );
+  });
+
   it("使っていない出力を、ファイルとして消せる", async () => {
     const { calls } = stubApi({
       "/merge-groups?status=skipped": { groups: [] },
@@ -83,6 +121,8 @@ describe("つないだ動画の記録", () => {
     const { calls } = stubApi({
       ...EMPTY_ROUTES,
       "/merge-groups?status=skipped": { groups: [discardedGroup("old1", "library/a.MP4")] },
+      // **叩く先も登録する**（`stubApi` は知らないパスを 404 で返す）。
+      "/merge-groups/old1": { id: "old1" },
     });
     render(
       <MemoryRouter>
@@ -105,6 +145,13 @@ describe("つないだ動画の記録", () => {
     await waitFor(() =>
       expect(calls().some((c) => c.path === "/merge-groups/old1" && c.method === "DELETE")).toBe(true),
     );
+    // **消した後は一覧を引き直す。** 叩いたところまでしか見ないと、画面が
+    // 消えたはずの組を出したままでも気付けない。
+    await waitFor(() =>
+      expect(
+        calls().filter((c) => c.path === "/merge-groups?status=skipped").length,
+      ).toBeGreaterThan(1),
+    );
   });
 
   it("別々のままにした組み合わせが無ければ、そう書く", async () => {
@@ -123,6 +170,7 @@ describe("つないだ動画の記録", () => {
       "/merge-groups?status=skipped": {
         groups: [discardedGroup("g1", "library/a.MP4"), discardedGroup("g2", "library/b.MP4")],
       },
+      "/merge-groups/g2": { id: "g2" },
     });
     render(
       <MemoryRouter>
@@ -142,6 +190,7 @@ describe("つないだ動画の記録", () => {
     const { calls } = stubApi({
       "/merge-groups?status=skipped": { groups: [] },
       "/media/stale-derived": { stale: [staleItem("s1", "derived/a.MP4"), staleItem("s2", "derived/b.MP4")] },
+      "/media/s2": { id: "s2" },
     });
     render(
       <MemoryRouter>
@@ -161,6 +210,7 @@ describe("つないだ動画の記録", () => {
         groups: [discardedGroup("g1", "library/a.MP4"), discardedGroup("g2", "library/b.MP4")],
       },
       "/media/stale-derived": { stale: [staleItem("s1", "derived/a.MP4"), staleItem("s2", "derived/b.MP4")] },
+      "/media/s2": { id: "s2" },
     });
     render(
       <MemoryRouter>
@@ -191,6 +241,7 @@ describe("つないだ動画の記録", () => {
     const { calls } = stubApi({
       "/merge-groups?status=skipped": { groups: [] },
       "/media/stale-derived": { stale: [staleItem("s3", "derived/old3.MP4")] },
+      "/media/s3": { id: "s3" },
     });
     render(
       <MemoryRouter>

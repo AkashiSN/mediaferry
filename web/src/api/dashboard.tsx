@@ -10,7 +10,7 @@
 import { createContext, useContext } from "react";
 import type { ReactNode } from "react";
 
-import { useEvents } from "../hooks/useEvents";
+import { useEventCount } from "../hooks/useEvents";
 import { useReloadOnEvents } from "../hooks/useReloadOnEvents";
 import type { DashboardCounts } from "../hooks/useTasks";
 import { useQuery } from "./hooks";
@@ -43,8 +43,7 @@ const DashboardContext = createContext<Query<Dashboard> | null>(null);
 
 export function DashboardProvider({ children }: { children: ReactNode }) {
   const dashboard = useQuery<Dashboard>("/dashboard");
-  const { received } = useEvents();
-  useReloadOnEvents(received, dashboard.reload);
+  useReloadOnEvents(useEventCount(), dashboard.reload);
   return <DashboardContext.Provider value={dashboard}>{children}</DashboardContext.Provider>;
 }
 
