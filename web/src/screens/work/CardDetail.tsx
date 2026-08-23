@@ -15,6 +15,7 @@ import { useMutation, useQuery } from "../../api/hooks";
 import { ConfirmDialog, type Confirmation } from "../../components/ConfirmDialog";
 import { ErrorBanner } from "../../components/ErrorBanner";
 import { Icon } from "../../components/Icon";
+import { formatBytes } from "../../utils/formatBytes";
 
 /** カード 1 枚（`GET /devices` の 1 要素）。**判定関数がここにあるので、型もここに
  * 1 つだけ置く**（ホームの帯も同じものを描く）。 */
@@ -22,6 +23,9 @@ export type Volume = {
   volume_instance_id: string;
   // API は空文字を返す（`None` にはならない）。ラベルの有無は `""` で見る。
   fs_label: string;
+  // ボリュームの総容量。**同じカメラのカードが 2 枚挿さっていると、判定結果も
+  // 確度も同じ行になる**ので、目の前のどれなのかは容量でも見分ける。
+  size_bytes: number;
   profile_slug: string | null;
   identity_confidence: string | null;
   provisional: boolean;
@@ -236,6 +240,9 @@ export function CardDetailScreen() {
                 </div>
                 <div className="grow">
                   <h2 style={{ fontSize: 16, fontWeight: 650 }}>{label}</h2>
+                  <p className="small" style={{ marginTop: 4 }}>
+                    {formatBytes(volume.size_bytes)}
+                  </p>
                   <p className="small" style={{ marginTop: 4 }}>
                     判定: {profileName}
                     {confidence !== null ? `（確度：${confidence}）` : ""}

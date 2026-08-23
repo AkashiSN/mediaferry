@@ -140,6 +140,7 @@ describe("ホーム", () => {
           {
             volume_instance_id: "v1",
             fs_label: "OSMO",
+            size_bytes: 512_711_688_192,
             profile_slug: "dji-osmo",
             identity_confidence: "high",
             provisional: false,
@@ -152,8 +153,102 @@ describe("ホーム", () => {
       "/settings": { settings: [{ key: "AUTO_IMPORT", value: "trusted" }], warnings: [] },
     });
     renderHome();
-    await waitFor(() => expect(screen.getByText("初めて見るカードです")).toBeInTheDocument());
+    await waitFor(() =>
+      expect(screen.getByText("OSMO は初めて見るカードです")).toBeInTheDocument(),
+    );
     expect(screen.getByRole("button", { name: "このカードを信頼する" })).toBeInTheDocument();
+  });
+
+  // **カードは、どれが目の前のどれなのかが分かる形で出す。** 同じカメラの
+  // カードが 2 枚挿さっていると、カメラの種類だけでは区別が付かない。
+  it("挿さっているカードを、ラベルと容量で見分けられる", async () => {
+    stubHome({
+      "/dashboard": EMPTY_DASHBOARD,
+      "/devices": {
+        volumes: [
+          {
+            volume_instance_id: "v1",
+            fs_label: "SD_Card",
+            size_bytes: 512_711_688_192,
+            profile_slug: "dji-osmo",
+            identity_confidence: "high",
+            provisional: false,
+            trusted: false,
+            reason: "DCIM に一致するファイルが 1 件",
+          },
+          {
+            volume_instance_id: "v2",
+            fs_label: "Pocket4",
+            size_bytes: 116_047_982_592,
+            profile_slug: "dji-osmo",
+            identity_confidence: "high",
+            provisional: true,
+            trusted: false,
+            reason: "DCIM はあるが一致するファイルが無い（空）",
+          },
+        ],
+      },
+      "/jobs": { jobs: [] },
+      "/settings": { settings: [{ key: "AUTO_IMPORT", value: "trusted" }], warnings: [] },
+    });
+    renderHome();
+
+    expect(await screen.findByText("SD_Card は初めて見るカードです")).toBeInTheDocument();
+    expect(screen.getByText("Pocket4 は初めて見るカードです")).toBeInTheDocument();
+    expect(screen.getByText("477 GiB")).toBeInTheDocument();
+    expect(screen.getByText("108 GiB")).toBeInTheDocument();
+  });
+
+  it("容量は、生のバイト数では出さない", async () => {
+    stubHome({
+      "/dashboard": EMPTY_DASHBOARD,
+      "/devices": {
+        volumes: [
+          {
+            volume_instance_id: "v1",
+            fs_label: "SD_Card",
+            size_bytes: 512_711_688_192,
+            profile_slug: "dji-osmo",
+            identity_confidence: "high",
+            provisional: false,
+            trusted: false,
+            reason: "DCIM に一致するファイルが 1 件",
+          },
+        ],
+      },
+      "/jobs": { jobs: [] },
+      "/settings": { settings: [{ key: "AUTO_IMPORT", value: "trusted" }], warnings: [] },
+    });
+    renderHome();
+
+    await screen.findByText("SD_Card は初めて見るカードです");
+    expect(screen.queryByText(/512711688192/)).toBeNull();
+  });
+
+  // ラベルが無いカードは `volumeLabel` が既定名を作る。見出しにもその名前が入る。
+  it("ラベルの無いカードは、既定の名前で見出しに出る", async () => {
+    stubHome({
+      "/dashboard": EMPTY_DASHBOARD,
+      "/devices": {
+        volumes: [
+          {
+            volume_instance_id: "v1",
+            fs_label: "",
+            size_bytes: 116_047_982_592,
+            profile_slug: "dji-osmo",
+            identity_confidence: "high",
+            provisional: false,
+            trusted: false,
+            reason: "DCIM がある",
+          },
+        ],
+      },
+      "/jobs": { jobs: [] },
+      "/settings": { settings: [{ key: "AUTO_IMPORT", value: "trusted" }], warnings: [] },
+    });
+    renderHome();
+
+    expect(await screen.findByText("名前の無いカード は初めて見るカードです")).toBeInTheDocument();
   });
 
   it("カメラの種類は、生の slug ではなく表示名を出す（§13）", async () => {
@@ -165,6 +260,7 @@ describe("ホーム", () => {
           {
             volume_instance_id: "v1",
             fs_label: "OSMO",
+            size_bytes: 512_711_688_192,
             profile_slug: "dji-osmo",
             identity_confidence: "high",
             provisional: true,
@@ -194,6 +290,7 @@ describe("ホーム", () => {
           {
             volume_instance_id: "v1",
             fs_label: "OSMO",
+            size_bytes: 512_711_688_192,
             profile_slug: "unknown-cam",
             identity_confidence: "high",
             provisional: false,
@@ -218,6 +315,7 @@ describe("ホーム", () => {
   const actionableVolume = {
     volume_instance_id: "v1",
     fs_label: "OSMO",
+    size_bytes: 512_711_688_192,
     profile_slug: "dji-osmo",
     identity_confidence: "high",
     provisional: false,

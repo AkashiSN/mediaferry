@@ -20,6 +20,7 @@ describe("カードの信頼登録", () => {
   const base = {
     volume_instance_id: "v1",
     fs_label: "SD_Card",
+    size_bytes: 512_711_688_192,
     profile_slug: "dji-osmo",
     identity_confidence: "high",
     provisional: false,
@@ -126,6 +127,7 @@ describe("カードの信頼登録", () => {
         ...base,
         volume_instance_id: "v2",
         fs_label: "USB_STICK",
+        size_bytes: 512_711_688_192,
         profile_slug: null,
         reason: "DCIM が無い",
       },
@@ -266,6 +268,20 @@ describe("カードの信頼登録", () => {
       expect(calls.some((call) => call.path === "/volumes/v2/scan")).toBe(true);
     });
     expect(calls.some((call) => call.path === "/volumes/v1/scan")).toBe(false);
+  });
+
+  // **どのカードなのかは、容量でも見分ける。** 同じカメラのカードが 2 枚
+  // 挿さっていると、判定結果も確度も同じ行になる。
+  it("カードの容量を、読める形で出す", async () => {
+    stubDevices([
+      { ...base, size_bytes: 512_711_688_192 },
+      { ...base, volume_instance_id: "v2", fs_label: "Pocket4", size_bytes: 116_047_982_592 },
+    ]);
+    renderCardDetail();
+
+    expect(await screen.findByText("477 GiB")).toBeInTheDocument();
+    expect(screen.getByText("108 GiB")).toBeInTheDocument();
+    expect(screen.queryByText(/512711688192/)).toBeNull();
   });
 
   it("カードが 1 枚も無いときは、そう書く", async () => {
