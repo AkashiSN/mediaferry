@@ -52,6 +52,9 @@ type Group = {
   verification: Verification | null;
   adopted_at: string | null;
   superseded_by_id: string | null;
+  /** 作ったときからカメラの種類が変わったか（`db/selection.py` の
+   * `group_is_current` は変わっていたら必ず断る）。 */
+  profile_changed: boolean;
   output: { media_file_id: string; rel_path: string; size_bytes: number; missing: boolean } | null;
   members: Member[];
 };
@@ -125,38 +128,66 @@ function ordered(members: Member[]): Member[] {
   return [...members].sort((a, b) => a.position - b.position);
 }
 
+/** 入っていれば外し、入っていなければ入れた**新しい**集合。**同じ物を書き換えない**
+ * （React は同一性で描き直しを決める）。 */
+function toggled(current: Set<string>, id: string): Set<string> {
+  const next = new Set(current);
+  if (next.has(id)) {
+    next.delete(id);
+  } else {
+    next.add(id);
+  }
+  return next;
+}
+
+/** 一度に出す組の数（API の `GET /merge-groups` の既定と同じ）。**打ち切ったことは黙らない。** */
+export const MERGE_PAGE = 200;
+
 /** 端数の丸めで生じる程度の重なりは、隙間なしとして扱う（秒）。 */
 const OVERLAP_TOLERANCE_SECONDS = 1;
 
 /**
  * パート間でいちばん大きい空白（秒）。**これが「なぜ同じ 1 本と判断したか」の根拠**。
  *
- * **計算できなかったものを 0 にしない。** 0 は「隙間なく続いている」という積極的な
- * 主張で、取り消せない結合をその根拠で確認させることになる。次のときは `null`
- * （分からない）を返す。
+ * 測れないつなぎ目は次のとき。
  *
  * - 隣り合うどちらかの長さが読めない（`duration_seconds === null`）
  * - 時刻が読めない（`captured_at` を解釈できない）
  * - パートが重なって見える —— `captured_at` が撮影の開始ではないときに起きる
  *   （カメラの種類の既定は `source: "mtime"` で、これはクリップの**終端**）
- * - つなぎ目が 1 つも無い（パートが 1 つだけ。構成を変えるで外すと起きる）
+ *
+ * **測れたつなぎ目は、別のつなぎ目が測れなかったからといって捨てない。** 捨てると、
+ * 大きい空白（＝別の撮影かもしれない）を測れていたのに、取り消せない結合の直前で
+ * 警告そのものが消える。
+ *
+ * **測れなかったものを 0 にはしない。** 0 は「隙間なく続いている」という積極的な
+ * 主張で、取り消せない結合をその根拠で確認させることになる。だから 0 と言えるのは
+ * **すべてのつなぎ目が測れて、どれも 0 だったとき**だけ。それ以外で測れない
+ * つなぎ目が混ざっていれば `null`（分からない）を返す。
  */
 function gapSeconds(members: Member[]): number | null {
   const sorted = ordered(members);
   let max: number | null = null;
+  let unmeasurable = false;
   for (let i = 1; i < sorted.length; i += 1) {
     const previous = sorted[i - 1];
     if (previous.duration_seconds === null) {
-      return null;
+      unmeasurable = true;
+      continue;
     }
     const previousEnd = Date.parse(previous.captured_at) + previous.duration_seconds * 1000;
     const gap = (Date.parse(sorted[i].captured_at) - previousEnd) / 1000;
     if (Number.isNaN(gap) || gap < -OVERLAP_TOLERANCE_SECONDS) {
-      return null;
+      unmeasurable = true;
+      continue;
     }
     max = Math.max(max ?? 0, gap);
   }
-  return max === null ? null : Math.round(Math.max(0, max) * 10) / 10;
+  if (max !== null && max > 0) {
+    return Math.round(max * 10) / 10;
+  }
+  // ここに来る max は 0 か null。**0 と言い切れるのは、全部測れたときだけ。**
+  return unmeasurable || max === null ? null : 0;
 }
 
 function totalBytes(members: Member[]): number {
@@ -174,6 +205,9 @@ function totalMinutes(members: Member[]): number {
  */
 function adoptable(group: Group): boolean {
   return (
+    // **カメラの種類が変わった組には出さない。** 採用しても `group_is_current`
+    // が断るので、押しても送れるようにはならない。
+    !group.profile_changed &&
     group.status === "merged" &&
     group.superseded_by_id === null &&
     group.adopted_at === null &&
@@ -184,7 +218,9 @@ function adoptable(group: Group): boolean {
 }
 
 export function MergeScreen() {
-  const groups = useQuery<Groups>("/merge-groups");
+  // **1 件多く読む。** ちょうど上限の件数だったときに「ほかにもあります」と
+  // 書かないため（読めた数だけでは、切れたのか出し切ったのかが分からない）。
+  const groups = useQuery<Groups>(`/merge-groups?limit=${MERGE_PAGE + 1}`);
   // 手で組むときの選択肢（**検出が拾えなかった並びを人が組む**）。
   const media = useQuery<{ media: { id: string; rel_path: string }[] }>("/media?page_size=200");
   const [picked, setPicked] = useState<Set<string>>(new Set());
@@ -273,6 +309,12 @@ export function MergeScreen() {
             {group.adopted_at !== null && (
               <p className="small" style={{ marginTop: 3 }}>
                 中身を見て採用しました。
+              </p>
+            )}
+            {/* **行き止まりにしない**（§13）。使えない理由と、次にやることを書く。 */}
+            {group.profile_changed && group.status === "merged" && (
+              <p className="small" style={{ marginTop: 3, color: "var(--warn)" }}>
+                つないだあとにカメラの種類が変わったので、この結果はもう使えません。「同じ構成でやり直す」でつなぎ直してください。
               </p>
             )}
           </div>
@@ -374,7 +416,9 @@ export function MergeScreen() {
     );
   }
 
-  const rows = groups.data?.groups ?? [];
+  const found = groups.data?.groups ?? [];
+  const truncated = found.length > MERGE_PAGE;
+  const rows = truncated ? found.slice(0, MERGE_PAGE) : found;
 
   return (
     <section aria-label="つなぐ" className="wrap">
@@ -397,6 +441,14 @@ export function MergeScreen() {
 
       <ErrorBanner error={edit.error ?? groups.error} onDismiss={edit.clear} />
 
+      {/* 裁定 20: ホームの「やること」は全件を数えるので、ここが上限で切れている
+          ことを言わないと、いくら片付けても数が合わないように見える。 */}
+      {truncated && (
+        <p role="note" className="small">
+          先頭 {MERGE_PAGE} 件だけを出しています（ほかにもあります）。
+        </p>
+      )}
+
       <div>
         <button type="button" className="btn sm" disabled={edit.busy} onClick={() => void act("/merge-groups/detect")}>
           分かれた動画を探す
@@ -416,15 +468,7 @@ export function MergeScreen() {
                   type="checkbox"
                   checked={picked.has(row.id)}
                   onChange={() =>
-                    setPicked((current) => {
-                      const next = new Set(current);
-                      if (next.has(row.id)) {
-                        next.delete(row.id);
-                      } else {
-                        next.add(row.id);
-                      }
-                      return next;
-                    })
+                    setPicked((current) => toggled(current, row.id))
                   }
                 />
                 {row.rel_path}
@@ -527,15 +571,7 @@ function RegroupDialog({
                   type="checkbox"
                   checked={picked.has(member.media_file_id)}
                   onChange={() =>
-                    setPicked((current) => {
-                      const next = new Set(current);
-                      if (next.has(member.media_file_id)) {
-                        next.delete(member.media_file_id);
-                      } else {
-                        next.add(member.media_file_id);
-                      }
-                      return next;
-                    })
+                    setPicked((current) => toggled(current, member.media_file_id))
                   }
                 />
                 {member.rel_path}

@@ -6,7 +6,7 @@ import { MemoryRouter, Route, Routes, useLocation } from "react-router-dom";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { stubApi } from "../../test/api";
-import { failureReason, MergeScreen } from "./Merge";
+import { failureReason, MERGE_PAGE, MergeScreen } from "./Merge";
 
 // **2 パートのサイズをわざと変える。** 両方同じ大きさだと、パートごとの表示が
 // 2 要素とも同じ文字列になり `getByText` が「複数一致」で落ちる。この GROUP の
@@ -18,6 +18,7 @@ const GROUP = {
   input_digest: "d",
   verification: null,
   superseded_by_id: null,
+  profile_changed: false,
   output: null,
   members: [
     {
@@ -70,6 +71,16 @@ const ROUTES = {
   "/merge-groups?status=skipped": { groups: [] },
   "/media": { media: [] },
   "/media/stale-derived": { stale: [] },
+  // **叩く先も登録する。** `stubApi` は知らないパスを 404 で返すので、
+  // 登録しないと「叩いた」までしか試せず、成功したあとの枝が死んでいても気付けない。
+  "/merge-groups/detect": { job_id: "j1" },
+  "/merge-groups/g1/merge": { job_id: "j1" },
+  "/merge-groups/g2/merge": { job_id: "j2" },
+  "/merge-groups/g1?action=discard": { id: "g1" },
+  "/merge-groups/g3?action=adopt": { id: "g3" },
+  "/merge-groups/g20?action=regroup": { id: "g20" },
+  "/merge-groups/g21?action=regroup": { id: "g21" },
+  "/merge-groups/g22?action=regroup": { id: "g22" },
 };
 
 /** `/send` へ渡った `location.state` を画面に出すだけの受け皿。 */
@@ -198,6 +209,131 @@ describe("つなぐ", () => {
     await waitFor(() =>
       expect(screen.getByText(/つなぎ目に 300 秒の空白があります/)).toBeInTheDocument(),
     );
+  });
+
+  // **測れた空白を、別のつなぎ目のせいで捨てない。** 捨てると、取り消せない結合の
+  // 直前で警告そのものが消える（いちばん危ない向きに倒れる）。
+  it("あるつなぎ目が測れなくても、測れた大きい空白は出す", async () => {
+    const mixed = {
+      ...GROUP,
+      id: "g40",
+      members: [
+        {
+          position: 0,
+          media_file_id: "q0",
+          rel_path: "library/Q0.MP4",
+          size_bytes: 1073741824,
+          duration_seconds: 300,
+          captured_at: "2026-08-18T14:00:00+09:00",
+        },
+        {
+          position: 1,
+          media_file_id: "q1",
+          rel_path: "library/Q1.MP4",
+          size_bytes: 1073741824,
+          duration_seconds: 300,
+          // 前パートの終端 14:05:00 から 300 秒後（別の撮影かもしれない）
+          captured_at: "2026-08-18T14:10:00+09:00",
+        },
+        {
+          position: 2,
+          media_file_id: "q2",
+          rel_path: "library/Q2.MP4",
+          size_bytes: 1073741824,
+          duration_seconds: 300,
+          // 前パートの終端 14:15:00 より 2 秒前（重なって見える＝測れない）
+          captured_at: "2026-08-18T14:14:58+09:00",
+        },
+      ],
+    };
+    stubApi({ ...ROUTES, "/merge-groups": { groups: [mixed] } });
+    render(
+      <MemoryRouter>
+        <MergeScreen />
+      </MemoryRouter>,
+    );
+    await waitFor(() =>
+      expect(screen.getByText(/つなぎ目に 300 秒の空白があります/)).toBeInTheDocument(),
+    );
+  });
+
+  // **測れなかったものを 0 にしない。** 0 は「隙間なく続いている」という積極的な
+  // 主張で、取り消せない結合をその根拠で確認させることになる。
+  it("測れたつなぎ目が全部 0 でも、測れないものがあれば「分かりません」と書く", async () => {
+    const partly = {
+      ...GROUP,
+      id: "g41",
+      members: [
+        {
+          position: 0,
+          media_file_id: "r0",
+          rel_path: "library/R0.MP4",
+          size_bytes: 1073741824,
+          duration_seconds: 300,
+          captured_at: "2026-08-18T14:00:00+09:00",
+        },
+        {
+          position: 1,
+          media_file_id: "r1",
+          rel_path: "library/R1.MP4",
+          size_bytes: 1073741824,
+          duration_seconds: null, // 長さが読めない
+          captured_at: "2026-08-18T14:05:00+09:00",
+        },
+        {
+          position: 2,
+          media_file_id: "r2",
+          rel_path: "library/R2.MP4",
+          size_bytes: 1073741824,
+          duration_seconds: 300,
+          captured_at: "2026-08-18T14:10:00+09:00",
+        },
+      ],
+    };
+    stubApi({ ...ROUTES, "/merge-groups": { groups: [partly] } });
+    render(
+      <MemoryRouter>
+        <MergeScreen />
+      </MemoryRouter>,
+    );
+    await waitFor(() =>
+      expect(
+        screen.getByText("パートの時刻と長さからは、つなぎ目の空白は分かりません。"),
+      ).toBeInTheDocument(),
+    );
+  });
+
+  // 裁定 20「打ち切ったことを黙らない」。ホームの「やること」は全件を数えるので、
+  // ここが上限で切れていることを言わないと、いくら片付けても数が合わない。
+  it("上限で切れているときは、ほかにもあると書く", async () => {
+    const many = Array.from({ length: MERGE_PAGE + 1 }, (_, index) => ({
+      ...GROUP,
+      id: `many-${index}`,
+    }));
+    stubApi({ ...ROUTES, "/merge-groups": { groups: many } });
+    render(
+      <MemoryRouter>
+        <MergeScreen />
+      </MemoryRouter>,
+    );
+    expect(
+      await screen.findByText(`先頭 ${MERGE_PAGE} 件だけを出しています（ほかにもあります）。`),
+    ).toBeInTheDocument();
+  });
+
+  it("ちょうど上限の件数なら、切れているとは書かない", async () => {
+    const many = Array.from({ length: MERGE_PAGE }, (_, index) => ({
+      ...GROUP,
+      id: `exact-${index}`,
+    }));
+    stubApi({ ...ROUTES, "/merge-groups": { groups: many } });
+    render(
+      <MemoryRouter>
+        <MergeScreen />
+      </MemoryRouter>,
+    );
+    await waitFor(() => expect(screen.getAllByRole("article")).toHaveLength(MERGE_PAGE));
+    expect(screen.queryByText(/ほかにもあります/)).toBeNull();
   });
 
   it("member の並びは position 順にする（API の配列順を信用しない）", async () => {
@@ -526,6 +662,39 @@ describe("つなぐ", () => {
     );
   });
 
+  // カメラの種類を保存すると版が上がり、その版で作った出力は `group_is_current`
+  // が必ず断る。押しても送れるようにならないボタンを残さない（§13）。
+  it("カメラの種類が変わった組には、採用のボタンを出さず、理由を書く", async () => {
+    const stale = {
+      ...GROUP,
+      id: "g30",
+      status: "merged",
+      adopted_at: null,
+      profile_changed: true,
+      output: {
+        media_file_id: "mo30",
+        rel_path: "library/OUT30.MP4",
+        size_bytes: 2147483648,
+        missing: false,
+      },
+      verification: verification(false, ["fail", "pass", "pass", "pass"]),
+    };
+    stubApi({ ...ROUTES, "/merge-groups": { groups: [stale] } });
+    render(
+      <MemoryRouter>
+        <MergeScreen />
+      </MemoryRouter>,
+    );
+    expect(
+      await screen.findByText(
+        "つないだあとにカメラの種類が変わったので、この結果はもう使えません。「同じ構成でやり直す」でつなぎ直してください。",
+      ),
+    ).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "中身を見て、これを使う" })).toBeNull();
+    // つなぎ直す道は残す。
+    expect(screen.getByRole("button", { name: "同じ構成でやり直す" })).toBeInTheDocument();
+  });
+
   it("「同じ構成でやり直す」は確認のあと、全 member で regroup する", async () => {
     const merged = { ...GROUP, id: "g20", status: "merged" };
     const { calls, bodies } = stubApiWithBodies({ ...ROUTES, "/merge-groups": { groups: [merged] } });
@@ -543,6 +712,13 @@ describe("つなぐ", () => {
     );
     const sent = bodies.find((b) => b.path === "/merge-groups/g20?action=regroup");
     expect(sent?.body).toEqual({ media_ids: ["m1", "m2"] });
+    // **組み直した後は一覧を引き直す。** 叩いたところまでしか見ないと、
+    // 画面が古い組を出したままでも気付けない。
+    await waitFor(() =>
+      expect(calls().filter((c) => c.path.startsWith("/merge-groups?limit=")).length).toBeGreaterThan(
+        1,
+      ),
+    );
   });
 
   it("「構成を変える」は、チェックを外した member を除いて regroup する", async () => {
