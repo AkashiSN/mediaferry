@@ -16,6 +16,7 @@ import { ErrorBanner } from "../components/ErrorBanner";
 import { Icon } from "../components/Icon";
 import { JobCard } from "../components/JobCard";
 import { fileName } from "../components/MediaTile";
+import { formatBytes } from "../utils/formatBytes";
 import type { Job } from "../components/JobProgress";
 import { autoImportOutlook, autoImportState, profileDisplayName, volumeLabel } from "./work/CardDetail";
 import type { Volume } from "./work/CardDetail";
@@ -300,13 +301,20 @@ function CardBanner({
         </div>
         <div className="grow">
           <h2 style={{ fontSize: 16, fontWeight: 650 }}>
-            {volume.trusted ? `${label} のカードが挿さっています` : "初めて見るカードです"}
+            {volume.trusted
+              ? `${label} のカードが挿さっています`
+              : `${label} は初めて見るカードです`}
           </h2>
           {!volume.trusted && actionable && (
             <p className="muted" style={{ marginTop: 4 }}>
               {profileName} のカードのようです。
             </p>
           )}
+          {/* **容量は、どのカードなのかの手がかり**（§13）。同じカメラの
+              カードが 2 枚挿さっていると、種類と確度だけでは区別が付かない。 */}
+          <p className="small" style={{ marginTop: 4 }}>
+            {formatBytes(volume.size_bytes)}
+          </p>
           {actionable ? (
             <p className="small" style={{ marginTop: 4 }}>
               {autoImportState(volume, autoImport)}
