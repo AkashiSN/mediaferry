@@ -201,3 +201,44 @@ def test_awaiting_total_ignores_invalidated_records(client, db):
         invalidated_reason="宛先を編集した",
     )
     assert client.get("/api/dashboard").json()["awaiting_total"] == 0
+
+
+def test_a_merged_group_from_an_older_profile_revision_is_not_a_task(client, db):
+    """**カメラの種類を保存したら、その版で作った結合物は「やること」でもない。**
+
+    `SENDABLE_CLAUSE` は現行の版でないグループの出力を数えない（`group_is_current`
+    が必ず断る）。ここで数え続けると、ホームが「確かめてください」と言い、
+    採用しても送れないまま数だけが 0 に落ちる —— 行き止まりになる。
+    """
+    import json
+
+    from mediaferry.ids import new_id
+
+    profile_id, revision_id = a_profile(db, slug="dash-stale-revision")
+    a_media_file(db, (profile_id, revision_id), rel_path="library/dash/STALE.MP4", role="derived")
+    output = db.execute(
+        "SELECT id FROM media_file WHERE rel_path = 'library/dash/STALE.MP4'"
+    ).fetchone()["id"]
+    a_merge_group(
+        db,
+        (profile_id, revision_id),
+        "d-stale-revision",
+        status="merged",
+        verification_json=json.dumps({"passed": False}),
+        output_media_file_id=output,
+    )
+    assert client.get("/api/dashboard").json()["merge_review_total"] == 1
+
+    # カメラの種類を保存する（版が上がる）。
+    newer = new_id()
+    db.execute(
+        "INSERT INTO profile_revision"
+        " (id, profile_id, revision, definition_json, schema_version, created_at)"
+        " VALUES (?, ?, 2, '{}', 1, '2026-08-22T00:00:00+00:00')",
+        (newer, profile_id),
+    )
+    db.execute(
+        "UPDATE device_profile SET current_revision_id = ? WHERE id = ?", (newer, profile_id)
+    )
+
+    assert client.get("/api/dashboard").json()["merge_review_total"] == 0

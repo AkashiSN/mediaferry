@@ -92,13 +92,16 @@ def list_groups(
     conn=Depends(get_conn),  # noqa: ANN001, B008
 ) -> dict[str, Any]:
     repo = MergeRepository(conn)
-    return {"groups": [_group(repo, row) for row in repo.list_groups(status, limit, offset)]}
+    current = _current_revisions(conn)
+    return {
+        "groups": [_group(repo, row, current) for row in repo.list_groups(status, limit, offset)]
+    }
 
 
 @router.get("/merge-groups/{group_id}")
 def get_group(group_id: str, conn=Depends(get_conn)) -> dict[str, Any]:  # noqa: ANN001, B008
     repo = MergeRepository(conn)
-    return _group(repo, _found(repo, group_id))
+    return _group(repo, _found(repo, group_id), _current_revisions(conn))
 
 
 @router.post("/merge-groups/{group_id}/merge")
@@ -150,8 +153,11 @@ def patch_group(  # noqa: ANN201
         media_ids = body.get("media_ids")
         # **手で作るときと同じ条件を課す**（2 件以上）。1 件だけの組にはつなぎ目が
         # 無く、つなぎようがない。
+        #
+        # **`bad_request` で断る。** 項目はあって短いだけなので、`missing_field`
+        # （画面は「必要な項目が足りません」としか出さない）では直しようがない。
         if not isinstance(media_ids, list) or len(media_ids) < 2:
-            raise ApiError(400, ErrorCode.MISSING_FIELD, "media_ids は 2 件以上が要る")
+            raise ApiError(400, ErrorCode.BAD_REQUEST, "つなぐには 2 件以上を選ぶ")
         digest = _digest_of(conn, media_ids)
         new_id = _edited(repo.supersede, group_id, media_ids, digest)
         return {"status": "ok", "group_id": new_id}
@@ -180,7 +186,7 @@ def create_group(
     """手動でグループを作る（検出が拾えなかった並びを人が組む）."""
     media_ids = body.get("media_ids")
     if not isinstance(media_ids, list) or len(media_ids) < 2:
-        raise ApiError(400, ErrorCode.MISSING_FIELD, "media_ids は 2 件以上が要る")
+        raise ApiError(400, ErrorCode.BAD_REQUEST, "つなぐには 2 件以上を選ぶ")
     repo = MergeRepository(conn)
     try:
         group_id = repo.create_manual(media_ids, _digest_of(conn, media_ids))
@@ -202,6 +208,11 @@ def _digest_of(conn, media_ids: list[str]) -> str:  # noqa: ANN001
 
     **手で組んだグループも同じ digest の定義を使う。** 別の作り方にすると、
     同じ構成でも検出と手動で違う指紋になり、二重に候補が出る。
+
+    **版はプロファイルの現行のもの**（取り込んだときの版ではない）。`detect` も
+    `selection.expected_digest` も現行の版で計算するので、ここだけ取り込み時の版を
+    使うと、カメラの種類を保存したあとに作った組は生まれた瞬間から食い違い、
+    `POST /uploads` が永久に断る。
     """
     placeholders = ",".join("?" * len(media_ids))
     rows = conn.execute(
@@ -218,7 +229,7 @@ def _digest_of(conn, media_ids: list[str]) -> str:  # noqa: ANN001
     return input_digest(
         [(media_id, found[media_id]["sha1"]) for media_id in media_ids],
         profile.definition.merge,
-        first["profile_revision_id"],
+        profile.revision_id,
     )
 
 
@@ -288,10 +299,22 @@ def _output_or_none(profile, rule, candidate) -> str | None:  # noqa: ANN001
         return None
 
 
-def _group(repo: MergeRepository, row) -> dict[str, Any]:  # noqa: ANN001
+def _current_revisions(conn) -> dict[str, str]:  # noqa: ANN001
+    """プロファイルごとの現行のリビジョン. **1 回引いて配る**（組ごとに引かない）."""
+    return {
+        row["id"]: row["current_revision_id"]
+        for row in conn.execute("SELECT id, current_revision_id FROM device_profile")
+    }
+
+
+def _group(repo: MergeRepository, row, current_revisions: dict[str, str]) -> dict[str, Any]:  # noqa: ANN001
     return {
         "id": row["id"],
         "status": row["status"],
+        # **作ったときからカメラの種類が変わったか。** 変わっていると
+        # `group_is_current` が必ず断るので、採用しても送れるようにはならない
+        # （`db/selection.py` の `SENDABLE_CLAUSE` と同じ条件）。
+        "profile_changed": current_revisions.get(row["profile_id"]) != row["profile_revision_id"],
         "detected_by": row["detected_by"],
         "input_digest": row["input_digest"],
         "output_media_file_id": row["output_media_file_id"],

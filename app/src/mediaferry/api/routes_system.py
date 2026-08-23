@@ -76,12 +76,19 @@ def dashboard(state=Depends(get_state), conn=Depends(get_conn)) -> dict[str, Any
         # active な member なので出ない。ここで数えないと、ホームが「やることは
         # ありません」と書く一方で、つなぐ画面には「中身を見て、これを使う」が
         # 出ている状態になる。条件は `work/Merge.tsx` の `adoptable` と揃える。
+        #
+        # **現行の版で作った組だけを数える**（`SENDABLE_CLAUSE` と同じ条件）。
+        # カメラの種類を保存すると版が上がり、その版で作った出力は採用しても
+        # `group_is_current` が必ず断る —— 数えると、押しても送れないまま数だけが
+        # 0 に落ちる行き止まりになる。
         "merge_review_total": conn.execute(
-            "SELECT count(*) AS n FROM merge_group"
-            " WHERE status = 'merged' AND superseded_by_id IS NULL"
-            "   AND adopted_at IS NULL AND output_media_file_id IS NOT NULL"
-            "   AND json_valid(verification_json)"
-            "   AND json_type(verification_json, '$.passed') IS NOT 'true'"
+            "SELECT count(*) AS n FROM merge_group g"
+            " WHERE g.status = 'merged' AND g.superseded_by_id IS NULL"
+            "   AND g.adopted_at IS NULL AND g.output_media_file_id IS NOT NULL"
+            "   AND g.profile_revision_id = ("
+            "     SELECT p.current_revision_id FROM device_profile p WHERE p.id = g.profile_id)"
+            "   AND json_valid(g.verification_json)"
+            "   AND json_type(g.verification_json, '$.passed') IS NOT 'true'"
         ).fetchone()["n"],
         # **和を取らない。** 2 つの宛先に未送信の 1 件は 1 件。休止中の宛先は
         # 送り先に選べないので、それしか無ければ「やること」は無い。
