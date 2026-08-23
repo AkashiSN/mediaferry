@@ -92,6 +92,15 @@ class Uploader:
         while True:
             if ctx.cancelled():
                 break
+            # **1 件ごとに自分でリースを延ばす。** `with_lease_pulse` が心拍を打つ
+            # のは「1 回の送信が `HEARTBEAT_INTERVAL` より長かったとき」だけなので、
+            # 写真のように 1 件ずつが速いと**一度も打たれない**。ループが延ばさない
+            # と、何十枚も送る道がリースの満期（60 秒）で落ちる。
+            #
+            # **`assert_lease` は要らない。** キャンセルは上の `cancelled()` が見て
+            # おり、失効と横取りは `heartbeat` 自身が `LeaseLost` で捕まえる
+            # （`extend_lease` は満期前の行しか更新しない）。
+            ctx.heartbeat()
             # **リビジョンは pair ごとに、claim と同じトランザクションで決まる**（§8）。
             record = self._uploads.claim_next(destination_id, ctx.job_id, ctx.lease_token)
             if record is None:

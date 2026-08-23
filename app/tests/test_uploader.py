@@ -728,3 +728,55 @@ def test_a_remote_that_cannot_be_read_still_ends_up_awaiting(world, db, monkeypa
     row = record_of(db)
     assert row["state"] == "awaiting_datetime_approval"
     assert row["remote_datetime_original"] is None
+
+
+def test_many_quick_sends_do_not_lose_the_lease(world, db, data_root, monkeypatch):
+    """**速い送信を続けても、ジョブのリースが切れない。**
+
+    `with_lease_pulse` が心拍を打つのは「1 回の送信が `HEARTBEAT_INTERVAL` より
+    長かったとき」だけなので、**1 件ずつが速いと一度も打たれない**。ループが
+    自分で延ばさないと、写真を何十枚も送る道（いちばん普通の使い方）が
+    リース（60 秒）の満期で落ちる。実機で 61 秒で落ちた。
+    """
+    import time
+
+    from mediaferry.db.jobs import JobStore
+
+    server, uploader, _, uploads, _, destination_id, _ = world
+    profile = ProfileRegistry(db).current("dji-osmo")
+    directory = data_root / "library" / "dji-osmo" / "DCIM"
+    media_ids = []
+    for index in range(4):
+        payload = f"clip-{index}".encode()
+        (directory / f"B{index}.MP4").write_bytes(payload)
+        media_ids.append(
+            a_media_file(
+                db,
+                (profile.profile_id, profile.revision_id),
+                rel_path=f"library/dji-osmo/DCIM/B{index}.MP4",
+                sha1=hashlib.sha1(payload, usedforsecurity=False).hexdigest(),
+                size_bytes=len(payload),
+                captured_at=CAPTURED,
+                mtime_ns=1_700_000_000_000_000_000,
+            )
+        )
+    uploads.create_pairs(media_ids, [destination_id])
+
+    # **1 件ずつはリースより短い。** 心拍の間隔（既定 20 秒）にも届かないので、
+    # `with_lease_pulse` は一度も打たない。
+    real_upload = ImmichClient.upload_asset
+
+    def slow_enough(self, *args, **kwargs):  # noqa: ANN001, ANN002, ANN003, ANN202
+        time.sleep(0.6)
+        return real_upload(self, *args, **kwargs)
+
+    monkeypatch.setattr(ImmichClient, "upload_asset", slow_enough)
+    store = JobStore(db, lease_seconds=1)
+    store.enqueue("upload", {"destination_id": destination_id})
+    ctx = store.claim_next()
+
+    outcome = uploader.run(ctx, destination_id)
+
+    assert outcome.sent == 5
+    states = [row["state"] for row in db.execute("SELECT state FROM upload_record")]
+    assert states == ["complete"] * 5
