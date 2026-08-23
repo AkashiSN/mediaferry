@@ -4,7 +4,7 @@ import { MemoryRouter } from "react-router-dom";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { stubApi } from "../../test/api";
-import { ApproveScreen } from "./Approve";
+import { APPROVE_PAGE, ApproveScreen } from "./Approve";
 
 beforeEach(() => {
   document.cookie = "XSRF-TOKEN=token; path=/";
@@ -12,6 +12,56 @@ beforeEach(() => {
 afterEach(() => vi.restoreAllMocks());
 
 describe("確認", () => {
+  // 裁定 20「打ち切ったことを黙らない」。一覧には上限があり、ホームの件数は
+  // 全件を数える。黙って切ると、ホームの「N 件」といくら見比べても合わない。
+  it("上限で切れているときは、ほかにもあると書く", async () => {
+    const records = Array.from({ length: APPROVE_PAGE }, (_, index) => ({
+      id: `r${index}`,
+      destination_id: "d1",
+      media_file_id: `m${index}`,
+      origin: "pre_existing",
+      remote_current: null,
+      proposed: "2026-08-14 20:02",
+      remote_checked_at: null,
+      identical: false,
+    }));
+    stubApi({ "/uploads?state=awaiting_datetime_approval": { records } });
+    render(
+      <MemoryRouter>
+        <ApproveScreen />
+      </MemoryRouter>,
+    );
+    expect(
+      await screen.findByText(`先頭 ${APPROVE_PAGE} 件だけを出しています（ほかにもあります）。`),
+    ).toBeInTheDocument();
+  });
+
+  it("上限に達していなければ、余計なことは書かない", async () => {
+    stubApi({
+      "/uploads?state=awaiting_datetime_approval": {
+        records: [
+          {
+            id: "r1",
+            destination_id: "d1",
+            media_file_id: "m1",
+            origin: "pre_existing",
+            remote_current: null,
+            proposed: "2026-08-14 20:02",
+            remote_checked_at: null,
+            identical: false,
+          },
+        ],
+      },
+    });
+    render(
+      <MemoryRouter>
+        <ApproveScreen />
+      </MemoryRouter>,
+    );
+    await waitFor(() => expect(screen.getByText("（読めませんでした）")).toBeInTheDocument());
+    expect(screen.queryByText(/ほかにもあります/)).toBeNull();
+  });
+
   it("読めなかった値を空欄にしない", async () => {
     // **空欄は「変更なし」に見える。**
     stubApi({
@@ -299,8 +349,9 @@ describe("何を、どこで書き換えるのか", () => {
   it("どの写真かをサムネイルで出す", async () => {
     stubApprove();
     renderApprove();
-    // タイルの読み上げ名はファイル名（`MediaTile`）。その中の画像を見る。
-    const tile = await screen.findByRole("button", { name: "DJI_0001.MP4" });
+    // タイルの読み上げ名はファイル名（`MediaTile`）。押せないタイルは絵として
+    // 出す（`role="img"`）ので、押せる木からは探せない。
+    const tile = await screen.findByRole("img", { name: "DJI_0001.MP4" });
     expect(tile.querySelector("img")).toHaveAttribute("src", "/api/media/m1/thumbnail");
   });
 

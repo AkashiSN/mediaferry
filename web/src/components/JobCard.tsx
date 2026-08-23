@@ -16,11 +16,14 @@ export function JobCard({
   job,
   rate,
   onCancel,
+  cancelLabel = "中止する",
   notes,
 }: {
   job: Job;
   rate: number | null;
   onCancel?: (jobId: string) => void;
+  /** 止めるボタンの文言。画面によって呼び方が違う（送信中は「送るのをやめる」）。 */
+  cancelLabel?: string;
   /**
    * この作業に添える補足の行（終わった日時、届いた最後の文言など）。**空の行は
    * 描かない。**
@@ -46,7 +49,7 @@ export function JobCard({
             を渡さない呼び出し元では中止ボタンごと出さない。 */}
         {onCancel && (
           <button type="button" className="btn sm" onClick={() => onCancel(job.id)}>
-            中止する
+            {cancelLabel}
           </button>
         )}
       </div>

@@ -4,13 +4,13 @@ import { useCallback, useEffect, useState } from "react";
 import { BrowserRouter, Link, Route, Routes } from "react-router-dom";
 
 import { request } from "./api/client";
+import { DashboardProvider, useDashboard } from "./api/dashboard";
 import { useQuery } from "./api/hooks";
 import { Layout } from "./components/Layout";
 import type { Warning } from "./components/Layout";
 import { useEvents } from "./hooks/useEvents";
 import { useReloadOnEvents } from "./hooks/useReloadOnEvents";
 import { tasksFrom } from "./hooks/useTasks";
-import type { DashboardCounts } from "./hooks/useTasks";
 import { CardDetailScreen } from "./screens/work/CardDetail";
 import { LoginScreen } from "./screens/Login";
 import { HomeScreen } from "./screens/Home";
@@ -40,12 +40,20 @@ type Settings = { warnings: Warning[] };
  * 開いた時のままになる（§13「画面を再読み込みせずに進む」）。
  */
 function AuthedApp() {
+  return (
+    <DashboardProvider>
+      <Framed />
+    </DashboardProvider>
+  );
+}
+
+/** 枠と画面。**ダッシュボードの集計は枠とホームで同じ 1 本を見る**（`api/dashboard.tsx`）。 */
+function Framed() {
   const settings = useQuery<Settings>("/settings");
-  const dashboard = useQuery<DashboardCounts>("/dashboard");
+  const dashboard = useDashboard();
   const taskCount = tasksFrom(dashboard.data).length;
   const { received } = useEvents();
   useReloadOnEvents(received, settings.reload);
-  useReloadOnEvents(received, dashboard.reload);
 
   return (
     <BrowserRouter>

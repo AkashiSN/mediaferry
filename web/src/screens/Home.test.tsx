@@ -5,6 +5,7 @@ import userEvent from "@testing-library/user-event";
 import { MemoryRouter, Route, Routes } from "react-router-dom";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
+import { DashboardProvider } from "../api/dashboard";
 import { openStream, failStream } from "../test/setup";
 import { stubApi } from "../test/api";
 import { HomeScreen } from "./Home";
@@ -18,6 +19,7 @@ const EMPTY_DASHBOARD = {
   missing: 0,
   warnings: [],
   merge_candidates: 0,
+  merge_review_total: 0,
   unsent_total: 0,
   awaiting_total: 0,
 };
@@ -25,7 +27,10 @@ const EMPTY_DASHBOARD = {
 function renderHome() {
   return render(
     <MemoryRouter>
-      <HomeScreen />
+      {/* 集計は枠（`App.tsx`）が引いて配る。ホームだけを描くときも同じ形にする。 */}
+      <DashboardProvider>
+        <HomeScreen />
+      </DashboardProvider>
     </MemoryRouter>,
   );
 }
@@ -212,6 +217,9 @@ describe("ホーム", () => {
       "/devices": { volumes: [actionableVolume] },
       "/jobs": { jobs: [] },
       "/settings": { settings: [{ key: "AUTO_IMPORT", value: "trusted" }], warnings: [] },
+      "/volumes/v1/scan": { job_id: "j-scan" },
+      "/volumes/v1/import": { job_id: "j-import" },
+      "/merge-groups/detect": { job_id: "j-detect" },
     });
     renderHome();
 
@@ -298,10 +306,12 @@ describe("ホーム", () => {
     });
     render(
       <MemoryRouter initialEntries={["/"]}>
-        <Routes>
-          <Route path="/" element={<HomeScreen />} />
-          <Route path="/card" element={<div>カードの中身のページ</div>} />
-        </Routes>
+        <DashboardProvider>
+          <Routes>
+            <Route path="/" element={<HomeScreen />} />
+            <Route path="/card" element={<div>カードの中身のページ</div>} />
+          </Routes>
+        </DashboardProvider>
       </MemoryRouter>,
     );
 
@@ -337,6 +347,88 @@ describe("ホーム", () => {
     renderHome();
     await waitFor(() => expect(screen.getByText(/12\/87 件/)).toBeInTheDocument());
     expect(screen.getByText(/DJI_0043\.MP4/)).toBeInTheDocument();
+  });
+
+  // 「いま取り込む」は スキャン → コピー → 候補の検出 の 3 本を積む。一覧は
+  // 新しい順なので、先頭から「動いているもの」を拾うと**最後に積んだ待機中**を
+  // 掴み、コピーの間ずっと「候補の検出・待機中」を出してしまう（進捗も出ない）。
+  it("待っている作業より、動いている作業を出す", async () => {
+    stubApi({
+      "/dashboard": EMPTY_DASHBOARD,
+      "/devices": { volumes: [] },
+      "/jobs": {
+        jobs: [
+          {
+            id: "j3",
+            type: "detect_groups",
+            status: "queued",
+            created_at: "2026-08-18T05:00:02Z",
+          },
+          {
+            id: "j2",
+            type: "import",
+            status: "running",
+            created_at: "2026-08-18T05:00:01Z",
+            started_at: "2026-08-18T05:00:01Z",
+            progress: {
+              phase: "copy",
+              rel_path: "DCIM/100MEDIA/DJI_0043.MP4",
+              file_index: 12,
+              file_count: 87,
+              bytes_done: 1024,
+              bytes_total: 4096,
+            },
+          },
+        ],
+      },
+    });
+    renderHome();
+    await waitFor(() => expect(screen.getByText("取り込み")).toBeInTheDocument());
+    expect(screen.queryByText("候補の検出")).toBeNull();
+    expect(screen.getByText(/12\/87 件/)).toBeInTheDocument();
+  });
+
+  it("中止するのは、いま出している作業", async () => {
+    // 出しているのと違う作業を止めると、コピーは走り続けたまま別の予定が消える。
+    const api = stubApi({
+      "/dashboard": EMPTY_DASHBOARD,
+      "/devices": { volumes: [] },
+      "/jobs": {
+        jobs: [
+          { id: "j3", type: "detect_groups", status: "queued", created_at: "2026-08-18T05:00:02Z" },
+          {
+            id: "j2",
+            type: "import",
+            status: "running",
+            created_at: "2026-08-18T05:00:01Z",
+            started_at: "2026-08-18T05:00:01Z",
+            progress: { phase: "copy", bytes_done: 1024, bytes_total: 4096 },
+          },
+        ],
+      },
+    });
+    renderHome();
+    await userEvent.click(await screen.findByRole("button", { name: "中止する" }));
+    await waitFor(() =>
+      expect(api.calls().some((call) => call.path === "/jobs/j2/cancel")).toBe(true),
+    );
+    expect(api.calls().some((call) => call.path === "/jobs/j3/cancel")).toBe(false);
+  });
+
+  it("まだどれも動いていなければ、次に走る作業を出す", async () => {
+    stubApi({
+      "/dashboard": EMPTY_DASHBOARD,
+      "/devices": { volumes: [] },
+      "/jobs": {
+        jobs: [
+          { id: "j3", type: "detect_groups", status: "queued", created_at: "2026-08-18T05:00:02Z" },
+          { id: "j1", type: "scan", status: "queued", created_at: "2026-08-18T05:00:00Z" },
+        ],
+      },
+    });
+    renderHome();
+    await waitFor(() => expect(screen.getByText("スキャン")).toBeInTheDocument());
+    expect(screen.queryByText("候補の検出")).toBeNull();
   });
 
   // 裁定 8: 積んだまま送信が始まっていない `pending` は「まだ送っていない」から

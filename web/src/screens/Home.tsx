@@ -8,7 +8,9 @@ import { useState } from "react";
 import { Link } from "react-router-dom";
 
 import { request } from "../api/client";
-import { useQuery } from "../api/hooks";
+import { useDashboard } from "../api/dashboard";
+import type { Dashboard, DestinationSummary } from "../api/dashboard";
+import { useMutation, useQuery } from "../api/hooks";
 import { ConfirmDialog, type Confirmation } from "../components/ConfirmDialog";
 import { ErrorBanner } from "../components/ErrorBanner";
 import { Icon } from "../components/Icon";
@@ -18,7 +20,7 @@ import type { Job } from "../components/JobProgress";
 import { autoImportOutlook, autoImportState, profileDisplayName, volumeLabel } from "./work/CardDetail";
 import type { Volume } from "./work/CardDetail";
 import { useEvents } from "../hooks/useEvents";
-import { isLive, useJobPulse } from "../hooks/useJobPulse";
+import { pickLiveJob, useJobPulse } from "../hooks/useJobPulse";
 import { useReloadOnEvents } from "../hooks/useReloadOnEvents";
 import { tasksFrom } from "../hooks/useTasks";
 import type { Task } from "../hooks/useTasks";
@@ -28,51 +30,25 @@ type Devices = { volumes: Volume[] };
 type Profile = { slug: string; name: string };
 type Profiles = { profiles: Profile[] };
 
-type DestinationSummary = {
-  destination_id: string;
-  name: string;
-  enabled: boolean;
-  complete: number;
-  failed: number;
-  awaiting_approval: number;
-  pending: number;
-  unsent: number;
-  stacked: number;
-  stack_skipped: number;
-};
-
-type Dashboard = {
-  media_total: number;
-  destinations: DestinationSummary[];
-  running_jobs: number;
-  recent_imports: { id: string; rel_path: string; captured_at: string }[];
-  orphans: number;
-  missing: number;
-  warnings: { code: string; message: string }[];
-  merge_candidates: number;
-  unsent_total: number;
-  awaiting_total: number;
-};
-
 type Jobs = { jobs: Job[] };
 type Setting = { key: string; value: string | null };
 type Settings = { settings: Setting[] };
 
 export function HomeScreen() {
-  const dashboard = useQuery<Dashboard>("/dashboard");
+  // **集計は枠と共有する**（`api/dashboard.tsx`）。ここで別に引くと、取り込み中は
+  // 同じ重い集計が 2 本ずつ飛ぶ。
+  const dashboard = useDashboard();
   const devices = useQuery<Devices>("/devices");
   const jobs = useQuery<Jobs>("/jobs");
   const settings = useQuery<Settings>("/settings");
   const profiles = useQuery<Profiles>("/profiles");
   const { received, connected } = useEvents();
-  useReloadOnEvents(received, dashboard.reload);
   useReloadOnEvents(received, devices.reload);
   useReloadOnEvents(received, jobs.reload);
   useReloadOnEvents(received, settings.reload);
   useReloadOnEvents(received, profiles.reload);
 
-  const [error, setError] = useState<unknown>(null);
-  const [busy, setBusy] = useState<string | null>(null);
+  const card = useMutation();
   const [confirming, setConfirming] = useState<{ confirmation: Confirmation; id: string } | null>(
     null,
   );
@@ -84,17 +60,11 @@ export function HomeScreen() {
     null;
 
   async function act(volumeId: string, action: "trust" | "scan" | "import" | "close") {
-    setBusy(`${volumeId}:${action}`);
-    setError(null);
-    try {
+    await card.run(async () => {
       await request(`/volumes/${volumeId}/${action}`, { method: "POST" });
       devices.reload();
-    } catch (caught) {
-      setError(caught);
-    } finally {
-      setConfirming(null);
-      setBusy(null);
-    }
+    });
+    setConfirming(null);
   }
 
   /**
@@ -116,9 +86,7 @@ export function HomeScreen() {
    * 出ない**（`CardBanner` の `actionable`）。
    */
   async function importNow(volumeId: string, profileSlug: string) {
-    setBusy(`${volumeId}:import`);
-    setError(null);
-    try {
+    await card.run(async () => {
       await request(`/volumes/${volumeId}/scan`, { method: "POST" });
       await request(`/volumes/${volumeId}/import`, { method: "POST" });
       await request(`/merge-groups/detect?profile_slug=${encodeURIComponent(profileSlug)}`, {
@@ -126,20 +94,14 @@ export function HomeScreen() {
       });
       devices.reload();
       jobs.reload();
-    } catch (caught) {
-      setError(caught);
-    } finally {
-      setBusy(null);
-    }
+    });
   }
 
   async function cancelJob(jobId: string) {
-    try {
+    await card.run(async () => {
       await request(`/jobs/${jobId}/cancel`, { method: "POST" });
       jobs.reload();
-    } catch (caught) {
-      setError(caught);
-    }
+    });
   }
 
   // **やることは画面が持つ一覧ではなく、状態から毎回導く。** 読み込み中は
@@ -152,7 +114,7 @@ export function HomeScreen() {
   const dashboardData = dashboard.data;
   const tasks: Task[] = dashboardData === null ? [] : tasksFrom(dashboardData);
 
-  const running = (jobs.data?.jobs ?? []).find(isLive);
+  const running = pickLiveJob(jobs.data?.jobs ?? []);
   const averageRate = useJobPulse(running !== undefined, jobs.reload);
 
   return (
@@ -170,8 +132,15 @@ export function HomeScreen() {
         </div>
 
         <ErrorBanner
-          error={error ?? dashboard.error ?? devices.error ?? jobs.error ?? settings.error ?? profiles.error}
-          onDismiss={() => setError(null)}
+          error={
+            card.error ??
+            dashboard.error ??
+            devices.error ??
+            jobs.error ??
+            settings.error ??
+            profiles.error
+          }
+          onDismiss={card.clear}
         />
 
         {connected === false && (
@@ -189,7 +158,7 @@ export function HomeScreen() {
             // （§13。生の slug を出さない。写像は 1 か所にだけ持つ）。
             profileName={profileDisplayName(volume.profile_slug, profiles.data?.profiles ?? [])}
             autoImport={autoImport}
-            busy={busy}
+            busy={card.busy}
             onAct={act}
             onImport={importNow}
             onAskTrust={(label, outlook) =>
@@ -283,7 +252,7 @@ export function HomeScreen() {
         {confirming && (
           <ConfirmDialog
             confirmation={confirming.confirmation}
-            busy={busy !== null}
+            busy={card.busy}
             onCancel={() => setConfirming(null)}
             onConfirm={() => void act(confirming.id, "trust")}
           />
@@ -308,7 +277,7 @@ function CardBanner({
   label: string;
   profileName: string;
   autoImport: string | null;
-  busy: string | null;
+  busy: boolean;
   onAct: (volumeId: string, action: "trust" | "scan" | "import" | "close") => void;
   onImport: (volumeId: string, profileSlug: string) => void;
   onAskTrust: (label: string, outlook: ReturnType<typeof autoImportOutlook>) => void;
@@ -353,7 +322,7 @@ function CardBanner({
             <button
               type="button"
               className="btn primary"
-              disabled={busy !== null}
+              disabled={busy}
               onClick={() => onImport(volume.volume_instance_id, slug)}
             >
               いま取り込む
@@ -365,7 +334,7 @@ function CardBanner({
                 type="button"
                 className="btn sm outline"
                 // 設定を読めていない間は押させない（同意の内容を作れない）。
-                disabled={busy !== null || autoImport === null}
+                disabled={busy || autoImport === null}
                 onClick={() => onAskTrust(label, autoImportOutlook(volume, autoImport))}
               >
                 このカードを信頼する
@@ -377,7 +346,7 @@ function CardBanner({
             <button
               type="button"
               className="btn sm"
-              disabled={busy !== null}
+              disabled={busy}
               onClick={() => onAct(volume.volume_instance_id, "close")}
             >
               取り外す
@@ -389,9 +358,9 @@ function CardBanner({
   );
 }
 
-const TASK_ICON = { merge: "merge", send: "up", approve: "alert" } as const;
+const TASK_ICON = { merge: "merge", merge_review: "merge", send: "up", approve: "alert" } as const;
 
-/** やること 1 件（§13）。3 種類しかないので直に分岐する。 */
+/** やること 1 件（§13）。4 種類しかないので直に分岐する。 */
 function TaskCard({ task, dashboard }: { task: Task; dashboard: Dashboard }) {
   if (task.kind === "merge") {
     return (
@@ -411,6 +380,34 @@ function TaskCard({ task, dashboard }: { task: Task; dashboard: Dashboard }) {
           <div className="acts">
             <Link to="/merge" className="btn outline">
               つなぐ
+            </Link>
+          </div>
+        </div>
+      </article>
+    );
+  }
+  if (task.kind === "merge_review") {
+    // **つないだが、思ったとおりか自動では確かめきれなかった組。** 送る候補にも
+    // 構成ファイルにも出ないので、ここから入らないと画面のどこにも現れない
+    // （`work/Merge.tsx` の「中身を見て、これを使う」がその決着）。
+    return (
+      <article className="card pad">
+        <div className="row">
+          <div className="iconbox">
+            <Icon name={TASK_ICON.merge_review} />
+          </div>
+          <div className="grow">
+            <h3 style={{ fontSize: "14.5px", fontWeight: 600 }}>
+              つないだ動画を {task.count} 本、確かめてください
+            </h3>
+            <p className="small" style={{ marginTop: 3 }}>
+              うまくつながったかを自動では確かめきれませんでした。中身を見て、使うかどうかを
+              決めてください。決めるまでは送れません。
+            </p>
+          </div>
+          <div className="acts">
+            <Link to="/merge" className="btn outline">
+              確かめる
             </Link>
           </div>
         </div>

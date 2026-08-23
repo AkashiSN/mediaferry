@@ -7,7 +7,8 @@ import { useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
 
 import { request } from "../../api/client";
-import { useQuery } from "../../api/hooks";
+import { useDashboardReload } from "../../api/dashboard";
+import { useMutation, useQuery } from "../../api/hooks";
 import { ConfirmDialog } from "../../components/ConfirmDialog";
 import { ErrorBanner } from "../../components/ErrorBanner";
 import { Icon } from "../../components/Icon";
@@ -28,34 +29,34 @@ type Record_ = {
 };
 
 type Records = { records: Record_[] };
+
+/** 一度に出す件数（API の `GET /uploads` の既定と同じ）。**打ち切ったことは黙らない。** */
+export const APPROVE_PAGE = 200;
 type Destination = { id: string; name: string };
 type Destinations = { destinations: Destination[] };
 
 export function ApproveScreen() {
-  const records = useQuery<Records>("/uploads?state=awaiting_datetime_approval");
+  const records = useQuery<Records>(
+    `/uploads?state=awaiting_datetime_approval&limit=${APPROVE_PAGE}`,
+  );
   // **どの Immich を書き換えるのかを名前で出すため**に引く（§13。送り先が
   // 2 つあると、id だけでは画面から判別できない）。
   const destinations = useQuery<Destinations>("/destinations");
   const [files, setFiles] = useState<Record<string, Media>>({});
-  const [error, setError] = useState<unknown>(null);
+  const decision = useMutation();
   const { received } = useEvents();
   useReloadOnEvents(received, records.reload);
-  const [busy, setBusy] = useState(false);
   const [approving, setApproving] = useState<Record_ | null>(null);
+  const refreshTasks = useDashboardReload();
   const navigate = useNavigate();
 
   async function act(record: Record_, action: "approve" | "reject") {
-    setBusy(true);
-    setError(null);
-    try {
-      await request(`/uploads/${record.id}/${action}`, { method: "POST" });
+    if (await decision.run(() => request(`/uploads/${record.id}/${action}`, { method: "POST" }))) {
       records.reload();
-    } catch (caught) {
-      setError(caught);
-    } finally {
-      setBusy(false);
-      setApproving(null);
+      // 却下は進捗のイベントを出さない。**枠の「やること」も一緒に直す。**
+      refreshTasks();
     }
+    setApproving(null);
   }
 
   const rows = records.data?.records ?? [];
@@ -113,7 +114,15 @@ export function ApproveScreen() {
         </p>
       </div>
 
-      <ErrorBanner error={error ?? records.error} onDismiss={() => setError(null)} />
+      <ErrorBanner error={decision.error ?? records.error} onDismiss={decision.clear} />
+
+      {/* 裁定 20: ホームの件数は全件を数えるので、ここが上限で切れていることを
+          言わないと、いくら片付けても数が合わないように見える。 */}
+      {rows.length === APPROVE_PAGE && (
+        <p role="note" className="small">
+          先頭 {APPROVE_PAGE} 件だけを出しています（ほかにもあります）。
+        </p>
+      )}
 
       {rows.length === 0 ? (
         <div className="card pad empty">
@@ -168,11 +177,11 @@ export function ApproveScreen() {
                 {record.identical ? (
                   <span className="small">変更なし</span>
                 ) : (
-                  <button type="button" className="btn outline" disabled={busy} onClick={() => setApproving(record)}>
+                  <button type="button" className="btn outline" disabled={decision.busy} onClick={() => setApproving(record)}>
                     承認する
                   </button>
                 )}
-                <button type="button" className="btn sm" disabled={busy} onClick={() => void act(record, "reject")}>
+                <button type="button" className="btn sm" disabled={decision.busy} onClick={() => void act(record, "reject")}>
                   却下する
                 </button>
               </div>
@@ -191,7 +200,7 @@ export function ApproveScreen() {
             // カードの表示（「—」）と揃える。空文字だと「変更後 」で文が途切れる。
             proposed: approving.proposed === null ? "—" : formatDateTime(approving.proposed),
           }}
-          busy={busy}
+          busy={decision.busy}
           onCancel={() => setApproving(null)}
           onConfirm={() => void act(approving, "approve")}
         />

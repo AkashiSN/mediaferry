@@ -6,7 +6,7 @@ import { Link, useLocation, useNavigate } from "react-router-dom";
 import { request } from "../../api/client";
 import { useQuery } from "../../api/hooks";
 import { ErrorBanner } from "../../components/ErrorBanner";
-import { progressLine, statusLabel } from "../../components/JobProgress";
+import { JobCard } from "../../components/JobCard";
 import type { Job } from "../../components/JobProgress";
 import { isLive, useJobPulse } from "../../hooks/useJobPulse";
 
@@ -23,14 +23,17 @@ export function SendingScreen() {
   const [error, setError] = useState<unknown>(null);
 
   // **`Send.tsx` から渡された `jobIds` があれば、それだけを追う。** 渡されずに
-  // この画面を直接開いた場合（閉じたあとにブラウザの戻る、など）は、進行中の
-  // 送信ジョブをすべて出す。
+  // この画面を直接開いた場合（閉じたあとにブラウザの戻る、再読み込み、1 件も
+  // 始まらなかった送信）は、進行中の送信ジョブをすべて出す。
+  //
+  // **終わったものは出さない。** `GET /jobs` は状態を問わず直近 50 件を返すので、
+  // type だけで絞ると過去の送信が「送っています」の下に並ぶ。
   const jobs = useMemo(() => {
     const all = jobsQuery.data?.jobs ?? [];
     if (jobIds && jobIds.length > 0) {
       return all.filter((job) => jobIds.includes(job.id));
     }
-    return all.filter((job) => job.type === "upload");
+    return all.filter((job) => job.type === "upload" && isLive(job));
   }, [jobsQuery.data, jobIds]);
 
   const running = jobs.some(isLive);
@@ -68,25 +71,18 @@ export function SendingScreen() {
           <p className="muted">いま送っているものはありません。</p>
         </div>
       ) : (
+        // **進行中の作業の見せ方は `JobCard` が持つ**（題・状態・進捗の行・帯）。
+        // ここで描き直すと、進捗の帯だけこの画面から抜け落ちる。
         jobs.map((job) => (
-          <section key={job.id} className="card pad">
-            <div className="row">
-              <b>{statusLabel(job.status)}</b>
-              {["queued", "running"].includes(job.status) && (
-                <button
-                  type="button"
-                  className="btn danger sm"
-                  style={{ marginLeft: "auto" }}
-                  onClick={() => void cancel(job.id)}
-                >
-                  送るのをやめる
-                </button>
-              )}
-            </div>
-            {job.progress && (
-              <p className="small job-progress-line">{progressLine(job.progress, averageRate(job))}</p>
-            )}
-          </section>
+          <JobCard
+            key={job.id}
+            job={job}
+            rate={averageRate(job)}
+            cancelLabel="送るのをやめる"
+            onCancel={
+              ["queued", "running"].includes(job.status) ? (id) => void cancel(id) : undefined
+            }
+          />
         ))
       )}
 

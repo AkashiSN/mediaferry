@@ -10,9 +10,38 @@ import type { Job } from "../components/JobProgress";
 /** 進捗を持ちうる状態（`api/routes_system.py` の `_LIVE_STATUSES` と揃える）。 */
 export const LIVE_STATUSES = ["queued", "running", "cancelling"];
 
-/** その作業がまだ動いているか。 */
+/** その作業がまだ動いているか（待機中も含む）。 */
 export function isLive(job: Job): boolean {
   return LIVE_STATUSES.includes(job.status);
+}
+
+/** いま実際に走っているか（待機中は含まない）。 */
+function isRunning(job: Job): boolean {
+  return job.status === "running" || job.status === "cancelling";
+}
+
+/**
+ * いま画面に出す作業を 1 つ選ぶ。
+ *
+ * **走っているものを優先する。** 一覧は新しい順に来るので、先頭から `isLive` で
+ * 拾うと最後に積んだ待機中を掴む。「いま取り込む」は スキャン → コピー →
+ * 候補の検出 の 3 本を積むため、コピーの間ずっと「候補の検出・待機中」を出す
+ * ことになり、進捗も出ず、中止も別の作業に当たる。
+ *
+ * 走っているものが無ければ、**次に走る＝いちばん古い待機中**を返す。並び順に
+ * 頼らず `created_at` で選ぶ（一覧の順は API 側の都合で変わりうる）。
+ */
+export function pickLiveJob(jobs: Job[]): Job | undefined {
+  const running = jobs.find(isRunning);
+  if (running !== undefined) {
+    return running;
+  }
+  return jobs
+    .filter((job) => job.status === "queued")
+    .reduce<Job | undefined>(
+      (oldest, job) => (oldest === undefined || job.created_at < oldest.created_at ? job : oldest),
+      undefined,
+    );
 }
 
 /**

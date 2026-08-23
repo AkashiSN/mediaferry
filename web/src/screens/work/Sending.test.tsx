@@ -81,6 +81,26 @@ describe("送信中", () => {
     await waitFor(() => expect(screen.getAllByText("実行中")).toHaveLength(1));
   });
 
+  // `GET /jobs` は状態を問わず直近 50 件を返す。type だけで絞ると、**終わった
+  // 送信が「送っています」の下に並ぶ**（何も動いていないのに、完了・失敗の札が
+  // 出る）。router の state 無しで来る経路（戻る・再読み込み・1 件も始まらな
+  // かった送信）は珍しくない。
+  it("jobIds が無いとき、終わった送信は出さない", async () => {
+    stubApi({
+      "/jobs": {
+        jobs: [
+          { id: "j1", type: "upload", status: "succeeded", created_at: "2026-08-18T00:00:00+00:00" },
+          { id: "j2", type: "upload", status: "failed", created_at: "2026-08-18T00:00:00+00:00" },
+          { id: "j3", type: "upload", status: "cancelled", created_at: "2026-08-18T00:00:00+00:00" },
+        ],
+      },
+    });
+    renderSending();
+    expect(await screen.findByText("いま送っているものはありません。")).toBeInTheDocument();
+    expect(screen.queryByText("完了")).toBeNull();
+    expect(screen.queryByText("失敗")).toBeNull();
+  });
+
   it("「送るのをやめる」はキャンセルを叩く", async () => {
     const { calls } = stubApi({
       "/jobs": {

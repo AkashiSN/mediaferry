@@ -7,6 +7,7 @@
 // 取り違える書き間違いも、どちらもこの `region` の名前で捕まる。
 
 import { render, screen, waitFor } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { App } from "./App";
@@ -24,6 +25,7 @@ const EMPTY_DASHBOARD = {
   missing: 0,
   warnings: [],
   merge_candidates: 0,
+  merge_review_total: 0,
   unsent_total: 0,
   awaiting_total: 0,
 };
@@ -149,6 +151,60 @@ describe("taskCount の配線", () => {
     expect(home).not.toHaveTextContent("5");
     expect(home).not.toHaveTextContent("7");
     expect(home).not.toHaveTextContent("12");
+  });
+
+  // 却下・破棄・送り先の入り切りは進捗のイベントを出さない。**枠は画面を移っても
+  // 再マウントしない**ので、画面側から直しに行かないとバッジが古いまま残る。
+  it("ジョブにならない操作の後も、ピルの数を直す", async () => {
+    let awaiting = 2;
+    const api = stubApi(
+      {
+        ...BASE_ROUTES,
+        "/uploads?state=awaiting_datetime_approval": {
+          records: [
+            {
+              id: "r1",
+              destination_id: "d1",
+              media_file_id: "m1",
+              origin: "pre_existing",
+              remote_current: null,
+              proposed: "2026-08-14 20:02",
+              remote_checked_at: null,
+              identical: false,
+            },
+          ],
+        },
+        "/uploads/r1/reject": { status: "ok" },
+      },
+      (path, init) => {
+        if (path === "/uploads/r1/reject" && init?.method === "POST") {
+          awaiting = 0;
+        }
+      },
+    );
+    // 応答は毎回いまの `awaiting` を映す（`stubApi` の表は固定なので、
+    // /dashboard だけ差し替える）。
+    const inner = globalThis.fetch as unknown as (input: string, init?: RequestInit) => Promise<Response>;
+    vi.stubGlobal("fetch", (input: string, init?: RequestInit) => {
+      if (input.replace(/^\/api/, "") === "/dashboard") {
+        void api;
+        return Promise.resolve(
+          new Response(JSON.stringify({ ...EMPTY_DASHBOARD, awaiting_total: awaiting }), {
+            status: 200,
+          }),
+        );
+      }
+      return inner(input, init);
+    });
+
+    window.history.pushState({}, "", "/approve");
+    render(<App />);
+    const home = await screen.findByRole("link", { name: /ホーム/ });
+    await waitFor(() => expect(home).toHaveTextContent("1"));
+
+    await userEvent.click(await screen.findByRole("button", { name: "却下する" }));
+
+    await waitFor(() => expect(home.textContent).not.toMatch(/[0-9]/));
   });
 
   it("やることが 1 つも無ければ、ピルを出さない", async () => {

@@ -25,8 +25,9 @@ export function fileName(relPath: string): string {
   return parts[parts.length - 1];
 }
 
-/** 秒を `分:秒` に丸める（プロトタイプの `dur` と同じ形）。 */
-function formatDuration(seconds: number): string {
+/** 動画の長さを `分:秒` に丸める（タイルの右下に出す値）。**進捗の「残り約 N 分」
+ * とは別物**（`components/JobProgress.tsx` の `formatRemaining`）。 */
+function formatClipLength(seconds: number): string {
   const total = Math.max(0, Math.round(seconds));
   const minutes = Math.floor(total / 60);
   const secs = total % 60;
@@ -44,16 +45,8 @@ export function MediaTile({
 }) {
   const name = fileName(media.rel_path);
   const hasDuration = media.kind === "video" && media.duration_seconds != null;
-  return (
-    <button
-      type="button"
-      className={`tile${selected ? " sel" : ""}`}
-      title={name}
-      aria-label={name}
-      aria-pressed={selected}
-      disabled={!onToggle}
-      onClick={() => onToggle?.(media.id)}
-    >
+  const inside = (
+    <>
       <img
         src={`/api/media/${media.id}/thumbnail`}
         alt=""
@@ -74,7 +67,30 @@ export function MediaTile({
       ) : (
         <StatusMark status={media.status ?? null} />
       )}
-      {hasDuration && <span className="dur">{formatDuration(media.duration_seconds as number)}</span>}
+      {hasDuration && <span className="dur">{formatClipLength(media.duration_seconds as number)}</span>}
+    </>
+  );
+
+  // **押せないタイルをボタンにしない。** `disabled` なボタンは読み上げの木から
+  // 外れるので、確認の下見（`work/Send.tsx`）に並ぶ写真のファイル名が、目で
+  // 見ている人にしか届かなくなる。押せないなら、それは絵である。
+  if (!onToggle) {
+    return (
+      <span className={`tile${selected ? " sel" : ""}`} title={name} role="img" aria-label={name}>
+        {inside}
+      </span>
+    );
+  }
+  return (
+    <button
+      type="button"
+      className={`tile${selected ? " sel" : ""}`}
+      title={name}
+      aria-label={name}
+      aria-pressed={selected}
+      onClick={() => onToggle(media.id)}
+    >
+      {inside}
     </button>
   );
 }
