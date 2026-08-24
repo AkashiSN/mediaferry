@@ -1,5 +1,7 @@
 // 進行中の作業 1 件（§13）。ファイル名と件数で進捗を示す。
 
+import type { ReactNode } from "react";
+
 import { progressLine, statusLabel } from "./JobProgress";
 import type { Job, JobProgressValue } from "./JobProgress";
 
@@ -20,6 +22,7 @@ export function JobCard({
   cancelLabel = "中止する",
   cancelBusy = false,
   notes,
+  footer,
 }: {
   job: Job;
   /** その作業が扱っている当のもの（カードのラベルなど）。**題に添える。**
@@ -37,6 +40,14 @@ export function JobCard({
    * 描かない。**
    */
   notes?: string[];
+  /**
+   * この作業の箱の中に添える要素。**文字列ではなく要素で受ける** —— 状態として
+   * 読み上げさせたい行（`role="status"`）は、文言だけを渡すと意味づけが落ちる。
+   *
+   * `notes` と同じく**箱の内側に描く**。呼び出し元がカードの外に兄弟として
+   * 並べると、カードの内側の余白ではなく外枠に揃い、縁からはみ出して見える。
+   */
+  footer?: ReactNode;
 }) {
   const title = JOB_TYPE_LABELS[job.type] ?? job.type;
   return (
@@ -84,6 +95,7 @@ export function JobCard({
             {note}
           </p>
         ))}
+      {footer}
     </section>
   );
 }

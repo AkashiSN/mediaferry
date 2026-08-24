@@ -575,6 +575,47 @@ describe("ホーム", () => {
     expect(screen.getByText("OSMO")).toBeInTheDocument();
   });
 
+  // **危ないのは掴まれている間だけ**（§3）。抜いていいかを安全なときにしか
+  // 出さないなら、この知らせは半分しか実装されていない。
+  it("取り込みが走っているカードは、抜かないでと言う", async () => {
+    stubHome({
+      "/dashboard": EMPTY_DASHBOARD,
+      "/devices": { volumes: [{ ...actionableVolume, busy: true }] },
+      "/jobs": {
+        jobs: [
+          {
+            id: "j1",
+            type: "import",
+            status: "running",
+            created_at: "2026-08-24T00:00:00Z",
+            volume_instance_id: "v1",
+          },
+        ],
+      },
+      "/settings": { settings: [{ key: "AUTO_IMPORT", value: "trusted" }], warnings: [] },
+    });
+    renderHome();
+
+    // **その作業の箱の中に出す。** 外に並べると、カードの縁からはみ出して見える。
+    const box = (await screen.findByText("取り込み")).closest("section");
+    expect(box).toHaveTextContent("作業中です。終わるまで抜かないでください。");
+  });
+
+  // 抜く相手がいない作業（送信など）には出さない。
+  it("カードに紐づかない作業には、抜いていいかを出さない", async () => {
+    stubHome({
+      "/dashboard": EMPTY_DASHBOARD,
+      "/devices": { volumes: [] },
+      "/jobs": {
+        jobs: [{ id: "j1", type: "upload", status: "running", created_at: "2026-08-24T00:00:00Z" }],
+      },
+    });
+    renderHome();
+
+    await screen.findByText("送信");
+    expect(screen.queryByText(/抜/)).toBeNull();
+  });
+
   it("待機中の作業も残らず出す", async () => {
     stubHome({
       "/dashboard": EMPTY_DASHBOARD,

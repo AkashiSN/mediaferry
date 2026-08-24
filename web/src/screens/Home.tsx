@@ -226,6 +226,10 @@ export function HomeScreen() {
                 rate={averageRate(job)}
                 onCancel={isCancellable(job) ? (id) => void cancelJob(id) : undefined}
                 cancelBusy={action.busy}
+                // **抜いていいかは、掴まれている間こそ要る**（§3）。文言は
+                // `CardStanding` の 1 か所だけが持つ。カードに紐づかない作業
+                // （送信など）には抜く相手がいないので出さない。
+                footer={card === null ? undefined : <CardStanding card={card} />}
               />
             ))}
           </section>
