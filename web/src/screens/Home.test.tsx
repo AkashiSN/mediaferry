@@ -1,6 +1,6 @@
 // ホーム（§13）。**やることが無いときは、無いと書く。**
 
-import { render, screen, waitFor } from "@testing-library/react";
+import { act, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { MemoryRouter, Route, Routes } from "react-router-dom";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -54,6 +54,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  vi.useRealTimers();
   vi.restoreAllMocks();
 });
 
@@ -134,6 +135,69 @@ describe("ホーム", () => {
 
   // **承認と取り込みを、別々の仕事に見せない**（§1）。取り込む残りがあるカードは
   // 「やること」の札になり、未信頼ならその同じ札に信頼の入口も乗る。
+  // **読めていないものを「無い」と言わない。** 失敗のバナーと「やることは
+  // ありません」が並ぶ画面は、いま直している食い違いと同じ形（画面が嘘をつく）。
+  it("カードの一覧を読めなかったら、やることはありませんと書かない", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn((input: string) => {
+        const path = input.replace(/^\/api/, "");
+        if (path === "/devices") {
+          return Promise.resolve(new Response(JSON.stringify({}), { status: 500 }));
+        }
+        const body =
+          {
+            "/dashboard": EMPTY_DASHBOARD,
+            "/jobs": { jobs: [] },
+            "/settings": { settings: [], warnings: [] },
+            "/profiles": { profiles: [] },
+          }[path] ?? {};
+        return Promise.resolve(new Response(JSON.stringify(body), { status: 200 }));
+      }),
+    );
+    renderHome();
+
+    await screen.findByRole("alert");
+    expect(screen.queryByText("いま、やることはありません")).toBeNull();
+  });
+
+  // **押さなくても切り替わる、の土台**（§3）。`CardStanding` が「抜かないで
+  // ください」から「いま抜いて大丈夫です」へ自分で変わるのは、この拍が回って
+  // いるから。進捗の接続が切れている間は、これが唯一の自動更新になる。
+  it("走っている作業があれば、押さなくても取り直す", async () => {
+    vi.useFakeTimers();
+    const api = stubHome({
+      "/dashboard": EMPTY_DASHBOARD,
+      "/devices": { volumes: [] },
+      "/jobs": {
+        jobs: [{ id: "j1", type: "import", status: "running", created_at: "2026-08-24T00:00:00Z" }],
+      },
+    });
+    renderHome();
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(4000);
+    });
+
+    expect(api.calls().filter((call) => call.path === "/jobs").length).toBeGreaterThan(1);
+  });
+
+  it("走っている作業が無ければ、取り直しは回らない", async () => {
+    vi.useFakeTimers();
+    const api = stubHome({
+      "/dashboard": EMPTY_DASHBOARD,
+      "/devices": { volumes: [] },
+      "/jobs": { jobs: [] },
+    });
+    renderHome();
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(10_000);
+    });
+
+    expect(api.calls().filter((call) => call.path === "/jobs")).toHaveLength(1);
+  });
+
   it("挿さっているカードを、信頼していなければそう書く", async () => {
     stubHome({
       "/dashboard": EMPTY_DASHBOARD,

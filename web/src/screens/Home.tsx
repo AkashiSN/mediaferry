@@ -104,6 +104,10 @@ export function HomeScreen() {
   const nothing =
     sections.doing.length === 0 && sections.todo.length === 0 && sections.standing.length === 0;
   const loading = dashboard.loading || devices.loading || jobs.loading;
+  // **読めていないものを「無い」とは言わない。** 3 本のうち 1 本でも値が無ければ
+  // （失敗したか、まだ返っていない）、空表示は出さない —— カードが挿さっていても
+  // 「やることはありません」と書いてしまう。失敗そのものはバナーが知らせる。
+  const unread = dashboardData === null || devices.data === null || jobs.data === null;
 
   const averageRate = useJobPulse(sections.doing.length > 0, jobs.reload);
 
@@ -281,7 +285,7 @@ export function HomeScreen() {
         {nothing &&
           (loading ? (
             <p>読み込み中…</p>
-          ) : dashboardData === null ? (
+          ) : unread ? (
             // 失敗はすぐ上のバナーで知らせるので、ここには何も書かない
             // （`読み込み中…` を出し続けると、失敗しても消えない）。
             null
