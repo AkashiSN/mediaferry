@@ -595,7 +595,10 @@ def test_the_hash_scan_pulses_the_lease(setup, data_root, db, monkeypatch):
     prepared = a_prepared(data_root, ctx, b"x" * (4 * 1024 * 1024 + 1))
     monkeypatch.setattr("mediaferry.core.lease_pulse.HEARTBEAT_INTERVAL", 0)
     beats = []
-    monkeypatch.setattr(ctx, "heartbeat", lambda: beats.append(1))
+    # **`JobContext.heartbeat` と同じ形にする.** 走査の心拍は引数なしで打つが、
+    # 続く fsync は `with_lease_pulse` 経由で `progress` を渡して打つ。受けられない
+    # 形にすると、fsync が心拍の間隔より長い環境（CI の遅いディスク）でだけ落ちる。
+    monkeypatch.setattr(ctx, "heartbeat", lambda progress=None: beats.append(1))
 
     publisher.publish_prepared(ctx, a_merge_request(profile, group_id), prepared)
     assert beats

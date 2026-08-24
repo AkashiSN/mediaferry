@@ -200,6 +200,14 @@ PYTHONDONTWRITEBYTECODE=1 uv run python mutate.py \
 `(?P<ts>\d{4})(a|a)+$` は「悪性のつもり」で書いたが、`\d{4}` が先頭で即座に
 失敗するので backtracking に入らず、変異試験は素通りしたままだった。
 
+**差し替える偽物は、本物と同じ形にする。** `JobContext.heartbeat` は
+`progress` を任意引数に取り、走査の途中は引数なし、`with_lease_pulse` からは
+`progress` 付きで呼ばれる。`test_the_hash_scan_pulses_the_lease` の偽物は引数を
+受けられない形で書かれていたため、**fsync が心拍の間隔より長い環境でだけ**
+`TypeError` で落ちた（開発機では通り、CI #41 で落ちた）。速い機械では届かない
+呼び出し口が偽物にはある。**形を合わせておけば、機械の速さでテストの結果が
+変わらない。**
+
 ### 作業の作法
 
 1. 各タスクは「失敗するテストを書く → 失敗を確認 → 最小実装 → 通ることを確認 →
