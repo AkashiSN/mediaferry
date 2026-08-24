@@ -27,6 +27,8 @@ export type Job = {
   started_at?: string | null;
   // **走っている間は無い**（終わった時点で API が入れる）。
   finished_at?: string | null;
+  // どのカードの作業か。カードに紐づかない作業（送信など）では null。
+  volume_instance_id?: string | null;
   progress?: JobProgressValue | null;
 };
 
