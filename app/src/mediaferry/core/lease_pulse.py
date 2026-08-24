@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import threading
 from collections.abc import Callable
+from typing import Any
 
 from ..db.jobs import LEASE_SECONDS, JobContext, LeaseLost
 
@@ -24,12 +25,17 @@ def with_lease_pulse[T](
     ctx: JobContext,
     work: Callable[[], T],
     also: Callable[[], None] | None = None,
+    progress: Callable[[], dict[str, Any] | None] | None = None,
     ownership_errors: tuple[type[BaseException], ...] = (LeaseLost,),
 ) -> T:
     """`work` を待ちながら heartbeat を打つ.
 
     `also` を渡すと、heartbeat のたびに一緒に呼ぶ（アップロードでは
     `upload_record.claim_expires_at` の延長に使う）。
+
+    `progress` を渡すと、heartbeat のたびに呼んでその値を一緒に書く。
+    **書き込みは増えない** —— 既に打っている UPDATE に相乗りする。走っている
+    スレッドは値を数えるだけで、DB へ触るのは待つ側のまま。
 
     **`ownership_errors` には `also` が投げうる例外も含める。** アップロードは
     `ClaimLost` を投げるので、`(LeaseLost, ClaimLost)` を渡す。含め忘れると、
@@ -62,7 +68,7 @@ def with_lease_pulse[T](
                 # 延ばすので、heartbeat だけでは 28 GiB の送信中のキャンセルに
                 # 気づけない（`assert_lease` は `cancelling` を通さない）。
                 ctx.assert_lease()
-                ctx.heartbeat()
+                ctx.heartbeat(progress() if progress is not None else None)
                 if also is not None:
                     also()
             except ownership_errors as exc:

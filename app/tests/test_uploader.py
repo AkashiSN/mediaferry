@@ -1,5 +1,6 @@
 import base64
 import hashlib
+import json
 import os
 
 import pytest
@@ -12,7 +13,7 @@ from mediaferry.db.jobs import JobStore
 from mediaferry.db.profiles import ProfileRegistry
 from mediaferry.db.uploads import UploadRepository
 from mediaferry.jobs.preflight import PreflightCache, PreflightFailed
-from mediaferry.jobs.uploader import Uploader
+from mediaferry.jobs.uploader import Uploader, _Reported
 
 from .fake_immich import API_KEY
 from .test_schema_artifacts import a_media_file, a_merge_group
@@ -485,7 +486,7 @@ def test_the_lease_is_extended_while_the_file_is_sent(world, db, monkeypatch):
     server, uploader, ctx, _, _, destination_id, _ = world
     monkeypatch.setattr("mediaferry.core.lease_pulse.HEARTBEAT_INTERVAL", 0.05)
     beats = []
-    monkeypatch.setattr(ctx, "heartbeat", lambda: beats.append(1))
+    monkeypatch.setattr(ctx, "heartbeat", lambda progress=None: beats.append(progress))
     real = ImmichClient.upload_asset
 
     def slow_upload(self, *args, **kwargs):
@@ -780,3 +781,137 @@ def test_many_quick_sends_do_not_lose_the_lease(world, db, data_root, monkeypatc
     assert outcome.sent == 5
     states = [row["state"] for row in db.execute("SELECT state FROM upload_record")]
     assert states == ["complete"] * 5
+
+
+def test_the_upload_job_reports_how_far_it_got(world, db):
+    """71 GB を 6 分かけている間、画面に何も出ないのを直す."""
+    _server, uploader, ctx, _uploads, _destinations, destination_id, _media_id = world
+
+    uploader.run(ctx, destination_id)
+
+    # 進捗は走っている間だけ入る（終わらせるのは runner なので、ここでは残る）。
+    row = db.execute("SELECT progress_json FROM job").fetchone()
+    assert row["progress_json"] is not None, "送信のジョブが進捗を一度も書いていない"
+    progress = json.loads(row["progress_json"])
+    assert progress["phase"] == "upload"
+    assert progress["file_index"] == 1
+    assert progress["file_count"] == 1
+    # 1 件の中を数えている証拠。ここが 0 なら、件数だけ出して中は見ていない。
+    assert progress["bytes_done_all"] == len(PAYLOAD)
+    assert progress["bytes_total_all"] == len(PAYLOAD)
+    # **`DATA_ROOT` からの相対パスだけを載せる**（絶対パスは画面にも API にも出さない）。
+    assert progress["rel_path"] == "library/dji-osmo/DCIM/A.MP4"
+    assert progress["bytes_total"] == len(PAYLOAD)
+
+
+def test_the_reported_total_grows_rather_than_lying():
+    """走っている間に対象が増えても `12 / 10 件` とは書かない."""
+    reported = _Reported(file_count=2, bytes_total_all=100)
+
+    reported.file_index = 3
+    reported.bytes_done_all = 150
+
+    snapshot = reported.snapshot()
+    assert snapshot["file_count"] == 3
+    assert snapshot["bytes_total_all"] == 150
+
+
+def test_bytes_are_counted_while_one_file_streams(immich, tmp_path):
+    """大きい 1 件を送っている間も、その中で進む."""
+    seen: list[int] = []
+    payload = b"x" * 4096
+    path = tmp_path / "big.mp4"
+    path.write_bytes(payload)
+
+    client = ImmichClient(immich.url, API_KEY)
+    client.upload_asset(
+        path,
+        sha1_hex=hashlib.sha1(payload, usedforsecurity=False).hexdigest(),
+        device_asset_id="mediaferry:big",
+        file_created_at=CAPTURED,
+        file_modified_at=CAPTURED,
+        on_bytes=seen.append,
+    )
+
+    assert sum(seen) == 4096
+
+
+def test_progress_is_written_while_a_single_long_file_is_sent(world, db, monkeypatch):
+    """71 GB の 1 件は 6 分かかる. **その間、書き手は送信中の心拍しかいない。**"""
+    import time
+
+    _server, uploader, ctx, _uploads, _destinations, destination_id, _media_id = world
+    monkeypatch.setattr("mediaferry.core.lease_pulse.HEARTBEAT_INTERVAL", 0.05)
+    beats: list[dict | None] = []
+    real_heartbeat = ctx.heartbeat
+
+    def spy(progress=None):  # noqa: ANN001, ANN202
+        beats.append(progress)
+        real_heartbeat(progress)
+
+    monkeypatch.setattr(ctx, "heartbeat", spy)
+    real_upload = ImmichClient.upload_asset
+
+    def slow_upload(self, *args, **kwargs):  # noqa: ANN001, ANN002, ANN003, ANN202
+        time.sleep(0.3)
+        return real_upload(self, *args, **kwargs)
+
+    monkeypatch.setattr(ImmichClient, "upload_asset", slow_upload)
+
+    uploader.run(ctx, destination_id)
+
+    # ループの心拍は 2 回（1 件目の前と、もう無いと分かる前）。それを超えた分が
+    # 送信中の心拍で、**そこにも進捗が乗っている**。
+    assert len(beats) > 2
+    assert all(beat is not None and beat["phase"] == "upload" for beat in beats)
+
+
+def test_the_totals_are_counted_before_the_first_file_is_sent(world, db, data_root, monkeypatch):
+    """分母は**送る前**に決まる. 実測を写すだけなら、バーは常に 100% になる."""
+    _server, uploader, ctx, uploads, _destinations, destination_id, _media_id = world
+    profile = ProfileRegistry(db).current("dji-osmo")
+    directory = data_root / "library" / "dji-osmo" / "DCIM"
+    payload = b"second-clip"
+    (directory / "C.MP4").write_bytes(payload)
+    second = a_media_file(
+        db,
+        (profile.profile_id, profile.revision_id),
+        rel_path="library/dji-osmo/DCIM/C.MP4",
+        sha1=hashlib.sha1(payload, usedforsecurity=False).hexdigest(),
+        size_bytes=len(payload),
+        captured_at=CAPTURED,
+        mtime_ns=1_700_000_000_000_000_000,
+    )
+    done = b"already-sent"
+    (directory / "D.MP4").write_bytes(done)
+    settled = a_media_file(
+        db,
+        (profile.profile_id, profile.revision_id),
+        rel_path="library/dji-osmo/DCIM/D.MP4",
+        sha1=hashlib.sha1(done, usedforsecurity=False).hexdigest(),
+        size_bytes=len(done),
+        captured_at=CAPTURED,
+        mtime_ns=1_700_000_000_000_000_000,
+    )
+    uploads.create_pairs([second, settled], [destination_id])
+    # **無効化した 1 件は分母に入らない**（`claim_next` が拾わない行）。
+    db.execute(
+        "UPDATE upload_record SET invalidated_at = ?, invalidated_reason = ?"
+        " WHERE media_file_id = ?",
+        (CAPTURED, "テストで無効化した", settled),
+    )
+    beats: list[dict] = []
+    real_heartbeat = ctx.heartbeat
+
+    def spy(progress=None):  # noqa: ANN001, ANN202
+        beats.append(progress)
+        real_heartbeat(progress)
+
+    monkeypatch.setattr(ctx, "heartbeat", spy)
+
+    uploader.run(ctx, destination_id)
+
+    # 最初の心拍は 1 件目を claim する前。そこで既に全体が見えている。
+    assert beats[0]["file_index"] == 0
+    assert beats[0]["file_count"] == 2
+    assert beats[0]["bytes_total_all"] == len(PAYLOAD) + len(payload)

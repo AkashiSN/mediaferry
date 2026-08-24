@@ -56,6 +56,13 @@ class Stamp:
 
 
 CLAIMABLE_STATES = ("pending", "needs_recheck")
+# **claim できる行を選ぶ条件を 1 か所に持つ。** `claim_next` と、進捗の分母を
+# 数える `sendable_totals` が同じ集合を指す。片方だけ変えると、画面の
+# 「N 件中 M 件」が実際に送る対象と食い違う。
+CLAIMABLE_CLAUSE = (
+    "destination_id = ? AND target_epoch = ? AND invalidated_at IS NULL"
+    f" AND state IN ({', '.join('?' * len(CLAIMABLE_STATES))})"
+)
 
 
 class ClaimLost(RuntimeError):
@@ -293,6 +300,33 @@ class UploadRepository:
         # pending / needs_recheck は既に claim できる状態。二重に作らない。
         return PairResult(media["id"], destination_id, "created", row["id"])
 
+    def _current_revision(self, destination_id: str) -> sqlite3.Row | None:
+        """送れる宛先の現行リビジョン. 無効・保管済みの宛先には無い."""
+        return self._conn.execute(
+            "SELECT r.* FROM upload_destination d"
+            " JOIN destination_revision r ON r.id = d.current_revision_id"
+            " WHERE d.id = ? AND d.enabled = 1 AND d.archived_at IS NULL",
+            (destination_id,),
+        ).fetchone()
+
+    def sendable_totals(self, destination_id: str) -> tuple[int, int]:
+        """これから送る件数と合計バイトを返す. **進捗の分母**（§2）.
+
+        条件は `claim_next` と同じ（`CLAIMABLE_CLAUSE`）。数えた後も対象は
+        増減しうるので、これは開始時のひとにらみでしかない。実測が追い越したら、
+        画面に出す側が合計を伸ばす。
+        """
+        revision = self._current_revision(destination_id)
+        if revision is None:
+            return (0, 0)
+        row = self._conn.execute(
+            "SELECT COUNT(*) AS files, COALESCE(SUM(media_file.size_bytes), 0) AS bytes"  # noqa: S608
+            " FROM upload_record JOIN media_file ON media_file.id = upload_record.media_file_id"
+            f" WHERE {CLAIMABLE_CLAUSE}",
+            (destination_id, revision["target_epoch"], *CLAIMABLE_STATES),
+        ).fetchone()
+        return (row["files"], row["bytes"])
+
     def claim_next(
         self,
         destination_id: str,
@@ -311,18 +345,11 @@ class UploadRepository:
         """
         marks = ", ".join("?" * len(CLAIMABLE_STATES))
         with immediate(self._conn):
-            revision = self._conn.execute(
-                "SELECT r.* FROM upload_destination d"
-                " JOIN destination_revision r ON r.id = d.current_revision_id"
-                " WHERE d.id = ? AND d.enabled = 1 AND d.archived_at IS NULL",
-                (destination_id,),
-            ).fetchone()
+            revision = self._current_revision(destination_id)
             if revision is None:
                 return None
             row = self._conn.execute(
-                "SELECT id FROM upload_record"  # noqa: S608
-                " WHERE destination_id = ? AND target_epoch = ? AND invalidated_at IS NULL"
-                f"   AND state IN ({marks})"
+                f"SELECT id FROM upload_record WHERE {CLAIMABLE_CLAUSE}"  # noqa: S608
                 "   AND (claim_expires_at IS NULL OR claim_expires_at < ?)"
                 " ORDER BY created_at LIMIT 1",
                 (

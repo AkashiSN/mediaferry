@@ -663,7 +663,7 @@ def test_the_lease_pulse_waits_for_the_work_before_raising(setup, monkeypatch):
         time.sleep(0.3)
         finished.append(1)
 
-    def lost():
+    def lost(progress=None):  # noqa: ANN001, ANN202 - `JobContext.heartbeat` と同じ形
         raise LeaseLost("リースを失った")
 
     monkeypatch.setattr("mediaferry.core.lease_pulse.HEARTBEAT_INTERVAL", 0.05)
