@@ -12,9 +12,11 @@ import { Link, useNavigate } from "react-router-dom";
 
 import { request } from "../../api/client";
 import { useMutation, useQuery } from "../../api/hooks";
+import { CardStanding } from "../../components/CardStanding";
 import { ConfirmDialog, type Confirmation } from "../../components/ConfirmDialog";
 import { ErrorBanner } from "../../components/ErrorBanner";
 import { Icon } from "../../components/Icon";
+import type { CardView } from "../../hooks/homeSections";
 import { formatBytes } from "../../utils/formatBytes";
 
 /** カード 1 枚（`GET /devices` の 1 要素）。**判定関数がここにあるので、型もここに
@@ -31,6 +33,11 @@ export type Volume = {
   provisional: boolean;
   trusted: boolean;
   reason: string | null;
+  // ホームの帯（`CardStanding`）と同じ判断をするための欄。ホームの
+  // `homeSections.ts` もこの 3 つを見る。
+  pending_count: number;
+  scanned_at: string | null;
+  busy: boolean;
 };
 
 type Devices = { volumes: Volume[] };
@@ -176,7 +183,7 @@ export function CardDetailScreen() {
       ? null
       : (settings.data.settings.find((setting) => setting.key === "AUTO_IMPORT")?.value ?? null);
 
-  async function act(volumeId: string, action: "trust" | "scan" | "import" | "close") {
+  async function act(volumeId: string, action: "trust" | "scan" | "import") {
     await card.run(async () => {
       await request(`/volumes/${volumeId}/${action}`, { method: "POST" });
       devices.reload();
@@ -232,6 +239,21 @@ export function CardDetailScreen() {
           const profileName = profileDisplayName(volume.profile_slug, profileList);
           const confidence = confidenceLabel(volume.identity_confidence);
           const actionable = volume.profile_slug !== null;
+          // `CardStanding` はホームと同じ形（`CardView`）を受け取る。ここは
+          // `Volume` しか持っていないので、既に引いてある表示名で作り直す。
+          const cardView: CardView = {
+            volume_instance_id: volume.volume_instance_id,
+            label,
+            profile_name: profileName,
+            size_bytes: volume.size_bytes,
+            profile_slug: volume.profile_slug,
+            trusted: volume.trusted,
+            provisional: volume.provisional,
+            reason: volume.reason ?? "",
+            pending_count: volume.pending_count,
+            scanned_at: volume.scanned_at,
+            busy: volume.busy,
+          };
           return (
             <section key={volume.volume_instance_id} className="card pad">
               <div className="rowtop">
@@ -260,6 +282,9 @@ export function CardDetailScreen() {
                       {profileName} の対象ですが、取り込む中身がまだありません。
                     </p>
                   )}
+                  {/* **抜いていいかは、押さずに読める**（§3）。文言は `CardStanding`
+                      の 1 か所だけが持つ。 */}
+                  <CardStanding card={cardView} />
                 </div>
               </div>
               {actionable && (
@@ -316,14 +341,6 @@ export function CardDetailScreen() {
                     </button>
                   </>
                 )}
-                <button
-                  type="button"
-                  className="btn sm"
-                  disabled={card.busy}
-                  onClick={() => void act(volume.volume_instance_id, "close")}
-                >
-                  {label} を取り外す
-                </button>
               </div>
             </section>
           );

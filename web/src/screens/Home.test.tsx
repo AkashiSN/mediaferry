@@ -665,6 +665,21 @@ describe("ホーム", () => {
     expect(box).toHaveTextContent("作業中です。終わるまで抜かないでください。");
   });
 
+  // **押しても何も起きないボタンは置かない**（§3）。抜いていいかは
+  // `CardStanding` が常時の表示で答えるので、押して確かめる入口は要らない。
+  it("「取り外す」ボタンは無い", async () => {
+    stubHome({
+      "/dashboard": EMPTY_DASHBOARD,
+      "/devices": { volumes: [actionableVolume] },
+      "/jobs": { jobs: [] },
+      "/settings": { settings: [{ key: "AUTO_IMPORT", value: "trusted" }], warnings: [] },
+    });
+    renderHome();
+
+    await screen.findByText(/38 件を取り込む/);
+    expect(screen.queryByRole("button", { name: /取り外す/ })).toBeNull();
+  });
+
   // 抜く相手がいない作業（送信など）には出さない。
   it("カードに紐づかない作業には、抜いていいかを出さない", async () => {
     stubHome({

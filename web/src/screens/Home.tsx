@@ -33,11 +33,7 @@ import { isCancellable, useJobPulse } from "../hooks/useJobPulse";
 import { useReloadOnEvents } from "../hooks/useReloadOnEvents";
 import { formatDateTime } from "../utils/formatDateTime";
 
-/** `/devices` の 1 要素。**判定関数と同じ型を土台にする**（`work/CardDetail.tsx`）。
- * ホームはそれに加えて、取り込む残り・数えた時刻・掴まれているかを見る。 */
-type DeviceVolume = Volume & Pick<CardView, "pending_count" | "scanned_at" | "busy">;
-
-type Devices = { volumes: DeviceVolume[] };
+type Devices = { volumes: Volume[] };
 type Profile = { slug: string; name: string };
 type Profiles = { profiles: Profile[] };
 
