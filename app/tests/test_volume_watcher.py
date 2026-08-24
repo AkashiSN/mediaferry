@@ -549,6 +549,17 @@ def test_the_automatic_path_also_looks_for_split_videos(watcher, db, volumes):
     assert job_types(db)[-2:] == ["import", "detect_groups"]
 
 
+def test_one_tick_queues_them_in_the_order_they_must_run(watcher, db, volumes):
+    """数えてから運ぶ。逆だと `import` は空の `source_entry` を読む."""
+    a_known_card(watcher, volumes)
+    trust_the_card(db)
+    watcher.tick()
+    db.execute("DELETE FROM job")
+    db.commit()
+    reinsert(watcher, volumes)
+    assert job_types(db) == ["scan", "import", "detect_groups"]
+
+
 def test_reinserting_the_card_counts_it_again(watcher, db, volumes):
     """前回のスキャン以降に撮ったものを拾う道.
 
@@ -602,6 +613,25 @@ def test_a_detached_presence_is_never_counted(watcher, db, volumes):
         "SELECT count(*) FROM volume_presence WHERE auto_scan_at IS NOT NULL"
     ).fetchone()[0]
     assert marked == 0, "抜けた接続に印を付けている"
+
+
+def test_a_failed_scan_enqueue_leaves_no_mark(watcher, db, volumes, monkeypatch):
+    """**印付けと enqueue は原子的**（片方だけ残らない）.
+
+    分けると、enqueue が落ちたときに印だけが残り、**そのカードは二度と
+    数えられない** —— 印は presence ごとなので、抜き差ししても戻らない。
+    """
+
+    def boom(self, job_type, params):  # noqa: ANN001
+        raise RuntimeError("積めなかった")
+
+    monkeypatch.setattr(JobStore, "enqueue", boom)
+    with pytest.raises(RuntimeError):
+        watcher.tick()
+    marked = db.execute(
+        "SELECT count(*) FROM volume_presence WHERE auto_scan_at IS NOT NULL"
+    ).fetchone()[0]
+    assert marked == 0, "積めなかったのに印だけ残っている"
 
 
 def test_the_counting_job_is_reported_even_when_auto_import_is_off(

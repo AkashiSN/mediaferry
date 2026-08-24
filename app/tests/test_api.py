@@ -211,9 +211,12 @@ def test_shutdown_waits_for_the_running_handler(data_root, broker, monkeypatch):
         client.cookies.set("XSRF-TOKEN", token)
         client.headers["X-CSRF-Token"] = token
         volume_id = client.get("/api/devices").json()["volumes"][0]["volume_instance_id"]
-        client.post(f"/api/volumes/{volume_id}/scan")
+        # **この POST の成否も見る。** 監視役の `scan` が必ず 1 本走るので、
+        # 戻り値を捨てると口が 403 や 500 を返すようになっても緑のままになる。
+        assert client.post(f"/api/volumes/{volume_id}/scan").status_code == 200
         # **どの 1 本かは決め打ちにしない。** 監視役も挿さっているカードに
-        # `scan` を積むので、先に走り出すのはそちらのことがある。見たいのは
+        # `scan` を積み、ジョブは 1 本ずつ直列に走るので、先に claim されるのは
+        # そちらのことがある。自分の id を待つと止まる。見たいのは
         # 「走っているハンドラを停止が待つか」だけ。
         deadline = time.monotonic() + 10
         while all(job["status"] != "running" for job in client.get("/api/jobs").json()["jobs"]):

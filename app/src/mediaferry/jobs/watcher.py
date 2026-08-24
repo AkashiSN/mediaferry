@@ -142,6 +142,18 @@ class VolumeWatcher:
 
     # ------------------------------------------------------------------
     def _enqueue_ready(self) -> list[str]:
+        """この周で積んだものを返す.
+
+        **記録は積み終わってから、どの経路でも同じ数だけ出す。** 積む本体は
+        途中で返る（`AUTO_IMPORT` が `trusted` でなければ `scan` だけで終わる）
+        ので、記録をそちらに置くと経路によって落ちる。
+        """
+        jobs = self._enqueue_in_one_transaction()
+        for job_id in jobs:
+            logger.info("自動で積んだ: %s", job_id)
+        return jobs
+
+    def _enqueue_in_one_transaction(self) -> list[str]:
         jobs: list[str] = []
         store = JobStore(self._conn)
         with immediate(self._conn):
@@ -184,8 +196,6 @@ class VolumeWatcher:
                             },
                         )
                     )
-        for job_id in jobs:
-            logger.info("自動で積んだ: %s", job_id)
         return jobs
 
     def _invalidate_gone(self) -> None:

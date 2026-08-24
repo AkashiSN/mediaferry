@@ -36,6 +36,10 @@ def _frames(response, count, timeout=10.0, job_id=None):
 
     **`job_id` で絞れる。** この線には全ジョブの進捗が流れるので、監視役が
     挿さっているカードに積んだ `scan` の 1 行 1 行も混ざる。
+
+    **ジョブに紐づかない枠は絞りを素通りする。** `cursor_reset` は `job_id` を
+    持たない（位置を作り直した理由だけを載せる）ので、`job_id` で絞ったときに
+    捨てると「作り直していないのに理由を流す」不具合が見えなくなる。
     """
     out: list[tuple[str | None, dict]] = []
     pending_id: str | None = None
@@ -48,7 +52,7 @@ def _frames(response, count, timeout=10.0, job_id=None):
         elif line.startswith("data:"):
             payload = json.loads(line.removeprefix("data:").strip())
             frame_id, pending_id = pending_id, None
-            if job_id is not None and payload.get("job_id") != job_id:
+            if job_id is not None and payload.get("job_id") not in (None, job_id):
                 continue
             out.append((frame_id, payload))
             if len(out) == count:
