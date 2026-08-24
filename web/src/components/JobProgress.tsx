@@ -34,7 +34,11 @@ export type Job = {
 
 // サーバが返す phase を §13 の言葉に写す（`merge` → **つなぐ**）。**内部の名前を
 // そのまま出さない**ので、写せないものだけ生の値のまま出す。
-const PHASES: Record<string, string> = { copy: "コピー中", merge: "つないでいます" };
+const PHASES: Record<string, string> = {
+  copy: "コピー中",
+  merge: "つないでいます",
+  upload: "送信中",
+};
 
 /** **速度と残りは画面で出す。** サーバに持たせると心拍の間隔に依存した値を残すことになる。 */
 export function progressLine(progress: JobProgressValue, bytesPerSecond: number | null): string {
