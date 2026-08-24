@@ -80,9 +80,7 @@ class JobRunner:
         row = poll_store.get(ctx.job_id)
         handler = self._handlers.get(row["type"])
         if handler is None:
-            poll_store.finish(
-                ctx.job_id, ctx.lease_token, "failed", f"未登録のジョブ種別: {row['type']}"
-            )
+            self._fail(poll_store, ctx, f"未登録のジョブ種別: {row['type']}")
             return
 
         conn = await asyncio.to_thread(self._database.connect)
@@ -90,17 +88,44 @@ class JobRunner:
         # ハンドラの中の JobStore と ArtifactPublisher を同じ接続に揃える。
         ctx = replace(ctx, _store=store)
         self._current = ctx
+        # **決着はハンドラの接続を閉じてから、ワーカーの接続で付ける。** 落ちた
+        # ハンドラは書き込みトランザクションを開いたままのことがあり、その中で
+        # 決着を書くと下の `ROLLBACK` が巻き戻す。合図の `emit` も
+        # `BEGIN IMMEDIATE` を要るので、開いたままの接続では書けない。
+        failure: Exception | None = None
         try:
             await asyncio.to_thread(handler, ctx, conn)
         except Exception as exc:  # noqa: BLE001 - どのジョブが落ちてもワーカーは生かす
             logger.exception("ジョブ %s が失敗した", ctx.job_id)
-            store.finish(ctx.job_id, ctx.lease_token, "failed", str(exc))
-            return
+            failure = exc
         finally:
             self._current = None
             if conn.in_transaction:  # pragma: no cover - 取りこぼしの検出用
                 logger.error("ジョブ %s がトランザクションを開いたまま終わった", ctx.job_id)
                 conn.execute("ROLLBACK")
             conn.close()
+        if failure is not None:
+            self._fail(poll_store, ctx, str(failure))
+            return
         # 状態の読み出しと決着を分けると、その間の cancel が上書きされる。
         poll_store.finish_claimed(ctx.job_id, ctx.lease_token)
+
+    def _fail(self, store: JobStore, ctx: JobContext, reason: str) -> None:
+        """失敗の決着を付け、**終わったことを合図として残す**.
+
+        `job_event` は進捗の配信（SSE）の唯一の出所なので、ここで書かないと
+        画面はカードの写しを取り直さず、サーバでは既にカードを離しているのに
+        「作業中です。終わるまで抜かないでください。」を出したまま止まる
+        （§13「作業が終われば、押さなくても表示が切り替わる」）。
+
+        **決着を先に書く。** 合図が先だと、それを受けて取り直した画面が、
+        まだ `running` の一覧を読む。`emit` はリースを見ないので、`finish` が
+        リースを外した後でも書ける。
+
+        理由は `job.error` と同じ文字列。**画面は `job.error` を出さない**ので、
+        ここに書かなければ失敗の理由がどこにも現れない。例外の文字列に秘密は
+        含めない（`adapters/immich.py` は識別子に API キーが混ざる応答を
+        `ImmichProtocolError` で弾き、値そのものは載せない）。
+        """
+        store.finish(ctx.job_id, ctx.lease_token, "failed", reason)
+        store.emit(ctx.job_id, "error", f"作業が失敗した: {reason}")

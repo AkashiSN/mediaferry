@@ -31,6 +31,7 @@ import type { CardView, Standing, Todo } from "../hooks/homeSections";
 import { useEvents } from "../hooks/useEvents";
 import { isCancellable, useJobPulse } from "../hooks/useJobPulse";
 import { useReloadOnEvents } from "../hooks/useReloadOnEvents";
+import { useReloadWhenSettled } from "../hooks/useReloadWhenSettled";
 import { formatDateTime } from "../utils/formatDateTime";
 
 type Devices = { volumes: Volume[] };
@@ -105,7 +106,12 @@ export function HomeScreen() {
   // 「やることはありません」と書いてしまう。失敗そのものはバナーが知らせる。
   const unread = dashboardData === null || devices.data === null || jobs.data === null;
 
-  const averageRate = useJobPulse(sections.doing.length > 0, jobs.reload);
+  // **拍が取り直すのは `/jobs` だけ。** 「抜いていいか」の出所は `/devices` の
+  // `busy` なので、走っている作業が空になった縁でカードの写しも取り直す
+  // （`/devices` はブローカーへの問い合わせを伴うので、拍のたびには叩かない）。
+  const working = sections.doing.length > 0;
+  const averageRate = useJobPulse(working, jobs.reload);
+  useReloadWhenSettled(working, devices.reload);
 
   async function trust(volumeId: string) {
     await action.run(async () => {

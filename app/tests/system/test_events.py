@@ -13,7 +13,7 @@ import time
 import httpx
 import pytest
 
-from mediaferry.db.connection import Database
+from mediaferry.db.connection import Database, immediate
 from mediaferry.db.jobs import JobStore
 
 from .harness import system_app
@@ -60,11 +60,27 @@ def _frames(response, count, timeout=10.0, job_id=None):
     raise AssertionError(f"{count} 本届かなかった（{len(out)} 本）")
 
 
+def _a_job_to_hang_events_on(conn) -> str:
+    """進捗を提げる相手のジョブ行を 1 つ置く. **ワーカーには拾わせない.**
+
+    `job_event` は `job` への外部キーを持つので行そのものは要るが、この試験が
+    見るのは線の上の挙動だけ。`queued` のまま置くと、`params` の無い `scan` が
+    実際に走って失敗し、その決着の合図（`jobs/runner.py`）が、ここで数える枠に
+    同じ `job_id` で混ざる。**`BEGIN IMMEDIATE` の中で決着まで書く** ——
+    分けると、その隙間に `claim_next` が入りうる。
+    """
+    store = JobStore(conn)
+    with immediate(conn):
+        job_id = store.enqueue("scan", {})
+        conn.execute("UPDATE job SET status = 'cancelled' WHERE id = ?", (job_id,))
+    return job_id
+
+
 def test_progress_reaches_an_open_page(tmp_path):
     with system_app(tmp_path) as app:
         conn = Database(app.data_root / "var" / "mediaferry.sqlite3").connect()
         store = JobStore(conn)
-        job_id = store.enqueue("scan", {})
+        job_id = _a_job_to_hang_events_on(conn)
         with (
             httpx.Client(base_url=app.url, timeout=15.0) as client,
             client.stream("GET", "/api/events") as response,
@@ -84,7 +100,7 @@ def test_a_reconnecting_page_does_not_miss_what_happened_meanwhile(tmp_path):
     with system_app(tmp_path) as app:
         conn = Database(app.data_root / "var" / "mediaferry.sqlite3").connect()
         store = JobStore(conn)
-        job_id = store.enqueue("scan", {})
+        job_id = _a_job_to_hang_events_on(conn)
         with httpx.Client(base_url=app.url, timeout=15.0) as client:
             with client.stream("GET", "/api/events") as response:
                 _emit_soon(store, job_id, "1 本目")

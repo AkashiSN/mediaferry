@@ -6,8 +6,9 @@ import { MemoryRouter, Route, Routes } from "react-router-dom";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { DashboardProvider } from "../api/dashboard";
-import { openStream, failStream } from "../test/setup";
+import { emitJob, openStream, failStream } from "../test/setup";
 import { stubApi } from "../test/api";
+import { SETTLE_MS } from "../hooks/useReloadOnEvents";
 import { HomeScreen } from "./Home";
 
 const EMPTY_DASHBOARD = {
@@ -663,6 +664,102 @@ describe("ホーム", () => {
     // **その作業の箱の中に出す。** 外に並べると、カードの縁からはみ出して見える。
     const box = (await screen.findByText("取り込み")).closest("section");
     expect(box).toHaveTextContent("作業中です。終わるまで抜かないでください。");
+  });
+
+  /** 掴まれているカードと、それを掴んでいる作業。 */
+  const busyCard = {
+    "/dashboard": EMPTY_DASHBOARD,
+    "/devices": { volumes: [{ ...actionableVolume, busy: true }] },
+    "/jobs": {
+      jobs: [
+        {
+          id: "j1",
+          type: "import",
+          status: "running",
+          created_at: "2026-08-24T00:00:00Z",
+          volume_instance_id: "v1",
+        },
+      ],
+    },
+    "/settings": { settings: [{ key: "AUTO_IMPORT", value: "trusted" }], warnings: [] },
+  };
+
+  // **抜いていいかの出所は `/devices` だけ**（§13）。2 秒の拍は `/jobs` しか
+  // 取り直さないので、進捗の知らせが来たらカードの写しも取り直す。
+  //
+  // **ここは知らせの経路だけを見る。** 作業の一覧は走ったままにしてあるので、
+  // 下の「空になった縁」では答えが出ない。
+  it("進捗の知らせが届いたら、抜いていいかも取り直す", async () => {
+    vi.useFakeTimers();
+    stubHome(busyCard);
+    renderHome();
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(100);
+    });
+    expect(screen.getByText("作業中です。終わるまで抜かないでください。")).toBeInTheDocument();
+
+    // サーバ側では作業が決着してカードを離した（失敗でも合図は届く）。
+    stubHome({
+      ...busyCard,
+      "/devices": { volumes: [{ ...actionableVolume, busy: false }] },
+    });
+    act(() => {
+      emitJob({
+        job_id: "j1",
+        seq: 1,
+        level: "error",
+        message: "作業が失敗した: ffprobe が見つからない",
+        data: null,
+        at: "2026-08-24T00:00:05Z",
+      });
+    });
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(SETTLE_MS + 100);
+    });
+
+    expect(screen.getByText("いま抜いて大丈夫です。")).toBeInTheDocument();
+  });
+
+  // **知らせが届かなくても切り替わる**（§13）。走っている作業が空になった縁で
+  // 一度だけ取り直す。**拍のたびには叩かない** —— `/devices` はブローカーへの
+  // 問い合わせを伴うので、2 秒ごとに叩くと、カードを挿している限りマウントと
+  // アンマウントが続く（`jobs/watcher.py`）。
+  it("走っている作業が無くなったら、抜いていいかを取り直す", async () => {
+    vi.useFakeTimers();
+    stubHome(busyCard);
+    renderHome();
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(100);
+    });
+    expect(screen.getByText("作業中です。終わるまで抜かないでください。")).toBeInTheDocument();
+
+    const api = stubHome({
+      ...busyCard,
+      "/devices": { volumes: [{ ...actionableVolume, busy: false }] },
+      "/jobs": {
+        jobs: [
+          {
+            id: "j1",
+            type: "import",
+            status: "failed",
+            created_at: "2026-08-24T00:00:00Z",
+            volume_instance_id: "v1",
+          },
+        ],
+      },
+    });
+    // 拍が `/jobs` を取り直し、走っている作業が空になる。知らせは 1 件も来ない。
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(2500);
+    });
+
+    expect(screen.getByText("いま抜いて大丈夫です。")).toBeInTheDocument();
+    // **縁で 1 回だけ。** 走っている作業が無い間、`/devices` を叩き続けない。
+    const before = api.calls().filter((call) => call.path === "/devices").length;
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(10_000);
+    });
+    expect(api.calls().filter((call) => call.path === "/devices")).toHaveLength(before);
   });
 
   // **押しても何も起きないボタンは置かない**（§3）。抜いていいかは

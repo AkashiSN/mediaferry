@@ -175,3 +175,94 @@ async def test_stop_waits_for_the_running_handler(db, database):
         await runner.stop()
 
     assert finished == [job_id]
+
+
+@pytest.mark.anyio
+async def test_a_failed_job_announces_that_it_finished(db, database, monkeypatch):
+    """失敗にも決着の合図が要る.
+
+    `job_event` は SSE の唯一の出所（`api/routes_events.py`）。失敗の経路で
+    書かないと、画面はカードの写しを取り直さず、サーバでは既に離しているのに
+    「作業中です。終わるまで抜かないでください。」を出したまま止まる。
+
+    **順序も見る。** 外から `job_event` を眺めても、合図と決着のどちらが先かは
+    競争になって読めない（10ms の隙間に入る保証が無い）ので、合図を出す瞬間の
+    状態を、書いている接続そのものから控える。
+    """
+    store = JobStore(db)
+    announced = []
+    emit = JobStore.emit
+
+    def spy(self, job_id, level, message, data=None):
+        # **合図が先に出ると、それを受けて取り直した画面はまだ `running` を読む。**
+        announced.append(self.get(job_id)["status"])
+        emit(self, job_id, level, message, data)
+
+    monkeypatch.setattr(JobStore, "emit", spy)
+
+    def boom(ctx, conn):
+        raise RuntimeError("ffprobe が見つからない")
+
+    runner = JobRunner(database, poll_interval=0.01)
+    runner.register("scan", boom)
+    job_id = store.enqueue("scan", {})
+
+    async with anyio.create_task_group() as tg:
+        tg.start_soon(runner.run_forever)
+        with anyio.fail_after(5):
+            while not announced:
+                await anyio.sleep(0.01)
+        await runner.stop()
+
+    assert announced == ["failed"], "決着より先に合図を出している"
+    events = store.events(job_id)
+    assert [event["level"] for event in events] == ["error"]
+    # 画面は `job.error` を出さないので、理由はここに書かないとどこにも現れない。
+    assert "ffprobe" in events[-1]["message"]
+
+
+@pytest.mark.anyio
+async def test_an_unknown_job_type_also_announces_that_it_finished(db, database):
+    """ハンドラの無い種別も同じ決着を通る（合図の無い終わり方を残さない）."""
+    store = JobStore(db)
+    runner = JobRunner(database, poll_interval=0.01)
+    job_id = store.enqueue("scan", {})
+
+    async with anyio.create_task_group() as tg:
+        tg.start_soon(runner.run_forever)
+        with anyio.fail_after(5):
+            while store.get(job_id)["status"] in {"queued", "running"}:
+                await anyio.sleep(0.01)
+        await runner.stop()
+
+    assert store.get(job_id)["status"] == "failed"
+    assert [event["level"] for event in store.events(job_id)] == ["error"]
+
+
+@pytest.mark.anyio
+async def test_a_handler_that_dies_holding_a_transaction_still_gets_a_verdict(db, database):
+    """決着は**ハンドラの接続を閉じてから**付ける.
+
+    開いたままのトランザクションの中で書くと、取りこぼしを拾う `ROLLBACK` が
+    決着ごと巻き戻し、失敗したジョブが `running` のまま残る（合図も書けない
+    —— `emit` は `BEGIN IMMEDIATE` を要る）。
+    """
+    store = JobStore(db)
+
+    def boom(ctx, conn):
+        conn.execute("BEGIN IMMEDIATE")
+        raise RuntimeError("開いたまま落ちた")
+
+    runner = JobRunner(database, poll_interval=0.01)
+    runner.register("scan", boom)
+    job_id = store.enqueue("scan", {})
+
+    async with anyio.create_task_group() as tg:
+        tg.start_soon(runner.run_forever)
+        with anyio.fail_after(5):
+            while store.get(job_id)["status"] in {"queued", "running"}:
+                await anyio.sleep(0.01)
+        await runner.stop()
+
+    assert store.get(job_id)["status"] == "failed"
+    assert [event["level"] for event in store.events(job_id)] == ["error"]

@@ -27,11 +27,11 @@ from mediaferry.jobs.watcher import VolumeWatcher
 @pytest.fixture
 def watcher(database, db, broker, monkeypatch):
     """watcher は専用の DB 接続と VolumeService を持つ（`db` とは別の接続）."""
-    monkeypatch.setenv("MEDIAFERRY_DEFAULT_TIMEZONE", "Asia/Tokyo")
+    monkeypatch.setenv("MEDIAFERRY_DEFAULT_TIMEZONE", "UTC")
     ProfileRegistry(db).sync_builtins()
     w = VolumeWatcher(
         database,
-        {"MEDIAFERRY_AUTO_IMPORT": "trusted", "MEDIAFERRY_DEFAULT_TIMEZONE": "Asia/Tokyo"},
+        {"MEDIAFERRY_AUTO_IMPORT": "trusted", "MEDIAFERRY_DEFAULT_TIMEZONE": "UTC"},
         broker,
         poll_interval=0.01,
     )
@@ -528,11 +528,11 @@ def test_counting_happens_even_when_auto_import_is_off(database, db, broker, mon
     **`watcher` フィクスチャは env で `trusted` に固定している**ので、
     ここだけ自前で組み立てる（env は DB より優先される）。
     """
-    monkeypatch.setenv("MEDIAFERRY_DEFAULT_TIMEZONE", "Asia/Tokyo")
+    monkeypatch.setenv("MEDIAFERRY_DEFAULT_TIMEZONE", "UTC")
     ProfileRegistry(db).sync_builtins()
     off = VolumeWatcher(
         database,
-        {"MEDIAFERRY_AUTO_IMPORT": "off", "MEDIAFERRY_DEFAULT_TIMEZONE": "Asia/Tokyo"},
+        {"MEDIAFERRY_AUTO_IMPORT": "off", "MEDIAFERRY_DEFAULT_TIMEZONE": "UTC"},
         broker,
         poll_interval=0.01,
     )
@@ -646,8 +646,9 @@ def test_a_detached_presence_is_never_counted(watcher, db, volumes):
 def test_a_failed_scan_enqueue_leaves_no_mark(watcher, db, volumes, monkeypatch):
     """**印付けと enqueue は原子的**（片方だけ残らない）.
 
-    分けると、enqueue が落ちたときに印だけが残り、**そのカードは二度と
-    数えられない** —— 印は presence ごとなので、抜き差ししても戻らない。
+    分けると、enqueue が落ちたときに印だけが残り、**同じ presence のままでは
+    二度と数えられない**（抜き差しすれば新しい presence になり、`scan` は
+    積み直される）。
     """
 
     def boom(self, job_type, params):  # noqa: ANN001
@@ -670,11 +671,11 @@ def test_the_counting_job_is_reported_even_when_auto_import_is_off(
     `tick` の戻り値は「この周で積んだもの」。捨てると、呼び出し側からは
     何も積まなかったのと区別が付かない。
     """
-    monkeypatch.setenv("MEDIAFERRY_DEFAULT_TIMEZONE", "Asia/Tokyo")
+    monkeypatch.setenv("MEDIAFERRY_DEFAULT_TIMEZONE", "UTC")
     ProfileRegistry(db).sync_builtins()
     off = VolumeWatcher(
         database,
-        {"MEDIAFERRY_AUTO_IMPORT": "off", "MEDIAFERRY_DEFAULT_TIMEZONE": "Asia/Tokyo"},
+        {"MEDIAFERRY_AUTO_IMPORT": "off", "MEDIAFERRY_DEFAULT_TIMEZONE": "UTC"},
         broker,
         poll_interval=0.01,
     )
