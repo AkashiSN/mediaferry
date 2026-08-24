@@ -37,7 +37,6 @@ class JobRunner:
         self._poll_interval = poll_interval
         self._handlers: dict[str, Handler] = {}
         self._stopping = asyncio.Event()
-        self._poll_store: JobStore | None = None
         self._current: JobContext | None = None
 
     def register(self, job_type: str, handler: Handler) -> None:
@@ -50,13 +49,28 @@ class JobRunner:
         `ctx.cancelled()` が偽のまま最後まで走り、停止が「待つだけ」になる。
         """
         self._stopping.set()
-        current, store = self._current, self._poll_store
-        if current is not None and store is not None:
-            await asyncio.to_thread(store.request_cancel, current.job_id)
+        current = self._current
+        if current is not None:
+            await asyncio.to_thread(self._request_cancel, current.job_id)
+
+    def _request_cancel(self, job_id: str) -> None:
+        """**停止の cancel は自前の接続で書く.**
+
+        `run_forever` の poller を借りてはいけない。`stop()` が `to_thread` で
+        書いている間、イベントループは `run_forever` を先へ進める。ジョブが
+        同じ瞬間に終われば `run_forever` は降りて poller を閉じ、書いている
+        最中の接続が消える —— 文の実行中に閉じられればプロセスごと落ちる
+        （SIGSEGV）。接続の所有者はスコープごとに 1 つに保つ。
+        """
+        conn = self._database.connect()
+        try:
+            JobStore(conn).request_cancel(job_id)
+        finally:
+            conn.close()
 
     async def run_forever(self) -> None:
         poller = self._database.connect()
-        self._poll_store = poll_store = JobStore(poller)
+        poll_store = JobStore(poller)
         try:
             while not self._stopping.is_set():
                 ctx = await asyncio.to_thread(poll_store.claim_next)
@@ -73,7 +87,6 @@ class JobRunner:
                     await asyncio.to_thread(poll_store.request_cancel, ctx.job_id)
                 await self._run_one(ctx, poll_store)
         finally:
-            self._poll_store = None
             poller.close()
 
     async def _run_one(self, ctx: JobContext, poll_store: JobStore) -> None:

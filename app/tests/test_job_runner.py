@@ -1,4 +1,6 @@
+import asyncio
 import sqlite3
+import threading
 
 import anyio
 import anyio.to_thread
@@ -177,6 +179,49 @@ async def test_stop_waits_for_the_running_handler(db, database):
         await runner.stop()
 
     assert finished == [job_id]
+
+
+@pytest.mark.anyio
+async def test_stop_does_not_write_through_the_workers_connection(db, database, monkeypatch):
+    """停止の cancel は、`run_forever` が閉じる接続の上に書いてはいけない.
+
+    `stop()` は cancel を `to_thread` へ逃がすので、待っている間にイベント
+    ループは `run_forever` を先へ進める。ジョブが同じ瞬間に終われば
+    `run_forever` は降りて poller を閉じ、閉じ終わった接続の上に cancel の
+    続きが落ちる —— 文の実行中に閉じられればプロセスごと落ちる（SIGSEGV）。
+    ここでは「閉じ終わってから続きが走る」順に固定して、同じ共有を捕まえる。
+    """
+    store = JobStore(db)
+    started = threading.Event()
+    release = threading.Event()
+    worker_done = threading.Event()
+    real_request_cancel = JobStore.request_cancel
+
+    def slow(ctx, conn):
+        started.set()
+        release.wait(5)
+
+    def cancel_after_the_worker_is_gone(self, job_id):
+        # ハンドラを降ろし、`run_forever` が poller を閉じ切るまで待ってから
+        # 本物の cancel を走らせる。
+        release.set()
+        worker_done.wait(5)
+        return real_request_cancel(self, job_id)
+
+    runner = JobRunner(database, poll_interval=0.01)
+    runner.register("import", slow)
+    store.enqueue("import", {})
+
+    worker = asyncio.create_task(runner.run_forever())
+    worker.add_done_callback(lambda _: worker_done.set())
+    with anyio.fail_after(5):
+        while not started.is_set():
+            await anyio.sleep(0.01)
+
+    monkeypatch.setattr(JobStore, "request_cancel", cancel_after_the_worker_is_gone)
+    with anyio.fail_after(5):
+        await runner.stop()
+        await worker
 
 
 @pytest.mark.anyio

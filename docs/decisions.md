@@ -245,6 +245,7 @@ SQLite の上で、複数のスコープ（API・ジョブ・watcher）が同じ
 | **キャンセルは例外で `JobRunner` まで上げない** | `_run_one` は例外をすべて `failed` にするので、利用者が押したキャンセルがジョブの失敗として記録される。ハンドラが受け止めて正常 return し、`finish_claimed` の `cancelling -> cancelled` に決着させる（取り込みも結合も同じ形で降りている） |
 | **`LeaseLost` をジョブの外へ出さない** | `_run_one` が例外をすべて `failed` にするので、利用者が押したキャンセルがジョブの失敗として記録される |
 | **停止は走っているジョブの完了を待つ** | `to_thread` のハンドラは task の cancel では止まらない。待たずに接続と dirfd を閉じると、コピー中のスレッドから見て資源が突然消える。timeout を付けて worker を cancel しても同じ |
+| **`JobRunner.stop()` の cancel は自前の接続で書く**（`_request_cancel`） | `stop()` は cancel を `to_thread` へ逃がすので、待っている間にイベントループは `run_forever` を先へ進める。ジョブが同じ瞬間に終われば `run_forever` は降りて poller を閉じ、cancel の続きは閉じた接続の上に落ちる。**文の実行中に閉じられるとプロセスごと落ちる** —— CI #39 の pytest が `Fatal Python error: Segmentation fault`（exit 139）で死んだのはこれ。`close()` が文と文の間に入れば `ProgrammingError` で済むが、どちらになるかは競争で決まる |
 
 ## データモデルとマイグレーション
 
