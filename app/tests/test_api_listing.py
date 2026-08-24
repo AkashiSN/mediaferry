@@ -239,6 +239,25 @@ def test_an_unknown_profile_matches_nothing(client, library):
     assert got["media"] == []
 
 
+def test_media_can_be_filtered_to_merged_videos(client, db):
+    """写真タブの「つないだ動画」の絞り込み."""
+    ref = a_profile(db, slug="role-filter-test")
+    a_media_file(db, ref, role="original", rel_path="library/dji-osmo/DCIM/A.MP4")
+    a_media_file(db, ref, role="derived", rel_path="derived/dji-osmo/DCIM/OUT.MP4")
+
+    body = client.get("/api/media?role=derived").json()
+
+    assert body["total"] == 1
+    assert [row["role"] for row in body["media"]] == ["derived"]
+
+
+def test_an_unknown_role_matches_nothing(client, db):
+    """**知らない値で全件を返さない.** 絞ったつもりが絞れていない、を作らない."""
+    ref = a_profile(db, slug="unknown-role-test")
+    a_media_file(db, ref, role="original")
+    assert client.get("/api/media?role=nonsense").json()["total"] == 0
+
+
 def test_stale_derived_outputs_are_listed_for_the_screen(client, db, data_root):
     """置き換えられたグループは `GET /merge-groups` に出ない（`list_groups`）.
 

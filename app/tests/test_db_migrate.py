@@ -558,7 +558,16 @@ def test_a_profile_filtered_listing_does_not_sort_the_whole_profile(tmp_path):
     # 絞り込みの形（`IN` か `=` か）を変えても試験が落ちない。
     from mediaferry.api.routes_media import _filters
 
-    where, params = _filters(None, "x", None, None, None, None, None)
+    where, params = _filters(
+        kind=None,
+        role=None,
+        profile="x",
+        captured_from=None,
+        captured_to=None,
+        q=None,
+        destination_id=None,
+        status=None,
+    )
     conn = Database(tmp_path / "db.sqlite3").connect()
     apply_migrations(conn)
     plan = " | ".join(
@@ -572,6 +581,43 @@ def test_a_profile_filtered_listing_does_not_sort_the_whole_profile(tmp_path):
     )
     conn.close()
 
+    assert "TEMP B-TREE" not in plan, plan
+
+
+def test_a_role_filtered_listing_does_not_scan_the_capture_time_index(tmp_path):
+    """`0022`。「つないだ動画」の絞り込みが、撮影日時の索引を全走査しない.
+
+    `derived` は `original` に比べて桁で少ない。`captured_at` 側の索引を辿ると、
+    `LIMIT` を満たすまでに何行 `role` を確かめるかが読めない（実測: original
+    60,000 行 / derived 200 行で 55〜66 ms）。`(role, captured_at DESC, id DESC)`
+    を辿れば `role = 'derived'` の行だけを最初から並び順に読める。
+    """
+    from mediaferry.api.routes_media import _filters
+
+    where, params = _filters(
+        kind=None,
+        role="derived",
+        profile=None,
+        captured_from=None,
+        captured_to=None,
+        q=None,
+        destination_id=None,
+        status=None,
+    )
+    conn = Database(tmp_path / "db.sqlite3").connect()
+    apply_migrations(conn)
+    plan = " | ".join(
+        row[3]
+        for row in conn.execute(
+            "EXPLAIN QUERY PLAN"  # noqa: S608 - 値は params で渡す
+            f" SELECT m.* FROM media_file m {where}"
+            " ORDER BY m.captured_at DESC, m.id DESC LIMIT ? OFFSET ?",
+            (*params, 50, 0),
+        )
+    )
+    conn.close()
+
+    assert "media_file_by_role" in plan, plan
     assert "TEMP B-TREE" not in plan, plan
 
 

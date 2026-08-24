@@ -24,6 +24,7 @@ def list_media(  # noqa: PLR0913
     page: int = 1,
     page_size: int = DEFAULT_PAGE_SIZE,
     kind: str | None = None,
+    role: str | None = None,
     profile: str | None = None,
     captured_from: str | None = None,
     captured_to: str | None = None,
@@ -38,8 +39,11 @@ def list_media(  # noqa: PLR0913
     tie-break を入れないとページの境目で重複・欠落する。
 
     `status` は**宛先ごとの状態**なので、`destination_id` と併せて指定する。
+    `role=derived` で写真タブの「つないだ動画」だけに絞れる。
     """
-    where, params = _filters(kind, profile, captured_from, captured_to, q, destination_id, status)
+    where, params = _filters(
+        kind, role, profile, captured_from, captured_to, q, destination_id, status
+    )
     limit, offset = page_bounds(page, page_size)
     total = conn.execute(f"SELECT count(*) AS n FROM media_file m {where}", params).fetchone()["n"]  # noqa: S608
     rows = conn.execute(
@@ -57,6 +61,7 @@ def list_media(  # noqa: PLR0913
 
 def _filters(  # noqa: PLR0913
     kind: str | None,
+    role: str | None,
     profile: str | None,
     captured_from: str | None,
     captured_to: str | None,
@@ -70,6 +75,10 @@ def _filters(  # noqa: PLR0913
     if kind is not None:
         clauses.append("m.kind = ?")
         params.append(kind)
+    if role is not None:
+        # **値の検査はしない。** 知らない値は 0 件になるだけで、`kind` と同じ扱い。
+        clauses.append("m.role = ?")
+        params.append(role)
     if profile is not None:
         # **`IN` ではなく `=` で書く。** `IN` だと SQLite は複数の値を取りうると
         # 見なして、索引があっても並べ替えを外せない（`0014` が効かず、その
