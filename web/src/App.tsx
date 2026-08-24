@@ -10,7 +10,7 @@ import { Layout } from "./components/Layout";
 import type { Warning } from "./components/Layout";
 import { useEvents } from "./hooks/useEvents";
 import { useReloadOnEvents } from "./hooks/useReloadOnEvents";
-import { tasksFrom } from "./hooks/useTasks";
+import { COUNTED } from "./hooks/homeSections";
 import { CardDetailScreen } from "./screens/work/CardDetail";
 import { LoginScreen } from "./screens/Login";
 import { HomeScreen } from "./screens/Home";
@@ -51,7 +51,10 @@ function AuthedApp() {
 function Framed() {
   const settings = useQuery<Settings>("/settings");
   const dashboard = useDashboard();
-  const taskCount = tasksFrom(dashboard.data).length;
+  // **バッジは集計だけから数える。** ホームの導出（`homeSections`）は `/devices`
+  // と `/jobs` も要るので、枠でも同じ導出をすると画面ごとに 3 本ずつ飛ぶ。
+  const counts = dashboard.data;
+  const taskCount = counts === null ? 0 : COUNTED.filter((row) => row.of(counts) > 0).length;
   const { received } = useEvents();
   useReloadOnEvents(received, settings.reload);
 

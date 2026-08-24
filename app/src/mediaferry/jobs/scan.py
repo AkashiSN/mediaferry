@@ -3,6 +3,9 @@
 dirfd 起点で scan.roots 配下を列挙し、既知の source_entry と照合する。
 この段階でフル SHA-1 は計算しない（16GiB を読む必要があるため）。
 同一性の判定には quick_fingerprint を使う。
+
+**最後まで見たら `volume_instance.scanned_at` に印を付ける。中身が空でも付ける**
+——「数えたか」は行の有無からは分からない（§11）。
 """
 
 from __future__ import annotations
@@ -16,6 +19,7 @@ from ..clock import now_iso
 from ..core.fingerprint import FINGERPRINT_VERSION, quick_fingerprint
 from ..db.jobs import JobContext
 from ..db.profiles import ProfileRef
+from ..db.sources import mark_scanned
 from ..ids import new_id
 
 
@@ -36,8 +40,10 @@ class Scanner:
     ) -> ScanOutcome:
         defn = profile.definition
         total = new = imported = ambiguous = 0
+        counted = True
         for found in iter_media_files(dirfd, defn.scan.roots, defn.scan.extensions):
             if ctx.cancelled():
+                counted = False
                 break
             total += 1
             ctx.heartbeat()
@@ -50,6 +56,11 @@ class Scanner:
             else:
                 new += 1
             ctx.emit("info", f"{found.rel_path}: {verdict}", {"size_bytes": found.size_bytes})
+        if counted:
+            # **最後まで見たときだけ「数えた」と書く。** 途中で降りたスキャンを
+            # 数え終わったことにすると、1 件も見ていないカードに画面が
+            # 「取り込むものはありません。」と書く。
+            mark_scanned(self._conn, volume_instance_id)
         return ScanOutcome(total=total, new=new, already_imported=imported, ambiguous=ambiguous)
 
     def _fingerprint(self, dirfd: int, rel_path: str, size: int) -> str:

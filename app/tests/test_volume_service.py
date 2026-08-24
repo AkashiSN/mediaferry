@@ -362,3 +362,61 @@ def test_the_serial_alone_does_not_identify_the_device(db, broker):
     row = db.execute("SELECT * FROM source_device").fetchone()
     assert row["serial"] == "123456789ABCDEF"
     assert row["usb_product_id"] == "0020"
+
+
+def _seed_entries(db, volume_instance_id: str, states: list[str]) -> None:
+    """`scan` が作る行を、状態だけ指定して並べる."""
+    for index, state in enumerate(states):
+        db.execute(
+            "INSERT INTO source_entry (id, volume_instance_id, rel_path, size_bytes,"
+            " mtime_ns, quick_fingerprint, fingerprint_version, state, observed_at)"
+            " VALUES (?, ?, ?, 1, 1, 'x', 1, ?, '2026-08-24T00:00:00Z')",
+            (f"entry-{index}", volume_instance_id, f"DCIM/{index}.MP4", state),
+        )
+
+
+def test_a_card_nobody_counted_yet_is_told_apart_from_an_empty_one(db, broker):
+    """挿した直後は「0 件」ではなく「まだ数えていない」."""
+    view = service(db, broker).refresh()[0]
+    assert view.scanned_at is None
+    assert view.pending_count == 0
+
+
+def test_pending_counts_exactly_what_import_would_carry(db, broker):
+    svc = service(db, broker)
+    view = svc.refresh()[0]
+    _seed_entries(db, view.volume_instance_id, ["seen", "seen", "published", "failed"])
+    # `Importer.run` が拾うのは seen と failed だけ。
+    assert svc.refresh()[0].pending_count == 3
+
+
+def test_the_rows_of_a_scan_are_not_the_proof_that_it_ran(db, broker):
+    """**「数えたか」を行数から導かない**（§11 の `scanned_at`）.
+
+    一致するファイルが無いカードはスキャンが完全に成功しても行が 0 件なので、
+    行から導くと「まだ数えていない」から永久に出られない。逆に、途中で降りた
+    スキャンは行を残すが数え終わっていない。**数えた事実は
+    `volume_instance.scanned_at` にしか無い。**
+    """
+    svc = service(db, broker)
+    view = svc.refresh()[0]
+    _seed_entries(db, view.volume_instance_id, ["published"])
+    assert svc.refresh()[0].scanned_at is None
+
+    db.execute(
+        "UPDATE volume_instance SET scanned_at = '2026-08-25T09:00:00Z' WHERE id = ?",
+        (view.volume_instance_id,),
+    )
+    assert svc.refresh()[0].scanned_at == "2026-08-25T09:00:00Z"
+
+
+def test_a_card_held_by_a_running_job_is_busy(db, broker):
+    svc = service(db, broker)
+    view = svc.refresh()[0]
+    assert view.selection is not None
+    svc.open(view.selection)
+    try:
+        assert svc.refresh()[0].busy is True
+    finally:
+        svc.release(view.selection)
+    assert svc.refresh()[0].busy is False

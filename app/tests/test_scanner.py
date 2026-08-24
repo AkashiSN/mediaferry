@@ -131,6 +131,44 @@ def test_cancelling_stops_the_scan(scanning, db):
     assert outcome.total == 0
 
 
+def _scanned_at(db, volume_id: str) -> str | None:
+    row = db.execute("SELECT scanned_at FROM volume_instance WHERE id = ?", (volume_id,)).fetchone()
+    return row["scanned_at"]
+
+
+def test_counting_an_empty_card_is_still_counting(scanning, db):
+    """**中身が空でも「数えた」を記録する**（§11 の `scanned_at`）.
+
+    一致するファイルが無いカードは `source_entry` を 1 行も作らないので、
+    行から「数えたか」を導くと永久に「まだ数えていない」に見える。ホームは
+    そのカードに「中身を数えています。」を出し続ける（DJI は内蔵ストレージと
+    SD カードを同時に見せるので、実機で起きる）。
+    """
+    scanner, ctx, fd, volume_id, profile, card = scanning
+    for path in (card / "DCIM" / "DJI_001").iterdir():
+        path.unlink()
+
+    outcome = scanner.scan(ctx, fd, volume_id, profile)
+
+    assert outcome.total == 0
+    assert db.execute("SELECT count(*) FROM source_entry").fetchone()[0] == 0
+    assert _scanned_at(db, volume_id) is not None
+
+
+def test_a_cancelled_scan_does_not_claim_to_have_counted(scanning, db):
+    """途中で降りたスキャンは「数え終えた」ではない.
+
+    記録してしまうと、1 件も見ていないカードに「取り込むものはありません。」と
+    書くことになる。
+    """
+    scanner, ctx, fd, volume_id, profile, _ = scanning
+    JobStore(db).request_cancel(ctx.job_id)
+
+    scanner.scan(ctx, fd, volume_id, profile)
+
+    assert _scanned_at(db, volume_id) is None
+
+
 def test_progress_events_name_the_file(scanning, db):
     scanner, ctx, fd, volume_id, profile, _ = scanning
     scanner.scan(ctx, fd, volume_id, profile)

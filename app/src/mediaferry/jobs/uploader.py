@@ -19,6 +19,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Any
 
 from ..adapters.immich import (
     ImmichAuthFailed,
@@ -33,7 +34,7 @@ from ..core.lease_pulse import with_lease_pulse
 from ..core.uploads.decisions import datetime_plan, origin_after_upload, tags_to_apply
 from ..db.jobs import JobContext, LeaseLost
 from ..db.profiles import ProfileRegistry
-from ..db.uploads import ClaimLost, NoLongerEligible, UploadRepository
+from ..db.uploads import CLAIMABLE_STATES, ClaimLost, NoLongerEligible, UploadRepository
 from .preflight import PreflightCache
 
 logger = logging.getLogger(__name__)
@@ -52,6 +53,65 @@ class UploadOutcome:
     skipped: int
     failed: int
     awaiting: int
+
+
+@dataclass
+class _Reported:
+    """画面に出す進み具合. **`_Progress` とは別物**（あちらは解放先を決める内部フラグ）.
+
+    合計はジョブの開始時に 1 回だけ数えた値で、送っている間にも対象は増減しうる。
+    **数えるのは送信スレッド、DB へ書くのは待つ側**（`with_lease_pulse` の心拍と
+    `run` のループ）。この分業のおかげで、接続はスコープごとに 1 本のままで済む。
+    """
+
+    file_count: int
+    bytes_total_all: int
+    file_index: int = 0
+    rel_path: str = ""
+    bytes_total: int = 0
+    bytes_done: int = 0
+    bytes_done_all: int = 0
+
+    def begin(self, rel_path: str, bytes_total: int) -> None:
+        """次の 1 件へ移る. `rel_path` は `DATA_ROOT` からの相対パス."""
+        self.file_index += 1
+        self.rel_path = rel_path
+        self.bytes_total = bytes_total
+        self.bytes_done = 0
+
+    def add(self, count: int) -> None:
+        """送信スレッドから呼ばれる. **DB へは触らない。**"""
+        self.bytes_done += count
+        self.bytes_done_all += count
+
+    def settle(self) -> None:
+        """1 件が決着した. **送らずに済んだぶんも分子に入れる。**
+
+        既にリモートにある件（`bulk_upload_check` の `reject`）や見送った件は
+        1 バイトも送らないのに、大きさは分母に入っている。拾わないと、重複の
+        多い回に「ほとんど終わっているのにバーが数 % のまま」になる。
+
+        足りない分だけを足す（引かない）。送った量が大きさを超えている件は、
+        そのまま残して `snapshot` に合計を伸ばさせる。
+        """
+        missing = self.bytes_total - self.bytes_done
+        if missing > 0:
+            self.bytes_done += missing
+            self.bytes_done_all += missing
+
+    def snapshot(self) -> dict[str, Any]:
+        # **合計を追い越したら合計を伸ばす。** 走っている間に対象が増減しうる
+        # ので、`12 / 10 件` のような嘘を画面に出さない。
+        return {
+            "phase": "upload",
+            "rel_path": self.rel_path,
+            "file_index": self.file_index,
+            "file_count": max(self.file_count, self.file_index),
+            "bytes_done": self.bytes_done,
+            "bytes_total": max(self.bytes_total, self.bytes_done),
+            "bytes_done_all": self.bytes_done_all,
+            "bytes_total_all": max(self.bytes_total_all, self.bytes_done_all),
+        }
 
 
 @dataclass
@@ -89,6 +149,10 @@ class Uploader:
 
     def run(self, ctx: JobContext, destination_id: str) -> UploadOutcome:
         sent = skipped = failed = awaiting = 0
+        # **分母は開始時に 1 回だけ数える。** 1 件ごとに数え直すと、送るたびに
+        # 全件の走査が増える。ずれは `snapshot` が合計を伸ばして吸収する。
+        file_count, bytes_total_all = self._uploads.sendable_totals(destination_id)
+        reported = _Reported(file_count=file_count, bytes_total_all=bytes_total_all)
         while True:
             if ctx.cancelled():
                 break
@@ -100,13 +164,17 @@ class Uploader:
             # **`assert_lease` は要らない。** キャンセルは上の `cancelled()` が見て
             # おり、失効と横取りは `heartbeat` 自身が `LeaseLost` で捕まえる
             # （`extend_lease` は満期前の行しか更新しない）。
-            ctx.heartbeat()
+            #
+            # **進捗も同じ UPDATE に乗せる**（書き込みは増えない）。1 件ずつが速い
+            # 道では、ここが唯一の進捗の書き手になる。
+            ctx.heartbeat(reported.snapshot())
             # **リビジョンは pair ごとに、claim と同じトランザクションで決まる**（§8）。
             record = self._uploads.claim_next(destination_id, ctx.job_id, ctx.lease_token)
             if record is None:
                 break
+            reported.begin(*self._extent(record))
             try:
-                state = self._guarded(ctx, record)
+                state = self._guarded(ctx, record, reported)
             except LeaseLost:
                 if ctx.cancelled():
                     # **利用者が押したキャンセルを失敗として記録しない**（§9.9）。
@@ -116,14 +184,28 @@ class Uploader:
                     ctx.emit("info", "キャンセルを観測したので送信を中止した")
                     break
                 raise
+            if state not in CLAIMABLE_STATES:
+                # **決着した件は必ず分子に入れる。** 送らずに済んだ件（既に
+                # リモートにある・見送った）も分母には入っている。`claim_next` が
+                # また拾う状態で降りたときだけ足さない —— 次に取り直したときに
+                # もう一度数えるので、二重に足さないため。
+                reported.settle()
             sent += state == "complete"
             failed += state == "failed"
             awaiting += state == "awaiting_datetime_approval"
             skipped += state in ("pending", "needs_recheck", "refused")
         return UploadOutcome(sent=sent, skipped=skipped, failed=failed, awaiting=awaiting)
 
+    def _extent(self, record: sqlite3.Row) -> tuple[str, int]:
+        """いま送る 1 件の相対パスと大きさ. **絶対パスは進捗に載せない。**"""
+        media = self._conn.execute(
+            "SELECT rel_path, size_bytes FROM media_file WHERE id = ?",
+            (record["media_file_id"],),
+        ).fetchone()
+        return (media["rel_path"], media["size_bytes"])
+
     # ------------------------------------------------------------------
-    def _guarded(self, ctx: JobContext, record: sqlite3.Row) -> str:
+    def _guarded(self, ctx: JobContext, record: sqlite3.Row, reported: _Reported) -> str:
         """**claim を取った後の全経路をここで囲む。**
 
         資格情報の復号、クライアントの構築、プロファイルの解決まで try の外に
@@ -140,7 +222,7 @@ class Uploader:
                 ctx.emit("warning", f"送信を見送った: {reason}", {"upload_record_id": record["id"]})
                 progress.settled = True
                 return "refused"
-            state = self._one(ctx, record, progress)
+            state = self._one(ctx, record, progress, reported)
             progress.settled = True
             return state
         except NoLongerEligible as exc:
@@ -160,7 +242,9 @@ class Uploader:
                 else:
                     self._release_pending(ctx, record)
 
-    def _one(self, ctx: JobContext, record: sqlite3.Row, progress: _Progress) -> str:
+    def _one(
+        self, ctx: JobContext, record: sqlite3.Row, progress: _Progress, reported: _Reported
+    ) -> str:
         revision = self._destinations.revision(record["destination_revision_id"])
         media = self._conn.execute(
             "SELECT * FROM media_file WHERE id = ?", (record["media_file_id"],)
@@ -168,7 +252,9 @@ class Uploader:
         profile = self._registry.by_id(media["profile_id"])
         with self._open_client(revision) as client:
             try:
-                return self._steps(ctx, client, record, media, profile, revision["id"], progress)
+                return self._steps(
+                    ctx, client, record, media, profile, revision["id"], progress, reported
+                )
             except ImmichUnavailable as exc:
                 return self._retry_or_fail(ctx, record, exc)
             except ImmichAuthFailed, ImmichRedirected, ImmichProtocolError:
@@ -234,6 +320,7 @@ class Uploader:
         profile,  # noqa: ANN001 - ProfileRef
         revision_id: str,
         progress: _Progress,
+        reported: _Reported,
     ) -> str:
         # 1. checking —— 外部への要求なので、直前に所有権と向き先を確かめる。
         self._guard(ctx, record, revision_id, "checking", progress)
@@ -276,7 +363,7 @@ class Uploader:
             # 送信の直前にもう一度。ここを通ってから初めて 1 バイトを送る。
             # **§10 の根拠もここで見直す**（`verify_eligibility`）。
             self._guard(ctx, record, revision_id, "uploading", progress, verify_eligibility=True)
-            uploaded = self._send(ctx, client, record, media)
+            uploaded = self._send(ctx, client, record, media, reported)
             origin = origin_after_upload(first_check, uploaded.status)
             if origin != "created_by_us":
                 # **`duplicate` で返った資産は他人のものかもしれない。**
@@ -366,8 +453,19 @@ class Uploader:
         except ImmichError:
             return None
 
-    def _send(self, ctx: JobContext, client: ImmichClient, record: sqlite3.Row, media: sqlite3.Row):  # noqa: ANN202
-        """**送信中もリースと claim を延ばす。** 28 GiB は 84.5 秒（Phase 0 の実測）."""
+    def _send(  # noqa: ANN202
+        self,
+        ctx: JobContext,
+        client: ImmichClient,
+        record: sqlite3.Row,
+        media: sqlite3.Row,
+        reported: _Reported,
+    ):
+        """**送信中もリースと claim を延ばす。** 28 GiB は 84.5 秒（Phase 0 の実測）.
+
+        **送信スレッドは数えるだけ**（`reported.add`）で、その値を DB へ書くのは
+        心拍を打つ待つ側（`progress`）。接続はスコープごとに 1 本のまま。
+        """
         path = self._data_root / media["rel_path"]
         device_asset_id = f"mediaferry:{media['id']}"
         modified = datetime.fromtimestamp(media["mtime_ns"] / 1e9, tz=UTC).isoformat()
@@ -379,8 +477,10 @@ class Uploader:
                 device_asset_id=device_asset_id,
                 file_created_at=media["captured_at"],
                 file_modified_at=modified,
+                on_bytes=reported.add,
             ),
             also=lambda: self._uploads.extend_claim(record["id"], ctx.lease_token),
+            progress=reported.snapshot,
             # claim の延長が失敗しても、送信スレッドを残したまま抜けない。
             ownership_errors=(LeaseLost, ClaimLost),
         )

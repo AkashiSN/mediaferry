@@ -58,6 +58,31 @@ def test_devices_lists_the_volume_with_its_profile(client):
     assert volumes[0]["trusted"] is False
 
 
+def test_devices_says_how_much_is_left_and_when_it_was_counted(client):
+    """ホームの「N 件を取り込む」の材料が、実際に `/devices` から出ていること.
+
+    数える前は「まだ数えていない」（`scanned_at` が空）。数えると件数と時刻の
+    両方が埋まり、運び終えると件数だけが 0 に戻る。**「まだ数えていない」と
+    「数えたが空」の区別が付かないと、挿した直後の画面が嘘をつく。**
+    """
+    before = client.get("/api/devices").json()["volumes"][0]
+    assert (before["pending_count"], before["scanned_at"], before["busy"]) == (0, None, False)
+
+    volume_id = before["volume_instance_id"]
+    _await_job(client, client.post(f"/api/volumes/{volume_id}/scan").json()["job_id"])
+
+    counted = client.get("/api/devices").json()["volumes"][0]
+    assert counted["pending_count"] == 1
+    assert counted["scanned_at"] is not None
+
+    _await_job(client, client.post(f"/api/volumes/{volume_id}/import").json()["job_id"])
+
+    settled = client.get("/api/devices").json()["volumes"][0]
+    assert settled["pending_count"] == 0
+    # **運び終えても「まだ数えていない」には戻らない**（0 件と未計測は別）。
+    assert settled["scanned_at"] is not None
+
+
 def test_scan_then_import_walks_the_whole_path(client, data_root):
     volume_id = client.get("/api/devices").json()["volumes"][0]["volume_instance_id"]
     scan = client.post(f"/api/volumes/{volume_id}/scan").json()
@@ -211,9 +236,15 @@ def test_shutdown_waits_for_the_running_handler(data_root, broker, monkeypatch):
         client.cookies.set("XSRF-TOKEN", token)
         client.headers["X-CSRF-Token"] = token
         volume_id = client.get("/api/devices").json()["volumes"][0]["volume_instance_id"]
-        job_id = client.post(f"/api/volumes/{volume_id}/scan").json()["job_id"]
+        # **この POST の成否も見る。** 監視役の `scan` が必ず 1 本走るので、
+        # 戻り値を捨てると口が 403 や 500 を返すようになっても緑のままになる。
+        assert client.post(f"/api/volumes/{volume_id}/scan").status_code == 200
+        # **どの 1 本かは決め打ちにしない。** 監視役も挿さっているカードに
+        # `scan` を積み、ジョブは 1 本ずつ直列に走るので、先に claim されるのは
+        # そちらのことがある。自分の id を待つと止まる。見たいのは
+        # 「走っているハンドラを停止が待つか」だけ。
         deadline = time.monotonic() + 10
-        while client.get(f"/api/jobs/{job_id}").json()["status"] != "running":
+        while all(job["status"] != "running" for job in client.get("/api/jobs").json()["jobs"]):
             assert time.monotonic() < deadline, "ジョブが走り出さない"
             time.sleep(0.01)
     order.append("shutdown")
@@ -361,3 +392,26 @@ def test_a_finished_job_never_shows_progress(client):
         assert client.get(f"/api/jobs/{ctx.job_id}").json()["progress"] is None
     finally:
         conn.close()
+
+
+def test_a_job_says_which_card_it_belongs_to(client, db):
+    """「いま動いていること」がどのカードの作業かを言えるようにする."""
+    db.execute(
+        "INSERT INTO job (id, type, status, params_json, created_at)"
+        " VALUES ('j1', 'import', 'running', ?, '2026-08-24T00:00:00Z')",
+        ('{"volume_instance_id": "vol-1"}',),
+    )
+    db.commit()
+    # **自分が入れた 1 本を名指しで取る。** 監視役が積んだ `scan` も一覧に並ぶ。
+    jobs = {job["id"]: job for job in client.get("/api/jobs").json()["jobs"]}
+    assert jobs["j1"]["volume_instance_id"] == "vol-1"
+
+
+def test_a_job_with_no_card_says_so(client, db):
+    db.execute(
+        "INSERT INTO job (id, type, status, params_json, created_at)"
+        " VALUES ('j2', 'upload', 'running', '{}', '2026-08-24T00:00:00Z')",
+    )
+    db.commit()
+    jobs = {job["id"]: job for job in client.get("/api/jobs").json()["jobs"]}
+    assert jobs["j2"]["volume_instance_id"] is None

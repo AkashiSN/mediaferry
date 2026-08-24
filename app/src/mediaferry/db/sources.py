@@ -130,6 +130,19 @@ def sync_presence(conn: sqlite3.Connection, volume_instance_id: str, volume) -> 
     return presence_id
 
 
+def mark_scanned(conn: sqlite3.Connection, volume_instance_id: str) -> None:
+    """数え終えた事実を記録する（§11 の `scanned_at`）.
+
+    **数えた結果（`source_entry` の行）からは導けない。** 一致するファイルが
+    無いカードは行を 1 つも作らないので、行から導くと「まだ数えていない」と
+    区別が付かず、画面が「中身を数えています。」を出し続ける。
+    """
+    conn.execute(
+        "UPDATE volume_instance SET scanned_at = ? WHERE id = ?",
+        (now_iso(), volume_instance_id),
+    )
+
+
 def detach_absent(conn: sqlite3.Connection, seen_presence_ids: Sequence[str]) -> int:
     """今回の観測に無い live な接続に detached_at を立てる.
 

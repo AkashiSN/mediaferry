@@ -41,6 +41,16 @@ describe("進捗の 1 行", () => {
     expect(line).toContain("残り約 1 秒");
   });
 
+  it("送信の進捗を、内部の名前のまま出さない", () => {
+    expect(
+      progressLine(
+        { phase: "upload", rel_path: "library/2026/DJI_0042.MP4", file_index: 12,
+          file_count: 35, bytes_done: 1_000, bytes_total: 4_000 },
+        null,
+      ),
+    ).toContain("送信中");
+  });
+
   it("状態も内部の値をそのまま出さない", () => {
     expect(statusLabel("running")).toBe("実行中");
     expect(statusLabel("cancelling")).toBe("キャンセル中");

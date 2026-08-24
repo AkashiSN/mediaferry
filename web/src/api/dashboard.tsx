@@ -12,7 +12,7 @@ import type { ReactNode } from "react";
 
 import { useEventCount } from "../hooks/useEvents";
 import { useReloadOnEvents } from "../hooks/useReloadOnEvents";
-import type { DashboardCounts } from "../hooks/useTasks";
+import type { DashboardCounts } from "../hooks/homeSections";
 import { useQuery } from "./hooks";
 import type { Query } from "./hooks";
 

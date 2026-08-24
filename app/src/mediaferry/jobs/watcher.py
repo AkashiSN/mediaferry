@@ -4,7 +4,8 @@
 
 1. `list_volumes` を一定間隔で呼び、**観測トークンが変わったときだけ**
    `VolumeService.refresh()` を回す
-2. **毎 tick**、`AUTO_IMPORT=trusted` のとき条件を満たす接続に `import` を積む
+2. **毎 tick**、対象と判定できた接続に `scan` を積み、`AUTO_IMPORT=trusted` の
+   とき条件を満たす接続にはさらに `import` と `detect_groups` を積む
 3. 消えた接続に紐づく**未実行**のジョブを無効化する
 
 **2 を 1 の門の内側に入れてはいけない。** 信頼登録は `volume_instance.trusted_at`
@@ -62,6 +63,21 @@ CANDIDATES = """
        AND v.trusted_at IS NOT NULL
        AND v.identity_confidence = 'high'
        AND v.provisional = 0
+       AND d.archived_at IS NULL
+       AND v.profile_revision_id = d.current_revision_id
+     ORDER BY p.attached_at, p.id
+"""
+
+# 数えてよい接続。**取り込みより広い** —— 信頼も確度も要らない。
+# プロファイルが決まっていること（`scan.roots` を読むため）だけが条件。
+TO_COUNT = """
+    SELECT p.id AS presence_id, p.volume_instance_id, p.broker_epoch, p.generation,
+           p.major, p.minor, v.fs_uuid, v.profile_id, v.profile_revision_id
+      FROM volume_presence p
+      JOIN volume_instance v ON v.id = p.volume_instance_id
+      JOIN device_profile d ON d.id = v.profile_id
+     WHERE p.detached_at IS NULL
+       AND p.auto_scan_at IS NULL
        AND d.archived_at IS NULL
        AND v.profile_revision_id = d.current_revision_id
      ORDER BY p.attached_at, p.id
@@ -126,15 +142,43 @@ class VolumeWatcher:
 
     # ------------------------------------------------------------------
     def _enqueue_ready(self) -> list[str]:
-        jobs: list[str] = []
+        """この周で積んだものを返す.
+
+        **記録は積み終わってから、どの経路でも同じ数だけ出す。** 積む本体は
+        途中で返る（`AUTO_IMPORT` が `trusted` でなければ `scan` だけで終わる）
+        ので、記録をそちらに置くと経路によって落ちる。
+
+        **種類も出す。** 3 種類（`scan` / `import` / `detect_groups`）が 1 行を
+        共有しているので、id だけでは何が積まれたのかがログから読めない
+        （`scan` を積んでいなかった不具合は、実機のログから見つかった）。
+        """
+        jobs = self._enqueue_in_one_transaction()
+        for job_type, job_id in jobs:
+            logger.info("自動で積んだ: %s %s", job_type, job_id)
+        return [job_id for _, job_id in jobs]
+
+    def _enqueue_in_one_transaction(self) -> list[tuple[str, str]]:
+        """積んだものを `(種類, id)` で返す."""
+        jobs: list[tuple[str, str]] = []
         store = JobStore(self._conn)
         with immediate(self._conn):
             # **「積んでよいか」の入力は全部、この排他区間の中で読む。**
             # AUTO_IMPORT は Tier.RUNTIME なので起動時のスナップショットを見ては
             # いけないが、外で読むのも同じ穴 —— 読んだ後・積む前に別接続の
             # `PUT /settings` が `off` を commit できてしまう（§12.1）。
+            #
+            # **数えるのは設定によらない。** 先に積むので、続けて積まれる
+            # `import` は数え終わった行を読む（ジョブは 1 本ずつ直列に走る）。
+            for row in self._conn.execute(TO_COUNT).fetchall():
+                marked = self._conn.execute(
+                    "UPDATE volume_presence SET auto_scan_at = ?"
+                    " WHERE id = ? AND auto_scan_at IS NULL AND detached_at IS NULL",
+                    (now_iso(), row["presence_id"]),
+                ).rowcount
+                if marked:
+                    jobs.append(("scan", store.enqueue("scan", _params(row))))
             if SettingsService(self._conn, self._env).snapshot().auto_import != "trusted":
-                return []
+                return jobs
             for row in self._conn.execute(CANDIDATES).fetchall():
                 # **印を付けるのと同じ条件を、同じトランザクションの中で取る。**
                 # SQLite に行ロックは無いので、更新できた側だけが実行者になる。
@@ -145,9 +189,23 @@ class VolumeWatcher:
                     (now_iso(), row["presence_id"]),
                 ).rowcount
                 if marked:
-                    jobs.append(store.enqueue("import", _params(row)))
-        for job_id in jobs:
-            logger.info("自動取り込みを積んだ: %s", job_id)
+                    jobs.append(("import", store.enqueue("import", _params(row))))
+                    # **探すところまでやる。** 取り込んだだけでは、ホームの
+                    # 「つなぐ」は出ない（現行の結合候補の数から導くため）。
+                    # params は実行側（`api/jobs_wiring.py` の `_profile_ref`）が
+                    # 読む形。欄の名前を違えると claim された瞬間に死ぬ。
+                    jobs.append(
+                        (
+                            "detect_groups",
+                            store.enqueue(
+                                "detect_groups",
+                                {
+                                    "profile_id": row["profile_id"],
+                                    "profile_revision_id": row["profile_revision_id"],
+                                },
+                            ),
+                        )
+                    )
         return jobs
 
     def _invalidate_gone(self) -> None:

@@ -27,12 +27,18 @@ export type Job = {
   started_at?: string | null;
   // **走っている間は無い**（終わった時点で API が入れる）。
   finished_at?: string | null;
+  // どのカードの作業か。カードに紐づかない作業（送信など）では null。
+  volume_instance_id?: string | null;
   progress?: JobProgressValue | null;
 };
 
 // サーバが返す phase を §13 の言葉に写す（`merge` → **つなぐ**）。**内部の名前を
 // そのまま出さない**ので、写せないものだけ生の値のまま出す。
-const PHASES: Record<string, string> = { copy: "コピー中", merge: "つないでいます" };
+const PHASES: Record<string, string> = {
+  copy: "コピー中",
+  merge: "つないでいます",
+  upload: "送信中",
+};
 
 /** **速度と残りは画面で出す。** サーバに持たせると心拍の間隔に依存した値を残すことになる。 */
 export function progressLine(progress: JobProgressValue, bytesPerSecond: number | null): string {

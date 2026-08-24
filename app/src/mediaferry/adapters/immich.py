@@ -21,10 +21,10 @@ from __future__ import annotations
 import base64
 import logging
 import re
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import Any
+from typing import IO, Any
 from urllib.parse import urlsplit
 
 import httpx
@@ -116,6 +116,30 @@ class RemoteStack:
     asset_ids: tuple[str, ...]
 
 
+class _CountingReader:
+    """読んだ量を数えながら渡すだけのラッパ.
+
+    **数えるのは送信スレッド、書くのは待つ側**（`with_lease_pulse`）。ここから
+    DB へは触らない。
+
+    `fileno` を下の stream へそのまま通す。httpx はこれで本文の長さを測り
+    `content-length` を付ける。**隠すと chunked になる** —— 数十 GiB の本文を
+    途中の proxy が受け取れる形とは限らない。
+    """
+
+    def __init__(self, stream: IO[bytes], on_bytes: Callable[[int], None]) -> None:
+        self._stream = stream
+        self._on_bytes = on_bytes
+
+    def read(self, size: int = -1) -> bytes:
+        chunk = self._stream.read(size)
+        self._on_bytes(len(chunk))
+        return chunk
+
+    def fileno(self) -> int:
+        return self._stream.fileno()
+
+
 class ImmichClient:
     def __init__(self, base_url: str, api_key: str, timeout_seconds: int = 86400) -> None:
         self._base_url = base_url.rstrip("/")
@@ -177,8 +201,13 @@ class ImmichClient:
         device_asset_id: str,
         file_created_at: str,
         file_modified_at: str,
+        on_bytes: Callable[[int], None] | None = None,
     ) -> UploadOutcome:
-        """multipart で送る. ファイルはストリーミングで読む."""
+        """multipart で送る. ファイルはストリーミングで読む.
+
+        `on_bytes` を渡すと、読み出すたびにその量を呼び出し側へ知らせる
+        （進捗の分子になる）。
+        """
         data = {
             "deviceAssetId": device_asset_id,
             "deviceId": "mediaferry",
@@ -187,13 +216,14 @@ class ImmichClient:
             "isFavorite": "false",
         }
         with path.open("rb") as stream:
+            asset_data = stream if on_bytes is None else _CountingReader(stream, on_bytes)
             response = self._request(
                 "POST",
                 "/api/assets",
                 # **本文を伴うので redirect を一切追わない。**
                 allow_redirect=False,
                 data=data,
-                files={"assetData": (path.name, stream, "application/octet-stream")},
+                files={"assetData": (path.name, asset_data, "application/octet-stream")},
                 headers={"x-immich-checksum": to_base64_checksum(sha1_hex)},
             )
         body = _as_object(response, "POST /api/assets")

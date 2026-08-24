@@ -28,6 +28,10 @@ from ..db.sources import (
     upsert_device,
 )
 
+# 取り込みの対象＝まだ運んでいない行。**`Importer.run` と同じ条件をここだけに持つ。**
+# 2 か所に書くと、画面の「残り N 件」と実際に運ぶ件数がずれる。
+PENDING_CLAUSE = "state IN ('seen', 'failed')"
+
 # manifest に含める名前の上限。数万件のカードで全件読まない。
 MANIFEST_LIMIT = 500
 # 既知ファイルの残存率をどれだけ標本し、どこから「連続的」と見なすか。
@@ -120,6 +124,14 @@ class VolumeView:
     provisional: bool
     trusted: bool
     reason: str
+    # 取り込む残りの件数。**まだ数えていないカードは `scanned_at` が None**
+    # ——「0 件」と区別できないと、挿した直後に「取り込むものはありません」と
+    # 断定してしまう。`scanned_at` はスキャンが最後まで走ったときに
+    # `volume_instance` へ書かれる印で、**中身が空のカードでも入る**。
+    pending_count: int
+    scanned_at: str | None
+    # このカードを掴んでいるジョブがあるか。**「いま抜いていいか」の答え。**
+    busy: bool
     selection: VolumeSelection | None
 
 
@@ -242,6 +254,7 @@ class VolumeService:
                 profile_id=profile_id,
                 profile_revision_id=revision_id,
             )
+        pending_count, scanned_at = self._counts(volume_id)
         return VolumeView(
             volume_instance_id=volume_id,
             volume_key=volume.volume_key,
@@ -252,8 +265,29 @@ class VolumeService:
             provisional=outcome.provisional,
             trusted=remembered["trusted_at"] is not None,
             reason=outcome.reason,
+            pending_count=pending_count,
+            scanned_at=scanned_at,
+            busy=volume_id in self._open,
             selection=selection,
         )
+
+    def _counts(self, volume_instance_id: str) -> tuple[int, str | None]:
+        """取り込む残りと、最後に数え終えた時刻.
+
+        **残りは `source_entry` を数えるが、「数えたか」は行から導かない。**
+        一致するファイルが無いカードは行を 1 つも作らないので、行から導くと
+        スキャンが完全に成功しても「まだ数えていない」に見える（`mark_scanned`）。
+        """
+        pending = self._conn.execute(
+            "SELECT sum(" + PENDING_CLAUSE + ") AS pending"  # noqa: S608
+            " FROM source_entry WHERE volume_instance_id = ?",
+            (volume_instance_id,),
+        ).fetchone()
+        scanned = self._conn.execute(
+            "SELECT scanned_at FROM volume_instance WHERE id = ?",
+            (volume_instance_id,),
+        ).fetchone()
+        return (pending["pending"] or 0), scanned["scanned_at"]
 
     def _manifest_of(self, dirfd, tree, outcome, definitions) -> str:  # noqa: ANN001
         roots = ("DCIM",)

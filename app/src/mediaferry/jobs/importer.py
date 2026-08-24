@@ -30,6 +30,7 @@ from ..core.naming import library_rel_path
 from ..core.timestamps import CapturedAt, resolve_captured_at
 from ..db.jobs import LEASE_SECONDS, JobContext
 from ..db.profiles import ProfileRef
+from .volumes import PENDING_CLAUSE
 
 COPY_CHUNK = 4 * 1024 * 1024
 # 空き容量の見積りに乗せる余裕。DB とサムネイルの分。
@@ -83,8 +84,8 @@ class Importer:
     ) -> ImportOutcome:
         pending = list(
             self._conn.execute(
-                "SELECT * FROM source_entry WHERE volume_instance_id = ?"
-                " AND state IN ('seen', 'failed') ORDER BY rel_path",
+                "SELECT * FROM source_entry WHERE volume_instance_id = ?"  # noqa: S608
+                f" AND {PENDING_CLAUSE} ORDER BY rel_path",
                 (volume_instance_id,),
             )
         )
