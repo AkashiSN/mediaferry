@@ -18,6 +18,10 @@ from .errors import ApiError, ErrorCode
 
 router = APIRouter()
 
+# `media_file.role` の CHECK 制約が許す値そのもの（`db/migrations/0003_*.sql`）。
+# `_filters` の role 節がこの外の値をリテラルで埋めないために使う。
+_KNOWN_ROLES = frozenset({"original", "derived"})
+
 
 @router.get("/media")
 def list_media(  # noqa: PLR0913
@@ -76,9 +80,18 @@ def _filters(  # noqa: PLR0913
         clauses.append("m.kind = ?")
         params.append(kind)
     if role is not None:
-        # **値の検査はしない。** 知らない値は 0 件になるだけで、`kind` と同じ扱い。
-        clauses.append("m.role = ?")
-        params.append(role)
+        # **既知の 2 値だけリテラルで埋める。** `_KNOWN_ROLES` に無い値（利用者が
+        # 送った任意の文字列を含む）は SQL へ触れさせず、常に 0 件になる節にする
+        # —— `f"m.role = '{role}'"` へそのまま渡すと文字列連結になってしまう。
+        # 既知の 2 値はバインド変数ではなくリテラルで埋める（`_status_clause` の
+        # `known[status]` と同じ作法）。バインド変数のままだと SQLite が prepare
+        # 時に `role = 'derived'` を証明できず、`0023` の部分索引
+        # （`WHERE role = 'derived'`）が選ばれる保証が無い。
+        if role in _KNOWN_ROLES:
+            clauses.append(f"m.role = '{role}'")  # noqa: S608 - 語彙は上で固定
+        else:
+            # 知らない値（＝ CHECK 制約の外）は、そもそも 1 行も一致しない。
+            clauses.append("0")
     if profile is not None:
         # **`IN` ではなく `=` で書く。** `IN` だと SQLite は複数の値を取りうると
         # 見なして、索引があっても並べ替えを外せない（`0014` が効かず、その

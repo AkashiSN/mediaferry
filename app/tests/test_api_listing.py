@@ -258,6 +258,19 @@ def test_an_unknown_role_matches_nothing(client, db):
     assert client.get("/api/media?role=nonsense").json()["total"] == 0
 
 
+def test_a_role_value_cannot_break_out_of_the_literal(client, db):
+    """`role` は既知の 2 値だけリテラルで埋める（`0023`）. **文字列連結の穴を作らない.**
+
+    既知の語彙以外は SQL に触れさせず常に 0 件にする。壊れていれば、この文字列は
+    `WHERE m.role = ''` の外へ抜け出して全件を返してしまう。
+    """
+    ref = a_profile(db, slug="role-injection-test")
+    a_media_file(db, ref, role="original")
+    a_media_file(db, ref, role="derived")
+    body = client.get("/api/media", params={"role": "derived' OR '1'='1"}).json()
+    assert body["total"] == 0
+
+
 def test_stale_derived_outputs_are_listed_for_the_screen(client, db, data_root):
     """置き換えられたグループは `GET /merge-groups` に出ない（`list_groups`）.
 

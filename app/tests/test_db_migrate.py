@@ -585,12 +585,20 @@ def test_a_profile_filtered_listing_does_not_sort_the_whole_profile(tmp_path):
 
 
 def test_a_role_filtered_listing_does_not_scan_the_capture_time_index(tmp_path):
-    """`0022`。「つないだ動画」の絞り込みが、撮影日時の索引を全走査しない.
+    """`0023`。「つないだ動画」の絞り込みが、撮影日時の索引を全走査しない.
 
     `derived` は `original` に比べて桁で少ない。`captured_at` 側の索引を辿ると、
     `LIMIT` を満たすまでに何行 `role` を確かめるかが読めない（実測: original
-    60,000 行 / derived 200 行で 55〜66 ms）。`(role, captured_at DESC, id DESC)`
-    を辿れば `role = 'derived'` の行だけを最初から並び順に読める。
+    60,000 行 / derived 200 行で 55〜66 ms）。`(captured_at DESC, id DESC)
+    WHERE role = 'derived'` の部分索引を辿れば `role = 'derived'` の行だけを
+    最初から並び順に読める。
+
+    **`0022` の全体索引ではなく `0023` の部分索引を見る。** `0022`
+    （`role, captured_at DESC, id DESC`）は role='original' 側にも使える形で、
+    `db/selection.py` の `SENDABLE_CLAUSE` の OR 節の両方の枝から拾われて
+    `MULTI-INDEX OR` に化け、`GET /media?status=unsent&…` を退行させた
+    （`test_the_unsent_listing_does_not_multi_index_or`）。`0023` は
+    role='derived' だけの部分索引に差し替えることでその退行を塞ぐ。
     """
     from mediaferry.api.routes_media import _filters
 
@@ -617,8 +625,60 @@ def test_a_role_filtered_listing_does_not_scan_the_capture_time_index(tmp_path):
     )
     conn.close()
 
-    assert "media_file_by_role" in plan, plan
+    assert "media_file_derived_listing" in plan, plan
     assert "TEMP B-TREE" not in plan, plan
+
+
+def test_the_unsent_listing_does_not_multi_index_or(tmp_path):
+    """`0023`。`status=unsent` の絞り込みが `MULTI-INDEX OR` に落ちない.
+
+    `db/selection.py` の `SENDABLE_CLAUSE` は
+    `(m.role = 'original' AND ...) OR (m.role = 'derived' AND ...)` という形で、
+    **両方の枝が `role` の等値をリテラルで持つ**。`0022`
+    （`role, captured_at DESC, id DESC`）はどちらの枝からも使えたため、SQLite が
+    `MULTI-INDEX OR` を選んでいた。OR の結果は `captured_at` の並び順に出ないので
+    最後に全件ソートが入り、`GET /media?status=unsent&destination_id=…` が
+    退行した（実測: original 60,000 行 / derived 200 行で中央値 0.58 ms → 74 ms。
+    詳細は `.superpowers/sdd/phase9-plan/task-3-report.md`）。
+
+    `0023` は role='derived' だけの部分索引に差し替えたので、role='original' の
+    枝には索引が無くなり、`MULTI-INDEX OR` の対象から外れる —— 既存の経路
+    （`media_file_captured_at` を辿りながら絞り込む）に戻ることを見る。
+    """
+    from mediaferry.api.routes_media import _filters
+
+    # **一覧が実際に組み立てる WHERE を使う。** `status=unsent` は
+    # `SENDABLE_CLAUSE` を経由するので、手で書き写すとこの退行を捕まえられない。
+    where, params = _filters(
+        kind=None,
+        role=None,
+        profile=None,
+        captured_from=None,
+        captured_to=None,
+        q=None,
+        destination_id="d1",
+        status="unsent",
+    )
+    conn = Database(tmp_path / "db.sqlite3").connect()
+    apply_migrations(conn)
+    plan = " | ".join(
+        row[3]
+        for row in conn.execute(
+            "EXPLAIN QUERY PLAN"  # noqa: S608 - 値は params で渡す
+            f" SELECT m.* FROM media_file m {where}"
+            " ORDER BY m.captured_at DESC, m.id DESC LIMIT ? OFFSET ?",
+            (*params, 50, 0),
+        )
+    )
+    conn.close()
+
+    assert "MULTI-INDEX OR" not in plan, plan
+    # **並べ替えの tie-break（`LAST TERM OF ORDER BY`）は許すが、全件ソートは許さない。**
+    # `MULTI-INDEX OR` の結果は並び順に出ないので `USE TEMP B-TREE FOR ORDER BY`
+    # （`LAST TERM OF` を伴わない全件ソート）になる。良い計画は tie-break だけの
+    # `USE TEMP B-TREE FOR LAST TERM OF ORDER BY` で、"FOR ORDER BY" を部分文字列に
+    # 持たない。
+    assert "FOR ORDER BY" not in plan, plan
 
 
 def test_a_group_discarded_before_the_change_gives_its_files_back(tmp_path):
