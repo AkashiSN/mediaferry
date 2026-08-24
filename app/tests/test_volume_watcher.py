@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import threading
 
 import pytest
@@ -656,6 +657,24 @@ def test_the_counting_job_is_reported_even_when_auto_import_is_off(
         off.close()
     scans = [row["id"] for row in db.execute("SELECT id FROM job WHERE type = 'scan'")]
     assert enqueued == scans, "積んだ `scan` を返していない"
+
+
+def test_every_enqueued_job_is_written_to_the_log(watcher, db, caplog):
+    """積んだものは、どの経路でも同じ数だけログに出す.
+
+    **この不具合（watcher が `scan` を積まない）は実機のログから見つかった。**
+    経路によって記録が落ちると、次に同じことが起きたときの手がかりが消える。
+    """
+    with caplog.at_level(logging.INFO, logger="mediaferry.jobs.watcher"):
+        enqueued = watcher.tick()
+
+    assert enqueued
+    logged = [
+        record.getMessage() for record in caplog.records if "自動で積んだ" in record.getMessage()
+    ]
+    assert len(logged) == len(enqueued)
+    for job_id in enqueued:
+        assert any(job_id in line for line in logged), f"{job_id} が記録に出ていない"
 
 
 def test_counting_is_marked_so_it_does_not_pile_up(watcher, db):

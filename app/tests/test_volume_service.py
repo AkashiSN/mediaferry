@@ -392,6 +392,25 @@ def test_pending_counts_exactly_what_import_would_carry(db, broker):
     assert after.scanned_at == "2026-08-24T00:00:00Z"
 
 
+def test_the_scan_time_is_the_latest_one(db, broker):
+    """`scanned_at` は**最後に数えた時刻**.
+
+    挿し直して数え直すと `source_entry` に古い行と新しい行が混ざる。いちばん
+    古い時刻を返すと、数え直した直後のカードが「ずっと前に数えたまま」に見える。
+    """
+    svc = service(db, broker)
+    view = svc.refresh()[0]
+    for index, observed in enumerate(["2026-08-24T00:00:00Z", "2026-08-25T09:00:00Z"]):
+        db.execute(
+            "INSERT INTO source_entry (id, volume_instance_id, rel_path, size_bytes,"
+            " mtime_ns, quick_fingerprint, fingerprint_version, state, observed_at)"
+            " VALUES (?, ?, ?, 1, 1, 'x', 1, 'published', ?)",
+            (f"stamp-{index}", view.volume_instance_id, f"DCIM/s{index}.MP4", observed),
+        )
+
+    assert svc.refresh()[0].scanned_at == "2026-08-25T09:00:00Z"
+
+
 def test_a_card_held_by_a_running_job_is_busy(db, broker):
     svc = service(db, broker)
     view = svc.refresh()[0]

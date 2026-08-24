@@ -42,7 +42,7 @@ describe("ホームの導出", () => {
     expect(todo).toEqual([{ kind: "import_card", card: CARD }]);
   });
 
-  // **これがこの設計の芯。** 帯が出ているのに「やることはありません」に
+  // **これがこの設計の芯。** カードの札が出ているのに「やることはありません」に
   // なる場面を作れないことを、規則そのもので確かめる。
   it("カードが挿さっていれば、3 つの並びのどれかに必ず出る", () => {
     const cards: CardView[] = [
@@ -134,6 +134,25 @@ describe("ホームの導出", () => {
     });
     const { doing } = homeSections({ cards: [], jobs: [older, runningButNewer], counts: NONE });
     expect(doing.map((d) => d.job.id)).toEqual(["run", "old"]);
+  });
+
+  // **止めかけの作業も「動いている」側。** 止め終わるまでは実際に走っている
+  // ので、待機中より先に出す（`isLive` は `cancelling` も live と見る）。
+  it("止めかけの作業も、待機中より先に出る", () => {
+    const older = job({
+      id: "old",
+      status: "queued",
+      created_at: "2026-08-24T00:00:01Z",
+      volume_instance_id: null,
+    });
+    const cancelling = job({
+      id: "cancel",
+      status: "cancelling",
+      created_at: "2026-08-24T00:00:02Z",
+      volume_instance_id: null,
+    });
+    const { doing } = homeSections({ cards: [], jobs: [older, cancelling], counts: NONE });
+    expect(doing.map((d) => d.job.id)).toEqual(["cancel", "old"]);
   });
 
   it("終わった作業は出さない", () => {

@@ -395,10 +395,10 @@ describe("ホーム", () => {
     expect(await screen.findByText("unknown-cam のカードのようです。")).toBeInTheDocument();
   });
 
-  // **押した先の配線を、押して確かめる。** `CardBanner` のボタンは
-  // `work/CardDetail.tsx` と同じ 4 つの操作（`trust` / `scan` / `import` /
-  // `close`）を叩くが、**この画面だけに入った書き間違い**（`import` を `scan` と
-  // 書き違える等）は、そちらの試験では捕まらない。
+  // **押した先の配線を、押して確かめる。** カードの札のボタンは
+  // `work/CardDetail.tsx` と同じ操作（`trust` / `scan` / `import`）を叩くが、
+  // **この画面だけに入った書き間違い**（`import` を `scan` と書き違える等）は、
+  // そちらの試験では捕まらない。
   const actionableVolume = {
     volume_instance_id: "v1",
     fs_label: "OSMO",
@@ -577,7 +577,7 @@ describe("ホーム", () => {
   });
 
   it("ラベルが無いカードが複数あると、見出しを連番で見分けられるようにする", async () => {
-    // `CardBanner` は `work/CardDetail.tsx` の `volumeLabel` を使う。一覧全体を
+    // カードの札は `work/CardDetail.tsx` の `volumeLabel` を使う。一覧全体を
     // 渡さないと、複数枚が同時にラベル無しのとき見分けが付かない。
     stubHome({
       "/dashboard": EMPTY_DASHBOARD,
@@ -597,7 +597,7 @@ describe("ホーム", () => {
   });
 
   // **実機で出た場面そのもの。** カードが挿さっていて、集計はすべて 0 だった。
-  // カードを「状態」ではなく「仕事」として扱うので、帯と空表示が同時に出ることは
+  // カードを「状態」ではなく「仕事」として扱うので、札と空表示が同時に出ることは
   // 形の上で起こらない。
   it("カードが挿さっている場面で「やることはありません」と書かない", async () => {
     stubHome({

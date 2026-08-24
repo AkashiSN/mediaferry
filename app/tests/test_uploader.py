@@ -11,7 +11,7 @@ from mediaferry.db.credentials import CredentialStore
 from mediaferry.db.destinations import DestinationRepository, RemoteIdentity
 from mediaferry.db.jobs import JobStore
 from mediaferry.db.profiles import ProfileRegistry
-from mediaferry.db.uploads import UploadRepository
+from mediaferry.db.uploads import ClaimLost, UploadRepository
 from mediaferry.jobs.preflight import PreflightCache, PreflightFailed
 from mediaferry.jobs.uploader import Uploader, _Reported
 
@@ -511,6 +511,10 @@ def test_the_claim_is_extended_while_the_file_is_sent(world, db, monkeypatch):
     """リースだけ延ばしても、claim が切れれば結果を commit できない.
 
     **送信が claim の寿命より長い**状況を作る（短いと延長の有無で差が出ない）。
+    claim の寿命を短くするには `claim_next` だけでは足りない ——
+    **送信の直前の `prepare_side_effect` も claim を延ばす**（既定 60 秒）ので、
+    そちらも短くしないと送信開始の時点で寿命が 60 秒に戻り、心拍の延長
+    （`also=`）を消しても落ちないテストになる。
     """
     import time
 
@@ -523,12 +527,62 @@ def test_the_claim_is_extended_while_the_file_is_sent(world, db, monkeypatch):
         return real(self, *args, **kwargs)
 
     monkeypatch.setattr(ImmichClient, "upload_asset", slow_upload)
-    # claim を 1 秒で切れるようにしてから走らせる。
+    # claim を 1 秒で切れるようにしてから走らせる（取るときも、延ばすときも）。
     monkeypatch.setattr(uploads, "claim_next", _claim_with(uploads, seconds=1))
+    monkeypatch.setattr(uploads, "prepare_side_effect", _prepare_with(uploads, seconds=1))
+    extended = []
+    real_extend = uploads.extend_claim
+
+    def counting_extend(record_id, token, lease_seconds=60):
+        extended.append(record_id)
+        return real_extend(record_id, token, lease_seconds)
+
+    monkeypatch.setattr(uploads, "extend_claim", counting_extend)
 
     uploader.run(ctx, destination_id)
 
+    # 心拍が claim を延ばしたので、1 秒で切れる claim を跨いで commit できた。
+    assert extended
     assert record_of(db)["state"] == "complete"
+
+
+def test_the_send_thread_is_awaited_when_the_claim_extension_fails(world, db, monkeypatch):
+    """claim の延長が失敗しても、送信スレッドを残したまま抜けない.
+
+    `with_lease_pulse` の `ownership_errors` に `ClaimLost` が入っていないと、
+    延長が失敗した瞬間に待つ側だけが例外で抜け、**呼び出し側が失敗を見た後で
+    送信スレッドが数十 GiB を送り終える**。抜けた時点で送信が終わっていることを
+    見て、その経路を塞ぐ。
+    """
+    import threading
+    import time
+
+    server, uploader, ctx, uploads, destinations, destination_id, _ = world
+    monkeypatch.setattr("mediaferry.core.lease_pulse.HEARTBEAT_INTERVAL", 0.05)
+    finished = threading.Event()
+    real = ImmichClient.upload_asset
+
+    def slow_upload(self, *args, **kwargs):
+        time.sleep(0.5)  # 心拍（0.05 秒）より十分に長い
+        try:
+            return real(self, *args, **kwargs)
+        finally:
+            finished.set()
+
+    monkeypatch.setattr(ImmichClient, "upload_asset", slow_upload)
+
+    def refuse_to_extend(record_id, token, lease_seconds=60):
+        raise ClaimLost(f"レコード {record_id} の claim を失っている")
+
+    monkeypatch.setattr(uploads, "extend_claim", refuse_to_extend)
+
+    with pytest.raises(ClaimLost):
+        uploader.run(ctx, destination_id)
+
+    # **例外を受け取った時点で、送信スレッドはもう走っていない。**
+    assert finished.is_set()
+    # 成否が不明なまま降りたので、次は `checking` からやり直す。
+    assert record_of(db)["state"] == "needs_recheck"
 
 
 def _claim_with(uploads, seconds):
@@ -538,6 +592,16 @@ def _claim_with(uploads, seconds):
         return real(revision, job_id, token, seconds)
 
     return claim
+
+
+def _prepare_with(uploads, seconds):
+    """`prepare_side_effect` が延ばす claim の寿命だけを短くする."""
+    real = uploads.prepare_side_effect
+
+    def prepare(ctx, record_id, expect_state, lease_seconds=60, verify_eligibility=False):
+        return real(ctx, record_id, expect_state, seconds, verify_eligibility)
+
+    return prepare
 
 
 def test_a_duplicate_after_an_accept_is_unknown_not_ours(world, db, monkeypatch):
@@ -815,6 +879,28 @@ def test_the_reported_total_grows_rather_than_lying():
     assert snapshot["file_count"] == 3
     assert snapshot["bytes_total_all"] == 150
 
+    # **いま送っている 1 件の中でも同じ。** 分母は `media_file.size_bytes`（数えた
+    # 時点の値）なので、実ファイルが伸びていると送った量が大きさを追い越し、
+    # 画面に `12 GiB / 10 GiB` が出る。
+    reported.begin("library/dji-osmo/DCIM/A.MP4", 10)
+    reported.add(15)
+    assert reported.snapshot()["bytes_total"] == 15
+
+
+def test_settling_never_takes_back_what_was_already_sent():
+    """決着で分子を**引かない**（`settle` は足りない分だけを足す）.
+
+    実ファイルが `media_file.size_bytes` より大きいと、送った量が大きさを
+    追い越したまま決着する。引くと、次の 1 件へ移った瞬間にバーが戻る。
+    """
+    reported = _Reported(file_count=1, bytes_total_all=10)
+    reported.begin("library/dji-osmo/DCIM/A.MP4", 10)
+    reported.add(15)
+
+    reported.settle()
+
+    assert (reported.bytes_done, reported.bytes_done_all) == (15, 15)
+
 
 def test_bytes_are_counted_while_one_file_streams(immich, tmp_path):
     """大きい 1 件を送っている間も、その中で進む."""
@@ -959,3 +1045,35 @@ def test_a_file_that_did_not_need_sending_still_counts_as_done(world, db, data_r
     progress = json.loads(db.execute("SELECT progress_json FROM job").fetchone()["progress_json"])
     assert progress["bytes_total_all"] == len(PAYLOAD) + len(payload)
     assert progress["bytes_done_all"] == progress["bytes_total_all"]
+
+
+def test_a_record_that_goes_back_for_a_retry_is_not_counted_as_done(world, db, monkeypatch):
+    """**再試行に回した件は分子に入れない。** 次に取り直したときに二重で数える.
+
+    `claim_next` がまた拾う状態（`pending` / `needs_recheck`）で降りた件を
+    決着として数えると、同じレコードを 2 周するあいだに同じ大きさを 2 回
+    足すことになり、11 バイトのジョブが `22 / 22` で終わる。
+    """
+    from mediaferry.adapters.immich import ImmichUnavailable
+
+    server, uploader, ctx, _, _, destination_id, _ = world
+    monkeypatch.setattr("mediaferry.jobs.uploader.BACKOFF_BASE_SECONDS", 0.01)
+    calls = {"n": 0}
+    real_check = ImmichClient.bulk_upload_check
+
+    def once_unavailable(self, pairs):  # noqa: ANN001, ANN202
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise ImmichUnavailable("POST /api/assets/bulk-upload-check が 503")
+        return real_check(self, pairs)
+
+    monkeypatch.setattr(ImmichClient, "bulk_upload_check", once_unavailable)
+
+    uploader.run(ctx, destination_id)
+
+    assert record_of(db)["state"] == "complete"
+    assert len(server.uploads) == 1
+    progress = json.loads(db.execute("SELECT progress_json FROM job").fetchone()["progress_json"])
+    # 1 件を 2 周したが、送ったのは 1 件ぶん。
+    assert progress["bytes_done_all"] == len(PAYLOAD)
+    assert progress["bytes_total_all"] == len(PAYLOAD)

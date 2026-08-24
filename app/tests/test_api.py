@@ -58,6 +58,31 @@ def test_devices_lists_the_volume_with_its_profile(client):
     assert volumes[0]["trusted"] is False
 
 
+def test_devices_says_how_much_is_left_and_when_it_was_counted(client):
+    """ホームの「N 件を取り込む」の材料が、実際に `/devices` から出ていること.
+
+    数える前は「まだ数えていない」（`scanned_at` が空）。数えると件数と時刻の
+    両方が埋まり、運び終えると件数だけが 0 に戻る。**「まだ数えていない」と
+    「数えたが空」の区別が付かないと、挿した直後の画面が嘘をつく。**
+    """
+    before = client.get("/api/devices").json()["volumes"][0]
+    assert (before["pending_count"], before["scanned_at"], before["busy"]) == (0, None, False)
+
+    volume_id = before["volume_instance_id"]
+    _await_job(client, client.post(f"/api/volumes/{volume_id}/scan").json()["job_id"])
+
+    counted = client.get("/api/devices").json()["volumes"][0]
+    assert counted["pending_count"] == 1
+    assert counted["scanned_at"] is not None
+
+    _await_job(client, client.post(f"/api/volumes/{volume_id}/import").json()["job_id"])
+
+    settled = client.get("/api/devices").json()["volumes"][0]
+    assert settled["pending_count"] == 0
+    # **運び終えても「まだ数えていない」には戻らない**（0 件と未計測は別）。
+    assert settled["scanned_at"] is not None
+
+
 def test_scan_then_import_walks_the_whole_path(client, data_root):
     volume_id = client.get("/api/devices").json()["volumes"][0]["volume_instance_id"]
     scan = client.post(f"/api/volumes/{volume_id}/scan").json()
