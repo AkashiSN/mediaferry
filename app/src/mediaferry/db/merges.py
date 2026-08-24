@@ -196,19 +196,28 @@ class MergeRepository:
     def discard(self, group_id: str) -> None:
         """グループを捨てる（`skipped` にする）.
 
-        **公開済みの派生物は消さない。** 削除はデータを失う経路なので、選択肢
-        （§10）から外れるだけにする。取り残された派生物は孤立として報告される。
+        **公開済みの派生物はここでは消さない。** 消すかどうかは呼ぶ側が決める
+        （写真タブの削除は `MediaRepository.delete_derived` が両方を 1 つの
+        トランザクションで行う）。
         """
         with immediate(self._conn):
-            self._assert_editable(group_id)
-            # **無効化は skipped にする前に行う**（`supersede` と同じ理由）。
-            # `status` を立てた trigger が member を `active = 0` にするので、
-            # 後だと「active な member」を条件にした無効化が 1 件も当たらない。
-            self._invalidate_pending(group_id, "結合グループを破棄した")
-            self._conn.execute(
-                "UPDATE merge_group SET status = 'skipped', updated_at = ? WHERE id = ?",
-                (now_iso(), group_id),
-            )
+            self.discard_locked(group_id)
+
+    def discard_locked(self, group_id: str) -> None:
+        """`discard` の中身. **トランザクションが開いている前提.**
+
+        `immediate()` は入れ子にできないので、同じトランザクションで他の書き込みも
+        行う呼び手（削除）はこちらを使う。
+        """
+        self._assert_editable(group_id)
+        # **無効化は skipped にする前に行う**（`supersede` と同じ理由）。
+        # `status` を立てた trigger が member を `active = 0` にするので、
+        # 後だと「active な member」を条件にした無効化が 1 件も当たらない。
+        self._invalidate_pending(group_id, "結合グループを破棄した")
+        self._conn.execute(
+            "UPDATE merge_group SET status = 'skipped', updated_at = ? WHERE id = ?",
+            (now_iso(), group_id),
+        )
 
     def delete_discarded(self, group_id: str) -> None:
         """破棄の記録を消す. **消せるのは何も持っていないものだけ.**

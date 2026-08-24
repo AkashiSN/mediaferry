@@ -151,14 +151,14 @@ def delete_media(  # noqa: ANN201
     conn=Depends(get_conn),  # noqa: ANN001, B008
     state=Depends(get_state),  # noqa: ANN001, B008
 ):
-    """**古くなった派生物だけ**消す（やり直しの後片付け）.
+    """**Immich に生きていない `derived` だけ**消す（写真タブの「消す」）.
 
-    元ファイルは消せない。現行のグループの結合結果も、送信の記録が指している
-    ものも消せない。理由は 409 で返す。
+    元ファイルは消せない。現行のグループの出力なら、グループごと「別々にした」
+    にしてから消す。消せない理由は 409 で返す（規則は `deletion_blocker`）。
     """
     repo = MediaRepository(conn, state.settings.data_root)
     try:
-        rel_path = repo.delete_stale_derived(media_id)
+        rel_path = repo.delete_derived(media_id)
     except GroupNotEditable as exc:
         raise ApiError(409, ErrorCode.CONFLICT, str(exc)) from exc
     return {"status": "ok", "rel_path": rel_path}

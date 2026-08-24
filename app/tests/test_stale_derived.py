@@ -44,35 +44,27 @@ def test_a_superseded_output_can_be_deleted(world, db, data_root):
     """やり直した後の古い出力（実機では 74 GiB 残った）."""
     repo, _, ref = world
     media_id, group_id, path = a_derived_with_group(db, data_root, ref, superseded=True)
-    repo.delete_stale_derived(media_id)
+    repo.delete_derived(media_id)
     assert not path.exists()
     remaining = db.execute("SELECT count(*) FROM media_file WHERE id = ?", (media_id,)).fetchone()[
         0
     ]
     assert remaining == 0
     # 出力の記録も外す（実体が無いのに指し続けない）。
-    assert (
-        db.execute(
-            "SELECT output_media_file_id FROM merge_group WHERE id = ?", (group_id,)
-        ).fetchone()[0]
-        is None
-    )
+    row = db.execute(
+        "SELECT output_media_file_id, status FROM merge_group WHERE id = ?", (group_id,)
+    ).fetchone()
+    assert row["output_media_file_id"] is None
+    # **置き換えられたグループは discard の対象外**（設計 §3。既に superseded
+    # なので「別々にした」にし直す必要が無い）。status が触られていないこと。
+    assert row["status"] == "merged"
 
 
 def test_a_discarded_groups_output_can_be_deleted(world, db, data_root):
     repo, _, ref = world
     media_id, _, path = a_derived_with_group(db, data_root, ref, status="skipped")
-    repo.delete_stale_derived(media_id)
+    repo.delete_derived(media_id)
     assert not path.exists()
-
-
-def test_the_output_of_a_live_group_is_kept(world, db, data_root):
-    """**現行のグループの出力は消せない。** 選択肢に出ているものを消さない."""
-    repo, _, ref = world
-    media_id, _, path = a_derived_with_group(db, data_root, ref)
-    with pytest.raises(GroupNotEditable):
-        repo.delete_stale_derived(media_id)
-    assert path.exists()
 
 
 def test_an_original_is_never_deleted(world, db, data_root):
@@ -90,7 +82,7 @@ def test_an_original_is_never_deleted(world, db, data_root):
     group_id = a_merge_group(db, ref, "digest-points-at-an-original", status="skipped")
     db.execute("UPDATE merge_group SET output_media_file_id = ? WHERE id = ?", (media_id, group_id))
     with pytest.raises(GroupNotEditable):
-        repo.delete_stale_derived(media_id)
+        repo.delete_derived(media_id)
     assert (data_root / rel).exists()
 
 
@@ -103,7 +95,7 @@ def test_a_derived_that_was_sent_is_kept(world, db, data_root):
     destination = a_destination(db)
     an_upload(db, destination, media_id)
     with pytest.raises(GroupNotEditable):
-        repo.delete_stale_derived(media_id)
+        repo.delete_derived(media_id)
     assert path.exists()
 
 
@@ -115,7 +107,7 @@ def test_a_derived_with_no_owner_is_kept(world, db, data_root):
     (data_root / rel).write_bytes(b"x")
     media_id = a_media_file(db, ref, rel_path=rel, role="derived")
     with pytest.raises(GroupNotEditable):
-        repo.delete_stale_derived(media_id)
+        repo.delete_derived(media_id)
 
 
 # ----------------------------------------------------------------------
@@ -124,7 +116,7 @@ def test_a_derived_with_no_owner_is_kept(world, db, data_root):
 # **消せるのに画面から辿れなければ、無いのと同じ。** `list_groups` は
 # `superseded_by_id` を持つ行をどの場合も返さないので、置き換えられたグループの
 # 「できたファイル」は結合画面に出ない —— 実機で 66 GiB がそこに残っていた。
-# **一覧の条件は `delete_stale_derived` の前提そのものにする**（規則を 2 か所に
+# **一覧の条件は `delete_derived` の前提そのものにする**（規則を 2 か所に
 # 分けない）。
 
 
@@ -351,3 +343,84 @@ def test_deletion_blocker_of_an_unknown_media_file(world, db, data_root):
     """存在しない id はそもそも消せない."""
     repo, _, _ = world
     assert repo.deletion_blocker("no-such-id") == "そのファイルは無い"
+
+
+# ----------------------------------------------------------------------
+# 現行グループの結合結果を消す（`delete_derived`）
+#
+# **消したら、グループごと「別々にした」にする。** `merged` のまま出力だけ
+# 外すと `merge_member` が active に残り、再検出も組み直しも塞がって
+# 二度とつなげなくなる（`0017` に実機で詰まった記録がある）。
+
+
+def test_deleting_a_live_groups_output_discards_the_group(world, db, data_root):
+    """**現行グループの出力を消したら、グループごと「別々にした」にする.**
+
+    `merged` のまま出力だけ外すと `merge_member` が active に残り、再検出も
+    組み直しも塞がって**二度とつなげなくなる**（`0017` に実機で詰まった記録がある）。
+    """
+    repo, _, ref = world
+    media_id, group_id, path = a_derived_with_group(db, data_root, ref)
+    member = a_media_file(db, ref, role="original")
+    db.execute("INSERT INTO merge_member VALUES (?, ?, 0, 1)", (group_id, member))
+
+    repo.delete_derived(media_id)
+
+    assert not path.exists()
+    group = db.execute("SELECT status FROM merge_group WHERE id = ?", (group_id,)).fetchone()
+    assert group["status"] == "skipped"
+    # **元になったファイルが解放される** —— trigger が active を落とす。
+    active = db.execute(
+        "SELECT active FROM merge_member WHERE merge_group_id = ?", (group_id,)
+    ).fetchone()["active"]
+    assert active == 0
+
+
+def test_deleting_a_sent_but_vanished_derived_removes_its_upload_records(world, db, data_root):
+    """**記録も一緒に消す.**
+
+    `upload_record.media_file_id` は `ON DELETE RESTRICT`（`0004`）なので、
+    記録を残したまま `media_file` の行は消せない。Immich にも NAS にも無いものの
+    記録なので、指す先の無い記録を残さない。
+    """
+    repo, _, ref = world
+    media_id, _, path = a_derived_with_group(db, data_root, ref)
+    dest = a_destination(db)
+    record_id = an_upload(
+        db,
+        dest,
+        media_id,
+        state="complete",
+        remote_asset_id=None,
+        remote_checked_at=now_iso(),
+        destination_revision_id=dest[1],
+    )
+
+    repo.delete_derived(media_id)
+
+    assert not path.exists()
+    assert (
+        db.execute("SELECT count(*) FROM upload_record WHERE id = ?", (record_id,)).fetchone()[0]
+        == 0
+    )
+
+
+def test_a_derived_living_in_immich_is_not_deleted(world, db, data_root):
+    """**判定と削除で規則がずれていないこと.** 消せない理由をそのまま上げる."""
+    repo, _, ref = world
+    media_id, _, path = a_derived_with_group(db, data_root, ref)
+    dest = a_destination(db)
+    an_upload(
+        db,
+        dest,
+        media_id,
+        state="complete",
+        remote_asset_id="asset-1",
+        remote_is_trashed=0,
+        remote_checked_at=now_iso(),
+        destination_revision_id=dest[1],
+    )
+
+    with pytest.raises(GroupNotEditable, match="Immich に入っている"):
+        repo.delete_derived(media_id)
+    assert path.exists()
