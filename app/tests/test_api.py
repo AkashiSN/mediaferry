@@ -211,9 +211,12 @@ def test_shutdown_waits_for_the_running_handler(data_root, broker, monkeypatch):
         client.cookies.set("XSRF-TOKEN", token)
         client.headers["X-CSRF-Token"] = token
         volume_id = client.get("/api/devices").json()["volumes"][0]["volume_instance_id"]
-        job_id = client.post(f"/api/volumes/{volume_id}/scan").json()["job_id"]
+        client.post(f"/api/volumes/{volume_id}/scan")
+        # **どの 1 本かは決め打ちにしない。** 監視役も挿さっているカードに
+        # `scan` を積むので、先に走り出すのはそちらのことがある。見たいのは
+        # 「走っているハンドラを停止が待つか」だけ。
         deadline = time.monotonic() + 10
-        while client.get(f"/api/jobs/{job_id}").json()["status"] != "running":
+        while all(job["status"] != "running" for job in client.get("/api/jobs").json()["jobs"]):
             assert time.monotonic() < deadline, "ジョブが走り出さない"
             time.sleep(0.01)
     order.append("shutdown")
@@ -371,8 +374,9 @@ def test_a_job_says_which_card_it_belongs_to(client, db):
         ('{"volume_instance_id": "vol-1"}',),
     )
     db.commit()
-    jobs = client.get("/api/jobs").json()["jobs"]
-    assert jobs[0]["volume_instance_id"] == "vol-1"
+    # **自分が入れた 1 本を名指しで取る。** 監視役が積んだ `scan` も一覧に並ぶ。
+    jobs = {job["id"]: job for job in client.get("/api/jobs").json()["jobs"]}
+    assert jobs["j1"]["volume_instance_id"] == "vol-1"
 
 
 def test_a_job_with_no_card_says_so(client, db):
@@ -381,5 +385,5 @@ def test_a_job_with_no_card_says_so(client, db):
         " VALUES ('j2', 'upload', 'running', '{}', '2026-08-24T00:00:00Z')",
     )
     db.commit()
-    jobs = client.get("/api/jobs").json()["jobs"]
-    assert jobs[0]["volume_instance_id"] is None
+    jobs = {job["id"]: job for job in client.get("/api/jobs").json()["jobs"]}
+    assert jobs["j2"]["volume_instance_id"] is None

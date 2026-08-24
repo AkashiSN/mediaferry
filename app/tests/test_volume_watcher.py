@@ -70,6 +70,10 @@ def trust_the_card(db):
     db.commit()
 
 
+def job_types(db) -> list[str]:
+    return [row["type"] for row in db.execute("SELECT type FROM job ORDER BY created_at, id")]
+
+
 def queued_imports(db) -> list[str]:
     return [
         row["id"]
@@ -508,6 +512,129 @@ def test_a_failed_enqueue_leaves_no_mark(watcher, db, volumes, monkeypatch):
         "SELECT count(*) FROM volume_presence WHERE auto_import_at IS NOT NULL"
     ).fetchone()[0]
     assert marked == 0, "積めなかったのに印だけ残っている"
+
+
+def test_a_card_is_counted_as_soon_as_it_appears(watcher, db):
+    """`scan` を積まないと `source_entry` が無く、自動取り込みは 0 件で成功する."""
+    watcher.tick()
+    assert job_types(db) == ["scan"]
+
+
+def test_counting_happens_even_when_auto_import_is_off(database, db, broker, monkeypatch):
+    """「取り込まない」は「数えない」ではない.
+
+    **`watcher` フィクスチャは env で `trusted` に固定している**ので、
+    ここだけ自前で組み立てる（env は DB より優先される）。
+    """
+    monkeypatch.setenv("MEDIAFERRY_DEFAULT_TIMEZONE", "Asia/Tokyo")
+    ProfileRegistry(db).sync_builtins()
+    off = VolumeWatcher(
+        database,
+        {"MEDIAFERRY_AUTO_IMPORT": "off", "MEDIAFERRY_DEFAULT_TIMEZONE": "Asia/Tokyo"},
+        broker,
+        poll_interval=0.01,
+    )
+    try:
+        off.tick()
+    finally:
+        off.close()
+    assert job_types(db) == ["scan"]
+
+
+def test_the_automatic_path_also_looks_for_split_videos(watcher, db, volumes):
+    """取り込んだあとに探さないと、ホームに「つなぐ」が出ない."""
+    a_known_card(watcher, volumes)
+    trust_the_card(db)
+    watcher.tick()
+    assert job_types(db)[-2:] == ["import", "detect_groups"]
+
+
+def test_reinserting_the_card_counts_it_again(watcher, db, volumes):
+    """前回のスキャン以降に撮ったものを拾う道.
+
+    印は presence ごとなので、挿し直せば新しい行になり、もう一度数える。
+    """
+    watcher.tick()
+    reinsert(watcher, volumes)
+    scans = db.execute("SELECT count(*) FROM job WHERE type = 'scan'").fetchone()[0]
+    assert scans == 2
+
+
+def test_an_archived_profile_is_not_counted(watcher, db):
+    """archive されたプロファイルの `scan.roots` では数えない.
+
+    `volume_instance.profile_id` は前回の判定の写しでしかない。判定の後・積む
+    前に別接続で archive が commit されうるので、同じ排他区間で確かめる。
+    """
+    watcher.tick()
+    db.execute("UPDATE volume_presence SET auto_scan_at = NULL")
+    db.execute("UPDATE device_profile SET archived_at = '2026-08-19T00:00:00Z'")
+    db.commit()
+    assert watcher._enqueue_ready() == [], "archive されたプロファイルで数えている"
+
+
+def test_a_stale_profile_revision_is_not_counted(watcher, db):
+    """判定に使った版が編集されていたら、その版では数えない（同上の窓）."""
+    watcher.tick()
+    db.execute("UPDATE volume_presence SET auto_scan_at = NULL")
+    profile = db.execute("SELECT id FROM device_profile WHERE slug = 'dji-osmo'").fetchone()
+    db.execute(
+        "INSERT INTO profile_revision"
+        " (id, profile_id, revision, definition_json, schema_version, created_at)"
+        " VALUES ('rev-counting', ?, 51, '{}', 1, '2026-08-19T00:00:00Z')",
+        (profile["id"],),
+    )
+    db.execute(
+        "UPDATE device_profile SET current_revision_id = 'rev-counting' WHERE id = ?",
+        (profile["id"],),
+    )
+    db.commit()
+    assert watcher._enqueue_ready() == [], "旧リビジョンの判定で数えている"
+
+
+def test_a_detached_presence_is_never_counted(watcher, db, volumes):
+    """抜けた接続に印を付けない（`SELECT` と `UPDATE` の両方で見る）."""
+    watcher.tick()
+    db.execute("UPDATE volume_presence SET auto_scan_at = NULL, detached_at = '2026-01-01'")
+    db.commit()
+    watcher.tick()
+    marked = db.execute(
+        "SELECT count(*) FROM volume_presence WHERE auto_scan_at IS NOT NULL"
+    ).fetchone()[0]
+    assert marked == 0, "抜けた接続に印を付けている"
+
+
+def test_the_counting_job_is_reported_even_when_auto_import_is_off(
+    database, db, broker, monkeypatch
+):
+    """`off` で早く返るとき、積んだ `scan` を捨てない.
+
+    `tick` の戻り値は「この周で積んだもの」。捨てると、呼び出し側からは
+    何も積まなかったのと区別が付かない。
+    """
+    monkeypatch.setenv("MEDIAFERRY_DEFAULT_TIMEZONE", "Asia/Tokyo")
+    ProfileRegistry(db).sync_builtins()
+    off = VolumeWatcher(
+        database,
+        {"MEDIAFERRY_AUTO_IMPORT": "off", "MEDIAFERRY_DEFAULT_TIMEZONE": "Asia/Tokyo"},
+        broker,
+        poll_interval=0.01,
+    )
+    try:
+        enqueued = off.tick()
+    finally:
+        off.close()
+    scans = [row["id"] for row in db.execute("SELECT id FROM job WHERE type = 'scan'")]
+    assert enqueued == scans, "積んだ `scan` を返していない"
+
+
+def test_counting_is_marked_so_it_does_not_pile_up(watcher, db):
+    """同じ接続に何度も積まない（印を付けるのと積むのは同じ排他区間）."""
+    watcher.tick()
+    watcher.tick()
+    watcher.tick()
+    scans = db.execute("SELECT count(*) FROM job WHERE type = 'scan'").fetchone()[0]
+    assert scans == 1
 
 
 # ----------------------------------------------------------------------

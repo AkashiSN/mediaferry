@@ -31,8 +31,12 @@ def _emit_soon(store, job_id, message, delay=0.5):
     return thread
 
 
-def _frames(response, count, timeout=10.0):
-    """`id:` と `data:` の対を `count` 個集める."""
+def _frames(response, count, timeout=10.0, job_id=None):
+    """`id:` と `data:` の対を `count` 個集める.
+
+    **`job_id` で絞れる。** この線には全ジョブの進捗が流れるので、監視役が
+    挿さっているカードに積んだ `scan` の 1 行 1 行も混ざる。
+    """
     out: list[tuple[str | None, dict]] = []
     pending_id: str | None = None
     deadline = time.monotonic() + timeout
@@ -42,8 +46,11 @@ def _frames(response, count, timeout=10.0):
         if line.startswith("id:"):
             pending_id = line.removeprefix("id:").strip()
         elif line.startswith("data:"):
-            out.append((pending_id, json.loads(line.removeprefix("data:").strip())))
-            pending_id = None
+            payload = json.loads(line.removeprefix("data:").strip())
+            frame_id, pending_id = pending_id, None
+            if job_id is not None and payload.get("job_id") != job_id:
+                continue
+            out.append((frame_id, payload))
             if len(out) == count:
                 return out
     raise AssertionError(f"{count} 本届かなかった（{len(out)} 本）")
@@ -60,7 +67,7 @@ def test_progress_reaches_an_open_page(tmp_path):
         ):
             assert response.status_code == 200
             _emit_soon(store, job_id, "動いている")
-            [(event_id, event)] = _frames(response, 1)
+            [(event_id, event)] = _frames(response, 1, job_id=job_id)
         conn.close()
 
     assert event["message"] == "動いている"
@@ -77,14 +84,14 @@ def test_a_reconnecting_page_does_not_miss_what_happened_meanwhile(tmp_path):
         with httpx.Client(base_url=app.url, timeout=15.0) as client:
             with client.stream("GET", "/api/events") as response:
                 _emit_soon(store, job_id, "1 本目")
-                [(first_id, first)] = _frames(response, 1)
+                [(first_id, first)] = _frames(response, 1, job_id=job_id)
             # ここは「切れている」時間。
             store.emit(job_id, "info", "切れている間")
             store.emit(job_id, "info", "そのあと")
             with client.stream(
                 "GET", "/api/events", headers={"Last-Event-ID": first_id}
             ) as response:
-                events = [event for _, event in _frames(response, 2)]
+                events = [event for _, event in _frames(response, 2, job_id=job_id)]
         conn.close()
 
     assert first["message"] == "1 本目"
