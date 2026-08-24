@@ -224,3 +224,6 @@ graphify-out/cost.json
 graphify-out/.graphify_python
 graphify-out/.graphify_root
 # graphify-out/cache/ は速度のために追跡する（外すならこの行を有効化）
+
+# ブレインストーミングの視覚用コンパニオンが置くモック（追跡しない）
+.superpowers/
