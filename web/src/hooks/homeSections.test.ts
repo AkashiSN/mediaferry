@@ -72,6 +72,16 @@ describe("ホームの導出", () => {
     expect(standing).toEqual([{ card, kind: "counting" }]);
   });
 
+  // 数える前の pending_count は前回の値の残りで、いまの残りではない。
+  // 「数えています」を優先し、「取り込むものはありません」と言わないため、
+  // 判定は scanned_at を先に見る。
+  it("まだ数えていないカードは、pending_count が残っていても「数えています」のまま", () => {
+    const card = { ...CARD, scanned_at: null };
+    const { standing, todo } = homeSections({ cards: [card], jobs: [], counts: NONE });
+    expect(standing).toEqual([{ card, kind: "counting" }]);
+    expect(todo).toEqual([]);
+  });
+
   it("数えた上で残りが無いカードは、抜いていい側に出る", () => {
     const card = { ...CARD, pending_count: 0 };
     const { standing } = homeSections({ cards: [card], jobs: [], counts: NONE });
@@ -110,6 +120,20 @@ describe("ホームの導出", () => {
     const newer = job({ id: "new", status: "queued", created_at: "2026-08-24T00:00:02Z", volume_instance_id: null });
     const { doing } = homeSections({ cards: [], jobs: [newer, older, running], counts: NONE });
     expect(doing.map((d) => d.job.id)).toEqual(["run", "old", "new"]);
+  });
+
+  // created_at が新しくても、走っている作業は待機中より先に出す。並びは
+  // 時刻ではなく「いま動いているか」で決める。
+  it("走っている作業は、待機中より created_at が新しくても先に出る", () => {
+    const older = job({ id: "old", status: "queued", created_at: "2026-08-24T00:00:01Z", volume_instance_id: null });
+    const runningButNewer = job({
+      id: "run",
+      status: "running",
+      created_at: "2026-08-24T00:00:02Z",
+      volume_instance_id: null,
+    });
+    const { doing } = homeSections({ cards: [], jobs: [older, runningButNewer], counts: NONE });
+    expect(doing.map((d) => d.job.id)).toEqual(["run", "old"]);
   });
 
   it("終わった作業は出さない", () => {
