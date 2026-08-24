@@ -1,16 +1,22 @@
-// ホーム（§13）。いま挿さっているカードの帯、やること、進行中の作業、
-// 送り先ごとの状況、最近の取り込みを上から順に置く。
+// ホーム（§13）。**画面は一覧を持たない** —— カード・作業・集計から 3 つの並びを
+// 導き（`hooks/homeSections.ts`）、「いま動いていること」「やること」「いまの様子」
+// の順に置く。その下に、送り先ごとの状況と最近の取り込みを添える。
+//
+// **カードは「状態」ではなく「仕事」として扱う。** 取り込む残りがあるカードは
+// やることの札になるので、「カードが挿さっているのに、やることはありません」と
+// いう食い違いは、条件の直しではなく形の上で起こり得ない。
 //
 // **数字より先に、次の一手を出す。** 宛先ごとの件数だけを並べても、読んだ人が
-// 何をすればいいかは決まらない。「やること」を上に置き、件数はその下に添える。
+// 何をすればいいかは決まらない。
 
 import { useState } from "react";
 import { Link } from "react-router-dom";
 
 import { request } from "../api/client";
 import { useDashboard } from "../api/dashboard";
-import type { Dashboard, DestinationSummary } from "../api/dashboard";
+import type { DestinationSummary } from "../api/dashboard";
 import { useMutation, useQuery } from "../api/hooks";
+import { CardStanding } from "../components/CardStanding";
 import { ConfirmDialog, type Confirmation } from "../components/ConfirmDialog";
 import { ErrorBanner } from "../components/ErrorBanner";
 import { Icon } from "../components/Icon";
@@ -20,20 +26,27 @@ import { formatBytes } from "../utils/formatBytes";
 import type { Job } from "../components/JobProgress";
 import { autoImportOutlook, autoImportState, profileDisplayName, volumeLabel } from "./work/CardDetail";
 import type { Volume } from "./work/CardDetail";
+import { homeSections } from "../hooks/homeSections";
+import type { CardView, Standing, Todo } from "../hooks/homeSections";
 import { useEvents } from "../hooks/useEvents";
-import { pickLiveJob, useJobPulse } from "../hooks/useJobPulse";
+import { isCancellable, useJobPulse } from "../hooks/useJobPulse";
 import { useReloadOnEvents } from "../hooks/useReloadOnEvents";
-import { tasksFrom } from "../hooks/useTasks";
-import type { Task } from "../hooks/useTasks";
 import { formatDateTime } from "../utils/formatDateTime";
 
-type Devices = { volumes: Volume[] };
+/** `/devices` の 1 要素。**判定関数と同じ型を土台にする**（`work/CardDetail.tsx`）。
+ * ホームはそれに加えて、取り込む残り・数えた時刻・掴まれているかを見る。 */
+type DeviceVolume = Volume & Pick<CardView, "pending_count" | "scanned_at" | "busy">;
+
+type Devices = { volumes: DeviceVolume[] };
 type Profile = { slug: string; name: string };
 type Profiles = { profiles: Profile[] };
 
 type Jobs = { jobs: Job[] };
 type Setting = { key: string; value: string | null };
 type Settings = { settings: Setting[] };
+
+/** 件数から導くやること（カードの取り込み以外）。 */
+type CountedTodo = Exclude<Todo, { kind: "import_card" }>;
 
 export function HomeScreen() {
   // **集計は枠と共有する**（`api/dashboard.tsx`）。ここで別に引くと、取り込み中は
@@ -49,7 +62,7 @@ export function HomeScreen() {
   useReloadOnEvents(received, settings.reload);
   useReloadOnEvents(received, profiles.reload);
 
-  const card = useMutation();
+  const action = useMutation();
   const [confirming, setConfirming] = useState<{ confirmation: Confirmation; id: string } | null>(
     null,
   );
@@ -60,17 +73,82 @@ export function HomeScreen() {
     (settings.data?.settings ?? []).find((setting) => setting.key === "AUTO_IMPORT")?.value ??
     null;
 
-  async function act(volumeId: string, action: "trust" | "scan" | "import" | "close") {
-    await card.run(async () => {
-      await request(`/volumes/${volumeId}/${action}`, { method: "POST" });
+  const volumes = devices.data?.volumes ?? [];
+  const profileList = profiles.data?.profiles ?? [];
+
+  // **名前付けの実装を 2 つにしない**（§1）。ラベルの既定名と連番も、カメラの
+  // 種類の表示名も `work/CardDetail.tsx` の引き当てをそのまま使う。`volumeLabel`
+  // に一覧全体を渡すのは、ラベルが無いカードが複数あると同じ既定名になるため。
+  const cards: CardView[] = volumes.map((volume) => ({
+    volume_instance_id: volume.volume_instance_id,
+    label: volumeLabel(volumes, volume),
+    profile_name: profileDisplayName(volume.profile_slug, profileList),
+    size_bytes: volume.size_bytes,
+    profile_slug: volume.profile_slug,
+    trusted: volume.trusted,
+    provisional: volume.provisional,
+    reason: volume.reason ?? "",
+    pending_count: volume.pending_count,
+    scanned_at: volume.scanned_at,
+    busy: volume.busy,
+  }));
+
+  // **やることは画面が持つ一覧ではなく、状態から毎回導く。** 読み込み中は
+  // 「読み込み中…」を出し、「やることはありません」とは書かない（直後に件数が
+  // 現れて驚かせないため）。読み込み中かどうかは `loading` で見る（`data === null`
+  // は失敗のときも真になり、失敗しても「読み込み中…」が消えなくなる）。
+  // `const` に取ってから narrowing するのは ——`dashboard.data` を式のあちこちで
+  // 直に見ると、`null` チェックの後でも型が絞られず `as` に頼ることになるため。
+  const dashboardData = dashboard.data;
+  const sections = homeSections({ cards, jobs: jobs.data?.jobs ?? [], counts: dashboardData });
+  const nothing =
+    sections.doing.length === 0 && sections.todo.length === 0 && sections.standing.length === 0;
+  const loading = dashboard.loading || devices.loading || jobs.loading;
+
+  const averageRate = useJobPulse(sections.doing.length > 0, jobs.reload);
+
+  async function trust(volumeId: string) {
+    await action.run(async () => {
+      await request(`/volumes/${volumeId}/trust`, { method: "POST" });
       devices.reload();
     });
     setConfirming(null);
   }
 
+  /** 信頼の確認を出す。**見通しは `work/CardDetail.tsx` と同じ関数から作る** ——
+   * 片方だけで判定すると、同意の内容と実挙動がずれる。 */
+  function askTrust(card: CardView) {
+    const volume = volumes.find(
+      (candidate) => candidate.volume_instance_id === card.volume_instance_id,
+    );
+    if (volume === undefined) {
+      return;
+    }
+    setConfirming({
+      confirmation: {
+        kind: "trust_volume",
+        label: card.label,
+        ...autoImportOutlook(volume, autoImport),
+      },
+      id: volume.volume_instance_id,
+    });
+  }
+
+  /** 未信頼のカードに添える、自動取り込みの見通し。信頼のボタンの隣に置くので、
+   * 承認すると何が起きるかが押す前に読める。信頼済みのカードには出さない。 */
+  function autoImportNote(card: CardView): string | null {
+    const volume = volumes.find(
+      (candidate) => candidate.volume_instance_id === card.volume_instance_id,
+    );
+    if (volume === undefined || card.trusted) {
+      return null;
+    }
+    return autoImportState(volume, autoImport);
+  }
+
   /**
-   * カードの帯の「いま取り込む」（§13）。**数える → コピーする → 分かれた動画を
-   * 探す**を、この順に積む。
+   * 「いま取り込む」（§13）。**数える → コピーする → 分かれた動画を探す**を、
+   * この順に積む。
    *
    * **コピーは数えた結果を読む。** 取り込みのジョブは前のスキャンが残した
    * `source_entry` を publish するだけなので、数えずにコピーだけを積むと、
@@ -82,12 +160,9 @@ export function HomeScreen() {
    * 探すジョブは「結合しない」と記録して何もしない。
    *
    * ジョブは積んだ順に 1 本ずつ走るので、探すのは取り込みが終わったあとになる。
-   *
-   * `profileSlug` は必ず値を持つ。**このボタンは対象と判定できたカードにしか
-   * 出ない**（`CardBanner` の `actionable`）。
    */
   async function importNow(volumeId: string, profileSlug: string) {
-    await card.run(async () => {
+    await action.run(async () => {
       await request(`/volumes/${volumeId}/scan`, { method: "POST" });
       await request(`/volumes/${volumeId}/import`, { method: "POST" });
       await request(`/merge-groups/detect?profile_slug=${encodeURIComponent(profileSlug)}`, {
@@ -99,24 +174,11 @@ export function HomeScreen() {
   }
 
   async function cancelJob(jobId: string) {
-    await card.run(async () => {
+    await action.run(async () => {
       await request(`/jobs/${jobId}/cancel`, { method: "POST" });
       jobs.reload();
     });
   }
-
-  // **やることは画面が持つ一覧ではなく、状態から毎回導く。** 読み込み中は
-  // 「読み込み中…」を出し、「やることはありません」とは書かない
-  // （直後に件数が現れて驚かせないため）。読み込み中かどうかは `dashboard.loading`
-  // で見る（`dashboardData === null` は失敗のときも真になり、失敗しても
-  // 「読み込み中…」が消えなくなる）。`const` に取ってから narrowing するのは
-  // ——`dashboard.data` を式のあちこちで直に見ると、`null` チェックの後でも
-  // 型が絞られず `as` に頼ることになるため。
-  const dashboardData = dashboard.data;
-  const tasks: Task[] = dashboardData === null ? [] : tasksFrom(dashboardData);
-
-  const running = pickLiveJob(jobs.data?.jobs ?? []);
-  const averageRate = useJobPulse(running !== undefined, jobs.reload);
 
   return (
     <section aria-label="ホーム">
@@ -134,71 +196,94 @@ export function HomeScreen() {
 
         <ErrorBanner
           error={
-            card.error ??
+            action.error ??
             dashboard.error ??
             devices.error ??
             jobs.error ??
             settings.error ??
             profiles.error
           }
-          onDismiss={card.clear}
+          onDismiss={action.clear}
         />
 
         {connected === false && (
           <p role="status">進捗の接続が切れています。再接続を待っています…</p>
         )}
 
-        {(devices.data?.volumes ?? []).map((volume) => (
-          <CardBanner
-            key={volume.volume_instance_id}
-            volume={volume}
-            // **一覧全体を渡す。** ラベルが無いカードが複数あると同じ既定名に
-            // なるので、連番で見分けるには他のカードも見える必要がある。
-            label={volumeLabel(devices.data?.volumes ?? [], volume)}
-            // **カメラの種類は `work/CardDetail.tsx` と同じ引き当てを使う**
-            // （§13。生の slug を出さない。写像は 1 か所にだけ持つ）。
-            profileName={profileDisplayName(volume.profile_slug, profiles.data?.profiles ?? [])}
-            autoImport={autoImport}
-            busy={card.busy}
-            onAct={act}
-            onImport={importNow}
-            onAskTrust={(label, outlook) =>
-              setConfirming({
-                confirmation: { kind: "trust_volume", label, ...outlook },
-                id: volume.volume_instance_id,
-              })
-            }
-          />
-        ))}
-
-        {running && (
-          <JobCard
-            job={running}
-            rate={averageRate(running)}
-            onCancel={(id) => void cancelJob(id)}
-            cancelBusy={card.busy}
-          />
-        )}
-
-        {dashboard.loading ? (
-          <p>読み込み中…</p>
-        ) : dashboardData === null ? (
-          // 失敗はすぐ上のバナーで知らせるので、ここには何も書かない
-          // （`読み込み中…` を出し続けると、失敗しても消えない）。
-          null
-        ) : tasks.length === 0 ? (
-          <EmptyState />
-        ) : (
+        {/* **走っている作業は全部出す。**「いま取り込む」は 数える → コピー →
+            探す の 3 本を積むので、1 本だけ選ぶと残りが画面から消える。 */}
+        {sections.doing.length > 0 && (
           <section style={{ display: "flex", flexDirection: "column", gap: 10 }}>
             <div className="sechead">
-              <h2>やること</h2>
-              <span className="small">{tasks.length} 件</span>
+              <h2>いま動いていること</h2>
+              <span className="small">{sections.doing.length} 件</span>
             </div>
-            {tasks.map((task) => (
-              <TaskCard key={task.kind} task={task} dashboard={dashboardData} />
+            {sections.doing.map(({ job, card }) => (
+              <JobCard
+                key={job.id}
+                job={job}
+                subject={card?.label ?? null}
+                rate={averageRate(job)}
+                onCancel={isCancellable(job) ? (id) => void cancelJob(id) : undefined}
+                cancelBusy={action.busy}
+              />
             ))}
           </section>
         )}
+
+        {sections.todo.length > 0 && (
+          <section style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+            <div className="sechead">
+              <h2>やること</h2>
+              <span className="small">{sections.todo.length} 件</span>
+            </div>
+            {sections.todo.map((todo) =>
+              todo.kind === "import_card" ? (
+                <ImportCardTask
+                  key={todo.card.volume_instance_id}
+                  card={todo.card}
+                  note={autoImportNote(todo.card)}
+                  busy={action.busy}
+                  // 設定を読めていない間は信頼させない（同意の内容を作れない）。
+                  canTrust={autoImport !== null}
+                  onImport={importNow}
+                  onAskTrust={askTrust}
+                />
+              ) : (
+                <TaskCard
+                  key={todo.kind}
+                  task={todo}
+                  destinations={dashboardData?.destinations ?? []}
+                />
+              ),
+            )}
+          </section>
+        )}
+
+        {/* 仕事も動きも無いカード。**抜いていいかは、押さずに読める**（§3）。 */}
+        {sections.standing.length > 0 && (
+          <section style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+            <div className="sechead">
+              <h2>いまの様子</h2>
+            </div>
+            {sections.standing.map((standing) => (
+              <StandingCard key={standing.card.volume_instance_id} standing={standing} />
+            ))}
+          </section>
+        )}
+
+        {/* **空表示は 3 つの並びがすべて空のときだけ。** カードが挿さっていれば
+            必ずどれかに出るので、カードと空表示は同時に出ない。 */}
+        {nothing &&
+          (loading ? (
+            <p>読み込み中…</p>
+          ) : dashboardData === null ? (
+            // 失敗はすぐ上のバナーで知らせるので、ここには何も書かない
+            // （`読み込み中…` を出し続けると、失敗しても消えない）。
+            null
+          ) : (
+            <EmptyState />
+          ))}
 
         {dashboardData !== null && (dashboardData.orphans > 0 || dashboardData.missing > 0) && (
           // **報告はするが、消す操作は置かない**（自動削除はデータを失う経路になる。
@@ -258,9 +343,9 @@ export function HomeScreen() {
         {confirming && (
           <ConfirmDialog
             confirmation={confirming.confirmation}
-            busy={card.busy}
+            busy={action.busy}
             onCancel={() => setConfirming(null)}
-            onConfirm={() => void act(confirming.id, "trust")}
+            onConfirm={() => void trust(confirming.id)}
           />
         )}
       </div>
@@ -268,87 +353,69 @@ export function HomeScreen() {
   );
 }
 
-/** いま挿さっているカードの帯（§13）。**理由は常に出す**（判定に外れたカードも）。 */
-function CardBanner({
-  volume,
-  label,
-  profileName,
-  autoImport,
+/** 取り込む残りがあるカード 1 枚（§1）。**承認と取り込みを 1 つの札に置く** ——
+ * 別々の札に立てると、同じカードに対する仕事が 2 件あるように見える。 */
+function ImportCardTask({
+  card,
+  note,
   busy,
-  onAct,
+  canTrust,
   onImport,
   onAskTrust,
 }: {
-  volume: Volume;
-  label: string;
-  profileName: string;
-  autoImport: string | null;
+  card: CardView;
+  note: string | null;
   busy: boolean;
-  onAct: (volumeId: string, action: "trust" | "scan" | "import" | "close") => void;
+  canTrust: boolean;
   onImport: (volumeId: string, profileSlug: string) => void;
-  onAskTrust: (label: string, outlook: ReturnType<typeof autoImportOutlook>) => void;
+  onAskTrust: (card: CardView) => void;
 }) {
-  // **`slug` を先に取り出す。** `actionable` から narrowing を効かせるには、
-  // 別名が `const` である必要がある（そうしないと「いま取り込む」に渡す型が
-  // `string | null` のままになる）。
-  const slug = volume.profile_slug;
-  const actionable = slug !== null;
+  // **`slug` を先に取り出す。** 対象と判定できたカードだけがこの札になる
+  // （`homeSections`）が、`const` の別名にしないと narrowing が効かない。
+  const slug = card.profile_slug;
   return (
-    <section className="card pad hl">
+    <article className="card pad hl">
       <div className="rowtop">
         <div className="iconbox on">
           <Icon name="card" />
         </div>
         <div className="grow">
-          <h2 style={{ fontSize: 16, fontWeight: 650 }}>
-            {volume.trusted
-              ? `${label} のカードが挿さっています`
-              : `${label} は初めて見るカードです`}
-          </h2>
-          {!volume.trusted && actionable && (
-            <p className="muted" style={{ marginTop: 4 }}>
-              {profileName} のカードのようです。
-            </p>
-          )}
-          {/* **容量は、どのカードなのかの手がかり**（§13）。同じカメラの
-              カードが 2 枚挿さっていると、種類と確度だけでは区別が付かない。 */}
+          <h3 style={{ fontSize: "14.5px", fontWeight: 600 }}>
+            {card.label} から {card.pending_count} 件を取り込む
+          </h3>
+          {/* **容量は、どのカードなのかの手がかり**（§13）。同じカメラのカードが
+              2 枚挿さっていると、種類だけでは区別が付かない。 */}
           <p className="small" style={{ marginTop: 4 }}>
-            {formatBytes(volume.size_bytes)}
+            {formatBytes(card.size_bytes)} ・ {card.profile_name}
           </p>
-          {actionable ? (
+          {note !== null && (
             <p className="small" style={{ marginTop: 4 }}>
-              {autoImportState(volume, autoImport)}
-            </p>
-          ) : (
-            <p role="note" className="small" style={{ marginTop: 4 }}>
-              対象外の理由: {volume.reason ?? "不明"}
+              {note}
             </p>
           )}
-          {volume.provisional && (
-            <p role="note" className="small" style={{ marginTop: 4 }}>
-              {profileName} の対象ですが、取り込む中身がまだありません。
-            </p>
-          )}
+          <CardStanding card={card} />
         </div>
         <div className="acts" style={{ flexDirection: "column", alignItems: "stretch" }}>
-          {actionable && (
+          {slug !== null && (
             <button
               type="button"
               className="btn primary"
-              disabled={busy}
-              onClick={() => onImport(volume.volume_instance_id, slug)}
+              // **この画面の要求中に加えて、そのカードが掴まれているときも落とす。**
+              // 走り出した札は「やること」から消えるが、別のタブから押された競合は
+              // 消える前に届きうる。
+              disabled={busy || card.busy}
+              onClick={() => onImport(card.volume_instance_id, slug)}
             >
               いま取り込む
             </button>
           )}
           <div className="acts">
-            {!volume.trusted && actionable && (
+            {!card.trusted && (
               <button
                 type="button"
                 className="btn sm outline"
-                // 設定を読めていない間は押させない（同意の内容を作れない）。
-                disabled={busy || autoImport === null}
-                onClick={() => onAskTrust(label, autoImportOutlook(volume, autoImport))}
+                disabled={busy || !canTrust}
+                onClick={() => onAskTrust(card)}
               >
                 このカードを信頼する
               </button>
@@ -356,25 +423,75 @@ function CardBanner({
             <Link to="/card" className="btn sm">
               中身を見る
             </Link>
-            <button
-              type="button"
-              className="btn sm"
-              disabled={busy}
-              onClick={() => onAct(volume.volume_instance_id, "close")}
-            >
-              取り外す
-            </button>
           </div>
         </div>
       </div>
-    </section>
+    </article>
   );
+}
+
+/** いまの様子 1 件（§1）。**理由は常に出す**（判定に外れたカードも）。 */
+function StandingCard({ standing }: { standing: Standing }) {
+  const card = standing.card;
+  return (
+    <article className="card pad">
+      <div className="rowtop">
+        <div className="iconbox on">
+          <Icon name="card" />
+        </div>
+        <div className="grow">
+          <h3 style={{ fontSize: "14.5px", fontWeight: 600 }}>
+            {card.trusted
+              ? `${card.label} のカードが挿さっています`
+              : `${card.label} は初めて見るカードです`}
+          </h3>
+          {!card.trusted && card.profile_slug !== null && (
+            <p className="muted" style={{ marginTop: 4 }}>
+              {card.profile_name} のカードのようです。
+            </p>
+          )}
+          <p className="small" style={{ marginTop: 4 }}>
+            {formatBytes(card.size_bytes)}
+          </p>
+          <p role="note" className="small" style={{ marginTop: 4 }}>
+            {standingLine(standing)}
+          </p>
+          <CardStanding card={card} />
+        </div>
+        <div className="acts">
+          <Link to="/card" className="btn sm">
+            中身を見る
+          </Link>
+        </div>
+      </div>
+    </article>
+  );
+}
+
+/** そのカードがいまどう見えているか（§1）。**数える前の 0 件を「空」と書かない。** */
+function standingLine({ card, kind }: Standing): string {
+  switch (kind) {
+    case "counting":
+      return "中身を数えています。";
+    case "not_target":
+      return `対象外の理由: ${card.reason === "" ? "不明" : card.reason}`;
+    case "no_contents":
+      return `${card.profile_name} の対象ですが、取り込む中身がまだありません。`;
+    case "done":
+      return "取り込むものはありません。";
+  }
 }
 
 const TASK_ICON = { merge: "merge", merge_review: "merge", send: "up", approve: "alert" } as const;
 
-/** やること 1 件（§13）。4 種類しかないので直に分岐する。 */
-function TaskCard({ task, dashboard }: { task: Task; dashboard: Dashboard }) {
+/** 件数から導くやること 1 件（§13）。4 種類しかないので直に分岐する。 */
+function TaskCard({
+  task,
+  destinations,
+}: {
+  task: CountedTodo;
+  destinations: DestinationSummary[];
+}) {
   if (task.kind === "merge") {
     return (
       <article className="card pad">
@@ -429,7 +546,7 @@ function TaskCard({ task, dashboard }: { task: Task; dashboard: Dashboard }) {
   }
   if (task.kind === "send") {
     const names =
-      dashboard.destinations
+      destinations
         .filter((destination) => destination.enabled)
         .map((destination) => destination.name)
         .join(" / ") || "（送り先がありません）";

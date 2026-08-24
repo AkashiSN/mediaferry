@@ -14,6 +14,7 @@ const JOB_TYPE_LABELS: Record<string, string> = {
 
 export function JobCard({
   job,
+  subject,
   rate,
   onCancel,
   cancelLabel = "中止する",
@@ -21,6 +22,9 @@ export function JobCard({
   notes,
 }: {
   job: Job;
+  /** その作業が扱っている当のもの（カードのラベルなど）。**題に添える。**
+   * 何に対する作業かが出ていないと、同じ種類の作業が並んだとき見分けが付かない。 */
+  subject?: string | null;
   rate: number | null;
   onCancel?: (jobId: string) => void;
   /** 止めるボタンの文言。画面によって呼び方が違う（送信中は「送るのをやめる」）。 */
@@ -41,6 +45,7 @@ export function JobCard({
         <div className="grow">
           <div className="row" style={{ gap: 9 }}>
             <h3 style={{ fontSize: "14.5px", fontWeight: 600 }}>{title}</h3>
+            {subject && <span className="small">{subject}</span>}
             <span className="small">{statusLabel(job.status)}</span>
           </div>
           {job.progress && (

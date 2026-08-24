@@ -132,6 +132,8 @@ describe("ホーム", () => {
     expect(screen.queryByText("読み込み中…")).toBeNull();
   });
 
+  // **承認と取り込みを、別々の仕事に見せない**（§1）。取り込む残りがあるカードは
+  // 「やること」の札になり、未信頼ならその同じ札に信頼の入口も乗る。
   it("挿さっているカードを、信頼していなければそう書く", async () => {
     stubHome({
       "/dashboard": EMPTY_DASHBOARD,
@@ -146,6 +148,9 @@ describe("ホーム", () => {
             provisional: false,
             trusted: false,
             reason: "DCIM がある",
+            pending_count: 38,
+            scanned_at: "2026-08-24T00:00:00Z",
+            busy: false,
           },
         ],
       },
@@ -153,9 +158,7 @@ describe("ホーム", () => {
       "/settings": { settings: [{ key: "AUTO_IMPORT", value: "trusted" }], warnings: [] },
     });
     renderHome();
-    await waitFor(() =>
-      expect(screen.getByText("OSMO は初めて見るカードです")).toBeInTheDocument(),
-    );
+    await waitFor(() => expect(screen.getByText(/未承認です/)).toBeInTheDocument());
     expect(screen.getByRole("button", { name: "このカードを信頼する" })).toBeInTheDocument();
   });
 
@@ -175,6 +178,9 @@ describe("ホーム", () => {
             provisional: false,
             trusted: false,
             reason: "DCIM に一致するファイルが 1 件",
+            pending_count: 0,
+            scanned_at: "2026-08-24T00:00:00Z",
+            busy: false,
           },
           {
             volume_instance_id: "v2",
@@ -185,6 +191,9 @@ describe("ホーム", () => {
             provisional: true,
             trusted: false,
             reason: "DCIM はあるが一致するファイルが無い（空）",
+            pending_count: 0,
+            scanned_at: "2026-08-24T00:00:00Z",
+            busy: false,
           },
         ],
       },
@@ -197,6 +206,8 @@ describe("ホーム", () => {
     expect(screen.getByText("Pocket4 は初めて見るカードです")).toBeInTheDocument();
     expect(screen.getByText("477 GiB")).toBeInTheDocument();
     expect(screen.getByText("108 GiB")).toBeInTheDocument();
+    // 挿さっているカードは「いまの様子」にしか出ていないが、それでも空ではない。
+    expect(screen.queryByText("いま、やることはありません")).toBeNull();
   });
 
   it("容量は、生のバイト数では出さない", async () => {
@@ -213,6 +224,9 @@ describe("ホーム", () => {
             provisional: false,
             trusted: false,
             reason: "DCIM に一致するファイルが 1 件",
+            pending_count: 0,
+            scanned_at: "2026-08-24T00:00:00Z",
+            busy: false,
           },
         ],
       },
@@ -240,6 +254,9 @@ describe("ホーム", () => {
             provisional: false,
             trusted: false,
             reason: "DCIM がある",
+            pending_count: 0,
+            scanned_at: "2026-08-24T00:00:00Z",
+            busy: false,
           },
         ],
       },
@@ -266,6 +283,9 @@ describe("ホーム", () => {
             provisional: true,
             trusted: false,
             reason: "DCIM がある",
+            pending_count: 0,
+            scanned_at: "2026-08-24T00:00:00Z",
+            busy: false,
           },
         ],
       },
@@ -296,6 +316,9 @@ describe("ホーム", () => {
             provisional: false,
             trusted: false,
             reason: "DCIM がある",
+            pending_count: 0,
+            scanned_at: "2026-08-24T00:00:00Z",
+            busy: false,
           },
         ],
       },
@@ -321,6 +344,9 @@ describe("ホーム", () => {
     provisional: false,
     trusted: true,
     reason: "DCIM がある",
+    pending_count: 38,
+    scanned_at: "2026-08-24T00:00:00Z",
+    busy: false,
   };
 
   it("「いま取り込む」を押すと、数えてから取り込み、分かれた動画まで探す", async () => {
@@ -361,32 +387,129 @@ describe("ホーム", () => {
     });
     renderHome();
 
-    await waitFor(() => expect(screen.getByText(/対象外の理由/)).toBeInTheDocument());
+    await waitFor(() =>
+      expect(screen.getByText("対象外の理由: DCIM がある")).toBeInTheDocument(),
+    );
     expect(screen.queryByRole("button", { name: "いま取り込む" })).toBeNull();
   });
 
-  it("「取り外す」を押すと、そのカードを取り外す", async () => {
-    const api = stubHome({
+  it("対象外の理由が分からないときは、空欄にしない", async () => {
+    stubHome({
       "/dashboard": EMPTY_DASHBOARD,
-      "/devices": { volumes: [actionableVolume] },
+      "/devices": { volumes: [{ ...actionableVolume, profile_slug: null, reason: null }] },
       "/jobs": { jobs: [] },
       "/settings": { settings: [{ key: "AUTO_IMPORT", value: "trusted" }], warnings: [] },
-      "/volumes/v1/close": { status: "ok" },
     });
     renderHome();
 
-    await userEvent.click(await screen.findByRole("button", { name: "取り外す" }));
+    expect(await screen.findByText("対象外の理由: 不明")).toBeInTheDocument();
+  });
+
+  // **数える前の 0 件は「空」ではない**（§1）。挿した直後のカードを「取り込む
+  // ものはありません」と断定すると、自動スキャンが終わるまで画面が嘘をつく。
+  it("まだ数えていないカードを、空だとは書かない", async () => {
+    stubHome({
+      "/dashboard": EMPTY_DASHBOARD,
+      "/devices": {
+        volumes: [{ ...actionableVolume, pending_count: 0, scanned_at: null }],
+      },
+      "/jobs": { jobs: [] },
+      "/settings": { settings: [{ key: "AUTO_IMPORT", value: "trusted" }], warnings: [] },
+    });
+    renderHome();
+
+    expect(await screen.findByText("中身を数えています。")).toBeInTheDocument();
+    expect(screen.queryByText("取り込むものはありません。")).toBeNull();
+    // 抜いていいかは、押さずに読める（§3）。
+    expect(screen.getByText("いま抜いて大丈夫です。")).toBeInTheDocument();
+  });
+
+  // **信頼は許可なので、確認を取ってから記録する**（§12.1）。同じ札に置いても、
+  // 押した先が確認を飛ばしてしまえば意味が無い。
+  it("「このカードを信頼する」は、確認を取ってから信頼する", async () => {
+    const api = stubHome({
+      "/dashboard": EMPTY_DASHBOARD,
+      "/devices": { volumes: [{ ...actionableVolume, trusted: false }] },
+      "/jobs": { jobs: [] },
+      "/settings": { settings: [{ key: "AUTO_IMPORT", value: "trusted" }], warnings: [] },
+      "/volumes/v1/trust": { status: "ok" },
+    });
+    renderHome();
+
+    await userEvent.click(await screen.findByRole("button", { name: "このカードを信頼する" }));
+    // 同意の内容は、いま挿さっているこのカードに何が起きるかで書く。
+    const dialog = await screen.findByRole("dialog");
+    expect(dialog).toHaveTextContent("OSMO");
+    expect(api.calls().some((call) => call.path === "/volumes/v1/trust")).toBe(false);
+
+    await userEvent.click(screen.getByRole("button", { name: "実行する" }));
 
     await waitFor(() =>
       expect(
-        api.calls().some((call) => call.path === "/volumes/v1/close" && call.method === "POST"),
+        api.calls().some((call) => call.path === "/volumes/v1/trust" && call.method === "POST"),
       ).toBe(true),
     );
-    // **取り外した後は一覧を引き直す。** 叩いたところまでしか見ないと、
-    // 画面が古いカードを出したままでも気付けない。
+    // 信頼したら一覧を引き直す（札の見え方が変わる）。
     await waitFor(() =>
       expect(api.calls().filter((call) => call.path === "/devices").length).toBeGreaterThan(1),
     );
+  });
+
+  // **読めていない設定を `trusted` と仮定しない。** 何が起きるかを書けないまま
+  // 同意を取ることになる。
+  it("設定を読めていない間は、信頼を押させない", async () => {
+    stubHome({
+      "/dashboard": EMPTY_DASHBOARD,
+      "/devices": { volumes: [{ ...actionableVolume, trusted: false }] },
+      "/jobs": { jobs: [] },
+    });
+    renderHome();
+
+    expect(await screen.findByRole("button", { name: "このカードを信頼する" })).toBeDisabled();
+  });
+
+  // **集計だけが返ってきた時点で「ありません」と書かない。** カードの一覧が
+  // まだなら、次に何が出るかはまだ決まっていない。
+  it("カードの一覧を読んでいる間は、やることはありませんと書かない", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn((input: string) => {
+        const path = input.replace(/^\/api/, "");
+        if (path === "/devices") {
+          // 返ってこない経路。読み込み中のまま留める。
+          return new Promise(() => {});
+        }
+        const body =
+          {
+            "/dashboard": { ...EMPTY_DASHBOARD, orphans: 3 },
+            "/jobs": { jobs: [] },
+            "/settings": { settings: [], warnings: [] },
+            "/profiles": { profiles: [] },
+          }[path] ?? {};
+        return Promise.resolve(new Response(JSON.stringify(body), { status: 200 }));
+      }),
+    );
+    renderHome();
+
+    // 集計は届いている（届いたことが読み取れる行で確かめる）。
+    await screen.findByText(/どこにも結び付いていないファイル 3 件/);
+    expect(screen.getByText("読み込み中…")).toBeInTheDocument();
+    expect(screen.queryByText("いま、やることはありません")).toBeNull();
+  });
+
+  // **競合に備えた 2 重目の錠**（§1）。別のタブから取り込みが始まっていて、
+  // まだこの画面の作業一覧に現れていない間も、同じカードを掴ませない。
+  it("掴まれているカードは、札が残っていても取り込ませない", async () => {
+    stubHome({
+      "/dashboard": EMPTY_DASHBOARD,
+      "/devices": { volumes: [{ ...actionableVolume, busy: true }] },
+      "/jobs": { jobs: [] },
+      "/settings": { settings: [{ key: "AUTO_IMPORT", value: "trusted" }], warnings: [] },
+    });
+    renderHome();
+
+    expect(await screen.findByRole("button", { name: "いま取り込む" })).toBeDisabled();
+    expect(screen.getByText("作業中です。終わるまで抜かないでください。")).toBeInTheDocument();
   });
 
   it("ラベルが無いカードが複数あると、見出しを連番で見分けられるようにする", async () => {
@@ -405,12 +528,68 @@ describe("ホーム", () => {
     });
     renderHome();
 
-    expect(
-      await screen.findByText("名前の無いカード 1 のカードが挿さっています"),
-    ).toBeInTheDocument();
-    expect(
-      screen.getByText("名前の無いカード 2 のカードが挿さっています"),
-    ).toBeInTheDocument();
+    expect(await screen.findByText("名前の無いカード 1 から 38 件を取り込む")).toBeInTheDocument();
+    expect(screen.getByText("名前の無いカード 2 から 38 件を取り込む")).toBeInTheDocument();
+  });
+
+  // **実機で出た場面そのもの。** カードが挿さっていて、集計はすべて 0 だった。
+  // カードを「状態」ではなく「仕事」として扱うので、帯と空表示が同時に出ることは
+  // 形の上で起こらない。
+  it("カードが挿さっている場面で「やることはありません」と書かない", async () => {
+    stubHome({
+      "/dashboard": EMPTY_DASHBOARD,
+      "/devices": { volumes: [actionableVolume] },
+      "/jobs": { jobs: [] },
+      "/settings": { settings: [{ key: "AUTO_IMPORT", value: "trusted" }], warnings: [] },
+    });
+    renderHome();
+
+    expect(await screen.findByText(/38 件を取り込む/)).toBeInTheDocument();
+    expect(screen.queryByText("いま、やることはありません")).not.toBeInTheDocument();
+  });
+
+  // **押せてしまう問題を、ボタンごと消して塞ぐ。** 取り込みが走っているカードは
+  // 「いま動いていること」の側で見えているので、「やること」には出ない。
+  it("取り込みが走っている間は、取り込むボタンを出さない", async () => {
+    stubHome({
+      "/dashboard": EMPTY_DASHBOARD,
+      "/devices": { volumes: [{ ...actionableVolume, busy: true }] },
+      "/jobs": {
+        jobs: [
+          {
+            id: "j1",
+            type: "import",
+            status: "running",
+            created_at: "2026-08-24T00:00:00Z",
+            volume_instance_id: "v1",
+          },
+        ],
+      },
+      "/settings": { settings: [{ key: "AUTO_IMPORT", value: "trusted" }], warnings: [] },
+    });
+    renderHome();
+
+    expect(await screen.findByText("取り込み")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "いま取り込む" })).not.toBeInTheDocument();
+    // どのカードの作業かは、見出しに添える（§1）。
+    expect(screen.getByText("OSMO")).toBeInTheDocument();
+  });
+
+  it("待機中の作業も残らず出す", async () => {
+    stubHome({
+      "/dashboard": EMPTY_DASHBOARD,
+      "/devices": { volumes: [] },
+      "/jobs": {
+        jobs: [
+          { id: "a", type: "import", status: "running", created_at: "2026-08-24T00:00:00Z" },
+          { id: "b", type: "detect_groups", status: "queued", created_at: "2026-08-24T00:00:01Z" },
+        ],
+      },
+    });
+    renderHome();
+
+    expect(await screen.findByText("取り込み")).toBeInTheDocument();
+    expect(screen.getByText("候補の検出")).toBeInTheDocument();
   });
 
   it("「中身を見る」を押すと、カードの中身のページへ行く（裁定 30）", async () => {
@@ -467,10 +646,9 @@ describe("ホーム", () => {
     expect(screen.getByText(/DJI_0043\.MP4/)).toBeInTheDocument();
   });
 
-  // 「いま取り込む」は スキャン → コピー → 候補の検出 の 3 本を積む。一覧は
-  // 新しい順なので、先頭から「動いているもの」を拾うと**最後に積んだ待機中**を
-  // 掴み、コピーの間ずっと「候補の検出・待機中」を出してしまう（進捗も出ない）。
-  it("待っている作業より、動いている作業を出す", async () => {
+  // 「いま取り込む」は スキャン → コピー → 候補の検出 の 3 本を積む。**1 本だけ
+  // 選ぶと残りが画面から消える**ので、全部出したうえで動いているものを先に置く。
+  it("動いている作業を先に置き、待っている作業も消さない", async () => {
     stubHome({
       "/dashboard": EMPTY_DASHBOARD,
       "/devices": { volumes: [] },
@@ -502,11 +680,14 @@ describe("ホーム", () => {
     });
     renderHome();
     await waitFor(() => expect(screen.getByText("取り込み")).toBeInTheDocument());
-    expect(screen.queryByText("候補の検出")).toBeNull();
+    expect(screen.getByText("候補の検出")).toBeInTheDocument();
     expect(screen.getByText(/12\/87 件/)).toBeInTheDocument();
+    // 動いているものが先。**並び順は一覧の順ではなく、この画面が決める。**
+    const titles = screen.getAllByRole("heading", { level: 3 }).map((node) => node.textContent);
+    expect(titles).toEqual(["取り込み", "候補の検出"]);
   });
 
-  it("中止するのは、いま出している作業", async () => {
+  it("中止するのは、そのボタンが乗っている作業", async () => {
     // 出しているのと違う作業を止めると、コピーは走り続けたまま別の予定が消える。
     const api = stubHome({
       "/dashboard": EMPTY_DASHBOARD,
@@ -527,7 +708,9 @@ describe("ホーム", () => {
       "/jobs/j2/cancel": { status: "ok" },
     });
     renderHome();
-    await userEvent.click(await screen.findByRole("button", { name: "中止する" }));
+    // 動いているものが先に並ぶので、先頭のボタンは走っているコピーのもの。
+    await screen.findByText("取り込み");
+    await userEvent.click(screen.getAllByRole("button", { name: "中止する" })[0]);
     await waitFor(() =>
       expect(api.calls().some((call) => call.path === "/jobs/j2/cancel")).toBe(true),
     );
@@ -537,7 +720,7 @@ describe("ホーム", () => {
     );
   });
 
-  it("まだどれも動いていなければ、次に走る作業を出す", async () => {
+  it("まだどれも動いていなければ、次に走る作業から順に出す", async () => {
     stubHome({
       "/dashboard": EMPTY_DASHBOARD,
       "/devices": { volumes: [] },
@@ -550,7 +733,9 @@ describe("ホーム", () => {
     });
     renderHome();
     await waitFor(() => expect(screen.getByText("スキャン")).toBeInTheDocument());
-    expect(screen.queryByText("候補の検出")).toBeNull();
+    expect(screen.getByText("候補の検出")).toBeInTheDocument();
+    const titles = screen.getAllByRole("heading", { level: 3 }).map((node) => node.textContent);
+    expect(titles).toEqual(["スキャン", "候補の検出"]);
   });
 
   // 裁定 8: 積んだまま送信が始まっていない `pending` は「まだ送っていない」から
