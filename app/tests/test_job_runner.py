@@ -2,7 +2,7 @@ import anyio
 import anyio.to_thread
 import pytest
 
-from mediaferry.db.jobs import JobStore
+from mediaferry.db.jobs import JobStore, LeaseLost
 from mediaferry.jobs.runner import JobRunner
 
 
@@ -266,3 +266,39 @@ async def test_a_handler_that_dies_holding_a_transaction_still_gets_a_verdict(db
 
     assert store.get(job_id)["status"] == "failed"
     assert [event["level"] for event in store.events(job_id)] == ["error"]
+
+
+@pytest.mark.anyio
+async def test_a_verdict_that_cannot_be_written_does_not_kill_the_worker(db, database, monkeypatch):
+    """決着そのものが書けなくても、次のジョブは走る.
+
+    `finish` は rowcount≠1 で `LeaseLost` を、`emit` は `BEGIN IMMEDIATE` の
+    待ちきれで送出しうる。ここから上がると `run_forever` を抜け、`api/app.py` の
+    裸の `create_task` の中で黙って死ぬ —— HTTP は生きたままジョブだけが二度と
+    走らなくなる。
+    """
+    store = JobStore(db)
+    settle = JobStore.finish_claimed
+    attempts = []
+
+    def break_the_first(self, job_id, token):
+        attempts.append(job_id)
+        if len(attempts) == 1:
+            raise LeaseLost("決着を書けない")
+        return settle(self, job_id, token)
+
+    monkeypatch.setattr(JobStore, "finish_claimed", break_the_first)
+
+    runner = JobRunner(database, poll_interval=0.01)
+    runner.register("scan", lambda ctx, conn: None)
+    store.enqueue("scan", {})
+    later = store.enqueue("scan", {})
+
+    async with anyio.create_task_group() as tg:
+        tg.start_soon(runner.run_forever)
+        with anyio.fail_after(5):
+            while store.get(later)["status"] in {"queued", "running"}:
+                await anyio.sleep(0.01)
+        await runner.stop()
+
+    assert store.get(later)["status"] == "succeeded", "決着が書けないとワーカーが死ぬ"

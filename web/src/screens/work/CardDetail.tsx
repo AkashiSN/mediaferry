@@ -17,6 +17,8 @@ import { ConfirmDialog, type Confirmation } from "../../components/ConfirmDialog
 import { ErrorBanner } from "../../components/ErrorBanner";
 import { Icon } from "../../components/Icon";
 import type { CardView } from "../../hooks/homeSections";
+import { useEventCount } from "../../hooks/useEvents";
+import { useReloadOnEvents } from "../../hooks/useReloadOnEvents";
 import { formatBytes } from "../../utils/formatBytes";
 
 /** カード 1 枚（`GET /devices` の 1 要素）。**判定関数がここにあるので、型もここに
@@ -170,6 +172,11 @@ export function CardDetailScreen() {
   const devices = useQuery<Devices>("/devices");
   const settings = useQuery<Settings>("/settings");
   const profiles = useQuery<Profiles>("/profiles");
+  // **「抜いていいか」は断定文なので、更新され続けなければならない**（§13）。
+  // 出所は `/devices` の `busy` で、押した取り込みが終わったことは進捗の知らせ
+  // でしか届かない。**数だけを見る購読を使う** —— この画面はイベントの中身を
+  // 読まないので、`useEvents` を呼ぶと読まない 200 件の控えを持つことになる。
+  useReloadOnEvents(useEventCount(), devices.reload);
   const card = useMutation();
   const [confirming, setConfirming] = useState<{ confirmation: Confirmation; id: string } | null>(
     null,

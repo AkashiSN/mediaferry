@@ -1,11 +1,13 @@
 // カードの中身（§13）。判定結果・確度・信頼登録の同意を、複数ボリュームが
 // 並ぶ前提で見る。
 
-import { render, screen, waitFor } from "@testing-library/react";
+import { act, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { MemoryRouter, Route, Routes } from "react-router-dom";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
+import { SETTLE_MS } from "../../hooks/useReloadOnEvents";
+import { emitJob } from "../../test/setup";
 import { CardDetailScreen } from "./CardDetail";
 
 beforeEach(() => {
@@ -13,6 +15,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  vi.useRealTimers();
   vi.restoreAllMocks();
 });
 
@@ -107,6 +110,38 @@ describe("カードの信頼登録", () => {
     renderCardDetail();
 
     expect(await screen.findByText(/抜かないでください/)).toBeInTheDocument();
+  });
+
+  // **断定文は、更新され続けなければならない**（§13）。この画面は「取り込む」を
+  // 押した人がそのまま見ている場所なので、終わったことが届かないと「作業中です。
+  // 終わるまで抜かないでください。」を永久に読み続ける（押せば答えが出るボタンを
+  // 消した以上、退行になる）。
+  it("作業が終わったら、押さなくても抜いていいと言う", async () => {
+    vi.useFakeTimers();
+    stubDevices([{ ...base, busy: true }]);
+    renderCardDetail();
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(100);
+    });
+    expect(screen.getByText(/抜かないでください/)).toBeInTheDocument();
+
+    // サーバ側では作業が終わってカードを離した。合図は進捗の知らせで届く。
+    stubDevices([{ ...base, busy: false }]);
+    act(() => {
+      emitJob({
+        job_id: "j1",
+        seq: 1,
+        level: "info",
+        message: "取り込み完了: 3 件 / スキップ 0 件 / 失敗 0 件",
+        data: null,
+        at: "2026-08-24T00:00:05Z",
+      });
+    });
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(SETTLE_MS + 100);
+    });
+
+    expect(screen.getByText("いま抜いて大丈夫です。")).toBeInTheDocument();
   });
 
   it("何も起きないボタンを置かない", async () => {

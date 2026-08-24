@@ -720,10 +720,34 @@ describe("ホーム", () => {
     expect(screen.getByText("いま抜いて大丈夫です。")).toBeInTheDocument();
   });
 
+  // **拍で `/devices` を叩かない。** `GET /devices` はブローカーへの問い合わせと
+  // マウントを伴う（`jobs/volumes.py` の `_probe`）ので、2 秒ごとに叩くと、カードを
+  // 挿している限りマウントとアンマウントが続く。
+  //
+  // **走っている区間を測る。** 拍が回っているのはここだけなので、止まった後だけを
+  // 見ていると、拍に `/devices` を積んでも誰も気づかない。
+  it("走っている作業があっても、カードの一覧は拍で取り直さない", async () => {
+    vi.useFakeTimers();
+    const api = stubHome(busyCard);
+    renderHome();
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(100);
+    });
+    const before = api.calls().filter((call) => call.path === "/devices").length;
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(6000);
+    });
+
+    // 拍そのものは回っている（`/jobs` は増える）。増えないのは `/devices` だけ。
+    expect(api.calls().filter((call) => call.path === "/jobs").length).toBeGreaterThan(1);
+    expect(api.calls().filter((call) => call.path === "/devices")).toHaveLength(before);
+  });
+
   // **知らせが届かなくても切り替わる**（§13）。走っている作業が空になった縁で
-  // 一度だけ取り直す。**拍のたびには叩かない** —— `/devices` はブローカーへの
-  // 問い合わせを伴うので、2 秒ごとに叩くと、カードを挿している限りマウントと
-  // アンマウントが続く（`jobs/watcher.py`）。
+  // 一度だけ取り直す。**拍のたびには叩かない** —— `/devices` の `_probe` は候補
+  // ごとに実際にマウントするので、2 秒ごとに叩くと、カードを挿している限り
+  // マウントとアンマウントが続く（`jobs/volumes.py`）。
   it("走っている作業が無くなったら、抜いていいかを取り直す", async () => {
     vi.useFakeTimers();
     stubHome(busyCard);

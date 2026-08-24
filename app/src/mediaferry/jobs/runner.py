@@ -100,15 +100,23 @@ class JobRunner:
             failure = exc
         finally:
             self._current = None
-            if conn.in_transaction:  # pragma: no cover - 取りこぼしの検出用
+            if conn.in_transaction:
                 logger.error("ジョブ %s がトランザクションを開いたまま終わった", ctx.job_id)
                 conn.execute("ROLLBACK")
             conn.close()
-        if failure is not None:
-            self._fail(poll_store, ctx, str(failure))
-            return
-        # 状態の読み出しと決着を分けると、その間の cancel が上書きされる。
-        poll_store.finish_claimed(ctx.job_id, ctx.lease_token)
+        # **決着そのものでもワーカーを落とさない。** `finish` は rowcount≠1 で
+        # `LeaseLost` を、`emit` は `BEGIN IMMEDIATE` の待ちきれで送出しうる。
+        # ここから上がると `run_forever` を抜け、`api/app.py` の裸の
+        # `create_task` の中で黙って死ぬ —— HTTP は生きたままジョブだけが
+        # 二度と走らなくなる。
+        try:
+            if failure is not None:
+                self._fail(poll_store, ctx, str(failure))
+                return
+            # 状態の読み出しと決着を分けると、その間の cancel が上書きされる。
+            poll_store.finish_claimed(ctx.job_id, ctx.lease_token)
+        except Exception:  # noqa: BLE001 - 決着が書けなくてもワーカーは生かす
+            logger.exception("ジョブ %s の決着を書けなかった", ctx.job_id)
 
     def _fail(self, store: JobStore, ctx: JobContext, reason: str) -> None:
         """失敗の決着を付け、**終わったことを合図として残す**.

@@ -13,6 +13,7 @@ import time
 import httpx
 import pytest
 
+from mediaferry.clock import iso, utcnow
 from mediaferry.db.connection import Database, immediate
 from mediaferry.db.jobs import JobStore
 
@@ -67,12 +68,16 @@ def _a_job_to_hang_events_on(conn) -> str:
     見るのは線の上の挙動だけ。`queued` のまま置くと、`params` の無い `scan` が
     実際に走って失敗し、その決着の合図（`jobs/runner.py`）が、ここで数える枠に
     同じ `job_id` で混ざる。**`BEGIN IMMEDIATE` の中で決着まで書く** ——
-    分けると、その隙間に `claim_next` が入りうる。
+    分けると、その隙間に `claim_next` が入りうる。**`finished_at` も入れる** ——
+    `request_cancel` は必ず入れるので、空のまま置くと本番に無い形の行になる。
     """
     store = JobStore(conn)
     with immediate(conn):
         job_id = store.enqueue("scan", {})
-        conn.execute("UPDATE job SET status = 'cancelled' WHERE id = ?", (job_id,))
+        conn.execute(
+            "UPDATE job SET status = 'cancelled', finished_at = ? WHERE id = ?",
+            (iso(utcnow()), job_id),
+        )
     return job_id
 
 
