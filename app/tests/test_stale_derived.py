@@ -7,12 +7,14 @@
 
 import pytest
 
+from mediaferry.clock import now_iso
 from mediaferry.db.media import MediaRepository
 from mediaferry.db.merges import GroupNotEditable
 from mediaferry.db.profiles import ProfileRegistry
 
 from .test_schema_artifacts import a_media_file, a_merge_group
 from .test_schema_sources import a_volume
+from .test_schema_uploads import a_destination, an_upload
 
 
 @pytest.fixture
@@ -180,3 +182,153 @@ def test_the_listing_hides_a_derived_with_no_owner(world, db, data_root):
     (data_root / rel).write_bytes(b"x")
     a_media_file(db, ref, rel_path=rel, role="derived")
     assert repo.list_stale_derived() == []
+
+
+# ----------------------------------------------------------------------
+# 消せない理由を 1 か所で決める（`deletion_blocker`）
+#
+# **一覧・詳細・DELETE の 3 つがこの 1 つの判定を使う。** 押しても 409 で断られる
+# ボタンを並べないため、規則を 2 か所に分けない。
+
+
+def test_a_derived_never_sent_can_be_deleted(world, db, data_root):
+    """一度も送っていない結合物は消せる."""
+    repo, _, ref = world
+    media_id, _, _ = a_derived_with_group(db, data_root, ref)
+    assert repo.deletion_blocker(media_id) is None
+
+
+def test_a_derived_living_in_immich_is_kept(world, db, data_root):
+    """**Immich に実在するものは消せない.** 何を送ったのかが分からなくなる."""
+    repo, _, ref = world
+    media_id, _, _ = a_derived_with_group(db, data_root, ref)
+    dest = a_destination(db)
+    an_upload(
+        db,
+        dest,
+        media_id,
+        state="complete",
+        remote_asset_id="asset-1",
+        remote_is_trashed=0,
+        remote_checked_at=now_iso(),
+        destination_revision_id=dest[1],
+    )
+    assert repo.deletion_blocker(media_id) == "Immich に入っている"
+
+
+def test_a_derived_in_the_immich_trash_can_be_deleted(world, db, data_root):
+    """**ゴミ箱は「無い」扱い**（利用者の判断）. Immich で捨てたのだから消せる."""
+    repo, _, ref = world
+    media_id, _, _ = a_derived_with_group(db, data_root, ref)
+    dest = a_destination(db)
+    an_upload(
+        db,
+        dest,
+        media_id,
+        state="complete",
+        remote_asset_id="asset-1",
+        remote_is_trashed=1,
+        remote_checked_at=now_iso(),
+        destination_revision_id=dest[1],
+    )
+    assert repo.deletion_blocker(media_id) is None
+
+
+def test_a_derived_that_vanished_from_immich_can_be_deleted(world, db, data_root):
+    """再確認でサーバに無いと分かった記録（`remote_asset_id` が外れている）."""
+    repo, _, ref = world
+    media_id, _, _ = a_derived_with_group(db, data_root, ref)
+    dest = a_destination(db)
+    an_upload(
+        db,
+        dest,
+        media_id,
+        state="complete",
+        remote_asset_id=None,
+        remote_checked_at=now_iso(),
+        destination_revision_id=dest[1],
+    )
+    assert repo.deletion_blocker(media_id) is None
+
+
+def test_an_unobserved_complete_is_kept(world, db, data_root):
+    """**「無い」には観測を要求する.**
+
+    `0007` を適用した DB には「向き先の記録が無い complete」が残っている。
+    **Immich に在るのに識別子を捨てただけ**かもしれないので消さない
+    （`POST /uploads/{id}/requeue` が同じ 2 列で選んでいるのと条件をそろえる）。
+    """
+    repo, _, ref = world
+    media_id, _, _ = a_derived_with_group(db, data_root, ref)
+    dest = a_destination(db)
+    an_upload(
+        db,
+        dest,
+        media_id,
+        state="complete",
+        remote_asset_id=None,
+        remote_checked_at=None,
+        destination_revision_id=dest[1],
+    )
+    assert repo.deletion_blocker(media_id) == "Immich にあるかどうかを確かめていない"
+
+
+def test_a_derived_being_sent_is_kept(world, db, data_root):
+    """送信中は決着していない."""
+    repo, _, ref = world
+    media_id, _, _ = a_derived_with_group(db, data_root, ref)
+    dest = a_destination(db)
+    an_upload(db, dest, media_id, state="pending")
+    assert repo.deletion_blocker(media_id) == "送信中か、確認を待っている記録がある"
+
+
+def test_an_invalidated_record_does_not_keep_a_derived(world, db, data_root):
+    """**無効化された記録は数えない**（§10）."""
+    repo, _, ref = world
+    media_id, _, _ = a_derived_with_group(db, data_root, ref)
+    dest = a_destination(db)
+    an_upload(
+        db,
+        dest,
+        media_id,
+        state="complete",
+        remote_asset_id="asset-1",
+        remote_is_trashed=0,
+        remote_checked_at=now_iso(),
+        destination_revision_id=dest[1],
+        invalidated_at=now_iso(),
+        invalidated_reason="試験",
+    )
+    assert repo.deletion_blocker(media_id) is None
+
+
+def test_an_original_can_never_be_deleted(world, db, data_root):
+    """カードから取り込んだ元ファイルは対象外."""
+    repo, _, ref = world
+    media_id = a_media_file(db, ref, role="original")
+    assert repo.deletion_blocker(media_id) == "取り込んだ元ファイルは消せない"
+
+
+def test_a_failed_record_does_not_keep_a_derived(world, db, data_root):
+    """送れなかった記録は、リモートに何も残していない."""
+    repo, _, ref = world
+    media_id, _, _ = a_derived_with_group(db, data_root, ref)
+    dest = a_destination(db)
+    an_upload(db, dest, media_id, state="failed", last_error="つながらない")
+    assert repo.deletion_blocker(media_id) is None
+
+
+def test_a_derived_whose_current_groups_member_is_being_sent_is_kept(world, db, data_root):
+    """出力自体は決着していても、元になった構成ファイルがまだ送信中なら消さない.
+
+    削除の実装（Task 2）は既存の `MergeRepository._assert_editable` を通り、
+    そこは構成ファイル（member）が送信中だと断る。ここで見ておかないと、
+    画面が「消せます」と言った直後に 409 になる。
+    """
+    repo, _, ref = world
+    media_id, group_id, _ = a_derived_with_group(db, data_root, ref)
+    member_id = a_media_file(db, ref, role="original")
+    db.execute("INSERT INTO merge_member VALUES (?, ?, 0, 1)", (group_id, member_id))
+    dest = a_destination(db)
+    an_upload(db, dest, member_id, state="pending")
+    assert repo.deletion_blocker(media_id) == "元になったファイルを送信中か、確認を待っている"

@@ -17,6 +17,42 @@ from pathlib import Path
 from .connection import immediate
 from .merges import GroupNotEditable
 
+# **「決着していない」送信状態の集合.** SQL と Python が同じ定義を使う
+# （`LIVING_REMOTE_CLAUSE` と `deletion_blocker` の member 側チェックの両方）。
+IN_FLIGHT_STATES = frozenset(
+    {
+        "pending",
+        "checking",
+        "uploading",
+        "asset_known",
+        "tagging",
+        "fixing_datetime",
+        "awaiting_datetime_approval",
+        "needs_recheck",
+    }
+)
+
+_IN_FLIGHT = ", ".join(f"'{state}'" for state in sorted(IN_FLIGHT_STATES))
+
+# **「Immich に生きている」記録の条件**（`upload_record u` に当てる）。
+# 消せるかの判定・詳細の応答・DELETE の 3 つがこの 1 つの定義を使う。**写しを作らない。**
+#
+# 3 つのどれかに当てはまれば「生きている」＝消させない。
+#
+#   * 決着していない（送信中・確認待ち）
+#   * 相手に実在する（識別子があり、ゴミ箱でもない）
+#   * **在るかどうかを観測していない**（`complete` なのに識別子も確認時刻も無い）
+#
+# **`remote_is_trashed` が NULL は「在る」側に倒す。** 観測していないだけで、
+# 無いことの証明ではない。
+LIVING_REMOTE_CLAUSE = (
+    "u.invalidated_at IS NULL AND ("
+    f" u.state IN ({_IN_FLIGHT})"
+    " OR (u.remote_asset_id IS NOT NULL AND coalesce(u.remote_is_trashed, 0) = 0)"
+    " OR (u.state = 'complete' AND u.remote_asset_id IS NULL"
+    "     AND u.remote_checked_at IS NULL))"
+)
+
 
 class MediaRepository:
     def __init__(self, conn: sqlite3.Connection, data_root: Path) -> None:
@@ -92,3 +128,61 @@ class MediaRepository:
         with contextlib.suppress(OSError):
             (self._data_root / rel_path).unlink()
         return rel_path
+
+    def deletion_blocker(self, media_file_id: str) -> str | None:
+        """消せない理由を返す（消せるなら `None`）.
+
+        **画面にそのまま出せる日本語を返す。** 押しても 409 で断られるボタンを
+        並べないため、一覧・詳細・DELETE がこの 1 つの判定を使う。
+
+        理由を 1 つに絞れるよう、当てはまりの強い順に見る。
+        """
+        row = self._conn.execute(
+            "SELECT role FROM media_file WHERE id = ?", (media_file_id,)
+        ).fetchone()
+        if row is None:
+            return "そのファイルは無い"
+        if row["role"] != "derived":
+            return "取り込んだ元ファイルは消せない"
+        for clause, reason in (
+            (
+                f"u.invalidated_at IS NULL AND u.state IN ({_IN_FLIGHT})",
+                "送信中か、確認を待っている記録がある",
+            ),
+            (
+                "u.invalidated_at IS NULL AND u.remote_asset_id IS NOT NULL"
+                " AND coalesce(u.remote_is_trashed, 0) = 0",
+                "Immich に入っている",
+            ),
+            (
+                "u.invalidated_at IS NULL AND u.state = 'complete'"
+                " AND u.remote_asset_id IS NULL AND u.remote_checked_at IS NULL",
+                "Immich にあるかどうかを確かめていない",
+            ),
+        ):
+            found = self._conn.execute(
+                f"SELECT 1 FROM upload_record u WHERE u.media_file_id = ? AND {clause}",  # noqa: S608
+                (media_file_id,),
+            ).fetchone()
+            if found is not None:
+                return reason
+        # **出力自体が決着していても、元になった構成ファイルがまだ送信中なら消さない.**
+        # 削除の実装は既存の `MergeRepository._assert_editable` を通り、そこは
+        # 現行グループの active な member が送信中だと断る。ここで見ておかないと、
+        # 画面が「消せます」と言った直後に 409 になる。
+        current_group = self._conn.execute(
+            "SELECT id FROM merge_group"
+            " WHERE output_media_file_id = ? AND superseded_by_id IS NULL AND status != 'skipped'",
+            (media_file_id,),
+        ).fetchone()
+        if current_group is not None:
+            member_in_flight = self._conn.execute(
+                "SELECT 1 FROM merge_member mm"  # noqa: S608
+                " JOIN upload_record u ON u.media_file_id = mm.media_file_id"
+                " WHERE mm.merge_group_id = ? AND mm.active = 1"
+                f"   AND u.invalidated_at IS NULL AND u.state IN ({_IN_FLIGHT})",
+                (current_group["id"],),
+            ).fetchone()
+            if member_in_flight is not None:
+                return "元になったファイルを送信中か、確認を待っている"
+        return None
