@@ -17,8 +17,8 @@ from pathlib import Path
 from .connection import immediate
 from .merges import GroupNotEditable
 
-# **「決着していない」送信状態の集合.** SQL と Python が同じ定義を使う
-# （`LIVING_REMOTE_CLAUSE` と `deletion_blocker` の member 側チェックの両方）。
+# **「決着していない」送信状態の集合.** `deletion_blocker` の出力側チェックと
+# member 側チェック、そして Python 側（`_presence` など）が同じ定義を使う。
 IN_FLIGHT_STATES = frozenset(
     {
         "pending",
@@ -33,25 +33,6 @@ IN_FLIGHT_STATES = frozenset(
 )
 
 _IN_FLIGHT = ", ".join(f"'{state}'" for state in sorted(IN_FLIGHT_STATES))
-
-# **「Immich に生きている」記録の条件**（`upload_record u` に当てる）。
-# 消せるかの判定・詳細の応答・DELETE の 3 つがこの 1 つの定義を使う。**写しを作らない。**
-#
-# 3 つのどれかに当てはまれば「生きている」＝消させない。
-#
-#   * 決着していない（送信中・確認待ち）
-#   * 相手に実在する（識別子があり、ゴミ箱でもない）
-#   * **在るかどうかを観測していない**（`complete` なのに識別子も確認時刻も無い）
-#
-# **`remote_is_trashed` が NULL は「在る」側に倒す。** 観測していないだけで、
-# 無いことの証明ではない。
-LIVING_REMOTE_CLAUSE = (
-    "u.invalidated_at IS NULL AND ("
-    f" u.state IN ({_IN_FLIGHT})"
-    " OR (u.remote_asset_id IS NOT NULL AND coalesce(u.remote_is_trashed, 0) = 0)"
-    " OR (u.state = 'complete' AND u.remote_asset_id IS NULL"
-    "     AND u.remote_checked_at IS NULL))"
-)
 
 
 class MediaRepository:

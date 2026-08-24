@@ -332,3 +332,22 @@ def test_a_derived_whose_current_groups_member_is_being_sent_is_kept(world, db, 
     dest = a_destination(db)
     an_upload(db, dest, member_id, state="pending")
     assert repo.deletion_blocker(media_id) == "元になったファイルを送信中か、確認を待っている"
+
+
+def test_an_invalidated_member_record_does_not_keep_a_derived(world, db, data_root):
+    """member 側も、無効化された記録は数えない（§10、出力側と同じ扱い）."""
+    repo, _, ref = world
+    media_id, group_id, _ = a_derived_with_group(db, data_root, ref)
+    member_id = a_media_file(db, ref, role="original")
+    db.execute("INSERT INTO merge_member VALUES (?, ?, 0, 1)", (group_id, member_id))
+    dest = a_destination(db)
+    an_upload(
+        db, dest, member_id, state="pending", invalidated_at=now_iso(), invalidated_reason="試験"
+    )
+    assert repo.deletion_blocker(media_id) is None
+
+
+def test_deletion_blocker_of_an_unknown_media_file(world, db, data_root):
+    """存在しない id はそもそも消せない."""
+    repo, _, _ = world
+    assert repo.deletion_blocker("no-such-id") == "そのファイルは無い"
