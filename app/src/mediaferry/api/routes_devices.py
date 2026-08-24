@@ -29,6 +29,9 @@ def list_devices(state=Depends(get_state)) -> dict[str, Any]:  # noqa: ANN001, B
                 "provisional": view.provisional,
                 "trusted": view.trusted,
                 "reason": view.reason,
+                "pending_count": view.pending_count,
+                "scanned_at": view.scanned_at,
+                "busy": view.busy,
             }
             for view in state.volumes.refresh()
         ]

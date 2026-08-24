@@ -362,3 +362,43 @@ def test_the_serial_alone_does_not_identify_the_device(db, broker):
     row = db.execute("SELECT * FROM source_device").fetchone()
     assert row["serial"] == "123456789ABCDEF"
     assert row["usb_product_id"] == "0020"
+
+
+def _seed_entries(db, volume_instance_id: str, states: list[str]) -> None:
+    """`scan` が作る行を、状態だけ指定して並べる."""
+    for index, state in enumerate(states):
+        db.execute(
+            "INSERT INTO source_entry (id, volume_instance_id, rel_path, size_bytes,"
+            " mtime_ns, quick_fingerprint, fingerprint_version, state, observed_at)"
+            " VALUES (?, ?, ?, 1, 1, 'x', 1, ?, '2026-08-24T00:00:00Z')",
+            (f"entry-{index}", volume_instance_id, f"DCIM/{index}.MP4", state),
+        )
+
+
+def test_a_card_nobody_counted_yet_is_told_apart_from_an_empty_one(db, broker):
+    """挿した直後は「0 件」ではなく「まだ数えていない」."""
+    view = service(db, broker).refresh()[0]
+    assert view.scanned_at is None
+    assert view.pending_count == 0
+
+
+def test_pending_counts_exactly_what_import_would_carry(db, broker):
+    svc = service(db, broker)
+    view = svc.refresh()[0]
+    _seed_entries(db, view.volume_instance_id, ["seen", "seen", "published", "failed"])
+    after = svc.refresh()[0]
+    # `Importer.run` が拾うのは seen と failed だけ。
+    assert after.pending_count == 3
+    assert after.scanned_at == "2026-08-24T00:00:00Z"
+
+
+def test_a_card_held_by_a_running_job_is_busy(db, broker):
+    svc = service(db, broker)
+    view = svc.refresh()[0]
+    assert view.selection is not None
+    svc.open(view.selection)
+    try:
+        assert svc.refresh()[0].busy is True
+    finally:
+        svc.release(view.selection)
+    assert svc.refresh()[0].busy is False
