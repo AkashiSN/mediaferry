@@ -494,7 +494,7 @@ poller の接続で書くようにした。落ちたハンドラは書き込み�
 | --- | --- |
 | **禁じた設計に錠が無い** | `Home.tsx` に `useJobPulse(working, devices.reload)`（＝拍で `/devices` も叩く形）を足しても、Home のテスト 44 本が全部通った。検査の窓が `working === false` の**後**、つまり**拍が止まっている区間**しか測っていなかった。走っている区間を測るテストを足した |
 | **決着がワーカーを生かす `try` の外へ出ていた** | `_fail` / `finish_claimed` は `finish` の `LeaseLost` と `emit` の待ちきれを送出しうる。`except Exception ... # どのジョブが落ちてもワーカーは生かす` の外にあると、`api/app.py` の裸の `create_task` の中で黙って死ぬ（HTTP は生きたままジョブだけが二度と走らない） |
-| **相互参照が誤り** | 「拍で `/devices` を叩くと mount/umount が続く」の出所を §12.1 と `jobs/watcher.py` の冒頭に帰していたが、どちらもその話をしていない。**本当の出所は §9.2 の判定と `jobs/volumes.py` の `_probe`**（「代償は『GET /devices のたびに mount / umount が走る』こと」）。3 か所直した |
+| **相互参照が誤り** | 「拍で `/devices` を叩くと mount/umount が続く」の出所を §12.1 と `jobs/watcher.py` の冒頭に帰していたが、どちらもその話をしていない。**本当の出所は §9.2 の判定と `jobs/volumes.py` の `_probe`**（「代償は『GET /devices のたびに mount / umount が走る』こと」）。**4 か所**（`docs/design.md` §13・`hooks/useReloadWhenSettled.ts`・`phase8-record.md`・`Home.test.tsx` のコメント）直した |
 | **§9.9 の文面が過大** | 「決着 → 合図」の順が守るのは `/jobs` の一覧の見え方だけで、`busy` は順序によらず既に偽（ハンドラが自分の `finally` で離す）。しかも成功の経路は同じ規則を守っていない（完了行は `finish_claimed` より先）。**失敗限定と明記した** |
 | **`# pragma: no cover` が古い** | 新しい `test_a_handler_that_dies_holding_a_transaction_still_gets_a_verdict` が実際にその分岐を通る |
 

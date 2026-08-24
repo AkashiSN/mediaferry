@@ -80,7 +80,7 @@ class JobRunner:
         row = poll_store.get(ctx.job_id)
         handler = self._handlers.get(row["type"])
         if handler is None:
-            self._fail(poll_store, ctx, f"未登録のジョブ種別: {row['type']}")
+            self._settle(poll_store, ctx, f"未登録のジョブ種別: {row['type']}")
             return
 
         conn = await asyncio.to_thread(self._database.connect)
@@ -104,17 +104,25 @@ class JobRunner:
                 logger.error("ジョブ %s がトランザクションを開いたまま終わった", ctx.job_id)
                 conn.execute("ROLLBACK")
             conn.close()
-        # **決着そのものでもワーカーを落とさない。** `finish` は rowcount≠1 で
-        # `LeaseLost` を、`emit` は `BEGIN IMMEDIATE` の待ちきれで送出しうる。
-        # ここから上がると `run_forever` を抜け、`api/app.py` の裸の
-        # `create_task` の中で黙って死ぬ —— HTTP は生きたままジョブだけが
-        # 二度と走らなくなる。
+        self._settle(poll_store, ctx, None if failure is None else str(failure))
+
+    def _settle(self, store: JobStore, ctx: JobContext, failure: str | None) -> None:
+        """決着を付ける. **終わり方によらず、ここを通す.**
+
+        **ここから例外を出さない。** `finish` は rowcount≠1 で `LeaseLost` を、
+        `emit` は `BEGIN IMMEDIATE` の待ちきれで送出しうる。ここから上がると
+        `run_forever` を抜け、`api/app.py` の裸の `create_task` の中で黙って
+        死ぬ —— HTTP は生きたままジョブだけが二度と走らなくなる。
+
+        **失敗の決着こそ危ない。** `finish` と `emit` の両方が乗る唯一の経路で、
+        しかもハンドラが既に落ちている場面で通る。
+        """
         try:
             if failure is not None:
-                self._fail(poll_store, ctx, str(failure))
+                self._fail(store, ctx, failure)
                 return
             # 状態の読み出しと決着を分けると、その間の cancel が上書きされる。
-            poll_store.finish_claimed(ctx.job_id, ctx.lease_token)
+            store.finish_claimed(ctx.job_id, ctx.lease_token)
         except Exception:  # noqa: BLE001 - 決着が書けなくてもワーカーは生かす
             logger.exception("ジョブ %s の決着を書けなかった", ctx.job_id)
 

@@ -1,3 +1,5 @@
+import sqlite3
+
 import anyio
 import anyio.to_thread
 import pytest
@@ -269,7 +271,9 @@ async def test_a_handler_that_dies_holding_a_transaction_still_gets_a_verdict(db
 
 
 @pytest.mark.anyio
-async def test_a_verdict_that_cannot_be_written_does_not_kill_the_worker(db, database, monkeypatch):
+async def test_a_success_verdict_that_cannot_be_written_does_not_kill_the_worker(
+    db, database, monkeypatch
+):
     """決着そのものが書けなくても、次のジョブは走る.
 
     `finish` は rowcount≠1 で `LeaseLost` を、`emit` は `BEGIN IMMEDIATE` の
@@ -302,3 +306,44 @@ async def test_a_verdict_that_cannot_be_written_does_not_kill_the_worker(db, dat
         await runner.stop()
 
     assert store.get(later)["status"] == "succeeded", "決着が書けないとワーカーが死ぬ"
+
+
+@pytest.mark.anyio
+async def test_a_failure_verdict_that_cannot_be_written_does_not_kill_the_worker(
+    db, database, monkeypatch
+):
+    """**失敗の決着こそ危ない。**
+
+    `finish` の `LeaseLost` と `emit` の待ちきれが両方乗る唯一の経路で、しかも
+    ハンドラが既に落ちている場面で通る。ここから例外が上がると `run_forever` を
+    抜け、`api/app.py` の裸の `create_task` の中で黙って死ぬ —— HTTP は生きた
+    ままジョブだけが二度と走らなくなる。
+    """
+    store = JobStore(db)
+    announce = JobStore.emit
+    attempts = []
+
+    def break_the_first(self, job_id, level, message, data=None):
+        attempts.append(job_id)
+        if len(attempts) == 1:
+            raise sqlite3.OperationalError("database is locked")
+        return announce(self, job_id, level, message, data)
+
+    monkeypatch.setattr(JobStore, "emit", break_the_first)
+
+    def boom(ctx, conn):
+        raise RuntimeError("ffprobe が見つからない")
+
+    runner = JobRunner(database, poll_interval=0.01)
+    runner.register("scan", boom)
+    store.enqueue("scan", {})
+    later = store.enqueue("scan", {})
+
+    async with anyio.create_task_group() as tg:
+        tg.start_soon(runner.run_forever)
+        with anyio.fail_after(5):
+            while store.get(later)["status"] in {"queued", "running"}:
+                await anyio.sleep(0.01)
+        await runner.stop()
+
+    assert store.get(later)["status"] == "failed", "失敗の決着が書けないとワーカーが死ぬ"
