@@ -82,6 +82,17 @@ describe("ホームの導出", () => {
     expect(todo).toEqual([]);
   });
 
+  // **サーバが実際に作れる組み合わせ。** 中身が空のカードもスキャンが終われば
+  // `scanned_at` が入り、`pending_count` は 0 のまま（`source_entry` は 1 行も
+  // できない）。この枝が到達不能だと、ホームだけが「中身を数えています。」を
+  // 出し続け、「カードの中身」と食い違う。
+  it("数えた上で中身がまだ無いカードは、中身が無い側に出る", () => {
+    const card = { ...CARD, pending_count: 0, provisional: true };
+    const { standing, todo } = homeSections({ cards: [card], jobs: [], counts: NONE });
+    expect(standing).toEqual([{ card, kind: "no_contents" }]);
+    expect(todo).toEqual([]);
+  });
+
   it("数えた上で残りが無いカードは、抜いていい側に出る", () => {
     const card = { ...CARD, pending_count: 0 };
     const { standing } = homeSections({ cards: [card], jobs: [], counts: NONE });

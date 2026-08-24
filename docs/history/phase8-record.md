@@ -18,7 +18,7 @@
 | Python のテスト | **1486 passed, 5 deselected**（4 分 05 秒） | `PYTHONDONTWRITEBYTECODE=1 uv run pytest` |
 | 画面のテスト | **489 passed / 25 ファイル** | `npm --prefix web run test` |
 | 受け入れ（実ブラウザ） | **16**（`journey` 14・`phase5` 1・`phase6` 1）。**1.1 分で全通** | `npm --prefix web run test:e2e` |
-| マイグレーション | **1 本**（`0020_auto_scan.sql`。`volume_presence.auto_scan_at` 1 列） | — |
+| マイグレーション | **1 本**（`0020_auto_scan.sql`。`volume_presence.auto_scan_at` 1 列）。**この後のレビューで `0021_volume_scanned_at.sql` が加わり 2 本**（下記） | — |
 
 Task 10（この記録の手番）が足したのは **テスト 7 本と表明 2 つ**で、実装は
 1 行も変えていない（Python 1480 → **1486**、画面 488 → **489**）。
@@ -348,6 +348,57 @@ Task 9 の修正ラウンドで `docs/development.md` の持ち越しに 1 行�
 6 通り並べて `doing + todo + standing > 0` を見るだけの 5 行で、**画面を描かずに
 設計の芯を守っている**。E2E の錠（`toHaveCount(0)`）は同じことを実ブラウザで
 1 行で見る。
+
+## ブランチ全体のレビューで直した 1 件（マージを止めていた）
+
+**中身が空のカードが、ホームで「中身を数えています。」から永久に出られなかった**
+（`main` からの後退）。`scanned_at` を `max(source_entry.observed_at)` から導いて
+いたが、`Scanner` はプロファイルに一致した行しか作らないので、**中身が空のカードは
+スキャンが完全に成功しても行が 0 件**で `scanned_at` が `NULL` のままだった。その
+カードのために書かれた `no_contents` の枝（「〜の対象ですが、取り込む中身がまだ
+ありません。」）は**到達不能**で、`work/CardDetail.tsx` はいまもそう出しているので、
+**ホームと「カードの中身」が同じカードについて別のことを言っていた** —— この
+ブランチが消すために作られた欠陥の型そのもの。緑のテストが
+`provisional → no_contents` を通していたのは、**テストが `scanned_at` に非 NULL を
+手で書いていた**から（サーバがその組み合わせを作れるのは「昔はファイルがあって
+消された」カードだけだった）。
+
+**直し方は「数えたか」を行数から推測するのをやめること。** `volume_instance` に
+`scanned_at` 列を足し（`0021`）、`Scanner.scan` が最後まで走ったときに書く
+（`db/sources.py::mark_scanned`）。`pending_count` は `source_entry` から数えるまま。
+
+- **書く場所は `Scanner` にした。** レビューの提案は `api/jobs_wiring.py` の
+  `run_scan` だったが、Scanner に置くと「中身が空のカードを数えた」場面を
+  `test_scanner.py` で**監視役の自動スキャンと競合せずに**作れるうえ、配線の行
+  （両端が試験されていても抜ける真ん中）を増やさない
+- **キャンセルされたスキャンには書かない。** 途中で降りたのに書くと、1 件も見て
+  いないカードに「取り込むものはありません。」と書くことになる（**失敗した
+  スキャンで `NULL` のままになる**ことの帰結は `../development.md` の持ち越しへ）
+- **既存の DB は埋め戻す。** 列を足すだけだと、数え終えていたカードも更新した
+  瞬間に「まだ数えていない」に見える（`0017` / `0018` と同じ形の落ち）
+- **`test_the_scan_time_is_the_latest_one` は役目を終えたので消した。** 守って
+  いたのは `max(observed_at)` で、その導出そのものが無くなった。代わりに
+  `test_the_rows_of_a_scan_are_not_the_proof_that_it_ran`（行があっても「数えた」に
+  ならない・`volume_instance` の値がそのまま出る）を置いた。埋め戻しが「最後に
+  数えた時刻」を採ることは `test_db_migrate.py` 側で見ている
+
+**併せて直した小さいもの。** watcher が積む `detect_groups` の params を実行側と
+同じ `_profile_ref` で読み戻すテスト（誤字があれば「claim された瞬間に `KeyError`
+で死ぬジョブ」が出荷される。種類だけを見る既存のテストでは通る）、watcher のログに
+ジョブの種類（3 種類が 1 行を共有していた）、`sendable_totals` の docstring
+（「条件は `claim_next` と同じ」は文字通り偽 —— `claim_next` は期限の条件を足す。
+指す集合は一致するが、**片側だけに条件を足す人がこの一文を信じる**）。
+
+### カードの振り分け順の食い違い（等価）
+
+`phase8-design.md` §1 は `pending_count` を `scanned_at` より先に見る順で書いて
+いるが、`../design.md` §13 は `scanned_at` が先。**`scanned_at` を行から導いていた
+間は厳密に等価だった**（行が 1 つでもあれば `max(observed_at)` は非 NULL なので、
+`scanned_at` が NULL なら `pending_count` は必ず 0）。上の修正で出所が変わったので、
+**中断したスキャンだけは行がありながら NULL** になりうる —— そのときの答えは §13 の
+順（「中身を数えています。」＝数え終わっていないので残数を信じない）で、実装
+（`web/src/hooks/homeSections.ts`）とテストもそちら。**正本は §13。**
+`phase8-design.md` は当時の記録なので書き換えない。
 
 ## 実機で見ること
 

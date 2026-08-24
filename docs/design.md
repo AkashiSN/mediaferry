@@ -456,7 +456,7 @@ SQLite（WAL モード、`busy_timeout` 設定、書き込みは単一ワーカ�
 | テーブル | 主なカラム |
 | --- | --- |
 | `source_device` | `id`, `usb_vendor_id`, `usb_product_id`, `usb_product`, `serial`, `first_seen_at`, `last_seen_at` |
-| `volume_instance` | `id`(内部 UUID), `fs_uuid`, `fs_type`, `fs_label`, `size_bytes`, `identity_confidence`, `content_manifest_digest`, `last_source_device_id`, `profile_id`, `profile_revision_id`, `trusted_at`, `first_seen_at`, `last_seen_at` |
+| `volume_instance` | `id`(内部 UUID), `fs_uuid`, `fs_type`, `fs_label`, `size_bytes`, `identity_confidence`, `content_manifest_digest`, `last_source_device_id`, `profile_id`, `profile_revision_id`, `trusted_at`, `scanned_at`, `first_seen_at`, `last_seen_at` |
 | `volume_presence` | `id`, `volume_instance_id`, `generation`, `device_node`, `major`, `minor`, `sysfs_path`, `attached_at`, `detached_at` |
 | `source_entry` | `id`, `volume_instance_id`, `rel_path`, `size_bytes`, `mtime_ns`, `quick_fingerprint`, `fingerprint_version`, `media_file_id`, `state`, `observed_at` |
 
@@ -1570,7 +1570,7 @@ claim では **(a) を必ず評価し、`selection_rule` に対応する現在�
 
 | メソッド | パス | 内容 |
 | --- | --- | --- |
-| GET | `/devices` | 接続中デバイスとボリューム、プロファイル判定結果、確度、信頼状態。加えて **`pending_count`**（取り込む残りの件数。`importer` が取り込む対象と**同じ条件**を 1 つの定数から使って数える）・**`scanned_at`**（一度も数えていないカードを見分ける。§13）・**`busy`**（そのカードを掴んでいる作業があるか＝「抜いていいか」の答え） |
+| GET | `/devices` | 接続中デバイスとボリューム、プロファイル判定結果、確度、信頼状態。加えて **`pending_count`**（取り込む残りの件数。`importer` が取り込む対象と**同じ条件**を 1 つの定数から使って数える）・**`scanned_at`**（一度も数えていないカードを見分ける。§13。**スキャンが最後まで走ったときに `volume_instance` へ記録する事実**で、数えた結果からは導かない —— 一致するファイルが無いカードは `source_entry` を 1 行も作らないので、行から導くと**中身が空のカードが永久に「まだ数えていない」になる**）・**`busy`**（そのカードを掴んでいる作業があるか＝「抜いていいか」の答え） |
 | POST | `/volumes/{id}/trust` | ボリュームインスタンスを信頼登録する |
 | POST | `/volumes/{id}/scan` | スキャン |
 | POST | `/volumes/{id}/import` | 取り込みジョブを開始 |
@@ -1904,6 +1904,13 @@ cross-origin の redirect でもカスタムヘッダを剥がさない。** 誤
 ので、**「取り込むものはありません」とは書かない** —— 数える前の 0 件は「空」では
 なく、断定すると数え終わるまでの間、画面が嘘をつく。数えたうえで残りが無いときだけ
 「ありません」と書く。
+
+**中身が空のカードも、数え終われば 3 から出る。** 「数えたか」はスキャンが最後まで
+走った事実（§11 の `scanned_at`）で、**数えた結果の件数ではない** —— 件数から導くと、
+一致するファイルが 1 件も無いカード（撮影前の内蔵ストレージ。DJI は SD カードと同時に
+見せる）はスキャンが成功しても「中身を数えています。」から永久に出られず、5 の
+「対象だが中身がまだ無い」に**到達できない**。ホームと「カードの中身」が同じカードに
+ついて別のことを言うのは、この画面がいちばん避けているものである。
 
 **取り込み中のカードの「いま取り込む」は押せない。** 走り出した札は「やること」から
 消えるので、ふつうはボタンごと無い。別のタブから押された競合に備えて、**その

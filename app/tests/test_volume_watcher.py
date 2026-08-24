@@ -18,6 +18,7 @@ import threading
 
 import pytest
 
+from mediaferry.api.jobs_wiring import _profile_ref
 from mediaferry.db.jobs import JobStore
 from mediaferry.db.profiles import ProfileRegistry
 from mediaferry.jobs.watcher import VolumeWatcher
@@ -550,6 +551,32 @@ def test_the_automatic_path_also_looks_for_split_videos(watcher, db, volumes):
     assert job_types(db)[-2:] == ["import", "detect_groups"]
 
 
+def test_the_detect_groups_params_are_what_the_runner_reads(watcher, db, volumes):
+    """積んだ params を、実行側と同じ関数（`_profile_ref`）で読み戻す.
+
+    **種類だけを見ていると、欄の名前を 1 つ書き違えても通る** —— 出荷される
+    のは「claim された瞬間に `KeyError` で死ぬジョブ」で、自動の経路が丸ごと
+    止まる。
+    """
+    a_known_card(watcher, volumes)
+    trust_the_card(db)
+    watcher.tick()
+    params = json.loads(
+        db.execute("SELECT params_json FROM job WHERE type = 'detect_groups'").fetchone()[
+            "params_json"
+        ]
+    )
+
+    profile = _profile_ref(db, params)
+
+    current = ProfileRegistry(db).current("dji-osmo")
+    assert (profile.profile_id, profile.revision_id) == (
+        current.profile_id,
+        current.revision_id,
+    )
+    assert profile.definition.slug == "dji-osmo"
+
+
 def test_one_tick_queues_them_in_the_order_they_must_run(watcher, db, volumes):
     """数えてから運ぶ。逆だと `import` は空の `source_entry` を読む."""
     a_known_card(watcher, volumes)
@@ -675,6 +702,32 @@ def test_every_enqueued_job_is_written_to_the_log(watcher, db, caplog):
     assert len(logged) == len(enqueued)
     for job_id in enqueued:
         assert any(job_id in line for line in logged), f"{job_id} が記録に出ていない"
+
+
+def test_the_log_says_which_kind_of_job_it_queued(watcher, db, volumes, caplog):
+    """id だけでは、3 種類のどれを積んだのか読めない.
+
+    1 行を `scan` / `import` / `detect_groups` の 3 つで共有しているので、
+    種類が無いと「積んだのに走らない」を追うのに DB を引くしかない。
+    **この不具合（watcher が `scan` を積まない）は実機のログから見つかった。**
+    """
+    a_known_card(watcher, volumes)
+    trust_the_card(db)
+    watcher.tick()
+    db.execute("DELETE FROM job")
+    db.commit()
+    with caplog.at_level(logging.INFO, logger="mediaferry.jobs.watcher"):
+        reinsert(watcher, volumes)
+
+    logged = [
+        record.getMessage() for record in caplog.records if "自動で積んだ" in record.getMessage()
+    ]
+    kinds = {row["id"]: row["type"] for row in db.execute("SELECT id, type FROM job")}
+    assert sorted(kinds.values()) == ["detect_groups", "import", "scan"]
+    for line in logged:
+        job_id = next(candidate for candidate in kinds if candidate in line)
+        assert kinds[job_id] in line, f"何を積んだのかが記録に出ていない: {line}"
+    assert len(logged) == len(kinds)
 
 
 def test_counting_is_marked_so_it_does_not_pile_up(watcher, db):

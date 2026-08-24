@@ -633,6 +633,42 @@ def test_a_group_discarded_before_the_change_gives_its_files_back(tmp_path):
     conn.close()
 
 
+def test_a_card_that_was_already_counted_stays_counted(tmp_path):
+    """`0021`。**版を足すだけでは、既に数え終えたカードが「未計測」に戻る.**
+
+    それまで「数えた時刻」は `source_entry.observed_at` の最大値から導いて
+    いた。列を足しただけでは既存の行は `NULL` なので、更新した瞬間にホームが
+    数え終わったカードにも「中身を数えています。」を出す。
+    """
+    from .test_schema_sources import a_volume
+
+    conn = Database(tmp_path / "old.sqlite3").connect()
+    apply_migrations(conn)
+    volume_id = a_volume(conn)
+    empty_id = a_volume(conn, fs_uuid="0000-0001")
+    for index, observed in enumerate(["2026-08-24T00:00:00Z", "2026-08-25T09:00:00Z"]):
+        conn.execute(
+            "INSERT INTO source_entry (id, volume_instance_id, rel_path, size_bytes, mtime_ns,"
+            " quick_fingerprint, fingerprint_version, state, observed_at)"
+            " VALUES (?, ?, ?, 1, 1, 'x', 1, 'published', ?)",
+            (f"e-{index}", volume_id, f"DCIM/{index}.MP4", observed),
+        )
+    # 0021 が入る前の DB へ戻す。
+    conn.execute("DELETE FROM schema_migration WHERE version = 21")
+    conn.execute("ALTER TABLE volume_instance DROP COLUMN scanned_at")
+
+    assert apply_migrations(conn) == [21]
+
+    rows = {row["id"]: row["scanned_at"] for row in conn.execute("SELECT * FROM volume_instance")}
+    # 最後に数えた時刻を引き継ぐ（いちばん古い方を採ると、数え直した直後の
+    # カードが「ずっと前に数えたまま」に見える）。
+    assert rows[volume_id] == "2026-08-25T09:00:00Z"
+    # 行が無いカードは埋め戻せない。**次に挿したときに数え直される**（§12.1 の
+    # `auto_scan_at` は presence ごとなので、挿し直しで新しい行になる）。
+    assert rows[empty_id] is None
+    conn.close()
+
+
 def test_progress_left_on_a_finished_job_is_cleared(tmp_path):
     """`0018`。**版を足すだけでは、既に終わっている行は誰も直さない.**
 

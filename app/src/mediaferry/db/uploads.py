@@ -312,9 +312,16 @@ class UploadRepository:
     def sendable_totals(self, destination_id: str) -> tuple[int, int]:
         """これから送る件数と合計バイトを返す. **進捗の分母**（§2）.
 
-        条件は `claim_next` と同じ（`CLAIMABLE_CLAUSE`）。数えた後も対象は
-        増減しうるので、これは開始時のひとにらみでしかない。実測が追い越したら、
-        画面に出す側が合計を伸ばす。
+        条件は `claim_next` が行を選ぶときの条件のうち、**期限を除く部分**
+        （`CLAIMABLE_CLAUSE`）。`claim_next` はこれに
+        `claim_expires_at IS NULL OR claim_expires_at < ?` を足す。**指す集合は
+        一致する** —— `release_to` は必ず `claim_expires_at` を消し、claim 済みの
+        行は `checking` にいて `CLAIMABLE_STATES` から外れるため。**片側にだけ
+        条件を足すと一致が壊れる**（画面の「N 件中 M 件」が実際に送る対象と
+        食い違う）。
+
+        数えた後も対象は増減しうるので、これは開始時のひとにらみでしかない。
+        実測が追い越したら、画面に出す側が合計を伸ばす。
         """
         revision = self._current_revision(destination_id)
         if revision is None:

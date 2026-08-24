@@ -126,7 +126,8 @@ class VolumeView:
     reason: str
     # 取り込む残りの件数。**まだ数えていないカードは `scanned_at` が None**
     # ——「0 件」と区別できないと、挿した直後に「取り込むものはありません」と
-    # 断定してしまう。
+    # 断定してしまう。`scanned_at` はスキャンが最後まで走ったときに
+    # `volume_instance` へ書かれる印で、**中身が空のカードでも入る**。
     pending_count: int
     scanned_at: str | None
     # このカードを掴んでいるジョブがあるか。**「いま抜いていいか」の答え。**
@@ -271,13 +272,22 @@ class VolumeService:
         )
 
     def _counts(self, volume_instance_id: str) -> tuple[int, str | None]:
-        """取り込む残りと、最後に数えた時刻."""
-        row = self._conn.execute(
-            "SELECT sum(" + PENDING_CLAUSE + ") AS pending, max(observed_at) AS scanned_at"  # noqa: S608
+        """取り込む残りと、最後に数え終えた時刻.
+
+        **残りは `source_entry` を数えるが、「数えたか」は行から導かない。**
+        一致するファイルが無いカードは行を 1 つも作らないので、行から導くと
+        スキャンが完全に成功しても「まだ数えていない」に見える（`mark_scanned`）。
+        """
+        pending = self._conn.execute(
+            "SELECT sum(" + PENDING_CLAUSE + ") AS pending"  # noqa: S608
             " FROM source_entry WHERE volume_instance_id = ?",
             (volume_instance_id,),
         ).fetchone()
-        return (row["pending"] or 0), row["scanned_at"]
+        scanned = self._conn.execute(
+            "SELECT scanned_at FROM volume_instance WHERE id = ?",
+            (volume_instance_id,),
+        ).fetchone()
+        return (pending["pending"] or 0), scanned["scanned_at"]
 
     def _manifest_of(self, dirfd, tree, outcome, definitions) -> str:  # noqa: ANN001
         roots = ("DCIM",)

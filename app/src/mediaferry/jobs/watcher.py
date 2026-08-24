@@ -147,14 +147,19 @@ class VolumeWatcher:
         **記録は積み終わってから、どの経路でも同じ数だけ出す。** 積む本体は
         途中で返る（`AUTO_IMPORT` が `trusted` でなければ `scan` だけで終わる）
         ので、記録をそちらに置くと経路によって落ちる。
+
+        **種類も出す。** 3 種類（`scan` / `import` / `detect_groups`）が 1 行を
+        共有しているので、id だけでは何が積まれたのかがログから読めない
+        （`scan` を積んでいなかった不具合は、実機のログから見つかった）。
         """
         jobs = self._enqueue_in_one_transaction()
-        for job_id in jobs:
-            logger.info("自動で積んだ: %s", job_id)
-        return jobs
+        for job_type, job_id in jobs:
+            logger.info("自動で積んだ: %s %s", job_type, job_id)
+        return [job_id for _, job_id in jobs]
 
-    def _enqueue_in_one_transaction(self) -> list[str]:
-        jobs: list[str] = []
+    def _enqueue_in_one_transaction(self) -> list[tuple[str, str]]:
+        """積んだものを `(種類, id)` で返す."""
+        jobs: list[tuple[str, str]] = []
         store = JobStore(self._conn)
         with immediate(self._conn):
             # **「積んでよいか」の入力は全部、この排他区間の中で読む。**
@@ -171,7 +176,7 @@ class VolumeWatcher:
                     (now_iso(), row["presence_id"]),
                 ).rowcount
                 if marked:
-                    jobs.append(store.enqueue("scan", _params(row)))
+                    jobs.append(("scan", store.enqueue("scan", _params(row))))
             if SettingsService(self._conn, self._env).snapshot().auto_import != "trusted":
                 return jobs
             for row in self._conn.execute(CANDIDATES).fetchall():
@@ -184,16 +189,21 @@ class VolumeWatcher:
                     (now_iso(), row["presence_id"]),
                 ).rowcount
                 if marked:
-                    jobs.append(store.enqueue("import", _params(row)))
+                    jobs.append(("import", store.enqueue("import", _params(row))))
                     # **探すところまでやる。** 取り込んだだけでは、ホームの
                     # 「つなぐ」は出ない（現行の結合候補の数から導くため）。
+                    # params は実行側（`api/jobs_wiring.py` の `_profile_ref`）が
+                    # 読む形。欄の名前を違えると claim された瞬間に死ぬ。
                     jobs.append(
-                        store.enqueue(
+                        (
                             "detect_groups",
-                            {
-                                "profile_id": row["profile_id"],
-                                "profile_revision_id": row["profile_revision_id"],
-                            },
+                            store.enqueue(
+                                "detect_groups",
+                                {
+                                    "profile_id": row["profile_id"],
+                                    "profile_revision_id": row["profile_revision_id"],
+                                },
+                            ),
                         )
                     )
         return jobs
