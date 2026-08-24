@@ -20,7 +20,7 @@ import type { CardView } from "../../hooks/homeSections";
 import { formatBytes } from "../../utils/formatBytes";
 
 /** カード 1 枚（`GET /devices` の 1 要素）。**判定関数がここにあるので、型もここに
- * 1 つだけ置く**（ホームの帯も同じものを描く）。 */
+ * 1 つだけ置く**（ホームの札も同じものを描く）。 */
 export type Volume = {
   volume_instance_id: string;
   // API は空文字を返す（`None` にはならない）。ラベルの有無は `""` で見る。
@@ -33,7 +33,7 @@ export type Volume = {
   provisional: boolean;
   trusted: boolean;
   reason: string | null;
-  // ホームの帯（`CardStanding`）と同じ判断をするための欄。ホームの
+  // ホームの札（`CardStanding`）と同じ判断をするための欄。ホームの
   // `homeSections.ts` もこの 3 つを見る。
   pending_count: number;
   scanned_at: string | null;
