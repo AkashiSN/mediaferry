@@ -361,3 +361,25 @@ def test_a_finished_job_never_shows_progress(client):
         assert client.get(f"/api/jobs/{ctx.job_id}").json()["progress"] is None
     finally:
         conn.close()
+
+
+def test_a_job_says_which_card_it_belongs_to(client, db):
+    """「いま動いていること」がどのカードの作業かを言えるようにする."""
+    db.execute(
+        "INSERT INTO job (id, type, status, params_json, created_at)"
+        " VALUES ('j1', 'import', 'running', ?, '2026-08-24T00:00:00Z')",
+        ('{"volume_instance_id": "vol-1"}',),
+    )
+    db.commit()
+    jobs = client.get("/api/jobs").json()["jobs"]
+    assert jobs[0]["volume_instance_id"] == "vol-1"
+
+
+def test_a_job_with_no_card_says_so(client, db):
+    db.execute(
+        "INSERT INTO job (id, type, status, params_json, created_at)"
+        " VALUES ('j2', 'upload', 'running', '{}', '2026-08-24T00:00:00Z')",
+    )
+    db.commit()
+    jobs = client.get("/api/jobs").json()["jobs"]
+    assert jobs[0]["volume_instance_id"] is None

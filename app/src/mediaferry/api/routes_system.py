@@ -407,6 +407,9 @@ def _job(row) -> dict[str, Any]:  # noqa: ANN001
         "started_at": row["started_at"],
         "finished_at": row["finished_at"],
         "error": row["error"],
+        # どのカードの作業か。**`params_json` から取り出すのはこの 1 欄だけ**
+        # —— params には秘密を入れない約束だが、丸ごと返す口は作らない。
+        "volume_instance_id": json.loads(row["params_json"]).get("volume_instance_id"),
         # **走っている間だけ入る**（`finish` が落とす）。速度と残り時間は画面が
         # 2 点の差分から出す —— こちらで持つと、心拍の間隔に依存した値を
         # 永続化することになる。
