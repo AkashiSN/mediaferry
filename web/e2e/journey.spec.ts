@@ -1,6 +1,6 @@
 // §13 の主要動線を、**空の DB から** CLI に触れずになぞる。
 //
-// ホーム → カードを信頼 → 取り込む → つなぐ → 送る → 確認。
+// ホーム → 取り込む → カードを信頼 → つなぐ → 送る → 確認。
 //
 // **E2E でしか捕まらないものがある。** vitest は画面の一部しか見ないので、
 // 「無いこと」が仕様に見える。画面をまたぐ規則（内部の名前を出さない、押せる
@@ -113,8 +113,7 @@ test("空の DB から、ホーム起点の主要動線が通る", async ({ page
     await expect(nav.getByRole("link", { name: label })).toBeVisible();
   }
 
-  // **やることが無いときは、無いと書く**（§13。空の表を出さない）。
-  await expect(page.getByText("いま、やることはありません")).toBeVisible();
+  const dialog = page.getByRole("dialog");
 
   // 2. 送り先を 2 件作る（**空の DB から画面だけで作れること**）。
   await nav.getByRole("link", { name: "設定" }).click();
@@ -130,30 +129,56 @@ test("空の DB から、ホーム起点の主要動線が通る", async ({ page
     await expect(page.getByRole("heading", { name: `immich-${index + 1}` })).toBeVisible();
   }
 
-  // 3. カードを信頼する。**2 枚挿してある**ので、機種名で見分ける。
+  // 3. カードは「状態」ではなく「仕事」として出る（§13）。**2 枚挿してある**ので、
+  //    機種名で見分ける。
+  //
+  //    **誰もスキャンを押していないのに件数が出る。** 挿した接続に watcher が
+  //    `scan` を積むからで（§12.1）、積まなければここは永久に「0 件」に見える。
   await nav.getByRole("link", { name: "ホーム" }).click();
-  const unknownDji = page.locator("section.card").filter({ hasText: "DJI Osmo Pocket" });
-  await expect(unknownDji.getByRole("button", { name: "このカードを信頼する" })).toBeVisible({
+  const dji = page.locator("article.card").filter({ hasText: "DJI Osmo Pocket" });
+  await expect(dji.getByRole("heading", { name: "SD_Card から 2 件を取り込む" })).toBeVisible({
     timeout: 60_000,
   });
-  await unknownDji.getByRole("button", { name: "このカードを信頼する" }).click();
+
+  // **カードが挿さっている場面で「いま、やることはありません」は出ない**（§13）。
+  // 取り込む残りがあるカードは「やること」の札になるので、3 つの並びが同時に空に
+  // なることは構造上あり得ない。**この錠は E2E でしか掛からない** —— カードの札と
+  // 空表示は別の場所で描かれるので、片方だけを見ていると「同時に出ないこと」が
+  // 仕様に見える。
+  await expect(page.getByText("いま、やることはありません")).toHaveCount(0);
+
+  // **抜いていいかは、押さずに読める**（§13）。「取り外す」は画面に置かない。
+  await expect(dji).toContainText("いま抜いて大丈夫です");
+  await expect(page.getByRole("button", { name: /取り外す/ })).toHaveCount(0);
+
+  // 4. 取り込む。**数えてからコピーする**ので、この 1 手で中身がライブラリに入る。
+  //    取り込む残りが無くなると、札は「やること」から「いまの様子」へ移る。
+  await dji.getByRole("button", { name: "いま取り込む" }).click();
+  // **`settled()` と混ぜない**ので別の名前にする（同名の待ちが上にある）。
+  const doneCard = page
+    .locator("article.card")
+    .filter({ hasText: "SD_Card は初めて見るカードです" });
+  await expect(doneCard).toContainText("取り込むものはありません。", { timeout: 60_000 });
+
+  // 5. 信頼する（§12.1 の同意）。**取り込み終わったカードは「やること」に居ない**
+  //    ので、承認は「カードの中身」から取る。**この順でしか確かめられない** ——
+  //    信頼してから取り込むと、承認した瞬間に自動取り込みが始まりうるので、
+  //    「いま取り込む」を押せるかどうかが watcher の周期との競争になる。
+  await doneCard.getByRole("link", { name: "中身を見る" }).click();
+  await expect(page.getByRole("heading", { name: "カードの中身" })).toBeVisible();
+  const detail = page.locator("section.card").filter({ hasText: "SD_Card をスキャン" });
+  // **ここにも「取り外す」は無い**（§13）。抜いていいかは常に文で出る。
+  await expect(detail).toContainText("いま抜いて大丈夫です");
+  await expect(page.getByRole("button", { name: /取り外す/ })).toHaveCount(0);
+  await detail.getByRole("button", { name: "SD_Card を信頼する" }).click();
   // **同意の対象には、いま挿してあるカードの中身が含まれる。**
-  const dialog = page.getByRole("dialog");
   await expect(dialog).toContainText("いま入っている中身");
   await expect(dialog).toContainText("取り違え");
   await page.getByRole("button", { name: "実行する" }).click();
+  await expect(detail).toContainText("信頼済み", { timeout: 60_000 });
+  await page.getByRole("button", { name: "ホームへ" }).click();
 
-  // 信頼すると、帯はカードの名前で名乗る。
-  const card = page.locator("section.card").filter({ hasText: "SD_Card のカードが挿さっています" });
-  await expect(card).toContainText("信頼済み", { timeout: 60_000 });
-
-  // 4. 取り込む。**数えてからコピーする**ので、この 1 手で中身がライブラリに入る。
-  await card.getByRole("button", { name: "いま取り込む" }).click();
-  await expect(page.getByRole("heading", { name: "やること", exact: true })).toBeVisible({
-    timeout: 60_000,
-  });
-
-  // 5. つなぐ。**候補が 0 件でも入れることを、画面の導線で確かめる。**
+  // 6. つなぐ。**候補が 0 件でも入れることを、画面の導線で確かめる。**
   //    合成カードの動画は 100 バイトで `min_part_size_gib`（15 GiB）に遠く及ばず、
   //    検出は候補を 1 つも作らない。このとき「やること」につなぐは出ないので、
   //    設定 › 詳しい情報の常設の入口から入る（ここが無いと、候補を作る画面へ
@@ -185,7 +210,7 @@ test("空の DB から、ホーム起点の主要動線が通る", async ({ page
   });
   await page.getByRole("button", { name: "ホームへ" }).click();
 
-  // 6. 送る。**宛先 → 対象 → 確認**の 3 段（§13）。
+  // 7. 送る。**宛先 → 対象 → 確認**の 3 段（§13）。
   const toSend = page.getByRole("link", { name: "送る", exact: true });
   await expect(toSend).toBeVisible({ timeout: 60_000 });
   await toSend.click();
@@ -199,13 +224,13 @@ test("空の DB から、ホーム起点の主要動線が通る", async ({ page
   await expect(dialog).toContainText("immich-1 / immich-2");
   await page.getByRole("button", { name: "実行する" }).click();
 
-  // 7. 送信中。**閉じても送信は続く。**
+  // 8. 送信中。**閉じても送信は続く。**
   await expect(page.getByRole("heading", { name: "送っています" })).toBeVisible({ timeout: 60_000 });
   await expect(page.getByText("この画面を閉じても送信は続きます。")).toBeVisible();
   await page.getByRole("button", { name: "閉じる" }).click();
   await expect(page.getByRole("heading", { name: "ホーム", exact: true })).toBeVisible();
 
-  // 8. 確認。**閉じたあとも送信は進み、結果がホームに出る。**
+  // 9. 確認。**閉じたあとも送信は進み、結果がホームに出る。**
   //    合成カードの動画は 100 バイトで送信が一瞬で終わるので、「進行中の作業が
   //    まだ出ている」ことは掴めない。掴めるのは「閉じても最後まで進むこと」で、
   //    止めていればここが「送信済み 0」のまま止まる。
@@ -214,7 +239,7 @@ test("空の DB から、ホーム起点の主要動線が通る", async ({ page
 
   expect(crashes).toEqual([]);
 
-  // 9. **秘密がどこにも出ない**（DOM・ネットワーク応答・コンソール）。
+  // 10. **秘密がどこにも出ない**（DOM・ネットワーク応答・コンソール）。
   const dom = await page.content();
   expect(dom).not.toContain("test-api-key");
   expect(dom).not.toContain(PASSWORD);
