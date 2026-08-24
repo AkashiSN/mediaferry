@@ -845,14 +845,14 @@ def test_progress_is_written_while_a_single_long_file_is_sent(world, db, monkeyp
     beats: list[dict | None] = []
     real_heartbeat = ctx.heartbeat
 
-    def spy(progress=None):  # noqa: ANN001, ANN202
+    def spy(progress=None):
         beats.append(progress)
         real_heartbeat(progress)
 
     monkeypatch.setattr(ctx, "heartbeat", spy)
     real_upload = ImmichClient.upload_asset
 
-    def slow_upload(self, *args, **kwargs):  # noqa: ANN001, ANN002, ANN003, ANN202
+    def slow_upload(self, *args, **kwargs):
         time.sleep(0.3)
         return real_upload(self, *args, **kwargs)
 
@@ -862,8 +862,13 @@ def test_progress_is_written_while_a_single_long_file_is_sent(world, db, monkeyp
 
     # ループの心拍は 2 回（1 件目の前と、もう無いと分かる前）。それを超えた分が
     # 送信中の心拍で、**そこにも進捗が乗っている**。
-    assert len(beats) > 2
-    assert all(beat is not None and beat["phase"] == "upload" for beat in beats)
+    #
+    # **「すべての心拍が運ぶ」とは求めない。** preflight の待ちを囲む
+    # `with_lease_pulse`（`_guard`）は `progress` を渡さないので、そこが心拍の
+    # 間隔を超えた回には運ばない心拍が混ざる。求めると時々落ちるテストになる。
+    carried = [beat for beat in beats if beat is not None]
+    assert len(carried) > 2
+    assert all(beat["phase"] == "upload" for beat in carried)
 
 
 def test_the_totals_are_counted_before_the_first_file_is_sent(world, db, data_root, monkeypatch):
@@ -903,7 +908,7 @@ def test_the_totals_are_counted_before_the_first_file_is_sent(world, db, data_ro
     beats: list[dict] = []
     real_heartbeat = ctx.heartbeat
 
-    def spy(progress=None):  # noqa: ANN001, ANN202
+    def spy(progress=None):
         beats.append(progress)
         real_heartbeat(progress)
 
@@ -915,3 +920,42 @@ def test_the_totals_are_counted_before_the_first_file_is_sent(world, db, data_ro
     assert beats[0]["file_index"] == 0
     assert beats[0]["file_count"] == 2
     assert beats[0]["bytes_total_all"] == len(PAYLOAD) + len(payload)
+    # **2 件目の `bytes_done` は 1 件目から続かない**（`begin` が 0 へ戻す）。
+    # 続くと、1 件の中の進み具合が「送った合計」に化ける。`bytes_total` と
+    # 比べるだけでは足りない（`snapshot` が合計のほうを伸ばして隠す）ので、
+    # 2 件目の大きさそのものと比べる。
+    assert beats[-1]["bytes_done"] == len(payload)
+
+
+def test_a_file_that_did_not_need_sending_still_counts_as_done(world, db, data_root):
+    """既にリモートにある件は 1 バイトも送らない. **それでも分子に入る。**
+
+    分母には大きさが入っているので、拾わないと重複の多い回に「ほとんど
+    終わっているのにバーが数 % のまま」になる。
+    """
+    server, uploader, ctx, uploads, _destinations, destination_id, _media_id = world
+    checksum = base64.b64encode(hashlib.sha1(PAYLOAD, usedforsecurity=False).digest()).decode()
+    server.assets[checksum] = "asset-existing"
+    # 2 件目は実際に送る（分子が「送った分」だけで足りていないことを見るため、
+    # 送る件と送らない件を混ぜる）。
+    profile = ProfileRegistry(db).current("dji-osmo")
+    payload = b"second-clip"
+    (data_root / "library" / "dji-osmo" / "DCIM" / "C.MP4").write_bytes(payload)
+    second = a_media_file(
+        db,
+        (profile.profile_id, profile.revision_id),
+        rel_path="library/dji-osmo/DCIM/C.MP4",
+        sha1=hashlib.sha1(payload, usedforsecurity=False).hexdigest(),
+        size_bytes=len(payload),
+        captured_at=CAPTURED,
+        mtime_ns=1_700_000_000_000_000_000,
+    )
+    uploads.create_pairs([second], [destination_id])
+
+    uploader.run(ctx, destination_id)
+
+    # 1 件は送っていない（既にあった）。それでも分子は分母に届く。
+    assert len(server.uploads) == 1
+    progress = json.loads(db.execute("SELECT progress_json FROM job").fetchone()["progress_json"])
+    assert progress["bytes_total_all"] == len(PAYLOAD) + len(payload)
+    assert progress["bytes_done_all"] == progress["bytes_total_all"]

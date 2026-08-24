@@ -34,7 +34,7 @@ from ..core.lease_pulse import with_lease_pulse
 from ..core.uploads.decisions import datetime_plan, origin_after_upload, tags_to_apply
 from ..db.jobs import JobContext, LeaseLost
 from ..db.profiles import ProfileRegistry
-from ..db.uploads import ClaimLost, NoLongerEligible, UploadRepository
+from ..db.uploads import CLAIMABLE_STATES, ClaimLost, NoLongerEligible, UploadRepository
 from .preflight import PreflightCache
 
 logger = logging.getLogger(__name__)
@@ -83,6 +83,21 @@ class _Reported:
         """送信スレッドから呼ばれる. **DB へは触らない。**"""
         self.bytes_done += count
         self.bytes_done_all += count
+
+    def settle(self) -> None:
+        """1 件が決着した. **送らずに済んだぶんも分子に入れる。**
+
+        既にリモートにある件（`bulk_upload_check` の `reject`）や見送った件は
+        1 バイトも送らないのに、大きさは分母に入っている。拾わないと、重複の
+        多い回に「ほとんど終わっているのにバーが数 % のまま」になる。
+
+        足りない分だけを足す（引かない）。送った量が大きさを超えている件は、
+        そのまま残して `snapshot` に合計を伸ばさせる。
+        """
+        missing = self.bytes_total - self.bytes_done
+        if missing > 0:
+            self.bytes_done += missing
+            self.bytes_done_all += missing
 
     def snapshot(self) -> dict[str, Any]:
         # **合計を追い越したら合計を伸ばす。** 走っている間に対象が増減しうる
@@ -169,6 +184,12 @@ class Uploader:
                     ctx.emit("info", "キャンセルを観測したので送信を中止した")
                     break
                 raise
+            if state not in CLAIMABLE_STATES:
+                # **決着した件は必ず分子に入れる。** 送らずに済んだ件（既に
+                # リモートにある・見送った）も分母には入っている。`claim_next` が
+                # また拾う状態で降りたときだけ足さない —— 次に取り直したときに
+                # もう一度数えるので、二重に足さないため。
+                reported.settle()
             sent += state == "complete"
             failed += state == "failed"
             awaiting += state == "awaiting_datetime_approval"
@@ -290,7 +311,7 @@ class Uploader:
             # ここを抜けた後は、リモートに触った可能性がある。
             progress.touched_remote = True
 
-    def _steps(  # noqa: PLR0913
+    def _steps(
         self,
         ctx: JobContext,
         client: ImmichClient,
