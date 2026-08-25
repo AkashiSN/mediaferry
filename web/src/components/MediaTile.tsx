@@ -22,8 +22,10 @@ export type Media = {
   duration_seconds?: number | null;
   status?: MediaStatus;
   role?: "original" | "derived";
-  /** 組（RAW+JPEG）。**主の行にだけ付く**（`GET /media?collapse=stack`）。曖昧な組
-   * （大小文字違いが混ざる等）は Immich でも組まれないので、どの行にも付かない。 */
+  /** 組（RAW+JPEG）。`GET /media?collapse=stack` が**組の member の行に付ける**。
+   * ふだん一覧に出るのは主だけだが、絞り込みで主が落ちると従が単独で出る（その
+   * ときも組の中身は付く）。曖昧な組（大小文字違いが混ざる等）は Immich でも
+   * 組まれないので、どの行にも付かない。 */
   stack?: { members: StackMember[] } | null;
 };
 

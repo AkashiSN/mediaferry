@@ -590,7 +590,7 @@ def test_a_scan_cancelled_right_after_seeing_the_pair_still_writes_no_mark(canon
 
     最初のファイルで降りるケース（`eligible` が空のまま）だけだと、印を書く
     処理そのものを丸ごと `counted` の外に出す変異を見逃す —— `eligible` が
-    空なら、门の有無に関わらず書くものが無い。ここでは両方を列挙し終えた
+    空なら、門の有無に関わらず書くものが無い。ここでは両方を列挙し終えた
     直後に降りることで、`eligible` が揃っていることと「数え終えた」ことを
     区別する。
     """

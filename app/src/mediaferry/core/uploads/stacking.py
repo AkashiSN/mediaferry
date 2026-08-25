@@ -45,9 +45,10 @@ class Candidate:
     # を書く。`None` は「まだ分からない」であって「同席していない」ではないが、
     # 組の判定では確かめられない相手として扱う（見つからない分は組まない）。
     copresent_key: str | None
-    # `captured_at` / `captured_at_source` は組の判定には使わない（撮影時刻は
-    # 同じ 1 枚であることを弱めこそすれ強めない）。値そのものは呼び出し側が
-    # 日時の突き合わせに使うので、観測として持ち続ける。
+    # `captured_at` / `captured_at_source` は**組の判定に使わない**（撮影時刻は
+    # 同じ 1 枚であることを弱めこそすれ強めない）。いまは読み手が無く、
+    # `jobs/stacker.py` が観測をそのまま詰めるだけ。**候補の姿を DB の行に
+    # そろえておく**ための欄で、判断には入らない。
     captured_at: str
     captured_at_source: str
     origin: str
