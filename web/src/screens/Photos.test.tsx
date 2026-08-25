@@ -247,6 +247,64 @@ describe("写真の画面", () => {
   });
 });
 
+// **「つないだ動画」は宛先ごとの絞り込みではない。** 送り先が 0 件でも押せる
+// （`DESTINATION_SCOPED` に入れない）。
+describe("つないだ動画の絞り込みと、タイルの行き先", () => {
+  beforeEach(() => {
+    document.cookie = "XSRF-TOKEN=token; path=/";
+  });
+  afterEach(() => vi.restoreAllMocks());
+
+  it("つないだ動画だけに絞れる", async () => {
+    const { calls } = stubApi({
+      "/media": { media: [], total: 0, page: 1, page_size: 200 },
+      "/destinations": { destinations: [{ id: "d1", name: "家", enabled: true }] },
+    });
+    render(
+      <MemoryRouter>
+        <PhotosScreen />
+      </MemoryRouter>,
+    );
+    await userEvent.click(await screen.findByRole("button", { name: "つないだ動画" }));
+    await waitFor(() =>
+      expect(calls().some((c) => c.path.includes("role=derived"))).toBe(true),
+    );
+  });
+
+  it("つないだ動画は宛先を選ばなくても絞れる", async () => {
+    // **宛先ごとの絞り込みではない。** 送り先が 0 件でも押せる。
+    stubApi({
+      "/media": { media: [], total: 0, page: 1, page_size: 200 },
+      "/destinations": { destinations: [] },
+    });
+    render(
+      <MemoryRouter>
+        <PhotosScreen />
+      </MemoryRouter>,
+    );
+    expect(await screen.findByRole("button", { name: "つないだ動画" })).not.toBeDisabled();
+  });
+
+  it("タイルは 1 件の画面へつながる", async () => {
+    stubApi({
+      "/media": {
+        media: [media("a", "2026-08-18T14:03:00+09:00")],
+        total: 1,
+        page: 1,
+        page_size: 200,
+      },
+      "/destinations": { destinations: [] },
+    });
+    render(
+      <MemoryRouter>
+        <PhotosScreen />
+      </MemoryRouter>,
+    );
+    await waitFor(() => expect(screen.getByRole("link", { name: /a\.JPG/ })).toBeInTheDocument());
+    expect(screen.getByRole("link", { name: /a\.JPG/ })).toHaveAttribute("href", "/photos/a");
+  });
+});
+
 // **絞り込みで隠れても、選んだものの合計は変わらない。** 表示中のタイルから
 // 合計を出すと、絞り込みで隠した分が抜けて、確認に出す数字が実際と食い違う。
 // 宛先を選んで確認ダイアログを開くところは `work/Send.tsx` の担当なので、
@@ -391,7 +449,7 @@ describe("読み込む件数と、切れていることの表示", () => {
         <PhotosScreen />
       </MemoryRouter>,
     );
-    await userEvent.click(await screen.findByRole("button", { name: /動画/ }));
+    await userEvent.click(await screen.findByRole("button", { name: "動画" }));
     await waitFor(() =>
       expect(calls().some((c) => c.path.includes("kind=video") && c.path.includes("q=DSC"))).toBe(
         true,
@@ -589,7 +647,7 @@ describe("読み込む件数と、切れていることの表示", () => {
         <PhotosScreen />
       </MemoryRouter>,
     );
-    await userEvent.click(await screen.findByRole("button", { name: /動画/ }));
+    await userEvent.click(await screen.findByRole("button", { name: "動画" }));
     await waitFor(() =>
       expect(calls().some((c) => c.path.includes("kind=video"))).toBe(true),
     );
