@@ -211,3 +211,20 @@ def test_a_volume_records_whether_the_match_was_provisional(db):
     )
     with pytest.raises(sqlite3.IntegrityError):
         db.execute("UPDATE volume_instance SET provisional = 2 WHERE id = ?", (volume,))
+
+
+def test_source_entry_carries_the_copresence_of_a_stack(db):
+    """**同席の印は「どのスキャンで、どの stem の下で同時に見えたか」.**
+
+    スキャンの id だけだと、1 回のスキャンが書いた**別々の組が同じ印**になる。
+    """
+    columns = {r["name"] for r in db.execute("PRAGMA table_info(source_entry)")}
+    assert {"copresent_key", "extension"} <= columns
+
+
+def test_existing_rows_have_no_copresence(db):
+    """**無いものを在ったことにしない。** 過去に同席したかは記録に無い."""
+    row = db.execute("PRAGMA table_info(source_entry)").fetchall()
+    by_name = {r["name"]: r for r in row}
+    assert by_name["copresent_key"]["dflt_value"] is None
+    assert by_name["copresent_key"]["notnull"] == 0

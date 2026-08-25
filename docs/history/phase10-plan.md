@@ -225,25 +225,25 @@ def test_the_identity_does_not_look_at_the_time():
     """
     late = replace(a_cr2(), captured_at="2026-08-17T14:31:00+00:00")
 
-    partners = identity_partners(a_jpg(), [a_jpg(), late], RULE)
+    identity = identity_partners(a_jpg(), [a_jpg(), late], RULE)
 
-    assert [c.rel_path for c in partners] == [late.rel_path]
+    assert [c.rel_path for c in identity.partners] == [late.rel_path]
 
 
 def test_the_identity_does_not_look_at_where_the_time_came_from():
     """`exifread` が JPG は読めて CR2 は読めなくても、組は同じ 1 枚である."""
     by_mtime = replace(a_cr2(), captured_at_source="mtime")
 
-    partners = identity_partners(a_jpg(), [a_jpg(), by_mtime], RULE)
+    identity = identity_partners(a_jpg(), [a_jpg(), by_mtime], RULE)
 
-    assert [c.rel_path for c in partners] == [by_mtime.rel_path]
+    assert [c.rel_path for c in identity.partners] == [by_mtime.rel_path]
 
 
 def test_the_identity_needs_the_same_card_and_stem():
     """別のカードの同じ名前は相方ではない（連番は一周する）."""
     other_card = replace(a_cr2(), volume_instance_id="another")
 
-    assert identity_partners(a_jpg(), [a_jpg(), other_card], RULE) == []
+    assert identity_partners(a_jpg(), [a_jpg(), other_card], RULE).partners == ()
 ```
 
 `a_jpg()` / `a_cr2()` / `RULE` は同ファイルに既にある。`replace` は
@@ -306,9 +306,34 @@ def test_two_partners_with_the_same_extension_are_ambiguous():
     case-sensitive な FS では `IMG_0001.JPG` と `IMG_0001.jpg` が同じ拡張子になる。
     **どちらが相方かは機械には決められない。**
     """
-    lower = replace(a_jpg(), media_file_id="other", rel_path="DCIM/100CANON/IMG_0001.jpg")
+    # **stem は `a_jpg()` の既定に合わせる。** 合わないと `source_key` の門で
+    # 先に落ちて、曖昧さの判定に届かない（`ambiguous` が常に False になる）。
+    lower = replace(a_jpg(), media_file_id="other", rel_path="DCIM/100CANON/IMG_1234.jpg")
 
     assert identity_partners(a_cr2(), [a_cr2(), a_jpg(), lower], RULE).ambiguous
+```
+
+**primary 自身が衝突する側の 1 つになる場合も、別に 1 本書く。** 上のテストは
+*相方どうし*の衝突しか見ておらず、「自分と同じ拡張子の別ファイルが相方に来る」
+という設計意図そのものを守らない。
+
+```python
+def test_a_partner_sharing_the_primarys_extension_is_ambiguous():
+    """primary 自身も曖昧さの数え上げに入る."""
+    lower = replace(a_jpg(), media_file_id="other", rel_path="DCIM/100CANON/IMG_1234.jpg")
+
+    assert identity_partners(a_jpg(), [a_jpg(), lower], RULE).ambiguous
+```
+
+**`identity_partners` を無効な規則で直接呼ぶテストも 1 本書く。** `resolve_group`
+にも同じ門があるので、経由すると隠れて検出できない。**Task 6 の一覧側は
+`resolve_group` を経由しない**ので、この門が単独で効く入口ができる。
+
+```python
+def test_a_profile_without_stacking_has_no_partners():
+    disabled = StackRule(enabled=False, extensions=("JPG", "CR2"))
+
+    assert identity_partners(a_jpg(), [a_jpg(), a_cr2()], disabled).partners == ()
 ```
 
 ```python
@@ -611,8 +636,10 @@ from ..core.uploads.stacking import extension_of, stem_prefix
         **印は `<job_id>:<stem prefix>`。** スキャンの id だけにすると、1 回の
         スキャンが書いた別々の組が同じ印になる（一覧が無関係な写真を畳む）。
 
-        **拡張子が 2 種類以上あることを要求する。** 同じ拡張子は鍵の下に 1 つ
-        しか無いので実際には起きないが、条件を「2 件以上」と書くと意図が読めない。
+        **拡張子が 2 種類以上あることを要求する。** 大小文字違い（`IMG_0001.JPG` と
+        `IMG_0001.jpg`）は同じ正規化拡張子になるので、条件を「2 件以上」と書くと
+        その 2 つを組と読んでしまう。組めるかは `identity_partners` が `ambiguous`
+        として決める。
         """
         by_prefix: dict[str, list[str]] = {}
         for rel_path in eligible:
@@ -621,6 +648,10 @@ from ..core.uploads.stacking import extension_of, stem_prefix
             if len({extension_of(path) for path in paths}) < 2:
                 continue
             for rel_path in paths:
+                # **1 行ごとに fsync が起きる**（接続は `synchronous = FULL` の
+                # autocommit）。1488 件のカードでは `_sweep_vanished` と同じ規模に
+                # なるので、同じように心拍を打ち続ける。
+                ctx.heartbeat()
                 self._conn.execute(
                     "UPDATE source_entry SET copresent_key = ?"
                     " WHERE volume_instance_id = ? AND rel_path = ?",
@@ -705,6 +736,10 @@ from ..core.uploads.stacking import extension_of, stem_prefix
 
 - [ ] **Step 5: 変異試験**
 
+**このタスクのテストは、書いた本数では足りない。** 実測では下の 5 つのうち 4 つが
+ブリーフ付属のテストでは検出できなかった（`counted` の門・`< 2` の閾値・`same` での
+分岐・`_touch` の `extension`）。**変異を当ててから、区別できるテストを足すこと。**
+
 壊すもの: `counted` の門 / `< 2` の閾値 / 印から `prefix` を落として `job_id` だけに
 する / `if not same` を落として常に消す / `if not same` を落として一度も消さない。
 **5 つとも落ちるテストがあることを確かめる。**
@@ -742,21 +777,21 @@ def test_a_partner_without_proof_of_copresence_is_not_a_partner():
     """
     stale = replace(a_cr2(), copresent_key=None)
 
-    assert identity_partners(a_jpg(), [a_jpg(), stale], RULE) == []
+    assert identity_partners(a_jpg(), [a_jpg(), stale], RULE).partners == ()
 
 
 def test_a_partner_from_another_copresence_is_not_a_partner():
     """別の機会に同席した相手とは組まない."""
     other = replace(a_cr2(), copresent_key="job2:DCIM/100CANON/IMG_0001.")
 
-    assert identity_partners(a_jpg(), [a_jpg(), other], RULE) == []
+    assert identity_partners(a_jpg(), [a_jpg(), other], RULE).partners == ()
 
 
 def test_the_primary_without_proof_has_no_partner():
     """自分の側に証拠が無ければ、相方が持っていても組まない."""
     mine = replace(a_jpg(), copresent_key=None)
 
-    assert identity_partners(mine, [mine, a_cr2()], RULE) == []
+    assert identity_partners(mine, [mine, a_cr2()], RULE).partners == ()
 ```
 
 `a_jpg()` / `a_cr2()` に `copresent_key="job1:DCIM/100CANON/IMG_0001."` を足す
@@ -965,8 +1000,17 @@ EXISTS (
 
 `list_media` に `collapse: str | None = None` を足し、`collapse == "stack"` の
 ときだけ `WITH rank(profile_id, extension, rank) AS (VALUES ...)` を前置して
-`AND NOT (<_SECONDARY_EXISTS>) AND NOT (<_AMBIGUOUS_EXISTS>)` を `where` に足す。
-**両方入れる** —— 曖昧な組を畳むと、同じ順位の 2 つのうち片方が黙って消える。`ranks` が空なら**何もしない**
+`AND NOT (<_SECONDARY_EXISTS> AND NOT <_AMBIGUOUS_EXISTS>)` を `where` に足す。
+
+**独立した 2 つの除外にしてはいけない。** `AND NOT(_SECONDARY) AND NOT(_AMBIGUOUS)`
+と書くと、`_AMBIGUOUS_EXISTS` は**同席グループ全体に対する述語**なので、グループ内の
+曖昧でない行（CR2 など）にも真になり、**曖昧な組の行が丸ごと一覧から消える**。
+意図は真逆（曖昧なら畳まずに全部出す）。**曖昧さは「隠すことからの保護」であって、
+独立した除外条件ではない。**
+
+同じ除外は `_members_of` にも要る。**曖昧なら `None` を返す** —— `identity_partners`
+は同じ状況を `ambiguous` として組を作らないので、返すと**画面だけが Immich の作らない
+組を宣言する**（`RAW` の札は `media.stack` の有無で出る）。`ranks` が空なら**何もしない**
 （`VALUES` は 0 行を書けない）。`collapse` が `"stack"` でも `None` でもなければ
 `ApiError(400, ErrorCode.INVALID, "collapse は stack だけ")`。
 
@@ -1001,6 +1045,16 @@ def _members_of(conn, media_id: str, ranks_sql: str, ranks_params: tuple) -> lis
     return rows
 ```
 
+**応答に出すのは `id` / `rel_path` / `size_bytes` の 3 つだけ**（`rank` は並べ替えの
+ための内部の値なので落とす。画面の `StackMember` 型と一致させる）。
+
+```python
+    members = [
+        {"id": row["id"], "rel_path": row["rel_path"], "size_bytes": row["size_bytes"]}
+        for row in rows
+    ]
+```
+
 **並べ替えは SQL の `ORDER BY r.rank` で行う**（Python 側で順位の dict を引くと、
 現行規則から外れた拡張子で `KeyError` になる）。**主が先頭に来ることをテストで
 固定する**（上の Step 1 の 1 本目）。
@@ -1031,6 +1085,11 @@ def test_members_follow_the_current_rule(client, canon_pair, narrowed_stack_rule
 実測の両方で確かめ、値を `phase10-record.md` に書く。
 
 - [ ] **Step 6: 変異試験**
+
+**「構造的に検出できない」と決めつけないこと。** 実測では下の 1 番が検出可能だった
+—— 順位は `media_file` 自身のプロファイルで引くので単射性は 1 つの `media_file` の
+中でしか効かず、**別プロファイルの `media_file` が同席グループに混ざる**と拡張子が
+違うのに順位が並ぶ。`<=` にすると**両方の行が一覧から消える**。
 
 壊すもの: `theirs.rank < mine.rank` を `<=` / `me.copresent_key IS NOT NULL` を外す /
 `sib.media_file_id <> m.id` を外す / `rule.enabled` の門を外す / `total` を

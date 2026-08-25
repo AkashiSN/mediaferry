@@ -10,6 +10,9 @@ import { Icon } from "./Icon";
 
 export type MediaStatus = "unsent" | "awaiting" | "sent" | "failed" | null;
 
+/** 組（RAW+JPEG）に含まれる 1 行。`GET /media?collapse=stack` の主の行が持つ。 */
+export type StackMember = { id: string; rel_path: string; size_bytes: number };
+
 export type Media = {
   id: string;
   rel_path: string;
@@ -19,12 +22,17 @@ export type Media = {
   duration_seconds?: number | null;
   status?: MediaStatus;
   role?: "original" | "derived";
+  /** 組（RAW+JPEG）。`GET /media?collapse=stack` が**組の member の行に付ける**。
+   * ふだん一覧に出るのは主だけだが、絞り込みで主が落ちると従が単独で出る（その
+   * ときも組の中身は付く）。曖昧な組（大小文字違いが混ざる等）は Immich でも
+   * 組まれないので、どの行にも付かない。 */
+  stack?: { members: StackMember[] } | null;
 };
 
 /** タイルが実際に読む部分だけ。**一覧の 1 行から直に描ける**ようにするため、
  * 撮影時刻や大きさは要求しない（`確認` は `GET /uploads` の行だけで描く）。 */
 export type TileMedia = Pick<Media, "id" | "rel_path"> &
-  Partial<Pick<Media, "kind" | "duration_seconds" | "status" | "role">>;
+  Partial<Pick<Media, "kind" | "duration_seconds" | "status" | "role" | "stack">>;
 
 /** `rel_path` の末尾（ファイル名）。**内部の相対パスを画面に出さない**（§13）ので、
  * タイルの `aria-label` も、ホームの「さっき取り込んだもの」もここを通す。 */
@@ -59,7 +67,17 @@ export function MediaTile({
   const inside = (
     <>
       <img src={`/api/media/${media.id}/thumbnail`} alt="" loading="lazy" className="tileimg" />
-      {media.role === "derived" && <span className="madeof">つないだ</span>}
+      {/* **「つないだ」と `RAW` は独立に立つ。** 出す条件が `role` と `stack` で
+          別々なので、両方立つ行がありうる。同じ座標へ重ねると片方が読めなくなる
+          ため、1 つの入れ物へ入れて横に並べる（`styles.css` の `.madeofs`）。
+          **どちらかを捨てない** —— 「つないだ動画」と「組の主」は別の事実で、
+          片方を隠すとタイルがその行を名乗り損ねる。 */}
+      {(media.role === "derived" || media.stack) && (
+        <span className="madeofs">
+          {media.role === "derived" && <span className="madeof">つないだ</span>}
+          {media.stack && <span className="madeof raw">RAW</span>}
+        </span>
+      )}
       <StatusMark status={media.status ?? null} />
       {hasDuration && (
         <span className="dur">{formatClipLength(media.duration_seconds as number)}</span>

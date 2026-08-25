@@ -78,8 +78,9 @@ class World:
         )
         self.db.execute(
             "INSERT INTO source_entry (id, volume_instance_id, rel_path, size_bytes, mtime_ns,"
-            " quick_fingerprint, fingerprint_version, media_file_id, state, observed_at)"
-            " VALUES (?, ?, ?, 10, 1, ?, 1, ?, 'published', ?)",
+            " quick_fingerprint, fingerprint_version, media_file_id, state, observed_at,"
+            " copresent_key)"
+            " VALUES (?, ?, ?, 10, 1, ?, 1, ?, 'published', ?, ?)",
             (
                 new_id(),
                 self.volume,
@@ -87,6 +88,9 @@ class World:
                 new_id(),
                 media,
                 now_iso(),
+                # **同じ stem の下で同時に取り込まれた印。** 実物のスキャンが
+                # `_mark_copresence` で `<job_id>:<stem prefix>` を書くのと同じ形。
+                f"job1:DCIM/100CANON/{stem}.",
             ),
         )
         asset_id = f"asset-{stem}-{extension}"
@@ -668,7 +672,7 @@ def test_the_current_profile_revision_decides_even_for_old_media(world):
         "canon-copy",
         replace(
             current.definition,
-            stack=StackRule(enabled=True, extensions=("JPG", "CR2"), tolerance_seconds=0),
+            stack=StackRule(enabled=True, extensions=("JPG", "CR2")),
         ),
     )
 

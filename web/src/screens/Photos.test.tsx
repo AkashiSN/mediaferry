@@ -6,6 +6,7 @@ import { MemoryRouter, Route, Routes, useLocation } from "react-router-dom";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { stubApi } from "../test/api";
+import { emitJob } from "../test/setup";
 import { PhotosScreen, groupByDate } from "./Photos";
 
 const media = (id: string, captured_at: string, extra = {}) => ({
@@ -54,7 +55,7 @@ describe("写真の画面", () => {
     await waitFor(() =>
       expect(
         calls().some(
-          (c) => c.path === "/media?status=unsent&destination_id=d1&page_size=200" && c.method === "GET",
+          (c) => c.path === "/media?status=unsent&destination_id=d1&collapse=stack&page_size=200" && c.method === "GET",
         ),
       ).toBe(true),
     );
@@ -80,6 +81,120 @@ describe("写真の画面", () => {
     await userEvent.click(screen.getByRole("button", { name: /a\.JPG/ }));
     expect(screen.getByText(/1 件を選択中/)).toBeInTheDocument();
     expect(screen.getByText(/2 KiB/)).toBeInTheDocument();
+  });
+
+  // **畳んだタイルは「1 枚（RAW+JPEG）」を表す。** 選択もその単位でないと、
+  // 送るときに主（JPG）しか積まれず、相方（CR2）が Immich に送られないまま
+  // スタックが組まれない（`docs/history/phase10-design.md` §4「選んで送る
+  // 画面の契約はそのまま」）。
+  it("組のタイルを選ぶと、相方も一緒に選ぶ", async () => {
+    stubApi({
+      "/media": {
+        media: [
+          media("a", "2026-08-18T14:03:00+09:00", {
+            rel_path: "library/x/IMG_0001.JPG",
+            size_bytes: 100,
+            stack: {
+              members: [
+                { id: "a", rel_path: "library/x/IMG_0001.JPG", size_bytes: 100 },
+                { id: "raw", rel_path: "library/x/IMG_0001.CR2", size_bytes: 900 },
+              ],
+            },
+          }),
+        ],
+        total: 1,
+        page: 1,
+        page_size: 50,
+      },
+      "/destinations": { destinations: [{ id: "d1", name: "家", enabled: true }] },
+    });
+    render(
+      <MemoryRouter>
+        <PhotosScreen />
+      </MemoryRouter>,
+    );
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: /IMG_0001\.JPG/ })).toBeInTheDocument(),
+    );
+    await userEvent.click(screen.getByRole("button", { name: /IMG_0001\.JPG/ }));
+    // 主（100 B）＋相方（900 B）＝ 2 件・1000 B。主の分だけでは 1 件・100 B になる。
+    expect(screen.getByText(/2 件を選択中/)).toBeInTheDocument();
+    expect(screen.getByText(/1000 B/)).toBeInTheDocument();
+
+    // もう一度押すと、両方まとめて選択から外れる（片方だけ残らない）。
+    await userEvent.click(screen.getByRole("button", { name: /IMG_0001\.JPG/ }));
+    expect(screen.queryByText(/件を選択中/)).toBeNull();
+  });
+
+  // **片方だけが選択に入っている状態から押したら、組ごと選ぶ（外さない）。**
+  // 畳めるかどうかはデータ側の事情で変わる（曖昧な組は畳まない）ので、相方だけを
+  // 選んだ後に畳んだタイルが現れることがある。ここで「全員外す」に倒すと、押した
+  // 人には何も選ばれていないタイルを押しただけに見えて、選択が黙って消える。
+  it("片方だけ選ばれた組のタイルを押すと、残りを足して組ごと選ぶ", async () => {
+    // 曖昧な間は畳めないので、主と相方が別々のタイルとして並ぶ（`stack` は付かない）。
+    const routes: Record<string, unknown> = {
+      "/media": {
+        media: [
+          media("a", "2026-08-18T14:03:00+09:00", {
+            rel_path: "library/x/IMG_0001.JPG",
+            size_bytes: 100,
+          }),
+          media("raw", "2026-08-18T14:03:00+09:00", {
+            rel_path: "library/x/IMG_0001.CR2",
+            size_bytes: 900,
+          }),
+        ],
+        total: 2,
+        page: 1,
+        page_size: 200,
+      },
+      "/destinations": { destinations: [{ id: "d1", name: "家", enabled: true }] },
+    };
+    const { calls } = stubApi(routes);
+    render(
+      <MemoryRouter>
+        <PhotosScreen />
+      </MemoryRouter>,
+    );
+    // 相方（CR2）だけを選ぶ。
+    await userEvent.click(await screen.findByRole("button", { name: /IMG_0001\.CR2/ }));
+    expect(screen.getByText(/1 件を選択中/)).toBeInTheDocument();
+
+    // 曖昧さが解けて、取り直したときには 1 タイルに畳まれている。
+    routes["/media"] = {
+      media: [
+        media("a", "2026-08-18T14:03:00+09:00", {
+          rel_path: "library/x/IMG_0001.JPG",
+          size_bytes: 100,
+          stack: {
+            members: [
+              { id: "a", rel_path: "library/x/IMG_0001.JPG", size_bytes: 100 },
+              { id: "raw", rel_path: "library/x/IMG_0001.CR2", size_bytes: 900 },
+            ],
+          },
+        }),
+      ],
+      total: 1,
+      page: 1,
+      page_size: 200,
+    };
+    const before = calls().filter((c) => c.path.startsWith("/media?")).length;
+    emitJob({ job_id: "j1", seq: 1, level: "info", message: "組み直した", data: null, at: "" });
+    await waitFor(
+      () => expect(calls().filter((c) => c.path.startsWith("/media?")).length).toBeGreaterThan(before),
+      { timeout: 2000 },
+    );
+    await waitFor(() =>
+      expect(screen.queryByRole("button", { name: /IMG_0001\.CR2/ })).toBeNull(),
+    );
+    // 選択は残っている（相方の 900 B だけが入っている）。
+    expect(screen.getByText(/1 件を選択中/)).toBeInTheDocument();
+
+    // 畳んだタイルを押す。**足りない主を足す**ので 2 件・1000 B になる。
+    // 全員外す実装なら、ここで操作バーごと消える。
+    await userEvent.click(screen.getByRole("button", { name: /IMG_0001\.JPG/ }));
+    expect(screen.getByText(/2 件を選択中/)).toBeInTheDocument();
+    expect(screen.getByText(/1000 B/)).toBeInTheDocument();
   });
 
   it("当てはまるものが無ければ、そう書く", async () => {
@@ -144,7 +259,7 @@ describe("写真の画面", () => {
     await waitFor(() =>
       expect(
         calls().some(
-          (c) => c.path === "/media?status=unsent&destination_id=d2&page_size=200" && c.method === "GET",
+          (c) => c.path === "/media?status=unsent&destination_id=d2&collapse=stack&page_size=200" && c.method === "GET",
         ),
       ).toBe(true),
     );
@@ -322,7 +437,7 @@ describe("つないだ動画の絞り込みと、タイルの行き先", () => {
     await waitFor(() =>
       expect(
         calls().some(
-          (c) => c.path === "/media?role=derived&page_size=200" && c.method === "GET",
+          (c) => c.path === "/media?role=derived&collapse=stack&page_size=200" && c.method === "GET",
         ),
       ).toBe(true),
     );
@@ -350,14 +465,14 @@ describe("つないだ動画の絞り込みと、タイルの行き先", () => {
     await waitFor(() => expect(lastMediaCall()?.path).toContain("role=derived"));
 
     await userEvent.click(screen.getByRole("button", { name: "すべて" }));
-    await waitFor(() => expect(lastMediaCall()?.path).toBe("/media?page_size=200"));
+    await waitFor(() => expect(lastMediaCall()?.path).toBe("/media?collapse=stack&page_size=200"));
 
     await userEvent.click(screen.getByRole("button", { name: "つないだ動画" }));
     await waitFor(() => expect(lastMediaCall()?.path).toContain("role=derived"));
 
     await userEvent.click(screen.getByRole("button", { name: "まだ送っていない" }));
     await waitFor(() =>
-      expect(lastMediaCall()?.path).toBe("/media?status=unsent&destination_id=d1&page_size=200"),
+      expect(lastMediaCall()?.path).toBe("/media?status=unsent&destination_id=d1&collapse=stack&page_size=200"),
     );
   });
 
@@ -466,9 +581,33 @@ describe("読み込む件数と、切れていることの表示", () => {
       </MemoryRouter>,
     );
     await waitFor(() =>
-      expect(calls().some((c) => c.path === "/media?page_size=200" && c.method === "GET")).toBe(
+      expect(calls().some((c) => c.path === "/media?collapse=stack&page_size=200" && c.method === "GET")).toBe(
         true,
       ),
+    );
+  });
+
+  // **写真タブは組を畳んで取りに行く。** 入れ忘れると、RAW+JPEG の組が同じ 1 枚
+  // なのに 2 タイルに割れて並ぶ（Task 6 の `GET /media?collapse=stack`）。
+  // **絞り込みを変えても付く**ことを見るため、他の path 断定と重ならない
+  // 「動画」の絞り込みで確かめる。
+  it("写真タブは組を畳んで取りに行く", async () => {
+    const { calls } = stubApi({
+      "/media": { media: [], total: 0, page: 1, page_size: 200 },
+      "/destinations": { destinations: [] },
+    });
+    render(
+      <MemoryRouter>
+        <PhotosScreen />
+      </MemoryRouter>,
+    );
+    await userEvent.click(await screen.findByRole("button", { name: "動画" }));
+    await waitFor(() =>
+      expect(
+        calls().some(
+          (c) => c.path === "/media?kind=video&collapse=stack&page_size=200" && c.method === "GET",
+        ),
+      ).toBe(true),
     );
   });
 
@@ -774,7 +913,7 @@ describe("送れなかったものの絞り込み", () => {
     await waitFor(() =>
       expect(
         calls().some(
-          (c) => c.path === "/media?status=failed&destination_id=d1&page_size=200" && c.method === "GET",
+          (c) => c.path === "/media?status=failed&destination_id=d1&collapse=stack&page_size=200" && c.method === "GET",
         ),
       ).toBe(true),
     );
@@ -859,5 +998,40 @@ describe("送るへ戻すとき", () => {
     await userEvent.click(screen.getByRole("button", { name: "送る" }));
     expect(await screen.findByTestId("send-ids")).toHaveTextContent("a");
     expect(screen.getByTestId("send-destinations")).toHaveTextContent("d2");
+  });
+
+  it("組のタイルを選んで送ると、相方の id も一緒に渡す", async () => {
+    stubApi({
+      "/media": {
+        media: [
+          media("a", "2026-08-18T14:03:00+09:00", {
+            rel_path: "library/x/IMG_0001.JPG",
+            stack: {
+              members: [
+                { id: "a", rel_path: "library/x/IMG_0001.JPG", size_bytes: 100 },
+                { id: "raw", rel_path: "library/x/IMG_0001.CR2", size_bytes: 900 },
+              ],
+            },
+          }),
+        ],
+        total: 1,
+        page: 1,
+        page_size: 200,
+      },
+      "/destinations": { destinations: [{ id: "d1", name: "家", enabled: true }] },
+    });
+    render(
+      <MemoryRouter initialEntries={["/photos"]}>
+        <Routes>
+          <Route path="/photos" element={<PhotosScreen />} />
+          <Route path="/send" element={<SendProbe />} />
+        </Routes>
+      </MemoryRouter>,
+    );
+    await userEvent.click(await screen.findByRole("button", { name: /IMG_0001\.JPG/ }));
+    await userEvent.click(screen.getByRole("button", { name: "送る" }));
+    // **id 順は問わない。** 積む順は実装の都合で、送信側は集合として扱う。
+    const sentIds = (await screen.findByTestId("send-ids")).textContent?.split(",").sort();
+    expect(sentIds).toEqual(["a", "raw"]);
   });
 });

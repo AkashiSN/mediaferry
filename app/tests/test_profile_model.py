@@ -226,7 +226,6 @@ def test_stack_is_optional_so_old_revisions_still_parse():
     defn = parse_definition(a_definition())
     assert defn.stack.enabled is False
     assert defn.stack.extensions == ()
-    assert defn.stack.tolerance_seconds == 0
 
 
 def test_stack_extensions_must_be_upper_and_dotless():
@@ -271,16 +270,6 @@ def test_stack_extensions_must_be_scanned():
         )
 
 
-def test_the_tolerance_must_not_be_negative():
-    with pytest.raises(ProfileInvalid, match="0 以上"):
-        parse_definition(
-            a_definition(
-                scan={"roots": ["DCIM"], "extensions": ["JPG", "CR2"]},
-                stack={"enabled": True, "extensions": ["JPG", "CR2"], "tolerance_seconds": -1},
-            )
-        )
-
-
 def test_a_disabled_stack_does_not_require_the_rest():
     """`merge.enabled: false` と同じ扱い（使われない値を発明させない）。"""
     assert parse_definition(a_definition(stack={"enabled": False})).stack.enabled is False
@@ -306,7 +295,6 @@ def test_canon_eos_stacks_jpg_and_cr2():
     canon = {d.slug: d for d in load_builtin_definitions()}["canon-eos"]
     assert canon.stack.enabled is True
     assert canon.stack.extensions == ("JPG", "CR2")
-    assert canon.stack.tolerance_seconds == 0
 
 
 def test_the_other_builtins_do_not_stack():
@@ -327,4 +315,19 @@ def test_the_stack_rule_is_part_of_the_normal_form():
             )
         )
     )
-    assert body["stack"] == {"enabled": True, "extensions": ["JPG", "CR2"], "tolerance_seconds": 0}
+    assert body["stack"] == {"enabled": True, "extensions": ["JPG", "CR2"]}
+
+
+def test_an_old_definition_with_a_tolerance_is_still_readable():
+    """既存リビジョンの JSON には `tolerance_seconds` が入っている.
+
+    弾くと、適用済みの DB のリビジョンを 1 つも開けなくなる。読み飛ばす。
+    """
+    defn = parse_definition(
+        a_definition(
+            scan={"roots": ["DCIM"], "extensions": ["JPG", "CR2"]},
+            stack={"enabled": True, "extensions": ["JPG", "CR2"], "tolerance_seconds": 5},
+        )
+    )
+    assert defn.stack.extensions == ("JPG", "CR2")
+    assert not hasattr(defn.stack, "tolerance_seconds")

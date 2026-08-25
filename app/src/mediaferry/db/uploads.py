@@ -889,7 +889,7 @@ class UploadRepository:
         """同じカードで `<dir>/<stem>.` から始まる観測（UNIQUE 索引の範囲引き）."""
         return list(
             self._conn.execute(
-                "SELECT rel_path, media_file_id FROM source_entry"
+                "SELECT rel_path, media_file_id, copresent_key FROM source_entry"
                 " WHERE volume_instance_id = ? AND rel_path > ? AND rel_path < ?"
                 "   AND media_file_id IS NOT NULL AND state = 'published'",
                 (volume_instance_id, prefix, prefix + HIGH_SENTINEL),

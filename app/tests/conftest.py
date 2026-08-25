@@ -1,16 +1,25 @@
 import os
 import socket
 import threading
+import time
+from dataclasses import dataclass, replace
 
 import pytest
 from fastapi.testclient import TestClient
 
 from mediaferry.adapters.broker_client import BrokerClient
 from mediaferry.api.app import create_app
+from mediaferry.clock import now_iso
+from mediaferry.core.profiles.model import definition_to_json
 from mediaferry.db.connection import Database
 from mediaferry.db.migrate import apply_migrations
+from mediaferry.db.profiles import ProfileRegistry
+from mediaferry.ids import new_id
 from mediaferry_protocol.messages import UsbInfo, VolumeInfo
 from mountd.server import BrokerServer
+
+from .test_schema_artifacts import a_media_file
+from .test_schema_sources import a_volume
 
 
 class FakeMountManager:
@@ -196,3 +205,276 @@ def secured_app(data_root, broker_factory, monkeypatch):
         token = client.get("/api/auth/session").cookies["XSRF-TOKEN"]
         client.headers["X-CSRF-Token"] = token
         yield client, token
+
+
+# ----------------------------------------------------------------------
+# `GET /media?collapse=stack` 用の fixture（Phase 10 Task 6）。
+
+
+def _await_job(client, job_id, timeout=20.0):
+    """ジョブが終わるまで待つ. `test_api.py` の同名の私用ヘルパーと同じ作法."""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        status = client.get(f"/api/jobs/{job_id}").json()["status"]
+        if status not in {"queued", "running", "cancelling"}:
+            assert status == "succeeded", client.get(f"/api/jobs/{job_id}").json()
+            return
+        time.sleep(0.05)
+    raise AssertionError(f"ジョブ {job_id} が終わらない")
+
+
+# **canon_pair / ambiguous_sibling が相乗りする同席の印。** 実物のスキャンが
+# `_mark_copresence` で書く `<job_id>:<stem prefix>` と同じ形。
+_CANON_PROOF = "job1:DCIM/100CANON/IMG_0001."
+
+
+@dataclass
+class CanonPair:
+    """`canon_pair` が作った行の手がかり. `ambiguous_sibling` / `narrowed_stack_rule` が使う."""
+
+    volume_instance_id: str
+    profile_id: str
+    revision_id: str
+    media_ids: dict
+    proof: str | None
+
+
+def _insert_source_entry(
+    db, *, volume_id, rel_path, media_id, extension, copresent_key, state="published"
+):
+    """`source_entry` を 1 行作る. **`extension` を明示する**
+
+    （`一覧の従外しは `source_entry.extension` を rank と突き合わせるので、
+    NULL のままだとどの rank にも一致しない）。
+    """
+    db.execute(
+        "INSERT INTO source_entry (id, volume_instance_id, rel_path, size_bytes, mtime_ns,"
+        " quick_fingerprint, fingerprint_version, media_file_id, state, observed_at,"
+        " copresent_key, extension)"
+        " VALUES (?, ?, ?, 10, 1, ?, 1, ?, ?, ?, ?, ?)",
+        (
+            new_id(),
+            volume_id,
+            rel_path,
+            new_id(),
+            media_id,
+            state,
+            now_iso(),
+            copresent_key,
+            extension,
+        ),
+    )
+
+
+def _make_canon_pair(db, *, proof: str | None) -> CanonPair:
+    registry = ProfileRegistry(db)
+    profile = registry.current("canon-eos")
+    # **`client` fixture が既定の DJI ボリューム（`fs_uuid="26B1-2FD6"`）を持つ。**
+    # `a_volume` の既定値のままだと UNIQUE (fs_uuid, fs_type, size_bytes) が衝突する。
+    volume_id = a_volume(db, (profile.profile_id, profile.revision_id), fs_uuid="CANON-EOS-0001")
+    media_ids = {}
+    for extension in ("JPG", "CR2"):
+        media_id = a_media_file(
+            db,
+            (profile.profile_id, profile.revision_id),
+            rel_path=f"library/canon-eos/DCIM/100CANON/IMG_0001.{extension}",
+            kind="photo",
+            duration_seconds=None,
+            captured_at="2026-08-19T10:30:00+09:00",
+            captured_at_source="exif",
+        )
+        _insert_source_entry(
+            db,
+            volume_id=volume_id,
+            rel_path=f"DCIM/100CANON/IMG_0001.{extension}",
+            media_id=media_id,
+            extension=extension,
+            copresent_key=proof,
+        )
+        media_ids[extension] = media_id
+    db.commit()
+    return CanonPair(
+        volume_instance_id=volume_id,
+        profile_id=profile.profile_id,
+        revision_id=profile.revision_id,
+        media_ids=media_ids,
+        proof=proof,
+    )
+
+
+@pytest.fixture
+def canon_pair(client, db) -> CanonPair:
+    """canon-eos の `media_file` を JPG・CR2 の 2 行と、同じ同席の証拠を持つ
+
+    `source_entry` を 2 行作る. `stack.extensions` の順で JPG が primary."""
+    return _make_canon_pair(db, proof=_CANON_PROOF)
+
+
+@pytest.fixture
+def canon_pair_without_proof(client, db) -> CanonPair:
+    """`canon_pair` と同じ形だが `copresent_key` が NULL —— 同席の証拠が無い."""
+    return _make_canon_pair(db, proof=None)
+
+
+@pytest.fixture
+def dji_media(client):
+    """`client` の `fake_card`（dji-osmo, `stack.enabled = false`）をそのまま取り込む."""
+    volume_id = client.get("/api/devices").json()["volumes"][0]["volume_instance_id"]
+    _await_job(client, client.post(f"/api/volumes/{volume_id}/scan").json()["job_id"])
+    _await_job(client, client.post(f"/api/volumes/{volume_id}/import").json()["job_id"])
+
+
+@pytest.fixture
+def ambiguous_sibling(db, canon_pair):
+    """`canon_pair` の JPG と同じ順位・同じ同席の証拠を持つ、もう 1 つの JPG.
+
+    大小文字違いの原名（`IMG_0001.jpg`）で、どちらが主か決まらない状況を作る。
+    """
+    media_id = a_media_file(
+        db,
+        (canon_pair.profile_id, canon_pair.revision_id),
+        rel_path="library/canon-eos/DCIM/100CANON/IMG_0001_alt.JPG",
+        kind="photo",
+        duration_seconds=None,
+        captured_at="2026-08-19T10:30:00+09:00",
+        captured_at_source="exif",
+    )
+    _insert_source_entry(
+        db,
+        volume_id=canon_pair.volume_instance_id,
+        rel_path="DCIM/100CANON/IMG_0001.jpg",
+        media_id=media_id,
+        extension="JPG",
+        copresent_key=canon_pair.proof,
+    )
+    db.commit()
+    return media_id
+
+
+def _second_card(
+    db, canon_pair, *, shared: str, fresh: str, shared_state: str = "published"
+) -> str:
+    """`canon_pair` と同じ原名の 2 枚組が載った、2 枚目のカードを足す.
+
+    `shared` の拡張子は 1 枚目と**同じ中身**なので同じ `media_file`（観測が 2 つに
+    増えるだけ）、`fresh` の拡張子は中身が違うので**別の** `media_file` になる。
+    返すのは新しくできた `media_file` の id。
+    """
+    registry = ProfileRegistry(db)
+    profile = registry.current("canon-eos")
+    volume_id = a_volume(db, (profile.profile_id, profile.revision_id), fs_uuid="CANON-EOS-0002")
+    proof = "job2:DCIM/100CANON/IMG_0001."
+    _insert_source_entry(
+        db,
+        volume_id=volume_id,
+        rel_path=f"DCIM/100CANON/IMG_0001.{shared}",
+        media_id=canon_pair.media_ids[shared],
+        extension=shared,
+        copresent_key=proof,
+        state=shared_state,
+    )
+    media_id = a_media_file(
+        db,
+        (canon_pair.profile_id, canon_pair.revision_id),
+        rel_path=f"library/canon-eos/DCIM/100CANON/IMG_0001_2.{fresh}",
+        kind="photo",
+        duration_seconds=None,
+        captured_at="2026-08-19T10:30:00+09:00",
+        captured_at_source="exif",
+    )
+    _insert_source_entry(
+        db,
+        volume_id=volume_id,
+        rel_path=f"DCIM/100CANON/IMG_0001.{fresh}",
+        media_id=media_id,
+        extension=fresh,
+        copresent_key=proof,
+    )
+    db.commit()
+    return media_id
+
+
+@pytest.fixture
+def second_card_with_another_raw(db, canon_pair):
+    """同じ JPG が 2 枚目のカードにも在り、そのカードには**別の** CR2 が在る.
+
+    `identity_partners` は主の**複数の観測にまたがって** `by_extension` を数える
+    ので、JPG から見ると CR2 が 2 つ＝曖昧。**主が曖昧なら従を隠さない**。
+    """
+    return _second_card(db, canon_pair, shared="JPG", fresh="CR2")
+
+
+@pytest.fixture
+def second_card_with_another_jpeg(db, canon_pair):
+    """同じ CR2 が 2 枚目のカードにも在り、そのカードには**別の** JPG が在る.
+
+    従（CR2）の側だけが曖昧になる形。主（どちらの JPG）から見た相方は 1 枚に
+    決まるので、主の曖昧さだけを見ると CR2 が隠れてしまう。
+    """
+    return _second_card(db, canon_pair, shared="CR2", fresh="JPG")
+
+
+@pytest.fixture
+def second_card_still_importing(db, canon_pair):
+    """2 枚目のカードの CR2 は公開済みだが、同じカードの JPG はまだ取り込み中.
+
+    **公開されていない観測は、身元の材料に数えない**（`sources_of` /
+    `siblings_on_card` と同じ）。数えると、1 枚目の組が「CR2 が 2 つある」に
+    見えて畳まれなくなる。
+    """
+    return _second_card(db, canon_pair, shared="JPG", fresh="CR2", shared_state="importing")
+
+
+@pytest.fixture
+def narrowed_stack_rule(db, canon_pair):
+    """canon-eos の `stack.extensions` から CR2 を外した新しいリビジョンを作る.
+
+    ビルトインは通常の `update()` では編集できない（`ProfileIsBuiltin`）。
+    `sync_builtins` と同じ経路（`_upsert_revision`）で新しいリビジョンを作り、
+    「アプリの更新で規則が変わった」を模す。
+    """
+    registry = ProfileRegistry(db)
+    old = registry.current("canon-eos").definition
+    # **2 つ未満にはできない**（`stack.extensions` は「1 つでは組にならない」で
+    # 弾かれる）。CR2 を MOV に差し替えて、CR2 だけを外に出す。
+    narrowed = replace(old, stack=replace(old.stack, extensions=("JPG", "MOV")))
+    registry._upsert_revision("canon-eos", definition_to_json(narrowed))  # noqa: SLF001
+    db.commit()
+
+
+@pytest.fixture
+def cross_profile_rank_collision(db, canon_pair):
+    """`canon_pair` の CR2 を、`extensions` を逆順にした別プロファイルへ付け替える.
+
+    **同席グループの中身が同じプロファイルとは限らない。** `media_file.profile_id`
+    は取り込み時のまま不変で、`source_entry.copresent_key` はボリューム単位で
+    採番されるだけなので、同じ同席グループに別プロファイルの `media_file` が
+    混ざりうる（スキーマはこれを禁じない）。ここでは `canon-eos` を複製し
+    `stack.extensions` を `["CR2", "JPG"]`（逆順）にした別プロファイルへ、
+    既存の CR2 を付け替える。JPG（`canon-eos`, 順位 0）と CR2
+    （複製先, 順位 0）は**拡張子が違う**ので `_AMBIGUOUS_EXISTS`
+    （`b.extension = a.extension`）は反応しない —— `theirs.rank < mine.rank` の
+    **厳密さ**だけが両者を隠さずに済ませる砦になる。
+    """
+    registry = ProfileRegistry(db)
+    reversed_ref = registry.duplicate("canon-eos", "canon-eos-reversed", "Canon EOS (reversed)")
+    narrowed = replace(
+        reversed_ref.definition,
+        stack=replace(reversed_ref.definition.stack, extensions=("CR2", "JPG")),
+    )
+    updated = registry.update("canon-eos-reversed", narrowed)
+    # **`media_file_captured_revision_update` トリガの契約を守る。** `profile_id` を
+    # 変えるときは、同じ UPDATE で `captured_at_revision_id` も新しいプロファイルの
+    # リビジョンに揃える（複合 FK が「同じプロファイルの版であること」を求める）。
+    db.execute(
+        "UPDATE media_file SET profile_id = ?, profile_revision_id = ?,"
+        " captured_at_revision_id = ? WHERE id = ?",
+        (
+            updated.profile_id,
+            updated.revision_id,
+            updated.revision_id,
+            canon_pair.media_ids["CR2"],
+        ),
+    )
+    db.commit()
+    return updated

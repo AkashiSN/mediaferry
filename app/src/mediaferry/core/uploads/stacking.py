@@ -1,17 +1,21 @@
 """RAW/JPEG の組を決める規則（§6・§9.11）.
 
-**判断だけを持つ。** DB も相手も触らないので、4 条件を 1 つずつ壊す試験が書ける。
+**判断だけを持つ。** DB も相手も触らないので、条件を 1 つずつ壊す試験が書ける。
 
 組の同一性は**カード上の原名**（`source_entry.rel_path`）で取る。公開名
 （`media_file.rel_path`）は衝突時に改名されるので、連番が一周した別カードの
 ファイルと束ねうる。
+
+**撮影時刻は見ない。** 時刻は同じ 1 枚であることを弱めこそすれ強めない ——
+一括で日時を入れ直すと JPG だけ書き換わって CR2 が元のままになりうる
+（RAW に書き込める道具の方が少ない）ため、時刻の食い違いは誤って組を
+拒む理由にしかならない。
 """
 
 from __future__ import annotations
 
 from collections.abc import Sequence
 from dataclasses import dataclass
-from datetime import datetime
 from posixpath import splitext
 
 from ..profiles.model import StackRule
@@ -36,6 +40,15 @@ class Candidate:
     profile_id: str
     volume_instance_id: str
     rel_path: str  # **カード上の原名**
+    # **同席の証拠**（`source_entry.copresent_key`）。同じ鍵で 2 つ以上の
+    # 拡張子が同時に見えたときだけ、スキャンがここへ `<job_id>:<stem prefix>`
+    # を書く。`None` は「まだ分からない」であって「同席していない」ではないが、
+    # 組の判定では確かめられない相手として扱う（見つからない分は組まない）。
+    copresent_key: str | None
+    # `captured_at` / `captured_at_source` は**組の判定に使わない**（撮影時刻は
+    # 同じ 1 枚であることを弱めこそすれ強めない）。いまは読み手が無く、
+    # `jobs/stacker.py` が観測をそのまま詰めるだけ。**候補の姿を DB の行に
+    # そろえておく**ための欄で、判断には入らない。
     captured_at: str
     captured_at_source: str
     origin: str
@@ -47,6 +60,21 @@ class Candidate:
     def source_key(self) -> tuple[str, str]:
         """組の鍵。**ボリュームと stem は必ず組で持つ。**"""
         return (self.volume_instance_id, stem_prefix(self.rel_path))
+
+
+@dataclass(frozen=True)
+class Identity:
+    """身元だけで決まる組。**曖昧さを潰さずに返す。**
+
+    一覧（送る前）と第 2 パス（送った後）の両方が `identity_partners` を通して
+    これを得る。**予測と事実を別の関数で決めない**（`docs/history/phase10-design.md`）。
+    """
+
+    partners: tuple[Candidate, ...]
+    # 同じ鍵に**同じ正規化拡張子**が 2 つ以上ある。`iter_media_files` は
+    # `{ext.upper()}` で突き合わせるので、case-sensitive な FS では
+    # `IMG_0001.JPG` と `IMG_0001.jpg` がこれになる。**自動では決められない。**
+    ambiguous: bool
 
 
 @dataclass(frozen=True)
@@ -73,34 +101,74 @@ def extension_of(rel_path: str) -> str:
     return splitext(rel_path)[1].lstrip(".").upper()
 
 
+def identity_partners(
+    primary: Candidate, candidates: Sequence[Candidate], rule: StackRule
+) -> Identity:
+    """**身元だけ**で相方を返す（カード上の事実。宛先を見ない）.
+
+    一覧（送る前）と第 2 パス（送った後）の両方がこれを呼ぶ。**予測と事実を
+    別の関数で決めない**（`docs/history/phase10-design.md`）。
+    """
+    if not rule.enabled:
+        return Identity(partners=(), ambiguous=False)
+    if extension_of(primary.rel_path) not in rule.extensions:
+        return Identity(partners=(), ambiguous=False)
+    keys = {c.source_key for c in candidates if c.media_file_id == primary.media_file_id}
+    # **鍵ごとの同席の証拠。** 1 つの鍵の下に自分の行は 1 つしか無い
+    # （UNIQUE (volume_instance_id, rel_path)）ので、対応は一意に決まる。
+    # 集合に潰すと、別々の観測でそれぞれが一致するだけの組が通ってしまう。
+    proofs = {
+        c.source_key: c.copresent_key
+        for c in candidates
+        if c.media_file_id == primary.media_file_id
+    }
+    partners: list[Candidate] = []
+    seen: set[str] = set()
+    by_extension: dict[str, set[str]] = {}
+    for candidate in candidates:
+        if candidate.media_file_id == primary.media_file_id:
+            continue
+        # **鍵は組で比べる**（同じカードの、同じディレクトリの、同じ stem）。
+        if candidate.source_key not in keys:
+            continue
+        extension = extension_of(candidate.rel_path)
+        if extension not in rule.extensions:
+            continue
+        proof = proofs.get(candidate.source_key)
+        # **「同じ時点でカードに在った」を要求する。** 鍵だけでは、片方だけ
+        # 撮り直したときに古い published な行と組む。**曖昧さの数え上げより
+        # 前で落とす** —— 証拠の無い相手は相方候補ですらない。
+        if proof is None or candidate.copresent_key != proof:
+            continue
+        # **同じ資産を 2 回送らない。** 1 つの media_file が複数の観測で候補に入る。
+        if candidate.media_file_id in seen:
+            continue
+        seen.add(candidate.media_file_id)
+        by_extension.setdefault(extension, set()).add(candidate.media_file_id)
+        partners.append(candidate)
+    # **1 つの拡張子に 2 つ以上の media_file が来たら曖昧。** 自分の拡張子も数える
+    # （自分と同じ拡張子の別ファイルが相方に来る場合がある）。
+    by_extension.setdefault(extension_of(primary.rel_path), set()).add(primary.media_file_id)
+    ambiguous = any(len(ids) > 1 for ids in by_extension.values())
+    return Identity(partners=tuple(partners), ambiguous=ambiguous)
+
+
 def resolve_group(
     primary: Candidate, candidates: Sequence[Candidate], rule: StackRule
 ) -> Group | Refusal:
-    """4 条件（§6）で組を決める. 同じ組はどの member から呼んでも同じになる."""
+    """身元で相方を決め、**資格**を確かめる. 同じ組はどの member から呼んでも同じ."""
     if not rule.enabled:
         return Refusal("カメラの種類がスタックを使わない")
     if extension_of(primary.rel_path) not in rule.extensions:
         return Refusal("この拡張子は組の対象ではない")
-    keys = {c.source_key for c in candidates if c.media_file_id == primary.media_file_id}
-    matched = [
-        c
-        for c in candidates
-        if c.media_file_id != primary.media_file_id
-        # **鍵は組で比べる**（同じカードの、同じディレクトリの、同じ stem）。
-        and c.source_key in keys
-        and extension_of(c.rel_path) in rule.extensions
-    ]
-    # **同じ資産を 2 回送らない。** 1 つの media_file が複数の観測で候補に入る。
-    # 集合を 1 つだけ持って O(n) にする（観測の数に上限は無い）。
-    partners: list[Candidate] = []
-    seen: set[str] = set()
-    for candidate in matched:
-        if candidate.media_file_id not in seen:
-            seen.add(candidate.media_file_id)
-            partners.append(candidate)
+    identity = identity_partners(primary, candidates, rule)
+    if identity.ambiguous:
+        # **「どちらかを選ぶ」を機械にやらせない。** 送信は止めず、理由を出す。
+        return Refusal("同じ拡張子の相方が複数ある。自動では決められない")
+    partners = list(identity.partners)
     if not partners:
         return Refusal("相方が見つからない")
-    refusal = _refused(primary, partners, rule)
+    refusal = _refused(primary, partners)
     if refusal is not None:
         return refusal
     members = sorted(
@@ -109,7 +177,7 @@ def resolve_group(
     return Group(members=tuple(members))
 
 
-def _refused(primary: Candidate, partners: Sequence[Candidate], rule: StackRule) -> Refusal | None:
+def _refused(primary: Candidate, partners: Sequence[Candidate]) -> Refusal | None:
     """組めない理由を探す. **見つからなければ None。**"""
     for member in (primary, *partners):
         if member.origin != "created_by_us":
@@ -132,14 +200,4 @@ def _refused(primary: Candidate, partners: Sequence[Candidate], rule: StackRule)
             return Refusal("相方が別のカメラの種類に属している")
         if partner.invalidated or partner.state != "complete":
             return Refusal("相方はまだ送信が終わっていない")
-        if partner.captured_at_source != primary.captured_at_source:
-            return Refusal("相方と時刻の根拠が違う（EXIF と mtime を突き合わせない）")
-        if not _within(primary.captured_at, partner.captured_at, rule.tolerance_seconds):
-            return Refusal("相方と撮影時刻が一致しない")
     return None
-
-
-def _within(left: str, right: str, tolerance_seconds: int) -> bool:
-    """**文字列ではなく瞬間で比べる**（オフセットが違っても同じ時刻でありうる）."""
-    delta = datetime.fromisoformat(left) - datetime.fromisoformat(right)
-    return abs(delta.total_seconds()) <= tolerance_seconds

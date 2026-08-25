@@ -1,6 +1,6 @@
 """組を決める規則（§6・§9.11）.
 
-**判断だけを持つ純関数**なので、4 条件を 1 つずつ壊す筋書きが書ける。
+**判断だけを持つ純関数**なので、条件を 1 つずつ壊す筋書きが書ける。
 """
 
 from dataclasses import replace
@@ -13,11 +13,12 @@ from mediaferry.core.uploads.stacking import (
     Group,
     Refusal,
     extension_of,
+    identity_partners,
     resolve_group,
     stem_prefix,
 )
 
-RULE = StackRule(enabled=True, extensions=("JPG", "CR2"), tolerance_seconds=0)
+RULE = StackRule(enabled=True, extensions=("JPG", "CR2"))
 
 
 def a_candidate(rel_path, **over):
@@ -37,6 +38,10 @@ def a_candidate(rel_path, **over):
         "state": "complete",
         "remote_asset_id": f"asset-{rel_path}",
         "invalidated": False,
+        # **既定は「同じ機会に同席していた」。** 同じディレクトリ・同じ stem の
+        # 観測どうしは、明示的に `copresent_key` を渡さない限り自動で一致する
+        # （実物のスキャンが同じ stem の下へ同じ印を書くのと同じ形）。
+        "copresent_key": f"job1:{stem_prefix(rel_path)}",
     }
     base.update(over)
     return Candidate(**base)
@@ -136,34 +141,20 @@ def test_a_media_observed_twice_appears_once_in_the_group():
     assert len(group.members) == 2
 
 
-def test_a_different_capture_time_is_not_a_partner():
-    """**同じシャッターであることの直接の証拠**（§6）."""
+def test_a_different_capture_time_is_not_a_partner_but_still_pairs():
+    """**撮影時刻は身元を弱めない**（`docs/history/phase10-design.md` §2）.
+
+    一括で日時を入れ直すと JPG だけ書き換わって CR2 が元のままになりうるので、
+    撮影時刻の食い違いは組を拒む理由にしない。
+    """
     late = a_cr2(captured_at="2026-08-19T10:30:01+09:00")
-    assert "撮影時刻" in resolve_group(a_jpg(), [a_jpg(), late], RULE).reason
+    assert isinstance(resolve_group(a_jpg(), [a_jpg(), late], RULE), Group)
 
 
-def test_the_tolerance_is_honoured():
-    late = a_cr2(captured_at="2026-08-19T10:30:01+09:00")
-    group = resolve_group(a_jpg(), [a_jpg(), late], replace(RULE, tolerance_seconds=2))
-    assert isinstance(group, Group)
-
-
-def test_the_tolerance_is_inclusive_at_the_boundary():
-    late = a_cr2(captured_at="2026-08-19T10:30:02+09:00")
-    group = resolve_group(a_jpg(), [a_jpg(), late], replace(RULE, tolerance_seconds=2))
-    assert isinstance(group, Group)
-
-
-def test_a_different_time_source_is_not_a_partner():
-    """EXIF の時刻と mtime の時刻という**別々の時計**を突き合わせない（§6）."""
+def test_a_different_time_source_still_pairs():
+    """EXIF の時刻と mtime の時刻という**別々の時計**でも、身元の判定には使わない."""
     fallen_back = a_cr2(captured_at_source="mtime")
-    assert "時刻の根拠" in resolve_group(a_jpg(), [a_jpg(), fallen_back], RULE).reason
-
-
-def test_offsets_are_compared_as_instants_not_strings():
-    """`captured_at` はオフセット付きで保存される（§8 の唯一の例外）."""
-    same_instant = a_cr2(captured_at="2026-08-19T01:30:00+00:00")
-    assert isinstance(resolve_group(a_jpg(), [a_jpg(), same_instant], RULE), Group)
+    assert isinstance(resolve_group(a_jpg(), [a_jpg(), fallen_back], RULE), Group)
 
 
 def test_a_partner_that_is_not_ours_refuses_the_group():
@@ -282,3 +273,161 @@ def test_two_missing_asset_ids_are_not_reported_as_a_duplicate():
     gone = [a_jpg(remote_asset_id=None), a_cr2(remote_asset_id=None)]
     refusal = resolve_group(gone[0], gone, RULE)
     assert "資産 ID が分からない" in refusal.reason
+
+
+def test_the_identity_does_not_look_at_the_time():
+    """**組の身元は時刻で決まらない。**
+
+    一括で日時を入れ直すと JPG だけ書き換わって CR2 が元のままになりうる
+    （RAW に書ける道具の方が少ない）。時刻で切ると 1 組も組めなくなる。
+    """
+    late = replace(a_cr2(), captured_at="2026-08-17T14:31:00+00:00")
+
+    identity = identity_partners(a_jpg(), [a_jpg(), late], RULE)
+
+    assert [c.rel_path for c in identity.partners] == [late.rel_path]
+
+
+def test_the_identity_does_not_look_at_where_the_time_came_from():
+    """`exifread` が JPG は読めて CR2 は読めなくても、組は同じ 1 枚である."""
+    by_mtime = replace(a_cr2(), captured_at_source="mtime")
+
+    identity = identity_partners(a_jpg(), [a_jpg(), by_mtime], RULE)
+
+    assert [c.rel_path for c in identity.partners] == [by_mtime.rel_path]
+
+
+def test_the_identity_needs_the_same_card_and_stem():
+    """別のカードの同じ名前は相方ではない（連番は一周する）."""
+    other_card = replace(a_cr2(), volume_instance_id="another")
+
+    assert identity_partners(a_jpg(), [a_jpg(), other_card], RULE).partners == ()
+
+
+def test_two_partners_with_the_same_extension_are_ambiguous():
+    """`iter_media_files` は拡張子を大文字化して突き合わせるので、
+    case-sensitive な FS では `IMG_1234.JPG` と `IMG_1234.jpg` が同じ拡張子になる。
+    **どちらが相方かは機械には決められない。**
+    """
+    lower = replace(a_jpg(), media_file_id="other", rel_path="DCIM/100CANON/IMG_1234.jpg")
+
+    assert identity_partners(a_cr2(), [a_cr2(), a_jpg(), lower], RULE).ambiguous
+
+
+def test_ambiguous_identity_refuses_the_group():
+    """組の判定側も曖昧さを潰さない。**利用者の判断に回す。**"""
+    lower = replace(a_jpg(), media_file_id="other", rel_path="DCIM/100CANON/IMG_1234.jpg")
+
+    refusal = resolve_group(a_cr2(), [a_cr2(), a_jpg(), lower], RULE)
+
+    assert "自動では決められない" in refusal.reason
+
+
+def test_a_disabled_rule_is_seen_directly_by_the_identity():
+    """`resolve_group` の門に隠れない場所を守る.
+
+    一覧（送る前）は `resolve_group` を経由せず `identity_partners` を直接
+    呼ぶ（Task 6）。`resolve_group` 側の `rule.enabled` の門はここには立たない
+    ので、`identity_partners` 自身がこの門を持つことを直接確かめる。
+    """
+    rule = StackRule(enabled=False, extensions=("JPG", "CR2"))
+
+    identity = identity_partners(a_jpg(), [a_jpg(), a_cr2()], rule)
+
+    assert identity.partners == ()
+
+
+def test_a_partner_sharing_the_primarys_own_extension_is_ambiguous():
+    """**自分と同じ拡張子の別ファイルが相方に来る場合**も曖昧.
+
+    相方どうしが衝突するだけでなく、primary 自身と同じ正規化拡張子の別ファイルが
+    同じ鍵（ボリューム・stem）に来る場合も、どちらが primary かは機械には
+    決められない。
+    """
+    twin = replace(a_jpg(), media_file_id="other", rel_path="DCIM/100CANON/IMG_1234.jpg")
+
+    assert identity_partners(a_jpg(), [a_jpg(), twin], RULE).ambiguous
+
+
+def test_a_partner_without_proof_of_copresence_is_not_a_partner():
+    """**同席の証拠が無ければ組まない。**
+
+    片方だけ撮り直すと、古い published な行が相方として残る。鍵だけで組むと
+    新しい JPG が無関係な古い RAW と組む（`phase10-design.md` の 3）。
+    """
+    stale = replace(a_cr2(), copresent_key=None)
+
+    assert identity_partners(a_jpg(), [a_jpg(), stale], RULE).partners == ()
+
+
+def test_a_partner_from_another_copresence_is_not_a_partner():
+    """別の機会に同席した相手とは組まない."""
+    other = replace(a_cr2(), copresent_key="job2:DCIM/100CANON/IMG_1234.")
+
+    assert identity_partners(a_jpg(), [a_jpg(), other], RULE).partners == ()
+
+
+def test_the_primary_without_proof_has_no_partner():
+    """自分の側に証拠が無ければ、相方が持っていても組まない."""
+    mine = replace(a_jpg(), copresent_key=None)
+
+    assert identity_partners(mine, [mine, a_cr2()], RULE).partners == ()
+
+
+def test_two_partners_both_missing_proof_are_not_partners():
+    """**両方とも証拠が無ければ、なおさら組まない。**
+
+    自分側も相手側も `copresent_key` が `None` だと、`!=` の比較だけでは
+    `None != None` が偽になり通ってしまう。「分からない」どうしを
+    「同席していた」と読まない。
+    """
+    mine = replace(a_jpg(), copresent_key=None)
+    unproven = replace(a_cr2(), copresent_key=None)
+
+    assert identity_partners(mine, [mine, unproven], RULE).partners == ()
+
+
+def test_a_partner_matching_a_different_observations_proof_is_not_a_partner():
+    """**証拠は鍵ごとに突き合わせる。** 別の観測の印と一致するだけでは組まない.
+
+    自分に 2 つの観測（別々のカード）があるとき、片方の鍵で来た相方候補の印が
+    *もう片方*の観測の印とたまたま一致しても、束ねてはいけない。`proofs` を
+    1 つの集合に潰すと、この組が通ってしまう。
+    """
+    mine = [
+        a_candidate(
+            "DCIM/100CANON/A.JPG",
+            media_file_id="m-jpg",
+            volume_instance_id="volume-1",
+            copresent_key="job1:DCIM/100CANON/A.",
+        ),
+        a_candidate(
+            "DCIM/100CANON/B.JPG",
+            media_file_id="m-jpg",
+            volume_instance_id="volume-2",
+            copresent_key="job2:DCIM/100CANON/B.",
+        ),
+    ]
+    # 鍵は mine[0]（volume-1, A.）と一致するが、印は mine[1] のものと一致する。
+    mismatched = a_candidate(
+        "DCIM/100CANON/A.CR2",
+        media_file_id="m-cr2",
+        volume_instance_id="volume-1",
+        copresent_key="job2:DCIM/100CANON/B.",
+    )
+
+    assert identity_partners(mine[0], [*mine, mismatched], RULE).partners == ()
+
+
+def test_an_unproven_candidate_does_not_count_toward_ambiguity():
+    """**曖昧さの数え上げは、証拠を通った相手だけを数える。**
+
+    証拠の門を `seen` の重複除けより後ろへ動かすと、組めなかった（証拠の無い）
+    相手の拡張子まで曖昧さの集計に混ざってしまう。
+    """
+    unproven = replace(a_cr2(), media_file_id="other-cr2", copresent_key=None)
+
+    identity = identity_partners(a_jpg(), [a_jpg(), a_cr2(), unproven], RULE)
+
+    assert identity.partners == (a_cr2(),)
+    assert not identity.ambiguous

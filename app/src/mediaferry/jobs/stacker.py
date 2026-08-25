@@ -240,6 +240,7 @@ class Stacker:
             profile_id=media["profile_id"],
             volume_instance_id=volume,
             rel_path=sibling["rel_path"],
+            copresent_key=sibling["copresent_key"],
             captured_at=media["captured_at"],
             captured_at_source=media["captured_at_source"],
             origin=record["origin"],

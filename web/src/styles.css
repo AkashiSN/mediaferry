@@ -275,10 +275,12 @@ h1.page.title-lg { font-size: 24px; }
 }
 .pick.on { background-color: var(--accent); }
 .pick svg { position: relative; color: var(--accent-ink); z-index: 1; }
-/* 左上＝つないだ動画の印。 */
-.madeof { position: absolute; top: 7px; left: 7px; z-index: 1; font-size: 10.5px;
-  color: var(--accent-ink);
+/* 左上＝つないだ動画・組（RAW+JPEG）の印。**両方立つ行がありうる**ので、座標は
+   入れ物が 1 つだけ持ち、札は入れ物の中で横に並べる。 */
+.madeofs { position: absolute; top: 7px; left: 7px; z-index: 1; display: flex; gap: 4px; }
+.madeof { font-size: 10.5px; color: var(--accent-ink);
   background: var(--accent); border-radius: 4px; padding: 1px 5px; }
+.madeof.raw { background: var(--warn-dot); }
 .tile .mark {
   position: absolute; left: 7px; bottom: 7px; width: 18px; height: 18px; border-radius: 50%;
   display: flex; align-items: center; justify-content: center; font-size: 11px; font-weight: 700;

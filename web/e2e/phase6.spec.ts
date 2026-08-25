@@ -55,15 +55,19 @@ test("RAW+JPEG が 1 スタックになり、見送りの理由も画面に出�
   await page.getByRole("button", { name: "EOS_DIGITAL をスキャン" }).click();
   await page.getByRole("button", { name: "EOS_DIGITAL を取り込む" }).click();
 
-  // 3. 写真に RAW+JPEG が並ぶまで待つ。**選ぶ丸はファイル名で名乗る**（§13）。
-  //    タイルは押すと開くので、**選ぶのは隅の丸**を押す。
+  // 3. 写真に RAW+JPEG が並ぶまで待つ。**写真タブは組を畳むので、選ぶ丸は
+  //    IMG_0003 につき 1 つだけ**（CR2 の行は一覧に出ない）。畳まれた行には
+  //    `RAW` の札が付く。
   await nav.getByRole("link", { name: "写真" }).click();
-  const pair = page.getByRole("button", { name: /^選ぶ：IMG_0003\.(JPG|CR2)$/ });
-  await expect(pair).toHaveCount(2, { timeout: 90_000 });
+  const combined = page.getByRole("button", { name: "選ぶ：IMG_0003.JPG" });
+  await expect(combined).toBeVisible({ timeout: 90_000 });
+  await expect(page.getByRole("button", { name: /^選ぶ：IMG_0003\.(JPG|CR2)$/ })).toHaveCount(1);
+  await expect(page.locator(".tile", { has: combined }).getByText("RAW")).toBeVisible();
 
-  // 4. 2 枚と、**組にならない 1 枚**（相方の無い JPG）を選んで送る。
-  await pair.nth(0).click();
-  await pair.nth(1).click();
+  // 4. 畳んだタイルは 1 枚で組の両方（JPG+CR2）を表すので、**1 つ選ぶだけで
+  //    相方も一緒に選ばれる。** これに、組にならない 1 枚（相方の無い
+  //    IMG_0001.JPG）を選んで送る。
+  await combined.click();
   await page.getByRole("button", { name: "選ぶ：IMG_0001.JPG" }).click();
   await page.getByRole("button", { name: "送る", exact: true }).click();
   await expect(page.getByRole("heading", { name: "Immich へ送る" })).toBeVisible();
@@ -90,7 +94,7 @@ test("RAW+JPEG が 1 スタックになり、見送りの理由も画面に出�
   };
   await expect.poll(membersOfTheStack, { timeout: 60_000 }).toBe(2);
 
-  // 6. **束ねられなかった 1 枚は、理由が送り先の画面に出る。**
+  // 6. **束ねられなかった 1 枚（IMG_0001）は、理由が送り先の画面に出る。**
   //    「対象外のときだけ出す」形にしないので、文言まで当てる（Phase 5 の教訓）。
   await page.goto(app.url + "/settings/destinations");
   await expect(page.getByText(/相方が見つからない/)).toBeVisible({ timeout: 60_000 });
