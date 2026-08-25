@@ -492,7 +492,7 @@ export function SendScreen() {
         <div
           style={{
             display: "grid",
-            gridTemplateColumns: "repeat(auto-fill, minmax(58px, 1fr))",
+            gridTemplateColumns: "repeat(auto-fill, minmax(74px, 1fr))",
             gap: 7,
           }}
         >

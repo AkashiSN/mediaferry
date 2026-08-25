@@ -277,9 +277,13 @@ h1.page.title-lg { font-size: 24px; }
 .pick svg { position: relative; color: var(--accent-ink); z-index: 1; }
 /* 左上＝つないだ動画・組（RAW+JPEG）の印。**両方立つ行がありうる**ので、座標は
    入れ物が 1 つだけ持ち、札は入れ物の中で横に並べる。 */
-.madeofs { position: absolute; top: 7px; left: 7px; z-index: 1; display: flex; gap: 4px; }
+.madeofs { position: absolute; top: 7px; left: 7px; z-index: 1; display: flex; gap: 4px;
+  max-width: calc(100% - 14px); }
 .madeof { font-size: 10.5px; color: var(--accent-ink);
-  background: var(--accent); border-radius: 4px; padding: 1px 5px; }
+  background: var(--accent); border-radius: 4px; padding: 1px 5px;
+  /* 既存の指定はそのまま。**組の札は文字が長いので、タイルの幅で切る** ——
+     読めなくなるより、はみ出さない方を採る。 */
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .madeof.raw { background: var(--warn-dot); }
 .tile .mark {
   position: absolute; left: 7px; bottom: 7px; width: 18px; height: 18px; border-radius: 50%;

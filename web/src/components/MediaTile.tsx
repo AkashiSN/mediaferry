@@ -6,6 +6,7 @@
 
 import { Link } from "react-router-dom";
 
+import { stackLabel } from "../utils/stacks";
 import { Icon } from "./Icon";
 
 export type MediaStatus = "unsent" | "awaiting" | "sent" | "failed" | null;
@@ -64,18 +65,21 @@ export function MediaTile({
 }) {
   const name = fileName(media.rel_path);
   const hasDuration = media.kind === "video" && media.duration_seconds != null;
+  // **札は「このタイルが表すファイル」から作る。** 一覧では組の全員、送る画面では
+  // 対象になっているぶんだけ —— `media.stack.members` がその集合そのものである。
+  const label = media.stack ? stackLabel(media.stack.members) : null;
   const inside = (
     <>
       <img src={`/api/media/${media.id}/thumbnail`} alt="" loading="lazy" className="tileimg" />
-      {/* **「つないだ」と `RAW` は独立に立つ。** 出す条件が `role` と `stack` で
+      {/* **「つないだ」と組の札は独立に立つ。** 出す条件が `role` と `stack` で
           別々なので、両方立つ行がありうる。同じ座標へ重ねると片方が読めなくなる
           ため、1 つの入れ物へ入れて横に並べる（`styles.css` の `.madeofs`）。
-          **どちらかを捨てない** —— 「つないだ動画」と「組の主」は別の事実で、
+          **どちらかを捨てない** —— 「つないだ動画」と「組」は別の事実で、
           片方を隠すとタイルがその行を名乗り損ねる。 */}
-      {(media.role === "derived" || media.stack) && (
+      {(media.role === "derived" || label !== null) && (
         <span className="madeofs">
           {media.role === "derived" && <span className="madeof">つないだ</span>}
-          {media.stack && <span className="madeof raw">RAW</span>}
+          {label !== null && <span className="madeof raw">{label}</span>}
         </span>
       )}
       <StatusMark status={media.status ?? null} />

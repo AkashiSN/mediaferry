@@ -76,7 +76,8 @@ describe("MediaTile", () => {
     expect(container.querySelector(".pick svg")).toBeNull();
   });
 
-  it("RAW も一緒にあると分かる", () => {
+  it("組なら JPG+RAW と名乗る", () => {
+    // **`RAW` の 1 語では 2 枚あることが読めない**（利用者のレビュー）。
     renderTile({
       to: "/photos/m1",
       onToggle: vi.fn(),
@@ -90,12 +91,27 @@ describe("MediaTile", () => {
         },
       },
     });
-    expect(screen.getByText("RAW")).toBeInTheDocument();
+    expect(screen.getByText("JPG+RAW")).toBeInTheDocument();
   });
 
   it("組でなければ RAW とは書かない", () => {
     renderTile({ to: "/photos/m1", onToggle: vi.fn() });
-    expect(screen.queryByText("RAW")).toBeNull();
+    expect(screen.queryByText(/RAW/)).toBeNull();
+  });
+
+  it("タイルが 1 枚しか表さないなら札を出さない", () => {
+    // 送る画面では、相方が送信済みで CR2 だけが対象になることがある。
+    // **`media.stack.members` は「このタイルが表すファイル」**なので、1 つなら
+    // 組ではない。
+    renderTile({
+      to: "/photos/m1",
+      onToggle: vi.fn(),
+      media: {
+        ...media,
+        stack: { members: [{ id: "m1", rel_path: "library/x/A.CR2", size_bytes: 200 }] },
+      },
+    });
+    expect(screen.queryByText(/RAW/)).toBeNull();
   });
 
   // **「つないだ」と `RAW` は独立に立つ。** どちらを出すかは `role` と `stack` が
@@ -118,6 +134,6 @@ describe("MediaTile", () => {
     });
     // **同じ入れ物の兄弟として並ぶ**ことを見る。別々に絶対配置すると重なる。
     const badges = [...container.querySelectorAll(".madeofs > .madeof")];
-    expect(badges.map((badge) => badge.textContent)).toEqual(["つないだ", "RAW"]);
+    expect(badges.map((badge) => badge.textContent)).toEqual(["つないだ", "JPG+RAW"]);
   });
 });
