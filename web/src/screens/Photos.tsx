@@ -20,13 +20,15 @@ type MediaPage = { media: Media[]; total: number; page: number; page_size: numbe
 type Destination = { id: string; name: string; enabled: boolean };
 type Destinations = { destinations: Destination[] };
 
-type FilterKey = "all" | "unsent" | "awaiting" | "video" | "sent" | "failed";
+type FilterKey = "all" | "unsent" | "awaiting" | "video" | "derived" | "sent" | "failed";
 
 const FILTERS: { key: FilterKey; label: string }[] = [
   { key: "all", label: "すべて" },
   { key: "unsent", label: "まだ送っていない" },
   { key: "awaiting", label: "確認が要る" },
   { key: "video", label: "動画" },
+  // **宛先ごとの絞り込みではない**ので `DESTINATION_SCOPED` には入れない。
+  { key: "derived", label: "つないだ動画" },
   { key: "sent", label: "送信済み" },
   { key: "failed", label: "送れなかった" },
 ];
@@ -49,6 +51,9 @@ const PAGE_SIZE = 200;
 function filterFromParams(params: URLSearchParams): FilterKey {
   if (params.get("kind") === "video") {
     return "video";
+  }
+  if (params.get("role") === "derived") {
+    return "derived";
   }
   const status = params.get("status");
   if (status === "unsent" || status === "awaiting" || status === "sent" || status === "failed") {
@@ -78,6 +83,8 @@ function buildMediaQuery(
   const query = new URLSearchParams();
   if (filter === "video") {
     query.set("kind", "video");
+  } else if (filter === "derived") {
+    query.set("role", "derived");
   } else if (DESTINATION_SCOPED.has(filter) && destinationId) {
     query.set("status", filter);
     query.set("destination_id", destinationId);
@@ -189,11 +196,14 @@ export function PhotosScreen() {
     const nextParams = new URLSearchParams(params);
     nextParams.delete("kind");
     nextParams.delete("status");
+    nextParams.delete("role");
     // **絞り込みを変えたら 1 ページ目へ戻す。** 3 ページ目のまま移ると、
     // 当てはまるものが 1 ページ分しか無いときに「ありません」と出る。
     nextParams.delete("page");
     if (next === "video") {
       nextParams.set("kind", "video");
+    } else if (next === "derived") {
+      nextParams.set("role", "derived");
     } else if (next !== "all") {
       nextParams.set("status", next);
     }
@@ -367,6 +377,7 @@ export function PhotosScreen() {
                 <MediaTile
                   key={item.id}
                   media={item}
+                  to={`/photos/${item.id}`}
                   selected={selected.has(item.id)}
                   onToggle={() => toggle(item.id, item.size_bytes)}
                 />

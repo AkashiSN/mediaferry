@@ -41,8 +41,8 @@ const DETAILS: readonly { to: string; title: string; note: string }[] = [
   },
   {
     to: "/settings/merge-history",
-    title: "つないだ動画の記録",
-    note: "どの部品から作ったか、別々のままにした組み合わせ",
+    title: "つないだ後の後片付け",
+    note: "別々のままにした組み合わせと、使っていない出力を片付ける",
   },
   {
     // 置き換わった出力は、それを作った記録と同じ画面にある（どのつなぎ直しで

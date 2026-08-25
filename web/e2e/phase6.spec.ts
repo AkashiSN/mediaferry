@@ -55,15 +55,16 @@ test("RAW+JPEG が 1 スタックになり、見送りの理由も画面に出�
   await page.getByRole("button", { name: "EOS_DIGITAL をスキャン" }).click();
   await page.getByRole("button", { name: "EOS_DIGITAL を取り込む" }).click();
 
-  // 3. 写真に RAW+JPEG が並ぶまで待つ。**タイルはファイル名で名乗る**（§13）。
+  // 3. 写真に RAW+JPEG が並ぶまで待つ。**選ぶ丸はファイル名で名乗る**（§13）。
+  //    タイルは押すと開くので、**選ぶのは隅の丸**を押す。
   await nav.getByRole("link", { name: "写真" }).click();
-  const pair = page.getByRole("button", { name: /^IMG_0003\.(JPG|CR2)$/ });
+  const pair = page.getByRole("button", { name: /^選ぶ：IMG_0003\.(JPG|CR2)$/ });
   await expect(pair).toHaveCount(2, { timeout: 90_000 });
 
   // 4. 2 枚と、**組にならない 1 枚**（相方の無い JPG）を選んで送る。
   await pair.nth(0).click();
   await pair.nth(1).click();
-  await page.getByRole("button", { name: "IMG_0001.JPG" }).click();
+  await page.getByRole("button", { name: "選ぶ：IMG_0001.JPG" }).click();
   await page.getByRole("button", { name: "送る", exact: true }).click();
   await expect(page.getByRole("heading", { name: "Immich へ送る" })).toBeVisible();
   // 送り先が 1 つしか無ければ、黙ってそれを使う。

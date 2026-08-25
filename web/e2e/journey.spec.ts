@@ -7,6 +7,10 @@
 // 領域の大きさ、ライトとダーク、確認ダイアログが前面に重なること）は、実際に
 // 並べて描いてみないと確かめられない。
 
+import { execFileSync } from "node:child_process";
+import { readdirSync, readFileSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
+
 import { expect, test, type Page } from "@playwright/test";
 
 import { start, type Running } from "./harness";
@@ -50,6 +54,78 @@ async function signIn(page: Page, path = "/"): Promise<void> {
   await page.getByLabel("パスワード").fill(PASSWORD);
   await page.getByRole("button", { name: "ログイン" }).click();
   await expect(page.getByRole("navigation")).toBeVisible();
+}
+
+/** `library/` の下にある動画ファイル（拡張子 `.MP4`）を再帰的に探す。 */
+function findVideoFiles(dir: string): string[] {
+  const found: string[] = [];
+  for (const entry of readdirSync(dir, { withFileTypes: true })) {
+    const full = join(dir, entry.name);
+    if (entry.isDirectory()) {
+      found.push(...findVideoFiles(full));
+    } else if (entry.name.toUpperCase().endsWith(".MP4")) {
+      found.push(full);
+    }
+  }
+  return found;
+}
+
+/**
+ * 手でグループを作り、実際につなぐ（§6「結合物が要る」）。
+ *
+ * **検出は合成カードでは候補を作れない。** `min_part_size_gib`（15）に対して
+ * 合成カードの動画は 100 バイトなので、「分かれた動画を探す」を押しても候補は
+ * 0 件のまま。「手でグループを作る」経路で組む。
+ *
+ * **合成カードの動画は ffmpeg では読めない。** 100 バイトの中身は本物のコンテナ
+ * ではないので、そのまま「つなぐ」を押しても結合が失敗して終わる（`role = derived`
+ * が 1 件も生まれない）。グループを作ったあと、NAS 上の該当ファイルを ffmpeg で
+ * 作った小さな本物の動画に差し替えてから「つなぐ」を押す —— これは NAS 上のファイル
+ * を直接書き換えるだけで、mediaferry 側には何も足さない。
+ */
+async function mergeTwoParts(page: Page): Promise<void> {
+  // 先行するテストが同じ 2 件を組んで「これは別々」で破棄していると、
+  // `input_digest` の番人がまだその構成を塞いでいる（破棄しても枠は空かない）。
+  // 設定 › つないだ後の後片付けで破棄の記録を先に消し、枠を空ける。
+  await page.goto(app.url + "/settings/merge-history");
+  await settled(page);
+  for (const discard of await page.getByRole("button", { name: /^消す：/ }).all()) {
+    await discard.click();
+    await page.getByRole("button", { name: "実行する" }).click();
+  }
+
+  await page.goto(app.url + "/merge");
+  await settled(page);
+  await page.getByRole("group").first().click(); // 「手でグループを作る」を開く
+  const parts = page.getByRole("checkbox");
+  await expect(parts.first()).toBeVisible({ timeout: 60_000 });
+  await parts.nth(0).check();
+  await parts.nth(1).check();
+  await page.getByRole("button", { name: /選んだ 2 件でグループを作る/ }).click();
+  const mergeButton = page.getByRole("button", { name: "つなぐ", exact: true });
+  await expect(mergeButton).toBeVisible({ timeout: 60_000 });
+
+  // NAS 上のダミー動画を、ffmpeg で読める小さな本物の動画に差し替える。
+  const clip = join(app.dataRoot, ".e2e-clip.mp4");
+  execFileSync("ffmpeg", [
+    "-y",
+    "-f",
+    "lavfi",
+    "-i",
+    "color=c=black:size=32x32:d=0.2",
+    "-c:v",
+    "libx264",
+    "-pix_fmt",
+    "yuv420p",
+    clip,
+  ]);
+  const bytes = readFileSync(clip);
+  for (const path of findVideoFiles(join(app.dataRoot, "library"))) {
+    writeFileSync(path, bytes);
+  }
+
+  await mergeButton.click();
+  await expect(page.getByText(/できたファイル/)).toBeVisible({ timeout: 60_000 });
 }
 
 /**
@@ -700,6 +776,46 @@ test("確認ダイアログは前面に重なり、背後を押させない", as
   expect(await page.getByRole("dialog").innerText()).not.toContain("**");
 
   await page.getByRole("button", { name: "やめる" }).click();
+});
+
+test("つないだ動画を開いて、消せる", async ({ page }) => {
+  await signIn(page);
+  // 手でグループを作ってつなぐ（検出は合成カードでは候補を作れない）。
+  await mergeTwoParts(page);
+
+  await page.goto(app.url + "/photos?role=derived");
+  await settled(page);
+  const tile = page.locator("main .tile").first();
+  await expect(tile).toBeVisible({ timeout: 60_000 });
+  // **見出しの照合をファイル名で絞る。** 「くわしく」も写真タブも `<h1>` を
+  // 1 つ持つので、階層（level）だけで見ると、遷移がまだ終わっていない
+  // （住所は変わったが描画が追いついていない）瞬間の写真タブの見出し
+  // 「写真」を誤って合格にしてしまう。
+  const fileLabel = await tile.locator(".tilehit").getAttribute("aria-label");
+  expect(fileLabel).not.toBeNull();
+  await tile.locator(".tilehit").click();
+
+  // くわしくが開き、**何から作られたかが出る**。
+  await expect(page.getByRole("heading", { level: 1, name: fileLabel! })).toBeVisible({
+    timeout: 60_000,
+  });
+  await expect(page.getByText(/つないだ動画/)).toBeVisible({ timeout: 60_000 });
+  await expect(page.getByRole("heading", { name: "元になったファイル" })).toBeVisible({
+    timeout: 60_000,
+  });
+
+  // 一度も送っていないので消せる。確認ダイアログを経て消す。
+  await page.getByRole("button", { name: "消す" }).click();
+  await expect(page.getByRole("dialog")).toBeVisible();
+  await page.getByRole("button", { name: "実行する" }).click();
+
+  // 消したら写真タブへ戻る。**「元になった 2 件」は既にほかのテストで送信済み**
+  // なので、絞り込み無しの一覧には残る —— 消えたことを見るのは、いま居た
+  // 「つないだ動画」の一覧（`role=derived`）に対してでなければならない。
+  await expect(page).toHaveURL(/\/photos$/);
+  await page.goto(app.url + "/photos?role=derived");
+  await settled(page);
+  await expect(page.locator("main .tile")).toHaveCount(0);
 });
 
 // ---- ログイン画面 ----

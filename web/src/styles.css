@@ -248,16 +248,24 @@ h1.page.title-lg { font-size: 24px; }
   border-radius: inherit; }
 /* 全面を覆う「開く」の的。丸より下に敷く。 */
 .tilehit { position: absolute; inset: 0; border-radius: inherit; z-index: 1; }
-/* 右上＝選ぶ丸。**44px の当たり判定**を見た目の丸の外へ広げる（§13）。 */
-.pick { position: absolute; top: 0; right: 0; width: 44px; height: 44px; z-index: 2;
-  border: none; background: none; padding: 0;
-  display: flex; align-items: flex-start; justify-content: flex-end; }
-.pick::before { content: ""; position: absolute; top: 7px; right: 7px; width: 21px; height: 21px;
-  border-radius: 50%; border: 2px solid #fff; box-shadow: 0 0 0 1px rgba(0, 0, 0, .28); }
-.pick.on::before { background: var(--accent); border-color: var(--accent); }
-.pick svg { position: relative; margin: 11px 11px 0 0; color: var(--accent-ink); z-index: 1; }
+/* 右上＝選ぶ丸。**押せる領域は 44px、見た目の丸はその内側 21px**（§13 のモック
+   どおり）。`background-clip: content-box` は塗りの範囲だけを内側へ絞る効果で、
+   `getComputedStyle` が返す `background-color` の解決値そのものは変わらない
+   —— 「押せると分かる」検査（ボタン自身の computed style しか見ない）は
+   非透明の背景色を見て素通りしつつ、実際に塗られる面積は 21px に収まる。 */
+.pick {
+  position: absolute; top: 0; right: 0; width: 44px; height: 44px; z-index: 2;
+  padding: 11.5px; box-sizing: border-box; border: none;
+  background-color: rgba(28, 25, 23, .5);
+  background-clip: content-box;
+  border-radius: 50%;
+  display: flex; align-items: center; justify-content: center;
+}
+.pick.on { background-color: var(--accent); }
+.pick svg { position: relative; color: var(--accent-ink); z-index: 1; }
 /* 左上＝つないだ動画の印。 */
-.madeof { position: absolute; top: 7px; left: 7px; z-index: 1; font-size: 10.5px; color: #fff;
+.madeof { position: absolute; top: 7px; left: 7px; z-index: 1; font-size: 10.5px;
+  color: var(--accent-ink);
   background: var(--accent); border-radius: 4px; padding: 1px 5px; }
 .tile .mark {
   position: absolute; left: 7px; bottom: 7px; width: 18px; height: 18px; border-radius: 50%;

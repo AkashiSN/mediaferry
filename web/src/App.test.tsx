@@ -61,7 +61,7 @@ const ROUTES: readonly [string, string][] = [
   ["/settings/profiles", "カメラの種類"],
   ["/settings/general", "詳しい設定"],
   ["/settings/jobs", "作業の履歴"],
-  ["/settings/merge-history", "つないだ動画の記録"],
+  ["/settings/merge-history", "つないだ後の後片付け"],
 ];
 
 beforeEach(() => {

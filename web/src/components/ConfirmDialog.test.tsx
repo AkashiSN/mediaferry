@@ -147,6 +147,7 @@ const BY_KIND: Record<Confirmation["kind"], Confirmation> = {
   upload: { kind: "upload", count: 1, totalBytes: 1, destinationNames: ["a"] },
   archive_destination: { kind: "archive_destination", name: "a" },
   discard_merge_group: { kind: "discard_merge_group", groupLabel: "a", publishedCount: 1 },
+  delete_merged_video: { kind: "delete_merged_video", name: "a.MP4", sourceCount: 2, freesSources: true },
   delete_merge_history: { kind: "delete_merge_history", groupLabel: "a" },
   delete_stale_derived: { kind: "delete_stale_derived", relPath: "derived/a.MP4" },
   remerge_group: { kind: "remerge_group", groupLabel: "a" },
@@ -156,11 +157,13 @@ const BY_KIND: Record<Confirmation["kind"], Confirmation> = {
   trust_volume: { kind: "trust_volume", label: "a", state: "starts", reason: null },
 };
 
-// `trust_volume` は state で本文が丸ごと入れ替わるので、残り 2 つも巡る。
+// `trust_volume` は state で、`delete_merged_video` は freesSources で本文が
+// 部分的に入れ替わるので、それぞれ残りの分岐も巡る。
 const EVERY_KIND: Confirmation[] = [
   ...Object.values(BY_KIND),
   { kind: "trust_volume", label: "a", state: "pending", reason: "確かめられた場合" },
   { kind: "trust_volume", label: "a", state: "blocked", reason: "設定が off な" },
+  { kind: "delete_merged_video", name: "a.MP4", sourceCount: 2, freesSources: false },
 ];
 
 

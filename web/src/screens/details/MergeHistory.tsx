@@ -1,6 +1,6 @@
-// つないだ動画の記録（§13「詳しい情報」）。別々のままにした組み合わせと、使っていない
+// つないだ後の後片付け（§13「詳しい情報」）。別々のままにした組み合わせと、使っていない
 // 出力は、どちらも操作できない記録なので、つなぐ画面（`work/Merge.tsx`）には出さずここへ
-// 置く。
+// 置く。つないだ動画そのものは写真タブ（`/photos?role=derived`）で見る。
 //
 // **使っていない出力の一覧は消さない**（`id="stale"`）。置き換えられて `/merge-groups`
 // から見えなくなった出力は、ここからしか辿れない。
@@ -78,14 +78,21 @@ export function MergeHistoryScreen() {
   const staleBytes = staleItems.reduce((sum, item) => sum + item.size_bytes, 0);
 
   return (
-    <section aria-label="つないだ動画の記録" className="wrap">
+    <section aria-label="つないだ後の後片付け" className="wrap">
       <div className="row">
         <Link to="/settings" className="btn sm">
           <Icon name="back" size={16} />
           設定へ
         </Link>
       </div>
-      <h1 className="page title-lg">つないだ動画の記録</h1>
+      <h1 className="page title-lg">つないだ後の後片付け</h1>
+      <p className="small">
+        つないだ動画そのものは{" "}
+        <Link to="/photos?role=derived" className="btn sm quiet">
+          写真 › つないだ動画
+        </Link>{" "}
+        で見られます。ここにあるのは、置き換わったり別々にしたりした後の片付けです。
+      </p>
 
       <ErrorBanner
         error={deletion.error ?? discarded.error ?? stale.error}

@@ -8,11 +8,19 @@ from __future__ import annotations
 
 import pytest
 
+from mediaferry.clock import now_iso
 from mediaferry.core.listing import escape_like, page_bounds
+from mediaferry.ids import new_id
 
 from .test_schema_artifacts import a_media_file, a_merge_group
 from .test_schema_sources import a_profile
 from .test_schema_uploads import a_destination, an_upload
+
+
+@pytest.fixture
+def ref(db):
+    """くわしくのテスト用に、使い回すプロファイル 1 つ."""
+    return a_profile(db, slug="media-detail-test")
 
 
 @pytest.fixture
@@ -239,6 +247,38 @@ def test_an_unknown_profile_matches_nothing(client, library):
     assert got["media"] == []
 
 
+def test_media_can_be_filtered_to_merged_videos(client, db):
+    """写真タブの「つないだ動画」の絞り込み."""
+    ref = a_profile(db, slug="role-filter-test")
+    a_media_file(db, ref, role="original", rel_path="library/dji-osmo/DCIM/A.MP4")
+    a_media_file(db, ref, role="derived", rel_path="derived/dji-osmo/DCIM/OUT.MP4")
+
+    body = client.get("/api/media?role=derived").json()
+
+    assert body["total"] == 1
+    assert [row["role"] for row in body["media"]] == ["derived"]
+
+
+def test_an_unknown_role_matches_nothing(client, db):
+    """**知らない値で全件を返さない.** 絞ったつもりが絞れていない、を作らない."""
+    ref = a_profile(db, slug="unknown-role-test")
+    a_media_file(db, ref, role="original")
+    assert client.get("/api/media?role=nonsense").json()["total"] == 0
+
+
+def test_a_role_value_cannot_break_out_of_the_literal(client, db):
+    """`role` は既知の 2 値だけリテラルで埋める（`0023`）. **文字列連結の穴を作らない.**
+
+    既知の語彙以外は SQL に触れさせず常に 0 件にする。壊れていれば、この文字列は
+    `WHERE m.role = ''` の外へ抜け出して全件を返してしまう。
+    """
+    ref = a_profile(db, slug="role-injection-test")
+    a_media_file(db, ref, role="original")
+    a_media_file(db, ref, role="derived")
+    body = client.get("/api/media", params={"role": "derived' OR '1'='1"}).json()
+    assert body["total"] == 0
+
+
 def test_stale_derived_outputs_are_listed_for_the_screen(client, db, data_root):
     """置き換えられたグループは `GET /merge-groups` に出ない（`list_groups`）.
 
@@ -420,3 +460,514 @@ def test_unsent_excludes_a_missing_original(client, db):
 
     body = client.get(f"/api/media?destination_id={destination[0]}&status=unsent").json()
     assert body["total"] == 0
+
+
+# ---------------------------------------------------------------- くわしく（`GET /media/{id}`）
+def a_derived_with_owner(db, ref, digest, rel_path, *, status="skipped"):
+    """持ち主のグループを持つ派生物を作る.
+
+    **出所の分からない派生物は、記録の状態に関わらず消せない**（孤立と同じ扱い）。
+    削除の可否を記録の状態で見たいテストは、まず持ち主を与えて**その検査を通す**。
+    """
+    output = a_media_file(db, ref, role="derived", rel_path=rel_path)
+    group = a_merge_group(db, ref, digest, status=status)
+    db.execute("UPDATE merge_group SET output_media_file_id = ? WHERE id = ?", (output, group))
+    return output
+
+
+def test_media_detail_lists_the_files_it_was_made_from(client, db, data_root, ref):
+    """くわしく画面は、元になったファイルを **`position` 順** に出す."""
+    first = a_media_file(db, ref, rel_path="library/dji-osmo/DCIM/A.MP4")
+    second = a_media_file(db, ref, rel_path="library/dji-osmo/DCIM/B.MP4")
+    output = a_media_file(db, ref, role="derived", rel_path="derived/dji-osmo/DCIM/OUT.MP4")
+    group = a_merge_group(db, ref, "digest-1", status="merged")
+    db.execute("UPDATE merge_group SET output_media_file_id = ? WHERE id = ?", (output, group))
+    # **わざと逆順に入れる** —— 挿入順で通ってしまう試験にしない。
+    db.execute("INSERT INTO merge_member VALUES (?, ?, 1, 1)", (group, second))
+    db.execute("INSERT INTO merge_member VALUES (?, ?, 0, 1)", (group, first))
+
+    body = client.get(f"/api/media/{output}").json()
+
+    assert [s["rel_path"] for s in body["sources"]] == [
+        "library/dji-osmo/DCIM/A.MP4",
+        "library/dji-osmo/DCIM/B.MP4",
+    ]
+
+
+def test_media_detail_says_whether_it_can_be_deleted(client, db, data_root, ref):
+    """**押しても 409 で断られるボタンを並べない.** 判定はサーバが返す."""
+    output = a_media_file(db, ref, role="derived", rel_path="derived/dji-osmo/DCIM/OUT.MP4")
+    group = a_merge_group(db, ref, "digest-1", status="merged")
+    db.execute("UPDATE merge_group SET output_media_file_id = ? WHERE id = ?", (output, group))
+    dest = a_destination(db)
+    an_upload(
+        db,
+        dest,
+        output,
+        state="complete",
+        destination_revision_id=dest[1],
+        remote_asset_id="asset-1",
+        remote_is_trashed=0,
+        remote_checked_at=now_iso(),
+    )
+
+    body = client.get(f"/api/media/{output}").json()
+
+    assert body["deletable"] is False
+    assert body["delete_blocked_reason"] == "Immich に入っている"
+    assert [d["presence"] for d in body["destinations"]] == ["present"]
+
+
+def test_media_detail_marks_a_trashed_asset(client, db, ref):
+    # **持ち主のグループを付ける.** 出所の分からない派生物はそれだけで消せないので、
+    # 付けないと「ゴミ箱なら消せる」を確かめたつもりで別の理由を見てしまう。
+    output = a_derived_with_owner(db, ref, "digest-trashed", "derived/dji-osmo/DCIM/TRASHED.MP4")
+    dest = a_destination(db)
+    an_upload(
+        db,
+        dest,
+        output,
+        state="complete",
+        destination_revision_id=dest[1],
+        remote_asset_id="asset-1",
+        remote_is_trashed=1,
+        remote_checked_at=now_iso(),
+    )
+
+    body = client.get(f"/api/media/{output}").json()
+
+    assert [d["presence"] for d in body["destinations"]] == ["trashed"]
+    assert body["deletable"] is True
+
+
+def test_media_detail_marks_a_record_still_in_flight(client, db, ref):
+    """送信中・確認待ちの記録は `sending`（`pending` は既定値そのもの）."""
+    output = a_media_file(db, ref, role="derived")
+    an_upload(db, a_destination(db), output)
+
+    body = client.get(f"/api/media/{output}").json()
+
+    assert [d["presence"] for d in body["destinations"]] == ["sending"]
+
+
+def test_media_detail_marks_a_failed_upload(client, db, ref):
+    output = a_media_file(db, ref, role="derived")
+    an_upload(db, a_destination(db), output, state="failed")
+
+    body = client.get(f"/api/media/{output}").json()
+
+    assert [d["presence"] for d in body["destinations"]] == ["failed"]
+
+
+def test_media_detail_marks_an_unswept_complete_record_as_unknown(client, db, ref):
+    """`0007` で洗った、識別子も確認時刻も無い `complete` は `unknown`."""
+    output = a_media_file(db, ref, role="derived")
+    dest = a_destination(db)
+    an_upload(
+        db,
+        dest,
+        output,
+        state="complete",
+        destination_revision_id=dest[1],
+        remote_asset_id=None,
+        remote_checked_at=None,
+    )
+
+    body = client.get(f"/api/media/{output}").json()
+
+    assert [d["presence"] for d in body["destinations"]] == ["unknown"]
+
+
+def test_media_detail_marks_a_reverified_absence_as_gone(client, db, ref):
+    """再確認で識別子が外れ、確認時刻はある `complete` は `gone`."""
+    output = a_media_file(db, ref, role="derived")
+    dest = a_destination(db)
+    an_upload(
+        db,
+        dest,
+        output,
+        state="complete",
+        destination_revision_id=dest[1],
+        remote_asset_id=None,
+        remote_checked_at=now_iso(),
+    )
+
+    body = client.get(f"/api/media/{output}").json()
+
+    assert [d["presence"] for d in body["destinations"]] == ["gone"]
+
+
+def test_media_detail_of_an_original_has_no_sources(client, db, ref):
+    """元ファイルは何からも作られていない."""
+    body = client.get(f"/api/media/{a_media_file(db, ref)}").json()
+    assert body["sources"] == []
+    assert body["deletable"] is False
+
+
+def test_media_detail_does_not_show_an_invalidated_record(client, db, ref):
+    """無効化された記録は状況として出さない（§10）."""
+    output = a_media_file(db, ref, role="derived")
+    dest = a_destination(db)
+    an_upload(
+        db,
+        dest,
+        output,
+        state="complete",
+        destination_revision_id=dest[1],
+        remote_asset_id="asset-1",
+        remote_is_trashed=0,
+        remote_checked_at=now_iso(),
+        invalidated_at=now_iso(),
+    )
+
+    body = client.get(f"/api/media/{output}").json()
+
+    assert [d["presence"] for d in body["destinations"]] == ["not_sent"]
+
+
+def test_media_detail_hides_an_archived_destination_with_no_record(client, db, ref):
+    """**退役した宛先は出さない** —— 押しようのない「まだ送っていません」を並べない."""
+    output = a_media_file(db, ref, role="derived")
+    dest = a_destination(db, name="retiring")
+    db.execute("UPDATE upload_destination SET archived_at = ? WHERE id = ?", (now_iso(), dest[0]))
+
+    body = client.get(f"/api/media/{output}").json()
+
+    assert body["destinations"] == []
+
+
+def test_media_detail_still_shows_an_archived_destination_with_a_record(client, db, ref):
+    """**記録があるなら履歴として出す.** 退役したことと、送った事実は別."""
+    output = a_media_file(db, ref, role="derived")
+    dest = a_destination(db, name="retired-with-history")
+    an_upload(
+        db,
+        dest,
+        output,
+        state="complete",
+        destination_revision_id=dest[1],
+        remote_asset_id="asset-1",
+        remote_is_trashed=0,
+        remote_checked_at=now_iso(),
+    )
+    db.execute("UPDATE upload_destination SET archived_at = ? WHERE id = ?", (now_iso(), dest[0]))
+
+    body = client.get(f"/api/media/{output}").json()
+
+    assert [d["presence"] for d in body["destinations"]] == ["present"]
+
+
+def test_media_detail_folds_multiple_epochs_of_the_same_destination_into_one_row(client, db, ref):
+    """向き先が変わっても、旧 epoch の `complete` は履歴として invalidate されない
+    （`db/destinations.py` の `_invalidate_old_epoch_locked` は `state <> 'complete'`
+    だけを破棄する）。**1 宛先 1 行に畳み、削除を断る状態を優先する** —— 画面に
+    出る状況と `deletable` / `delete_blocked_reason` が食い違わないようにする。
+    """
+    output = a_media_file(db, ref, role="derived")
+    dest_id, old_revision_id, credential_id = a_destination(db, name="moved", epoch=1)
+    new_revision_id = new_id()
+    db.execute(
+        "INSERT INTO destination_revision (id, destination_id, revision, target_epoch,"
+        " base_url, credential_id, created_at) VALUES (?, ?, 2, 2, 'http://immich.invalid', ?, ?)",
+        (new_revision_id, dest_id, credential_id, now_iso()),
+    )
+    db.execute(
+        "UPDATE upload_destination SET current_revision_id = ? WHERE id = ?",
+        (new_revision_id, dest_id),
+    )
+    # 旧 epoch: Immich に入っている（invalidate されず残る）。
+    an_upload(
+        db,
+        (dest_id, old_revision_id, credential_id),
+        output,
+        target_epoch=1,
+        state="complete",
+        destination_revision_id=old_revision_id,
+        remote_asset_id="asset-old",
+        remote_is_trashed=0,
+        remote_checked_at=now_iso(),
+    )
+    # 新 epoch: 送信中（既定の `pending`）。
+    an_upload(
+        db,
+        (dest_id, new_revision_id, credential_id),
+        output,
+        target_epoch=2,
+    )
+
+    body = client.get(f"/api/media/{output}").json()
+
+    # (a) 同じ宛先が 2 行に分かれない。
+    assert len(body["destinations"]) == 1
+    # (b) `deletion_blocker` が実際に断る理由（決着していない記録が最優先）と
+    # そろえて `sending` が選ばれる。
+    assert body["destinations"][0]["presence"] == "sending"
+    # (c) 画面の状況と削除の可否・理由の文言が完全に一致する。
+    assert body["deletable"] is False
+    assert body["delete_blocked_reason"] == "送信中か、確認を待っている記録がある"
+
+
+def test_media_detail_prioritizes_an_unverified_record_over_a_trashed_one(client, db, ref):
+    """`unknown`（未観測）は `trashed`（ゴミ箱、消せる）より優先度が高い ——
+    確かめていない記録が残っている限り、画面は「消せます」と言ってはいけない。
+    """
+    output = a_media_file(db, ref, role="derived")
+    dest_id, old_revision_id, credential_id = a_destination(
+        db, name="unknown-over-trashed", epoch=1
+    )
+    new_revision_id = new_id()
+    db.execute(
+        "INSERT INTO destination_revision (id, destination_id, revision, target_epoch,"
+        " base_url, credential_id, created_at) VALUES (?, ?, 2, 2, 'http://immich.invalid', ?, ?)",
+        (new_revision_id, dest_id, credential_id, now_iso()),
+    )
+    db.execute(
+        "UPDATE upload_destination SET current_revision_id = ? WHERE id = ?",
+        (new_revision_id, dest_id),
+    )
+    # 旧 epoch: ゴミ箱（それだけなら消せる）。
+    an_upload(
+        db,
+        (dest_id, old_revision_id, credential_id),
+        output,
+        target_epoch=1,
+        state="complete",
+        destination_revision_id=old_revision_id,
+        remote_asset_id="asset-old",
+        remote_is_trashed=1,
+        remote_checked_at=now_iso(),
+    )
+    # 新 epoch: 確かめていない（`0007` で洗った形。これだけなら消せない）。
+    an_upload(
+        db,
+        (dest_id, new_revision_id, credential_id),
+        output,
+        target_epoch=2,
+        state="complete",
+        destination_revision_id=new_revision_id,
+        remote_asset_id=None,
+        remote_checked_at=None,
+    )
+
+    body = client.get(f"/api/media/{output}").json()
+
+    assert len(body["destinations"]) == 1
+    assert body["destinations"][0]["presence"] == "unknown"
+    assert body["deletable"] is False
+
+
+def test_priority_places_deletion_blocking_states_before_non_blocking_ones(client, db, ref):
+    """`_PRESENCE_PRIORITY` の不変条件.
+
+    **削除を断る状態（`sending` / `present` / `unknown`）は、断らない状態
+    （`trashed` / `gone` / `failed` / `not_sent`）より必ず上にある。** 並びを
+    ベタ書きで比べるのではなく、各語彙が実際に `deletable` をどちらへ倒すかを
+    1 件ずつ作って確かめ、その結果と並び順を突き合わせる —— 語彙が増えても
+    この不変条件が崩れれば必ず落ちる。
+    """
+    from mediaferry.api.routes_media import _PRESENCE_PRIORITY
+
+    # 単独の記録 1 件で決まる語彙（`not_sent` は記録そのものが無い）。
+    simple_scenarios = {
+        "not_sent": None,
+        "sending": {"state": "pending"},
+        "failed": {"state": "failed"},
+    }
+    # `complete` 系は `destination_revision_id` が要る。
+    complete_scenarios = {
+        "present": {
+            "remote_asset_id": "asset-1",
+            "remote_is_trashed": 0,
+            "remote_checked_at": now_iso(),
+        },
+        "trashed": {
+            "remote_asset_id": "asset-1",
+            "remote_is_trashed": 1,
+            "remote_checked_at": now_iso(),
+        },
+        "gone": {"remote_asset_id": None, "remote_checked_at": now_iso()},
+        "unknown": {"remote_asset_id": None, "remote_checked_at": None},
+    }
+
+    def presence_of(body, destination_id):
+        # **`_destinations` は DB にある宛先を全部返す**（他の反復で作った宛先も
+        # 混ざる）。この反復で作った宛先だけを id で拾う。
+        for entry in body["destinations"]:
+            if entry["destination_id"] == destination_id:
+                return entry["presence"]
+        return "not_sent"
+
+    deletable_by_presence: dict[str, bool] = {}
+    for label, kwargs in simple_scenarios.items():
+        # **持ち主のグループを付ける.** 出所が分からないだけで消せなくなるので、
+        # 付けないと全部の語彙が「消せない」に倒れ、不変条件が空振りする。
+        output = a_derived_with_owner(db, ref, f"digest-inv-{label}", f"library/inv/{label}.MP4")
+        dest = a_destination(db, name=f"inv-{label}")
+        if kwargs is not None:
+            an_upload(db, dest, output, **kwargs)
+        body = client.get(f"/api/media/{output}").json()
+        presence = presence_of(body, dest[0])
+        assert presence == label, f"前提が崩れている: {label} の作り方が違う"
+        deletable_by_presence[label] = body["deletable"]
+    for label, extra in complete_scenarios.items():
+        output = a_derived_with_owner(db, ref, f"digest-inv-{label}", f"library/inv/{label}.MP4")
+        dest = a_destination(db, name=f"inv-{label}")
+        an_upload(db, dest, output, state="complete", destination_revision_id=dest[1], **extra)
+        body = client.get(f"/api/media/{output}").json()
+        presence = presence_of(body, dest[0])
+        assert presence == label, f"前提が崩れている: {label} の作り方が違う"
+        deletable_by_presence[label] = body["deletable"]
+
+    blocking = {label for label, deletable in deletable_by_presence.items() if not deletable}
+    non_blocking = set(deletable_by_presence) - blocking
+    assert blocking and non_blocking  # 両方揃っていないと不変条件そのものが空振りする
+
+    for blocked in blocking:
+        for allowed in non_blocking:
+            assert _PRESENCE_PRIORITY.index(blocked) < _PRESENCE_PRIORITY.index(allowed), (
+                f"{blocked}（消せない）が {allowed}（消せる）より優先度で下にある"
+            )
+
+
+def test_media_detail_prioritizes_a_live_asset_over_an_unverified_record(client, db, ref):
+    """`present` は `unknown` より優先度が高い —— `deletion_blocker` は
+    「Immich に入っている」を「確かめていない」より先に見る（当てはまりの強い順）
+    ので、画面の presence もその順にそろえないと理由の文言と食い違う。
+    """
+    output = a_media_file(db, ref, role="derived")
+    dest_id, old_revision_id, credential_id = a_destination(
+        db, name="present-over-unknown", epoch=1
+    )
+    new_revision_id = new_id()
+    db.execute(
+        "INSERT INTO destination_revision (id, destination_id, revision, target_epoch,"
+        " base_url, credential_id, created_at) VALUES (?, ?, 2, 2, 'http://immich.invalid', ?, ?)",
+        (new_revision_id, dest_id, credential_id, now_iso()),
+    )
+    db.execute(
+        "UPDATE upload_destination SET current_revision_id = ? WHERE id = ?",
+        (new_revision_id, dest_id),
+    )
+    # 旧 epoch: Immich に入っている。
+    an_upload(
+        db,
+        (dest_id, old_revision_id, credential_id),
+        output,
+        target_epoch=1,
+        state="complete",
+        destination_revision_id=old_revision_id,
+        remote_asset_id="asset-old",
+        remote_is_trashed=0,
+        remote_checked_at=now_iso(),
+    )
+    # 新 epoch: 確かめていない。
+    an_upload(
+        db,
+        (dest_id, new_revision_id, credential_id),
+        output,
+        target_epoch=2,
+        state="complete",
+        destination_revision_id=new_revision_id,
+        remote_asset_id=None,
+        remote_checked_at=None,
+    )
+
+    body = client.get(f"/api/media/{output}").json()
+
+    assert len(body["destinations"]) == 1
+    assert body["destinations"][0]["presence"] == "present"
+    assert body["deletable"] is False
+    assert body["delete_blocked_reason"] == "Immich に入っている"
+
+
+# ------------------------------------------------------- delete_frees_sources
+#
+# **消すと元ファイルが「まだ送っていない」に戻るのは、現行グループの出力を
+# 消すときだけ.** 既に `skipped`／superseded なグループの出力は member が
+# 既に解放済みなので、消しても状態は変わらない。画面はグループの現行性を
+# 知らないので、サーバがこの真偽を返す（確認ダイアログの文言をこれで出し分ける）。
+
+
+def test_media_detail_says_deleting_frees_the_sources_of_a_live_group(client, db, ref):
+    """現行グループ（`status = 'merged'` かつ `superseded_by_id IS NULL`）の出力."""
+    output = a_media_file(db, ref, role="derived", rel_path="derived/dji-osmo/DCIM/OUT.MP4")
+    group = a_merge_group(db, ref, "digest-live", status="merged")
+    db.execute("UPDATE merge_group SET output_media_file_id = ? WHERE id = ?", (output, group))
+
+    body = client.get(f"/api/media/{output}").json()
+
+    assert body["delete_frees_sources"] is True
+
+
+def test_media_detail_of_a_skipped_groups_output_does_not_promise_release(client, db, ref):
+    """**既に「別々にした」グループの出力.** member は既に解放済みなので、
+    消しても何も起きないことを予告してはいけない."""
+    output = a_media_file(db, ref, role="derived", rel_path="derived/dji-osmo/DCIM/OUT2.MP4")
+    group = a_merge_group(db, ref, "digest-skipped", status="skipped")
+    db.execute("UPDATE merge_group SET output_media_file_id = ? WHERE id = ?", (output, group))
+
+    body = client.get(f"/api/media/{output}").json()
+
+    assert body["delete_frees_sources"] is False
+
+
+def test_media_detail_of_a_superseded_groups_output_does_not_promise_release(client, db, ref):
+    """**組み直しで置き換わったグループの出力.** 置き換えた側が現行なので、
+    こちらの出力を消しても古いグループの member は動かない."""
+    output = a_media_file(db, ref, role="derived", rel_path="derived/dji-osmo/DCIM/OUT3.MP4")
+    group = a_merge_group(db, ref, "digest-superseded", status="merged")
+    db.execute("UPDATE merge_group SET output_media_file_id = ? WHERE id = ?", (output, group))
+    newer = a_merge_group(db, ref, "digest-newer")
+    db.execute("UPDATE merge_group SET superseded_by_id = ? WHERE id = ?", (newer, group))
+
+    body = client.get(f"/api/media/{output}").json()
+
+    assert body["delete_frees_sources"] is False
+
+
+def test_media_detail_of_an_original_never_promises_release(client, db, ref):
+    """元ファイルにはそもそも持ち主のグループが無い."""
+    original = a_media_file(db, ref, rel_path="library/dji-osmo/DCIM/A.MP4")
+
+    body = client.get(f"/api/media/{original}").json()
+
+    assert body["delete_frees_sources"] is False
+
+
+# ----------------------------------------- 同じ出力を 2 つのグループが指すとき
+#
+# 構成を変えない組み直し（やり直し）は正規の経路で、旧グループは出力を持ったまま
+# superseded になる。新グループの出力は `rel_path` が同じなので同じ `media_file`
+# 行が再利用され、**1 つの出力を 2 つのグループが指す**。
+
+
+def test_media_detail_lists_the_sources_of_a_rebuilt_output_once(client, db, data_root, ref):
+    """**元になったファイルを 2 重に出さない.**
+
+    `output_media_file_id` で直に join すると、旧グループと新グループの member が
+    両方並ぶ。件数（確認ダイアログの「元になった N 件」）が 2 倍になり、画面の
+    `key` も重複する。
+    """
+    from .test_stale_derived import a_rebuilt_output
+
+    media_id, _, _, member, _ = a_rebuilt_output(db, data_root, ref)
+
+    body = client.get(f"/api/media/{media_id}").json()
+
+    assert [source["media_file_id"] for source in body["sources"]] == [member]
+    # 現行グループの出力なので、消せば元ファイルは「まだ送っていない」に戻る。
+    assert body["delete_frees_sources"] is True
+
+
+def test_a_rebuilt_output_can_be_deleted_through_the_api(client, db, data_root, ref):
+    """**500 にしない.** 片方のグループだけ出力を外すと `ON DELETE RESTRICT` に
+    当たり、`GroupNotEditable` ではないので 409 にすらならない."""
+    from .test_stale_derived import a_rebuilt_output
+
+    media_id, _, _, _, path = a_rebuilt_output(db, data_root, ref)
+
+    assert client.get(f"/api/media/{media_id}").json()["deletable"] is True
+    response = client.delete(f"/api/media/{media_id}")
+
+    assert response.status_code == 200, response.json()
+    assert not path.exists()

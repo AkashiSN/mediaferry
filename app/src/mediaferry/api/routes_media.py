@@ -9,7 +9,7 @@ from fastapi.responses import FileResponse
 
 from ..adapters.thumbnails import ThumbnailFailed, quantise
 from ..core.listing import DEFAULT_PAGE_SIZE, escape_like, page_bounds
-from ..db.media import MediaRepository
+from ..db.media import IN_FLIGHT_STATES, MediaRepository, owner_group
 from ..db.merges import GroupNotEditable
 from ..db.selection import SENDABLE_CLAUSE
 from .deps import conn as get_conn
@@ -18,12 +18,17 @@ from .errors import ApiError, ErrorCode
 
 router = APIRouter()
 
+# `media_file.role` の CHECK 制約が許す値そのもの（`db/migrations/0003_*.sql`）。
+# `_filters` の role 節がこの外の値をリテラルで埋めないために使う。
+_KNOWN_ROLES = frozenset({"original", "derived"})
+
 
 @router.get("/media")
 def list_media(  # noqa: PLR0913
     page: int = 1,
     page_size: int = DEFAULT_PAGE_SIZE,
     kind: str | None = None,
+    role: str | None = None,
     profile: str | None = None,
     captured_from: str | None = None,
     captured_to: str | None = None,
@@ -38,8 +43,11 @@ def list_media(  # noqa: PLR0913
     tie-break を入れないとページの境目で重複・欠落する。
 
     `status` は**宛先ごとの状態**なので、`destination_id` と併せて指定する。
+    `role=derived` で写真タブの「つないだ動画」だけに絞れる。
     """
-    where, params = _filters(kind, profile, captured_from, captured_to, q, destination_id, status)
+    where, params = _filters(
+        kind, role, profile, captured_from, captured_to, q, destination_id, status
+    )
     limit, offset = page_bounds(page, page_size)
     total = conn.execute(f"SELECT count(*) AS n FROM media_file m {where}", params).fetchone()["n"]  # noqa: S608
     rows = conn.execute(
@@ -57,6 +65,7 @@ def list_media(  # noqa: PLR0913
 
 def _filters(  # noqa: PLR0913
     kind: str | None,
+    role: str | None,
     profile: str | None,
     captured_from: str | None,
     captured_to: str | None,
@@ -70,6 +79,19 @@ def _filters(  # noqa: PLR0913
     if kind is not None:
         clauses.append("m.kind = ?")
         params.append(kind)
+    if role is not None:
+        # **既知の 2 値だけリテラルで埋める。** `_KNOWN_ROLES` に無い値（利用者が
+        # 送った任意の文字列を含む）は SQL へ触れさせず、常に 0 件になる節にする
+        # —— `f"m.role = '{role}'"` へそのまま渡すと文字列連結になってしまう。
+        # 既知の 2 値はバインド変数ではなくリテラルで埋める（`_status_clause` の
+        # `known[status]` と同じ作法）。バインド変数のままだと SQLite が prepare
+        # 時に `role = 'derived'` を証明できず、`0023` の部分索引
+        # （`WHERE role = 'derived'`）が選ばれる保証が無い。
+        if role in _KNOWN_ROLES:
+            clauses.append(f"m.role = '{role}'")  # noqa: S608 - 語彙は上で固定
+        else:
+            # 知らない値（＝ CHECK 制約の外）は、そもそも 1 行も一致しない。
+            clauses.append("0")
     if profile is not None:
         # **`IN` ではなく `=` で書く。** `IN` だと SQLite は複数の値を取りうると
         # 見なして、索引があっても並べ替えを外せない（`0014` が効かず、その
@@ -138,11 +160,152 @@ def list_stale_derived(
 
 
 @router.get("/media/{media_id}")
-def get_media(media_id: str, conn=Depends(get_conn)) -> dict[str, Any]:  # noqa: ANN001, B008
+def get_media(  # noqa: ANN201
+    media_id: str,
+    conn=Depends(get_conn),  # noqa: ANN001, B008
+    state=Depends(get_state),  # noqa: ANN001, B008
+):
+    """1 件のくわしく（§13 の「くわしく」画面）.
+
+    **画面が要るものを 1 本で返す。** 複数の API を継ぎ足すと、片方だけ古い状態が出る。
+    """
     row = conn.execute("SELECT * FROM media_file WHERE id = ?", (media_id,)).fetchone()
     if row is None:
         raise ApiError(404, ErrorCode.NOT_FOUND, "そのメディアは無い")
-    return _media(row)
+    repo = MediaRepository(conn, state.settings.data_root)
+    blocker = repo.deletion_blocker(media_id)
+    return {
+        **_media(row),
+        "sources": _sources(conn, media_id),
+        "destinations": _destinations(conn, media_id),
+        "deletable": blocker is None,
+        "delete_blocked_reason": blocker,
+        # **消すと元になったファイルが「まだ送っていない」に戻るか.** 現行グループの
+        # 出力を消すときだけ真。確認ダイアログの文言をこれで出し分ける
+        # （画面はグループの現行性を知らないので、ここで返す）。
+        "delete_frees_sources": repo.delete_frees_sources(media_id),
+    }
+
+
+def _sources(conn, media_id: str) -> list[dict[str, Any]]:  # noqa: ANN001
+    """この 1 件の元になったファイル. **`position` 順**（つないだ順）.
+
+    **持ち主のグループ 1 つの member だけを出す。** 同じ出力を複数のグループが
+    指しうる（`db.media.owner_group`）ので、`output_media_file_id` で直に join すると
+    元ファイルが 2 重に並び、確認ダイアログの「元になった N 件」も 2 倍になる。
+    """
+    group = owner_group(conn, media_id)
+    if group is None:
+        return []
+    rows = conn.execute(
+        "SELECT mm.position, m.id, m.rel_path, m.missing_at"
+        " FROM merge_member mm JOIN media_file m ON m.id = mm.media_file_id"
+        " WHERE mm.merge_group_id = ? ORDER BY mm.position",
+        (group["id"],),
+    )
+    return [
+        {
+            "media_file_id": row["id"],
+            "rel_path": row["rel_path"],
+            "position": row["position"],
+            "missing": row["missing_at"] is not None,
+        }
+        for row in rows
+    ]
+
+
+# **「生きている」順に並べた presence の優先度.** 同じ宛先に複数の有効な記録が
+# 残ることがある —— 向き先が変わって `target_epoch` が進んでも、`complete` は
+# 履歴として invalidate されない（`db/destinations.py` の
+# `_invalidate_old_epoch_locked`）。`_destinations` はこの並びで 1 宛先 1 行に畳む。
+# **`target_epoch` だけに絞って現行分だけを出さない。** `deletion_blocker` は
+# epoch を区別せず有効な記録を全部見るので、現行 epoch だけを出す画面は
+# 「旧 epoch に `present` な資産が残っていて消せない」を説明できなくなる。
+# 優先度で畳めば、画面に出る状況と削除の可否が必ず一致する。
+#
+# **削除を断る 3 状態（`sending` / `present` / `unknown`）は、断らない 4 状態
+# （`trashed` / `gone` / `failed` / `not_sent`）より必ず上に置く。** 下にあると、
+# 画面が「消せそうな状況」を出しているのに `deletion_blocker` が断る組み合わせが
+# できる。3 状態の中の順は `deletion_blocker` が理由を選ぶ順（決着していない
+# 記録を最優先）にそろえる。
+_PRESENCE_PRIORITY = ("sending", "present", "unknown", "trashed", "gone", "failed", "not_sent")
+
+
+def _destinations(conn, media_id: str) -> list[dict[str, Any]]:  # noqa: ANN001
+    """宛先ごとの状況. **日本語にはしない** —— 画面が §13 の語彙で訳す.
+
+    **1 宛先 1 行に畳む。** `target_epoch` は API に出さない内部の概念。
+    `_PRESENCE_PRIORITY` の優先度で、同じ宛先の有効な記録から最良の 1 件を選ぶ。
+
+    **退役した宛先（`archived_at` あり）は、記録が無ければ出さない。** もう
+    送り先ではないので「まだ送っていません」を並べても押しようが無い。ただし
+    過去に送った（無効化されていない）記録が残っているなら、履歴として出す。
+    """
+    rows = conn.execute(
+        "SELECT d.id, d.name, d.archived_at, u.id AS upload_id, u.state,"
+        "       u.remote_asset_id, u.remote_is_trashed, u.remote_checked_at"
+        " FROM upload_destination d"
+        " LEFT JOIN upload_record u ON u.destination_id = d.id"
+        "   AND u.media_file_id = ? AND u.invalidated_at IS NULL"
+        " ORDER BY d.name",
+        (media_id,),
+    )
+    destinations: dict[str, dict[str, Any]] = {}
+    order: list[str] = []
+    for row in rows:
+        destination_id = row["id"]
+        if destination_id not in destinations:
+            destinations[destination_id] = {
+                "name": row["name"],
+                "archived_at": row["archived_at"],
+                "records": [],
+            }
+            order.append(destination_id)
+        if row["upload_id"] is not None:
+            destinations[destination_id]["records"].append(row)
+    result: list[dict[str, Any]] = []
+    for destination_id in order:
+        info = destinations[destination_id]
+        records = info["records"]
+        if not records:
+            if info["archived_at"] is not None:
+                # 記録の無い退役済みの宛先は、押しようの無い行を並べない。
+                continue
+            result.append(
+                {
+                    "destination_id": destination_id,
+                    "name": info["name"],
+                    "state": None,
+                    "presence": "not_sent",
+                }
+            )
+            continue
+        best = min(records, key=lambda r: _PRESENCE_PRIORITY.index(_presence(r)))
+        result.append(
+            {
+                "destination_id": destination_id,
+                "name": info["name"],
+                "state": best["state"],
+                "presence": _presence(best),
+            }
+        )
+    return result
+
+
+def _presence(row) -> str:  # noqa: ANN001
+    """`deletion_blocker` と同じ判断を、1 行ぶんの語彙にほどく.
+
+    片方を変えたらもう片方も変える（`deletion_blocker` が正）。
+    """
+    if row["state"] is None:
+        return "not_sent"
+    if row["state"] in IN_FLIGHT_STATES:
+        return "sending"
+    if row["remote_asset_id"] is not None:
+        return "trashed" if row["remote_is_trashed"] else "present"
+    if row["state"] == "complete":
+        return "gone" if row["remote_checked_at"] is not None else "unknown"
+    return "failed"
 
 
 @router.delete("/media/{media_id}")
@@ -151,14 +314,14 @@ def delete_media(  # noqa: ANN201
     conn=Depends(get_conn),  # noqa: ANN001, B008
     state=Depends(get_state),  # noqa: ANN001, B008
 ):
-    """**古くなった派生物だけ**消す（やり直しの後片付け）.
+    """**Immich に生きていない `derived` だけ**消す（写真タブの「消す」）.
 
-    元ファイルは消せない。現行のグループの結合結果も、送信の記録が指している
-    ものも消せない。理由は 409 で返す。
+    元ファイルは消せない。現行のグループの出力なら、グループごと「別々にした」
+    にしてから消す。消せない理由は 409 で返す（規則は `deletion_blocker`）。
     """
     repo = MediaRepository(conn, state.settings.data_root)
     try:
-        rel_path = repo.delete_stale_derived(media_id)
+        rel_path = repo.delete_derived(media_id)
     except GroupNotEditable as exc:
         raise ApiError(409, ErrorCode.CONFLICT, str(exc)) from exc
     return {"status": "ok", "rel_path": rel_path}

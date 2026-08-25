@@ -4,6 +4,8 @@
 // 区別が付かない：未送信は白縁の丸、送信済みはチェック、確認が要るは「!」、
 // 送れなかったものは「×」。
 
+import { Link } from "react-router-dom";
+
 import { Icon } from "./Icon";
 
 export type MediaStatus = "unsent" | "awaiting" | "sent" | "failed" | null;
@@ -16,12 +18,13 @@ export type Media = {
   size_bytes: number;
   duration_seconds?: number | null;
   status?: MediaStatus;
+  role?: "original" | "derived";
 };
 
 /** タイルが実際に読む部分だけ。**一覧の 1 行から直に描ける**ようにするため、
  * 撮影時刻や大きさは要求しない（`確認` は `GET /uploads` の行だけで描く）。 */
 export type TileMedia = Pick<Media, "id" | "rel_path"> &
-  Partial<Pick<Media, "kind" | "duration_seconds" | "status">>;
+  Partial<Pick<Media, "kind" | "duration_seconds" | "status" | "role">>;
 
 /** `rel_path` の末尾（ファイル名）。**内部の相対パスを画面に出さない**（§13）ので、
  * タイルの `aria-label` も、ホームの「さっき取り込んだもの」もここを通す。 */
@@ -43,60 +46,55 @@ export function MediaTile({
   media,
   selected,
   onToggle,
+  to,
 }: {
   media: TileMedia;
   selected: boolean;
   onToggle?: (id: string) => void;
+  /** 押したときに開く先。**選ぶのとは別の的**（隅の丸が選ぶ）。 */
+  to?: string;
 }) {
   const name = fileName(media.rel_path);
   const hasDuration = media.kind === "video" && media.duration_seconds != null;
   const inside = (
     <>
-      <img
-        src={`/api/media/${media.id}/thumbnail`}
-        alt=""
-        loading="lazy"
-        style={{
-          position: "absolute",
-          inset: 0,
-          width: "100%",
-          height: "100%",
-          objectFit: "cover",
-          borderRadius: "inherit",
-        }}
-      />
-      {selected ? (
-        <span className="check">
-          <Icon name="check" size={12} />
-        </span>
-      ) : (
-        <StatusMark status={media.status ?? null} />
+      <img src={`/api/media/${media.id}/thumbnail`} alt="" loading="lazy" className="tileimg" />
+      {media.role === "derived" && <span className="madeof">つないだ</span>}
+      <StatusMark status={media.status ?? null} />
+      {hasDuration && (
+        <span className="dur">{formatClipLength(media.duration_seconds as number)}</span>
       )}
-      {hasDuration && <span className="dur">{formatClipLength(media.duration_seconds as number)}</span>}
     </>
   );
 
   // **押せないタイルをボタンにしない。** `disabled` なボタンは読み上げの木から
   // 外れるので、確認の下見（`work/Send.tsx`）に並ぶ写真のファイル名が、目で
   // 見ている人にしか届かなくなる。押せないなら、それは絵である。
-  if (!onToggle) {
+  if (!to && !onToggle) {
     return (
       <span className={`tile${selected ? " sel" : ""}`} title={name} role="img" aria-label={name}>
         {inside}
       </span>
     );
   }
+  // **的を入れ子にしない。** `<a>` の中の `<button>` は不正な HTML なので、
+  // 全面を覆うリンクと、その上に載る丸を**兄弟**に並べる。
   return (
-    <button
-      type="button"
-      className={`tile${selected ? " sel" : ""}`}
-      title={name}
-      aria-label={name}
-      aria-pressed={selected}
-      onClick={() => onToggle(media.id)}
-    >
+    <div className={`tile${selected ? " sel" : ""}`} title={name}>
       {inside}
-    </button>
+      {to && <Link className="tilehit" to={to} aria-label={name} />}
+      {onToggle && (
+        <button
+          type="button"
+          className={`pick${selected ? " on" : ""}`}
+          aria-label={`選ぶ：${name}`}
+          aria-pressed={selected}
+          onClick={() => onToggle(media.id)}
+        >
+          {selected && <Icon name="check" size={12} />}
+        </button>
+      )}
+    </div>
   );
 }
 
