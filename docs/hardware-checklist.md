@@ -194,7 +194,15 @@ ls /path/to/mount/DCIM/100CANON | head
 > high`・`provisional: false` で確定した。**ただし `fs_label` は空で `EOS_DIGITAL`
 > ではなく、`hints.volume_labels` は一致に寄与していない**（確定は `require` だけで
 > 起きている）。`DCIM/100CANON/` の 1 ディレクトリに `IMG_####.JPG` / `IMG_####.CR2`
-> / `MVI_####.MOV` が 1488 件並び、`filename_pattern` の外れは 0 件だった。くわしくは
+> / `MVI_####.MOV` が 1488 件並び、`filename_pattern` の外れは 0 件だった。
+>
+> ホストで裏を取った。**ラベルが無いのは実カードの事実**（`blkid` は `TYPE="exfat"`
+> だけで `LABEL=` を返さない）。**exFAT で焼いた SDXC にはラベルが付かない。**
+> それでも `volume_labels` は残す —— `hint_score` は順位付けにしか効かないので、
+> FAT32 のカードで当たれば得があり、当たらなくても損が無い。
+> **`hints.usb_ids: []` も裏付けられた** —— `lsusb` に出るのは汎用の USB ストレージ
+> （リーダー）で、Canon のベンダ ID は見えない。**リーダーの ID を足すと、その
+> リーダーに挿したどのカードにも当たる**ので空のままにする。くわしくは
 > [`history/hardware-verification.md`](history/hardware-verification.md)。
 
 ### 14. EOS 70D の 4GB 分割が連番から判別できるか

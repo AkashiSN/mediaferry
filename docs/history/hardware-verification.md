@@ -769,11 +769,28 @@ USB でネットワーク機器としても見えている**（マスストレ�
 | `identity_confidence` | `high`（`provisional: false`） |
 | `reason` | 「DCIM に一致するファイルが 1 件」 |
 
-**`hints.volume_labels: ["EOS_DIGITAL"]` は当たらなかった。** 実カードのラベルは空で、
-確定は `require`（`DCIM` 配下のパターン一致）だけで起きている。`identity_confidence`
+**`hints.volume_labels: ["EOS_DIGITAL"]` は当たらなかった。** 確定は
+`require`（`DCIM` 配下のパターン一致）だけで起きている。`identity_confidence`
 が `high` なのは §8 の連続性の判定で、プロファイルの一致度とは無関係（`decisions.md`
-の「プロファイルの一致度とボリュームの同定確度を混ぜない」）。**ラベルの手がかりは
-実カードでは効かない**と分かった。
+の「プロファイルの一致度とボリュームの同定確度を混ぜない」）。
+
+ホストで裏を取った。**ラベルが無いのは実カードの事実で、mountd の読み落としではない。**
+
+```
+sdj      119.4G
+└─sdj1   exfat  119.4G          ← LABEL 列が空
+/dev/sdj1: UUID="203B-D0A3" BLOCK_SIZE="512" TYPE="exfat" PARTUUID="87959b18-01"
+```
+
+**exFAT で焼いた SDXC にはラベルが付かない。** それでも `volume_labels` は残す ——
+`hint_score` は順位付けにしか効かず一致の可否には関わらないので、FAT32 のカードで
+当たれば得があり、当たらなくても損が無い。
+
+**`hints.usb_ids: []` の根拠も実物で裏付けられた。** `lsusb` に出るのは
+`21c4:b060 Generic USB Storage` で、Canon のベンダ ID（`04a9`）は見えない。
+**リーダーの ID を足すと、そのリーダーに挿したどのカードにも当たる**ので、
+空のままにする（チェックリストの「機種の ID が見えるなら足してよい」は、
+カードリーダー経由では成立しない）。
 
 ### 中身（最初のスキャン、1488 件）
 

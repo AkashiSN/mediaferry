@@ -3,8 +3,12 @@ slug: canon-eos
 name: Canon EOS
 hints:
   # **USB ID は入れない。** カードリーダー経由が前提なので、見える ID は
-  # リーダーのものであって機種の手がかりにならない。
+  # リーダーのものであって機種の手がかりにならない（足すと、そのリーダーに
+  # 挿したどのカードにも当たる）。
   usb_ids: []
+  # **exFAT で焼いた SDXC にはラベルが無い。** それでも残すのは、hint が
+  # 順位付けにしか効かず（`hint_score`）一致の可否には関わらないため。
+  # FAT32 のカードで当たれば得があり、当たらなくても損は無い。
   volume_labels: ["EOS_DIGITAL"]
 require:
   roots: ["DCIM"]
