@@ -10,6 +10,7 @@ import pytest
 
 from mediaferry.clock import now_iso
 from mediaferry.core.listing import escape_like, page_bounds
+from mediaferry.ids import new_id
 
 from .test_schema_artifacts import a_media_file, a_merge_group
 from .test_schema_sources import a_profile
@@ -640,3 +641,56 @@ def test_media_detail_still_shows_an_archived_destination_with_a_record(client, 
     body = client.get(f"/api/media/{output}").json()
 
     assert [d["presence"] for d in body["destinations"]] == ["present"]
+
+
+def test_media_detail_folds_multiple_epochs_of_the_same_destination_into_one_row(client, db, ref):
+    """向き先が変わっても、旧 epoch の `complete` は履歴として invalidate されない
+    （`db/destinations.py` の `_invalidate_old_epoch_locked` は `state <> 'complete'`
+    だけを破棄する）。**1 宛先 1 行に畳み、生きている状態を優先する** —— 画面に
+    出る状況と `deletable` / `delete_blocked_reason` が食い違わないようにする。
+    """
+    output = a_media_file(db, ref, role="derived")
+    dest_id, old_revision_id, credential_id = a_destination(db, name="moved", epoch=1)
+    new_revision_id = new_id()
+    db.execute(
+        "INSERT INTO destination_revision (id, destination_id, revision, target_epoch,"
+        " base_url, credential_id, created_at) VALUES (?, ?, 2, 2, 'http://immich.invalid', ?, ?)",
+        (new_revision_id, dest_id, credential_id, now_iso()),
+    )
+    db.execute(
+        "UPDATE upload_destination SET current_revision_id = ? WHERE id = ?",
+        (new_revision_id, dest_id),
+    )
+    # 旧 epoch: Immich に入っている（invalidate されず残る）。
+    an_upload(
+        db,
+        (dest_id, old_revision_id, credential_id),
+        output,
+        target_epoch=1,
+        state="complete",
+        destination_revision_id=old_revision_id,
+        remote_asset_id="asset-old",
+        remote_is_trashed=0,
+        remote_checked_at=now_iso(),
+    )
+    # 新 epoch: 送信中（既定の `pending`）。
+    an_upload(
+        db,
+        (dest_id, new_revision_id, credential_id),
+        output,
+        target_epoch=2,
+    )
+
+    body = client.get(f"/api/media/{output}").json()
+
+    # (a) 同じ宛先が 2 行に分かれない。
+    assert len(body["destinations"]) == 1
+    # (b) 「生きている」状態（present）が優先される。
+    assert body["destinations"][0]["presence"] == "present"
+    # (c) 画面の状況（present）と削除の可否が食い違わない —— present な記録が
+    # 残っている以上、必ず消せない。理由の文言は `deletion_blocker` が
+    # 「当てはまりの強い順」（決着していない記録を最優先）に選ぶため、旧 epoch の
+    # `present` ではなく新 epoch の `pending`（送信中）の方になる。理由の文言は
+    # 畳んだ presence とは別に決まるが、**消せるか／消せないかの判定は必ず一致する**。
+    assert body["deletable"] is False
+    assert body["delete_blocked_reason"] == "送信中か、確認を待っている記録がある"

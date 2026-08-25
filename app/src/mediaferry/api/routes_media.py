@@ -203,32 +203,76 @@ def _sources(conn, media_id: str) -> list[dict[str, Any]]:  # noqa: ANN001
     ]
 
 
+# **「生きている」順に並べた presence の優先度.** 同じ宛先に複数の有効な記録が
+# 残ることがある —— 向き先が変わって `target_epoch` が進んでも、`complete` は
+# 履歴として invalidate されない（`db/destinations.py` の
+# `_invalidate_old_epoch_locked`）。`_destinations` はこの並びで 1 宛先 1 行に畳む。
+# **`target_epoch` だけに絞って現行分だけを出さない。** `deletion_blocker` は
+# epoch を区別せず有効な記録を全部見るので、現行 epoch だけを出す画面は
+# 「旧 epoch に `present` な資産が残っていて消せない」を説明できなくなる。
+# 優先度で畳めば、画面に出る状況と削除の可否が必ず一致する。
+_PRESENCE_PRIORITY = ("present", "sending", "trashed", "gone", "unknown", "failed", "not_sent")
+
+
 def _destinations(conn, media_id: str) -> list[dict[str, Any]]:  # noqa: ANN001
     """宛先ごとの状況. **日本語にはしない** —— 画面が §13 の語彙で訳す.
+
+    **1 宛先 1 行に畳む。** `target_epoch` は API に出さない内部の概念。
+    `_PRESENCE_PRIORITY` の優先度で、同じ宛先の有効な記録から最良の 1 件を選ぶ。
 
     **退役した宛先（`archived_at` あり）は、記録が無ければ出さない。** もう
     送り先ではないので「まだ送っていません」を並べても押しようが無い。ただし
     過去に送った（無効化されていない）記録が残っているなら、履歴として出す。
     """
     rows = conn.execute(
-        "SELECT d.id, d.name, u.state, u.remote_asset_id, u.remote_is_trashed,"
-        "       u.remote_checked_at"
+        "SELECT d.id, d.name, d.archived_at, u.id AS upload_id, u.state,"
+        "       u.remote_asset_id, u.remote_is_trashed, u.remote_checked_at"
         " FROM upload_destination d"
         " LEFT JOIN upload_record u ON u.destination_id = d.id"
         "   AND u.media_file_id = ? AND u.invalidated_at IS NULL"
-        " WHERE d.archived_at IS NULL OR u.id IS NOT NULL"
         " ORDER BY d.name",
         (media_id,),
     )
-    return [
-        {
-            "destination_id": row["id"],
-            "name": row["name"],
-            "state": row["state"],
-            "presence": _presence(row),
-        }
-        for row in rows
-    ]
+    destinations: dict[str, dict[str, Any]] = {}
+    order: list[str] = []
+    for row in rows:
+        destination_id = row["id"]
+        if destination_id not in destinations:
+            destinations[destination_id] = {
+                "name": row["name"],
+                "archived_at": row["archived_at"],
+                "records": [],
+            }
+            order.append(destination_id)
+        if row["upload_id"] is not None:
+            destinations[destination_id]["records"].append(row)
+    result: list[dict[str, Any]] = []
+    for destination_id in order:
+        info = destinations[destination_id]
+        records = info["records"]
+        if not records:
+            if info["archived_at"] is not None:
+                # 記録の無い退役済みの宛先は、押しようの無い行を並べない。
+                continue
+            result.append(
+                {
+                    "destination_id": destination_id,
+                    "name": info["name"],
+                    "state": None,
+                    "presence": "not_sent",
+                }
+            )
+            continue
+        best = min(records, key=lambda r: _PRESENCE_PRIORITY.index(_presence(r)))
+        result.append(
+            {
+                "destination_id": destination_id,
+                "name": info["name"],
+                "state": best["state"],
+                "presence": _presence(best),
+            }
+        )
+    return result
 
 
 def _presence(row) -> str:  # noqa: ANN001
