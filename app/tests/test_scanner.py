@@ -419,6 +419,25 @@ def test_two_files_seen_together_get_the_same_mark(canon_scanning, db):
     assert keys["DCIM/100CANON/IMG_0001.CR2"] == expected
 
 
+def test_the_lease_is_kept_alive_while_marking_copresence(canon_scanning, db):
+    """`_mark_copresence` も 1 行ずつ `UPDATE` を打つので、心拍を打ち続ける.
+
+    実機のカードは 1488 件で、その大半が RAW+JPEG（同席の印付けの対象）。
+    `_sweep_vanished` と同じ規模のループなのに心拍を打たないと、低速な
+    ディスクやネットワーク越しの DB で `HEARTBEAT_INTERVAL` / `LEASE_SECONDS`
+    に届き、走り続けているのに interrupted として表示される。
+    """
+    scanner, ctx, fd, volume_id, profile, _ = canon_scanning
+    beats = []
+    real_heartbeat = ctx.heartbeat
+    ctx.heartbeat = lambda: (beats.append(1), real_heartbeat())[1]
+
+    outcome = scanner.scan(ctx, fd, volume_id, profile)
+
+    # 列挙で 2 件（総数）＋ 同席の印付けで 2 件（組の両方に UPDATE）
+    assert len(beats) == outcome.total + 2 == 4
+
+
 def test_a_lone_file_gets_no_mark(canon_scanning, db):
     """相方が居なければ同席していない。**印を書かない。**"""
     scanner, ctx, fd, volume_id, profile, card = canon_scanning

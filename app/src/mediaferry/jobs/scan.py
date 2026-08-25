@@ -143,8 +143,15 @@ class Scanner:
         **印は `<job_id>:<stem prefix>`。** スキャンの id だけにすると、1 回の
         スキャンが書いた別々の組が同じ印になる（一覧が無関係な写真を畳む）。
 
-        **拡張子が 2 種類以上あることを要求する。** 同じ拡張子は鍵の下に 1 つ
-        しか無いので実際には起きないが、条件を「2 件以上」と書くと意図が読めない。
+        **拡張子が 2 種類以上あることを要求する。** 大小文字だけ違う拡張子
+        （`IMG_0001.JPG` と `IMG_0001.jpg`）はケースセンシティブな FS では別
+        ファイルとして列挙されるが `extension_of` が正規化すると同じ拡張子に
+        なるので、実際に起こりうる。この場合は `core/uploads/stacking.py` の
+        `Identity.ambiguous` と同じ「曖昧な重複」であって RAW+JPEG の組では
+        ないため、条件は「2 件以上」ではなく「2 種類以上」でなければならない。
+
+        **1 件ずつ `UPDATE` するので、列挙や `_sweep_vanished` と同じくリースを
+        打ち続ける。** 実機のカードは 1488 件で、その大半がこの対象になる。
         """
         by_prefix: dict[str, list[str]] = {}
         for rel_path in eligible:
@@ -153,6 +160,7 @@ class Scanner:
             if len({extension_of(path) for path in paths}) < 2:
                 continue
             for rel_path in paths:
+                ctx.heartbeat()
                 self._conn.execute(
                     "UPDATE source_entry SET copresent_key = ?"
                     " WHERE volume_instance_id = ? AND rel_path = ?",
