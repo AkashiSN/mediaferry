@@ -360,9 +360,10 @@ test("狭い画面で、下に貼り付く操作バーが隠れない", async ({
   await settled(page);
 
   // **実際に 1 枚選んでバーを出してから測る。** 選んでいない間はバーが無い。
-  const tile = page.locator("main button.tile").first();
-  await expect(tile).toBeVisible({ timeout: 60_000 });
-  await tile.click();
+  // タイルは押すと開くので、**選ぶのは隅の丸**を押す。
+  const pick = page.locator("main button.pick").first();
+  await expect(pick).toBeVisible({ timeout: 60_000 });
+  await pick.click();
   await expect(page.locator(".actionbar")).toBeVisible();
   const overActionbar = await covering(page, ".actionbar");
   expect(overActionbar, overActionbar.join(" / ")).toEqual([]);
@@ -480,8 +481,9 @@ for (const colorScheme of ["light", "dark"] as const) {
       }
       // **下に貼り付く帯は、1 枚選ぶまで描かれない。** 帯の地はトークンの外
       // （暗い帯）なので、選ばずに通り過ぎると帯の上の弱い操作が一度も測られない。
+      // タイルは押すと開くので、**選ぶのは隅の丸**を押す。
       if (path === "/photos") {
-        await page.locator("main button.tile").first().click({ timeout: 60_000 });
+        await page.locator("main button.pick").first().click({ timeout: 60_000 });
         await expect(page.locator(".actionbar")).toBeVisible();
       }
       for (const problem of await flatControls(page)) {
@@ -698,4 +700,55 @@ test("確認ダイアログは前面に重なり、背後を押させない", as
   expect(await page.getByRole("dialog").innerText()).not.toContain("**");
 
   await page.getByRole("button", { name: "やめる" }).click();
+});
+
+// ---- ログイン画面 ----
+//
+// **上のどの網にも掛かっていない。** 44px もコントラストもはみ出しも、`signIn()`
+// を済ませてから `main` の中だけを測る。ログインは枠（`Layout`）の外に出る唯一の
+// 画面で `main` も `nav` も持たないので、ここで別に見る。
+
+test("ログイン画面の押せるものも 44px 以上", async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.goto(app.url);
+  await expect(page.getByRole("heading", { name: "ログイン" })).toBeVisible();
+
+  const tooSmall: string[] = [];
+  const targets: [string, ReturnType<Page["getByLabel"]>][] = [
+    ["パスワード", page.getByLabel("パスワード")],
+    ["ログイン", page.getByRole("button", { name: "ログイン" })],
+  ];
+  for (const [name, locator] of targets) {
+    const box = await locator.boundingBox();
+    if (box !== null && box.height < 44) {
+      tooSmall.push(`「${name}」が ${Math.round(box.height)}px`);
+    }
+  }
+  expect(tooSmall, tooSmall.join(" / ")).toEqual([]);
+});
+
+test("ログイン画面は 1 枚のカードを中央に置く", async ({ page }) => {
+  await page.setViewportSize({ width: 1280, height: 900 });
+  await page.goto(app.url);
+  await expect(page.getByRole("heading", { name: "ログイン" })).toBeVisible();
+
+  const panel = await page.evaluate(() => {
+    const card = document.querySelector("form")?.closest(".card") ?? null;
+    if (card === null) {
+      return null;
+    }
+    const rect = card.getBoundingClientRect();
+    return {
+      left: Math.round(rect.left),
+      right: Math.round(window.innerWidth - rect.right),
+      width: Math.round(rect.width),
+      viewport: window.innerWidth,
+    };
+  });
+
+  expect(panel, "ログインのフォームがカードに入っていない").not.toBeNull();
+  // **本文の幅いっぱいに広げない。** 読む列としても押す的としても広すぎる。
+  expect(panel!.width, `カードが ${panel!.width}px`).toBeLessThanOrEqual(panel!.viewport / 2);
+  // 左右の余りが等しい ＝ 中央にある。
+  expect(Math.abs(panel!.left - panel!.right), "中央に無い").toBeLessThanOrEqual(2);
 });
