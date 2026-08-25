@@ -5,7 +5,8 @@ import { Link } from "react-router-dom";
 import { stackLabel } from "../utils/stacks";
 import { Icon } from "./Icon";
 
-/** 組（RAW+JPEG）に含まれる 1 行。`GET /media?collapse=stack` の主の行が持つ。 */
+/** 組（RAW+JPEG）に含まれる 1 行。`GET /media` が `collapse=stack` では主の行に、
+ * `stack=members` では組の行すべてに付ける（`GET /media/{id}` も返す）。 */
 export type StackMember = { id: string; rel_path: string; size_bytes: number };
 
 export type Media = {
@@ -16,10 +17,15 @@ export type Media = {
   size_bytes: number;
   duration_seconds?: number | null;
   role?: "original" | "derived";
-  /** 組（RAW+JPEG）。`GET /media?collapse=stack` が**組の member の行に付ける**。
-   * ふだん一覧に出るのは主だけだが、絞り込みで主が落ちると従が単独で出る（その
-   * ときも組の中身は付く）。曖昧な組（大小文字違いが混ざる等）は Immich でも
-   * 組まれないので、どの行にも付かない。 */
+  /** 組（RAW+JPEG）。**組の member の行に付く。**
+   *
+   * 出どころは 2 つ。`GET /media?collapse=stack`（写真タブ）は従を隠して主の行に
+   * 付けるが、絞り込みで主が落ちると従が単独で出る（そのときも組の中身は付く）。
+   * `GET /media?stack=members`（送る画面）は隠さず、組の行すべてに付ける ——
+   * 送る対象は絞り込みが返した行そのものなので、隠されると未送信の RAW が送られない。
+   * `GET /media/{id}`（くわしく）も同じものを返す。
+   *
+   * 曖昧な組（大小文字違いが混ざる等）は Immich でも組まれないので、どの行にも付かない。 */
   stack?: { members: StackMember[] } | null;
 };
 

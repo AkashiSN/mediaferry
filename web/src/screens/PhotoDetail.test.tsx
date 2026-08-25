@@ -599,10 +599,14 @@ describe("組（RAW+JPEG）", () => {
   });
 
   it("外したのが写真本体でも、残りの 1 枚だけが送るへ渡る", async () => {
-    // **`data.id` はいつも組の主と同じ id。** 従だけを外す形だと、残るのは常に
-    // `data.id` になり、「選んだぶんを渡す」と「いつも `data.id` を渡す」の
-    // どちらでも同じ結果になって見分けが付かない。ここでは主を外し、従だけを
-    // 残すことで、選んだぶんが渡っていることを確かめる。
+    // **この仕込みでは `data.id`（`m1`）が組の主にあたる**（`renderDetail` は
+    // `/media/m1` を返し、`aPair` の members は主が先頭）。従だけを外す形だと、
+    // 残るのは常に `data.id` になり、「選んだぶんを渡す」と「いつも `data.id` を
+    // 渡す」のどちらでも同じ結果になって見分けが付かない。ここでは主を外し、
+    // 従だけを残すことで、選んだぶんが渡っていることを確かめる。
+    //
+    // **`data.id` が主だとは限らない** —— 従の `/photos/:id` を直接開けば
+    // `data.id` は従で、`members[0].id` が主になる。
     renderDetail({ role: "original", rel_path: "library/canon/IMG_1.JPG", stack: aPair() });
 
     await userEvent.click(await screen.findByRole("checkbox", { name: "送る：IMG_1.JPG" }));
