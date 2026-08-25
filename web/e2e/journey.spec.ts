@@ -260,7 +260,7 @@ test("空の DB から、ホーム起点の主要動線が通る", async ({ page
   await expect(dialog).toContainText("取り違え");
   await page.getByRole("button", { name: "実行する" }).click();
   await expect(detail).toContainText("信頼済み", { timeout: 60_000 });
-  await page.getByRole("button", { name: "ホームへ" }).click();
+  await page.getByRole("link", { name: "ホームへ" }).click();
 
   // 6. つなぐ。**候補が 0 件でも入れることを、画面の導線で確かめる。**
   //    合成カードの動画は 100 バイトで `min_part_size_gib`（15 GiB）に遠く及ばず、
@@ -276,7 +276,11 @@ test("空の DB から、ホーム起点の主要動線が通る", async ({ page
   await parts.nth(0).check();
   await parts.nth(1).check();
   await page.getByRole("button", { name: /選んだ 2 件でグループを作る/ }).click();
-  await page.getByRole("button", { name: "ホームへ" }).click();
+  // **戻り先は来た道で決まる**（§13）。ここは設定から入ったので「設定へ」。
+  // ホームから入ったときは「ホームへ」で、下の 2 か所がそれを踏む。
+  await page.getByRole("link", { name: "設定へ" }).click();
+  await expect(page.getByRole("heading", { name: "設定", exact: true })).toBeVisible();
+  await nav.getByRole("link", { name: "ホーム" }).click();
 
   // 候補ができたので、**ホームの「やること」からも**入れる（§13 の主要動線）。
   const toMerge = page.getByRole("link", { name: "つなぐ", exact: true });
@@ -292,7 +296,7 @@ test("空の DB から、ホーム起点の主要動線が通る", async ({ page
   await expect(page.getByRole("heading", { name: "つなぐものはありません" })).toBeVisible({
     timeout: 60_000,
   });
-  await page.getByRole("button", { name: "ホームへ" }).click();
+  await page.getByRole("link", { name: "ホームへ" }).click();
 
   // 7. 送る。**宛先 → 対象 → 確認**の 3 段（§13）。
   const toSend = page.getByRole("link", { name: "送る", exact: true });

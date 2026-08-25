@@ -9,7 +9,7 @@ import { Link } from "react-router-dom";
 import { request } from "../api/client";
 import { useMutation, useQuery } from "../api/hooks";
 import { ErrorBanner } from "../components/ErrorBanner";
-import { Icon } from "../components/Icon";
+import { Icon, type IconName } from "../components/Icon";
 
 type Setting = { key: string; value: string | null; locked: boolean; writable: boolean };
 type Settings = { settings: Setting[] };
@@ -18,19 +18,25 @@ type Destinations = { destinations: Destination[] };
 type Profile = { slug: string; name: string; archived: boolean };
 type Profiles = { profiles: Profile[] };
 
-/** ふだんは見ないが、困ったときに要る画面（§13「詳しい情報」）。
+/** ふだんは見ないが、困ったときに要る画面（§13）。**性質ごとに分ける.**
+ *
+ * 1 つの節に混ぜると、「設定」というラベルで括られたものの中身が読めない ——
+ * 実際にこの中で設定なのは「詳しい設定」1 つだけで、残りは**作業の画面**と
+ * **記録**である。
  *
  * **「つなぐ」と「日時の確認」への常設の入口をここに置く。** ホームの「やること」
  * に出るのは仕事が残っているときだけなので、0 件の状態では入る道が無くなる
  * （ナビは 3 つで、`/merge` と `/approve` への導線は他に無い）。手でグループを
  * 作るのも、閾値を変えて探し直すのも、つなぐ画面にしかない。
  */
-const DETAILS: readonly { to: string; title: string; note: string }[] = [
-  { to: "/settings/jobs", title: "作業の履歴", note: "取り込みや送信がいつ終わったか" },
+type Entry = { to: string; title: string; note: string; icon: IconName };
+
+const WORK: readonly Entry[] = [
   {
     to: "/merge",
     title: "つなぐ",
     note: "分かれた動画を探して 1 本にする。手で組むこともできます",
+    icon: "list",
   },
   {
     // ホームの「確認」の札は、待っているものがあるときだけ出る。**何を確認した
@@ -38,11 +44,18 @@ const DETAILS: readonly { to: string; title: string; note: string }[] = [
     to: "/approve",
     title: "日時の確認",
     note: "先に Immich にあった写真の日時を直していいか",
+    icon: "list",
   },
+  { to: "/card", title: "接続中のカード", note: "判定の理由と、信頼の記録", icon: "card" },
+];
+
+const RECORDS: readonly Entry[] = [
+  { to: "/settings/jobs", title: "作業の履歴", note: "取り込みや送信がいつ終わったか", icon: "list" },
   {
     to: "/settings/merge-history",
     title: "つないだ後の後片付け",
     note: "別々のままにした組み合わせと、使っていない出力を片付ける",
+    icon: "list",
   },
   {
     // 置き換わった出力は、それを作った記録と同じ画面にある（どのつなぎ直しで
@@ -50,9 +63,44 @@ const DETAILS: readonly { to: string; title: string; note: string }[] = [
     to: "/settings/merge-history#stale",
     title: "使っていないファイル",
     note: "つなぎ直しで置き換わった古い出力",
+    icon: "list",
   },
-  { to: "/card", title: "接続中のカード", note: "判定の理由と、信頼の記録" },
 ];
+
+const ADVANCED: readonly Entry[] = [
+  {
+    to: "/settings/general",
+    title: "詳しい設定",
+    note: "データの置き場所や送信の待ち時間。アプリ設定で固定されている項目もあります",
+    icon: "gear",
+  },
+];
+
+/** 入口の並び 1 つ。**作業の画面には遷移元を渡す** —— 入口が 2 つあるので、
+ * 戻り先は来た道で決める（`components/BackLink.tsx`）。 */
+function Entries({ entries, carryFrom }: { entries: readonly Entry[]; carryFrom: boolean }) {
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 2 }}>
+      {entries.map((entry) => (
+        <Link
+          key={entry.title}
+          to={entry.to}
+          state={carryFrom ? { from: "/settings" } : undefined}
+          className="navitem"
+          style={{ height: 52 }}
+        >
+          <Icon name={entry.icon} />
+          <span className="grow">
+            <b style={{ display: "block", fontSize: "13.5px", color: "var(--ink)" }}>
+              {entry.title}
+            </b>
+            <span className="small">{entry.note}</span>
+          </span>
+        </Link>
+      ))}
+    </div>
+  );
+}
 
 export function SettingsScreen() {
   const settings = useQuery<Settings>("/settings");
@@ -190,35 +238,31 @@ export function SettingsScreen() {
         )}
       </section>
 
-      <section className="card pad">
+      <section className="card pad" aria-label="ふだんは使わない操作">
         <div className="sechead" style={{ marginBottom: 10 }}>
-          <h2>詳しい情報</h2>
+          <h2>ふだんは使わない操作</h2>
+        </div>
+        <p className="small" style={{ marginBottom: 12 }}>
+          ホームの「やること」に出ていないときも、ここから入れます。
+        </p>
+        <Entries entries={WORK} carryFrom />
+      </section>
+
+      <section className="card pad" aria-label="記録">
+        <div className="sechead" style={{ marginBottom: 10 }}>
+          <h2>記録</h2>
         </div>
         <p className="small" style={{ marginBottom: 12 }}>
           ふだんは見なくて大丈夫です。困ったときにここを開きます。
         </p>
-        <div style={{ display: "flex", flexDirection: "column", gap: 2 }}>
-          {DETAILS.map((entry) => (
-            <Link key={entry.title} to={entry.to} className="navitem" style={{ height: 52 }}>
-              <Icon name="list" />
-              <span className="grow">
-                <b style={{ display: "block", fontSize: "13.5px", color: "var(--ink)" }}>
-                  {entry.title}
-                </b>
-                <span className="small">{entry.note}</span>
-              </span>
-            </Link>
-          ))}
-          <Link to="/settings/general" className="navitem" style={{ height: 52 }}>
-            <Icon name="gear" />
-            <span className="grow">
-              <b style={{ display: "block", fontSize: "13.5px", color: "var(--ink)" }}>詳しい設定</b>
-              <span className="small">
-                データの置き場所や送信の待ち時間。アプリ設定で固定されている項目もあります
-              </span>
-            </span>
-          </Link>
+        <Entries entries={RECORDS} carryFrom={false} />
+      </section>
+
+      <section className="card pad" aria-label="詳しい設定">
+        <div className="sechead" style={{ marginBottom: 10 }}>
+          <h2>詳しい設定</h2>
         </div>
+        <Entries entries={ADVANCED} carryFrom={false} />
       </section>
     </section>
   );

@@ -350,7 +350,7 @@ describe("カードの信頼登録", () => {
       </MemoryRouter>,
     );
 
-    await userEvent.click(await screen.findByRole("button", { name: "ホームへ" }));
+    await userEvent.click(await screen.findByRole("link", { name: "ホームへ" }));
 
     expect(await screen.findByText("ホームのページ")).toBeInTheDocument();
   });

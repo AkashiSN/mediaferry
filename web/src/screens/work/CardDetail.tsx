@@ -8,12 +8,13 @@
 // 取り違えうること）を書く（§12.1）。
 
 import { useState } from "react";
-import { Link, useNavigate } from "react-router-dom";
+import { Link } from "react-router-dom";
 
 import { request } from "../../api/client";
 import { useMutation, useQuery } from "../../api/hooks";
 import { CardStanding } from "../../components/CardStanding";
 import { ConfirmDialog, type Confirmation } from "../../components/ConfirmDialog";
+import { BackLink } from "../../components/BackLink";
 import { ErrorBanner } from "../../components/ErrorBanner";
 import { Icon } from "../../components/Icon";
 import type { CardView } from "../../hooks/homeSections";
@@ -183,7 +184,6 @@ export function CardDetailScreen() {
   const [confirming, setConfirming] = useState<{ confirmation: Confirmation; id: string } | null>(
     null,
   );
-  const navigate = useNavigate();
 
   // **未解決・失敗は `null` のまま持つ。** 既定値へ倒すと、同意の内容が実挙動と
   // ずれる（`watcher.py` は積まないのに「コピーされます」と書く）。
@@ -205,12 +205,7 @@ export function CardDetailScreen() {
 
   return (
     <section aria-label="カードの中身" className="wrap">
-      <div className="row">
-        <button type="button" className="btn sm" onClick={() => navigate("/")}>
-          <Icon name="back" size={16} />
-          ホームへ
-        </button>
-      </div>
+      <BackLink />
       <h1 className="page title-lg">カードの中身</h1>
 
       <ErrorBanner

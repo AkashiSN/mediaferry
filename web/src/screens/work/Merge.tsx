@@ -12,6 +12,7 @@ import { useDashboardReload } from "../../api/dashboard";
 import { useMutation, useQuery } from "../../api/hooks";
 import { ConfirmDialog } from "../../components/ConfirmDialog";
 import type { Confirmation } from "../../components/ConfirmDialog";
+import { BackLink } from "../../components/BackLink";
 import { ErrorBanner } from "../../components/ErrorBanner";
 import { Icon } from "../../components/Icon";
 import { useDialogFocus } from "../../components/useDialogFocus";
@@ -366,12 +367,7 @@ export function MergeScreen() {
 
   return (
     <section aria-label="つなぐ" className="wrap">
-      <div className="row">
-        <button type="button" className="btn sm" onClick={() => navigate("/")}>
-          <Icon name="back" size={16} />
-          ホームへ
-        </button>
-      </div>
+      <BackLink />
       <div>
         <h1 className="page title-lg">
           分かれている動画を 1 本につなぎます
