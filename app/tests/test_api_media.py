@@ -209,6 +209,22 @@ def test_the_ambiguous_pair_gets_no_stack_members(client, canon_pair, ambiguous_
     assert not any("stack" in m for m in body["media"])
 
 
+def test_the_ambiguous_pair_gets_no_stack_members_under_stack_members(
+    client, canon_pair, ambiguous_sibling
+):
+    """`stack=members` でも、曖昧なグループには `stack` を付けない.
+
+    曖昧かどうかの判定（`NOT (ambiguous)`）は `_members_of` の中にあり、
+    `collapse` の値を見ない。上の `test_the_ambiguous_pair_gets_no_stack_members`
+    が固定しているのは `collapse=stack` の経路だけなので、隠さない
+    `stack=members` でも同じ判断が効くことを別に固定する。
+    """
+    body = client.get("/api/media?stack=members").json()
+
+    assert len(body["media"]) == 3
+    assert not any("stack" in m for m in body["media"])
+
+
 def test_a_sibling_under_a_different_profile_is_not_wrongly_hidden(
     client, canon_pair, cross_profile_rank_collision
 ):
@@ -252,6 +268,38 @@ def test_a_failed_raw_is_listed_when_its_jpeg_succeeded(client, db, canon_pair):
 
     assert [m["rel_path"].split("/")[-1] for m in body["media"]] == ["IMG_0001.CR2"]
     assert body["total"] == 1
+
+
+def test_stack_members_ignores_the_request_own_filters(client, db, canon_pair):
+    """`stack.members` は、その要求の絞り込みを受けない. **これは仕様であって欠落ではない。**
+
+    送る画面は絞り込みが返した行だけを送り、`stack.members` はその行の集合の中
+    だけで組を突き合わせるために読む（ブリーフの「なぜ要るか」）。ここでは JPG が
+    `complete`・CR2 が `failed` の状態で `status=failed` を掛けるので、一覧に
+    残るのは CR2 の 1 行だけになる。もしこの CR2 の `stack.members` が
+    同じ `status=failed` で絞られると、**既に送り終えた JPG が消えて**、
+    送る画面は「JPG+RAW の組」というラベルと正しい枚数を失う。`collapse=stack`
+    の従外し（`_secondary_exists_sql` に渡す `sibling_where`）と `_members_of` は
+    別物なので、**`_members_of` に同じ絞り込みを「対称だから」と足すと退行する**。
+    """
+    destination = a_destination(db, name="stack-members-filter")
+    an_upload(
+        db,
+        destination,
+        canon_pair.media_ids["JPG"],
+        state="complete",
+        destination_revision_id=destination[1],
+    )
+    an_upload(db, destination, canon_pair.media_ids["CR2"], state="failed")
+    db.commit()
+
+    body = client.get(
+        f"/api/media?stack=members&destination_id={destination[0]}&status=failed"
+    ).json()
+
+    assert [m["rel_path"].split("/")[-1] for m in body["media"]] == ["IMG_0001.CR2"]
+    names = [m["rel_path"].split("/")[-1] for m in body["media"][0]["stack"]["members"]]
+    assert names == ["IMG_0001.JPG", "IMG_0001.CR2"]
 
 
 def test_an_unsendable_jpeg_does_not_hide_its_raw(client, db, canon_pair):

@@ -167,6 +167,9 @@ def list_media(  # noqa: PLR0913
     prefix_params: tuple[Any, ...] = ()
     if collapse == "stack" or stack == "members":
         ranks_sql, ranks_params = _ranks(conn)
+    # `and ranks_sql` を落とさない。**`ranks_sql` が空だと `VALUES` は 0 行を
+    # 書けない**（`WITH rank(...) AS (VALUES )` は構文エラー）。stack が有効な
+    # プロファイルが 1 つも無い環境では、`collapse=stack` の要求ごとに毎回ここを通る。
     if collapse == "stack" and ranks_sql:
         prefix = f"WITH rank(profile_id, extension, rank) AS (VALUES {ranks_sql}) "
         prefix_params = ranks_params
