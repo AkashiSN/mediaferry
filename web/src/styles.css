@@ -292,24 +292,12 @@ h1.page.title-lg { font-size: 24px; }
      読めなくなるより、はみ出さない方を採る。 */
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .madeof.raw { background: var(--warn-dot); }
-.tile .mark {
-  position: absolute; left: 7px; bottom: 7px; width: 18px; height: 18px; border-radius: 50%;
-  display: flex; align-items: center; justify-content: center; font-size: 11px; font-weight: 700;
-}
-.tile .mark.unsent { border: 2px solid #fff; box-shadow: 0 0 0 1px rgba(0, 0, 0, .18); }
-.tile .mark.sent { background: var(--ok); color: #fff; }
-.tile .mark.awaiting { background: var(--warn-dot); color: #fff; }
-.tile .mark.failed { background: var(--danger); color: #fff; }
 .tile .dur {
   position: absolute; right: 6px; bottom: 6px; font-size: 10.5px; color: #fff;
   background: rgba(28, 25, 23, .6); border-radius: 4px; padding: 1px 5px;
 }
 .t0 { background: var(--t0); } .t1 { background: var(--t1); } .t2 { background: var(--t2); } .t3 { background: var(--t3); }
 .t4 { background: var(--t4); } .t5 { background: var(--t5); } .t6 { background: var(--t6); } .t7 { background: var(--t7); }
-
-.legend { display: flex; gap: 16px; flex-wrap: wrap; font-size: 12px; color: var(--ink-2); }
-.legend span { display: inline-flex; align-items: center; gap: 6px; }
-.lg { width: 12px; height: 12px; border-radius: 50%; display: inline-flex; align-items: center; justify-content: center; font-size: 8px; font-weight: 700; color: #fff; }
 
 /* **下に貼り付く操作バー。** 画面の幅によらず流れの中で貼り付くので、上の帯とも
    本文とも重ならない。`env(safe-area-inset-bottom)` は端末の下端の持ち手を避ける。 */

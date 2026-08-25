@@ -1,4 +1,4 @@
-// 写真（§13）。日付でまとめ、1 枚ごとに状態の印を出す。
+// 写真（§13）。日付でまとめたグリッドで表示する。
 
 import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
@@ -267,7 +267,9 @@ describe("写真の画面", () => {
     expect(calls().some((c) => c.path.includes("destination_id=d1"))).toBe(false);
   });
 
-  it("宛先ごとの絞り込みが効いているときだけ、状態の印を出す", async () => {
+  it("宛先ごとの絞り込みが効いていても、状態の印は出さない", async () => {
+    // **印は行ごとに引いていなかった。** 宛先ごとの絞り込みが効いている間だけ
+    // 全行へ同じ印を被せていたので、直前に押したチップの繰り返しにしかならない。
     stubApi({
       "/media": {
         media: [media("a", "2026-08-18T14:03:00+09:00")],
@@ -282,12 +284,23 @@ describe("写真の画面", () => {
         <PhotosScreen />
       </MemoryRouter>,
     );
-    await screen.findByRole("button", { name: /a\.JPG/ });
-    // 「すべて」では宛先ごとの状態が定まらないので、印を出さない。
+    await userEvent.click(await screen.findByRole("button", { name: /送信済み/ }));
+    await waitFor(() => expect(screen.getByRole("button", { name: /a\.JPG/ })).toBeInTheDocument());
     expect(container.querySelector(".tile .mark")).toBeNull();
+  });
 
-    await userEvent.click(screen.getByRole("button", { name: /送信済み/ }));
-    await waitFor(() => expect(container.querySelector(".tile .mark.sent")).not.toBeNull());
+  it("凡例を出さない", async () => {
+    stubApi({
+      "/media": { media: [], total: 0, page: 1, page_size: 200 },
+      "/destinations": { destinations: [] },
+    });
+    render(
+      <MemoryRouter>
+        <PhotosScreen />
+      </MemoryRouter>,
+    );
+    await screen.findByRole("heading", { name: "写真" });
+    expect(document.querySelector(".legend")).toBeNull();
   });
 
   it("選ぶ丸の aria-label は rel_path の末尾", async () => {
@@ -1226,53 +1239,6 @@ describe("読み込む件数と、切れていることの表示", () => {
     );
   });
 
-  // 絞り込みを変えた瞬間に印だけが変わると、送信済みの 200 枚に赤い × が付く。
-  it("絞り込みを変えて読んでいる間は、前の行に新しい印を付けない", async () => {
-    let release!: () => void;
-    const held = new Promise<void>((resolve) => {
-      release = resolve;
-    });
-    vi.stubGlobal(
-      "fetch",
-      vi.fn(async (input: string) => {
-        const path = input.replace(/^\/api/, "");
-        if (path.includes("status=failed")) {
-          await held;
-          return new Response(
-            JSON.stringify({ media: [], total: 0, page: 1, page_size: 200 }),
-            { status: 200 },
-          );
-        }
-        if (path.startsWith("/media")) {
-          return new Response(
-            JSON.stringify({
-              media: [media("a", "2026-08-18T15:12:00+09:00")],
-              total: 1,
-              page: 1,
-              page_size: 200,
-            }),
-            { status: 200 },
-          );
-        }
-        return new Response(
-          JSON.stringify({ destinations: [{ id: "d1", name: "家", enabled: true }] }),
-          { status: 200 },
-        );
-      }),
-    );
-    const { container } = render(
-      <MemoryRouter initialEntries={["/photos?status=sent&destination_id=d1"]}>
-        <PhotosScreen />
-      </MemoryRouter>,
-    );
-    await waitFor(() => expect(container.querySelector(".tile .mark.sent")).not.toBeNull());
-
-    await userEvent.click(screen.getByRole("button", { name: "送れなかった" }));
-
-    expect(container.querySelector(".tile .mark.failed")).toBeNull();
-    release();
-  });
-
   it("絞り込みを変えたら、1 ページ目に戻す", async () => {
     // 3 ページ目のまま別の絞り込みへ移ると、当てはまるものが 1 ページ分しか
     // 無いときに「ありません」と出る。
@@ -1341,25 +1307,6 @@ describe("送れなかったものの絞り込み", () => {
         ),
       ).toBe(true),
     );
-  });
-
-  it("送れなかったものには、その印を出す", async () => {
-    stubApi({
-      "/media": {
-        media: [media("a", "2026-08-18T14:03:00+09:00")],
-        total: 1,
-        page: 1,
-        page_size: 200,
-      },
-      "/destinations": { destinations: [{ id: "d1", name: "家", enabled: true }] },
-    });
-    const { container } = render(
-      <MemoryRouter>
-        <PhotosScreen />
-      </MemoryRouter>,
-    );
-    await userEvent.click(await screen.findByRole("button", { name: "送れなかった" }));
-    await waitFor(() => expect(container.querySelector(".tile .mark.failed")).not.toBeNull());
   });
 
   it("宛先が無ければ、「送れなかった」も選べない", async () => {

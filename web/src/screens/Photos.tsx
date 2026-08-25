@@ -1,8 +1,7 @@
-// 写真（§13）。日付でまとめたグリッドにして、1 枚ごとに宛先ごとの状態を印で出す。
+// 写真（§13）。日付でまとめたグリッドにして並べる。
 //
 // **写真を選ぶ画面なので、写真が見える大きさで並べる。** 表のセルに収まる大きさの
-// サムネイルでは、どれを選ぶかが決められない。状態の印には凡例を添える（色と形だけで
-// 意味を伝えない）。
+// サムネイルでは、どれを選ぶかが決められない。
 
 import { useMemo, useState } from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
@@ -10,7 +9,7 @@ import { useNavigate, useSearchParams } from "react-router-dom";
 import { useQuery } from "../api/hooks";
 import { ErrorBanner } from "../components/ErrorBanner";
 import { Icon } from "../components/Icon";
-import { MediaTile, type Media, type MediaStatus } from "../components/MediaTile";
+import { MediaTile, type Media } from "../components/MediaTile";
 import { useEvents } from "../hooks/useEvents";
 import { useReloadOnEvents } from "../hooks/useReloadOnEvents";
 import { formatBytes } from "../utils/formatBytes";
@@ -148,7 +147,10 @@ export function PhotosScreen() {
   // 宛先が 1 つしか無ければ、黙ってそれを使う。2 つ以上あるときは選ばせる。
   const effectiveDestinationId =
     destinationRows.length === 1 ? destinationRows[0].id : chosenDestinationId;
-  const needsDestination = DESTINATION_SCOPED.has(filter) && effectiveDestinationId === null;
+  const needsDestination = useMemo(
+    () => DESTINATION_SCOPED.has(filter) && effectiveDestinationId === null,
+    [filter, effectiveDestinationId],
+  );
 
   const page = pageFromParams(params);
   const mediaQuery = buildMediaQuery(
@@ -175,19 +177,12 @@ export function PhotosScreen() {
   const { received } = useEvents();
   useReloadOnEvents(received, media.reload);
 
-  // 宛先ごとの絞り込みが効いている間は、返ってきた行はすべてその状態。
-  // それ以外（すべて／動画）は宛先ごとの状態が定まらないので、印を出さない。
-  //
-  // **新しい絞り込みの結果が返るまでは、印を出さない。** 前の絞り込みの行が
-  // 並んだままなので、被せると送信済みの 200 枚に赤い × が付く。
-  const impliedStatus: MediaStatus =
-    !media.stale && DESTINATION_SCOPED.has(filter) ? (filter as MediaStatus) : null;
   const rows: Media[] = useMemo(() => {
     if (needsDestination) {
       return [];
     }
-    return (media.data?.media ?? []).map((row) => ({ ...row, status: impliedStatus }));
-  }, [media.data, impliedStatus, needsDestination]);
+    return media.data?.media ?? [];
+  }, [media.data, needsDestination]);
   const groups = useMemo(() => groupByDate(rows), [rows]);
   // **サーバ側の総数。** 1 度に読むのは `PAGE_SIZE` 件までなので、これより
   // 読めた行が少なければ切れている。宛先を選ぶ前は、いま出している 0 件と
@@ -442,32 +437,6 @@ export function PhotosScreen() {
           ))}
         </div>
       )}
-
-      {/* **状態の印には凡例を添える。** 色と形だけで意味を伝えない（§13）。 */}
-      <div className="legend">
-        <span>
-          <i className="lg" style={{ border: "2px solid var(--ink-3)" }} />
-          まだ送っていない
-        </span>
-        <span>
-          <i className="lg" style={{ background: "var(--ok)" }}>
-            <Icon name="check" size={8} />
-          </i>
-          送信済み
-        </span>
-        <span>
-          <i className="lg" style={{ background: "var(--warn-dot)" }}>
-            !
-          </i>
-          確認が要る
-        </span>
-        <span>
-          <i className="lg" style={{ background: "var(--danger)" }}>
-            ×
-          </i>
-          送れなかった
-        </span>
-      </div>
 
       {needsDestination ? (
         <div className="card pad empty">

@@ -1,15 +1,9 @@
 // 写真 1 枚のタイル（§13）。プロトタイプの `tile()` から色・間隔を取る。
-//
-// **状態の印は形と文字の両方で伝える。** 色だけにすると、色覚特性や白黒印刷で
-// 区別が付かない：未送信は白縁の丸、送信済みはチェック、確認が要るは「!」、
-// 送れなかったものは「×」。
 
 import { Link } from "react-router-dom";
 
 import { stackLabel } from "../utils/stacks";
 import { Icon } from "./Icon";
-
-export type MediaStatus = "unsent" | "awaiting" | "sent" | "failed" | null;
 
 /** 組（RAW+JPEG）に含まれる 1 行。`GET /media?collapse=stack` の主の行が持つ。 */
 export type StackMember = { id: string; rel_path: string; size_bytes: number };
@@ -21,7 +15,6 @@ export type Media = {
   captured_at: string;
   size_bytes: number;
   duration_seconds?: number | null;
-  status?: MediaStatus;
   role?: "original" | "derived";
   /** 組（RAW+JPEG）。`GET /media?collapse=stack` が**組の member の行に付ける**。
    * ふだん一覧に出るのは主だけだが、絞り込みで主が落ちると従が単独で出る（その
@@ -33,7 +26,7 @@ export type Media = {
 /** タイルが実際に読む部分だけ。**一覧の 1 行から直に描ける**ようにするため、
  * 撮影時刻や大きさは要求しない（`確認` は `GET /uploads` の行だけで描く）。 */
 export type TileMedia = Pick<Media, "id" | "rel_path"> &
-  Partial<Pick<Media, "kind" | "duration_seconds" | "status" | "role" | "stack">>;
+  Partial<Pick<Media, "kind" | "duration_seconds" | "role" | "stack">>;
 
 /** `rel_path` の末尾（ファイル名）。**内部の相対パスを画面に出さない**（§13）ので、
  * タイルの `aria-label` も、ホームの「さっき取り込んだもの」もここを通す。 */
@@ -84,7 +77,6 @@ export function MediaTile({
           {label !== null && <span className="madeof raw">{label}</span>}
         </span>
       )}
-      <StatusMark status={media.status ?? null} />
       {hasDuration && (
         <span className="dur">{formatClipLength(media.duration_seconds as number)}</span>
       )}
@@ -120,25 +112,4 @@ export function MediaTile({
       )}
     </div>
   );
-}
-
-/** 宛先ごとの状態の印。分からないとき（絞り込みが宛先を伴わないとき）は出さない。 */
-function StatusMark({ status }: { status: MediaStatus }) {
-  if (status === "sent") {
-    return (
-      <span className="mark sent">
-        <Icon name="check" size={11} />
-      </span>
-    );
-  }
-  if (status === "awaiting") {
-    return <span className="mark awaiting">!</span>;
-  }
-  if (status === "failed") {
-    return <span className="mark failed">×</span>;
-  }
-  if (status === "unsent") {
-    return <span className="mark unsent" />;
-  }
-  return null;
 }
