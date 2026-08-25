@@ -6,6 +6,9 @@ dirfd 起点で scan.roots 配下を列挙し、既知の source_entry と照合
 
 **最後まで見たら `volume_instance.scanned_at` に印を付ける。中身が空でも付ける**
 ——「数えたか」は行の有無からは分からない（§11）。
+
+**最後まで見たら、カードから消えたファイルの行も外す。** 外さないと
+`pending_count` が実体より多いまま残り、取り込みが開けない ENOENT で失敗する。
 """
 
 from __future__ import annotations
@@ -14,13 +17,14 @@ import os
 import sqlite3
 from dataclasses import dataclass
 
-from ..adapters.fs import iter_media_files, open_beneath
+from ..adapters.fs import exists_beneath, iter_media_files, open_beneath
 from ..clock import now_iso
 from ..core.fingerprint import FINGERPRINT_VERSION, quick_fingerprint
 from ..db.jobs import JobContext
 from ..db.profiles import ProfileRef
 from ..db.sources import mark_scanned
 from ..ids import new_id
+from .volumes import PENDING_CLAUSE
 
 
 @dataclass(frozen=True)
@@ -29,6 +33,7 @@ class ScanOutcome:
     new: int
     already_imported: int
     ambiguous: int
+    vanished: int = 0
 
 
 class Scanner:
@@ -39,7 +44,11 @@ class Scanner:
         self, ctx: JobContext, dirfd: int, volume_instance_id: str, profile: ProfileRef
     ) -> ScanOutcome:
         defn = profile.definition
-        total = new = imported = ambiguous = 0
+        # 掃除の候補を絞る基準。列挙より先に採ることで、今回触れた行が候補から
+        # 外れる。**絞りであって守りではない** —— 触れた行はカードに実在するので、
+        # 基準が無くても `exists_beneath` が残す。開き直す回数が減るだけ。
+        started = now_iso()
+        total = new = imported = ambiguous = vanished = 0
         counted = True
         for found in iter_media_files(dirfd, defn.scan.roots, defn.scan.extensions):
             if ctx.cancelled():
@@ -57,11 +66,50 @@ class Scanner:
                 new += 1
             ctx.emit("info", f"{found.rel_path}: {verdict}", {"size_bytes": found.size_bytes})
         if counted:
-            # **最後まで見たときだけ「数えた」と書く。** 途中で降りたスキャンを
-            # 数え終わったことにすると、1 件も見ていないカードに画面が
-            # 「取り込むものはありません。」と書く。
+            # **最後まで見たときだけ**。途中で降りたスキャンを数え終わったことに
+            # すると、1 件も見ていないカードに画面が「取り込むものはありません。」と
+            # 書く。掃除も同じ理由で、見ていないだけのファイルを「消えた」と読む。
+            vanished = self._sweep_vanished(ctx, dirfd, volume_instance_id, started)
             mark_scanned(self._conn, volume_instance_id)
-        return ScanOutcome(total=total, new=new, already_imported=imported, ambiguous=ambiguous)
+        return ScanOutcome(
+            total=total,
+            new=new,
+            already_imported=imported,
+            ambiguous=ambiguous,
+            vanished=vanished,
+        )
+
+    def _sweep_vanished(
+        self, ctx: JobContext, dirfd: int, volume_instance_id: str, started: str
+    ) -> int:
+        """今回触れなかった取り込み待ちの行のうち、本当に消えたものを外す.
+
+        **「無い」には観測を要求する。** 列挙に出ないことと、カードから消えたことは
+        別 —— `scan.extensions` を狭めれば、実在するファイルの行も列挙から外れる。
+        だから 1 件ずつ開いて確かめてから消す。
+
+        外すのは `PENDING_CLAUSE` の行だけ。`published` は「このカードから
+        取り込んだ」という記録で、スタッキングの「同じカード」判定（§9.11）と
+        `_known_files_survive` の標本がこれを引く。staging がまだ指している行も
+        残す —— `ON DELETE RESTRICT` なので消しに行くとスキャンごと落ちる。
+
+        **1 件ずつ開くので、列挙と同じくリースを打ち続ける**（`heartbeat`）。
+        """
+        rows = self._conn.execute(
+            "SELECT id, rel_path FROM source_entry"  # noqa: S608
+            f" WHERE volume_instance_id = ? AND {PENDING_CLAUSE} AND observed_at < ?"
+            " AND id NOT IN (SELECT source_entry_id FROM artifact_staging"
+            "                WHERE source_entry_id IS NOT NULL)",
+            (volume_instance_id, started),
+        ).fetchall()
+        gone = []
+        for row in rows:
+            ctx.heartbeat()
+            if not exists_beneath(dirfd, row["rel_path"]):
+                gone.append(row["id"])
+        for entry_id in gone:
+            self._conn.execute("DELETE FROM source_entry WHERE id = ?", (entry_id,))
+        return len(gone)
 
     def _fingerprint(self, dirfd: int, rel_path: str, size: int) -> str:
         fd = open_beneath(dirfd, rel_path)

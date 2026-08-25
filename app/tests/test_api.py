@@ -114,6 +114,38 @@ def test_the_import_summary_counts_what_it_skipped(client):
     assert summary == "取り込み完了: 0 件 / スキップ 1 件 / 失敗 0 件"
 
 
+def test_the_scan_summary_counts_what_left_the_card(client, fake_card):
+    """カードから消えたファイルを外したことが、ログから確かめられる.
+
+    件数が出ないと、`pending_count` が減った理由が誰にも分からない。実機では
+    「取り込む 1488 件」が「68 件」に変わるので、黙って変えてはいけない。
+    """
+    volume_id = client.get("/api/devices").json()["volumes"][0]["volume_instance_id"]
+    _await_job(client, client.post(f"/api/volumes/{volume_id}/scan").json()["job_id"])
+    (fake_card / "DCIM" / "DJI_001" / "DJI_20260817143000_0001_D.MP4").unlink()
+
+    second = client.post(f"/api/volumes/{volume_id}/scan").json()["job_id"]
+    _await_job(client, second)
+
+    events = client.get(f"/api/jobs/{second}/events", params={"after_seq": 0}).json()["events"]
+    assert events[-1]["message"] == "スキャン完了: 新規 0 件 / 取込済 0 件 / 消えた 1 件"
+
+
+def test_a_file_that_left_the_card_is_no_longer_counted_as_pending(client, fake_card):
+    """画面の「残り N 件」が実体に合う.
+
+    合わないと、押せば必ず失敗する取り込みを画面が勧めることになる。
+    """
+    volume_id = client.get("/api/devices").json()["volumes"][0]["volume_instance_id"]
+    _await_job(client, client.post(f"/api/volumes/{volume_id}/scan").json()["job_id"])
+    assert client.get("/api/devices").json()["volumes"][0]["pending_count"] == 1
+    (fake_card / "DCIM" / "DJI_001" / "DJI_20260817143000_0001_D.MP4").unlink()
+
+    _await_job(client, client.post(f"/api/volumes/{volume_id}/scan").json()["job_id"])
+
+    assert client.get("/api/devices").json()["volumes"][0]["pending_count"] == 0
+
+
 def test_trusting_a_volume_sticks(client):
     volume_id = client.get("/api/devices").json()["volumes"][0]["volume_instance_id"]
     assert client.post(f"/api/volumes/{volume_id}/trust").status_code == 200

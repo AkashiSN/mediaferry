@@ -174,3 +174,145 @@ def test_progress_events_name_the_file(scanning, db):
     scanner.scan(ctx, fd, volume_id, profile)
     messages = [e["message"] for e in JobStore(db).events(ctx.job_id)]
     assert any("DJI_20260817143000_0001_D.MP4" in m for m in messages)
+
+
+def _paths(db) -> set[str]:
+    return {r["rel_path"] for r in db.execute("SELECT rel_path FROM source_entry")}
+
+
+def test_a_file_that_left_the_card_stops_being_pending(scanning, db):
+    """カードから消えたファイルの行は、スキャンが外す.
+
+    外さないと `pending_count` が実体より多いまま残り、画面は「N 件取り込む」と
+    言うのに取り込みは開けない ENOENT で失敗する。しかも失敗した行は
+    `PENDING_CLAUSE` に居座るので、以後の取り込みが毎回失敗する。
+    """
+    scanner, ctx, fd, volume_id, profile, card = scanning
+    scanner.scan(ctx, fd, volume_id, profile)
+    (card / "DCIM" / "DJI_001" / "DJI_20260817143000_0001_D.MP4").unlink()
+
+    outcome = scanner.scan(ctx, fd, volume_id, profile)
+
+    assert outcome.vanished == 1
+    assert _paths(db) == set()
+
+
+def test_an_imported_entry_survives_the_file_leaving_the_card(scanning, db):
+    """取り込み済みの観測は残す.
+
+    `published` な行は「このカードから取り込んだ」という記録で、スタッキングの
+    「同じカード」判定（design.md §9.11）と `_known_files_survive` の標本が
+    これを引く。消すと、取り込んだ後にカードを消した人の組が崩れる。
+    """
+    scanner, ctx, fd, volume_id, profile, card = scanning
+    scanner.scan(ctx, fd, volume_id, profile)
+    db.execute("UPDATE source_entry SET state = 'published'")
+    (card / "DCIM" / "DJI_001" / "DJI_20260817143000_0001_D.MP4").unlink()
+
+    outcome = scanner.scan(ctx, fd, volume_id, profile)
+
+    assert outcome.vanished == 0
+    assert _paths(db) == {"DCIM/DJI_001/DJI_20260817143000_0001_D.MP4"}
+
+
+def test_a_failed_entry_that_left_the_card_stops_being_pending(scanning, db):
+    """`failed` も取り込み対象（`PENDING_CLAUSE`）なので、同じく外す."""
+    scanner, ctx, fd, volume_id, profile, card = scanning
+    scanner.scan(ctx, fd, volume_id, profile)
+    db.execute("UPDATE source_entry SET state = 'failed'")
+    (card / "DCIM" / "DJI_001" / "DJI_20260817143000_0001_D.MP4").unlink()
+
+    outcome = scanner.scan(ctx, fd, volume_id, profile)
+
+    assert outcome.vanished == 1
+    assert _paths(db) == set()
+
+
+def test_an_entry_whose_file_is_still_there_is_kept(scanning, db):
+    """**「無い」には観測を要求する。** 列挙に出ないだけでは消さない.
+
+    プロファイルの `scan.extensions` を狭めると、カードに実在するファイルの行が
+    列挙に現れなくなる。そこで消すと、広げ直すまで取り込めたはずのものが
+    黙って消える。`.LRF` は `dji-osmo` の `extensions` に無いが実在する。
+    """
+    scanner, ctx, fd, volume_id, profile, card = scanning
+    scanner.scan(ctx, fd, volume_id, profile)
+    db.execute(
+        "INSERT INTO source_entry (id, volume_instance_id, rel_path, size_bytes, mtime_ns,"
+        " quick_fingerprint, fingerprint_version, state, observed_at)"
+        " VALUES ('lrf', ?, 'DCIM/DJI_001/DJI_20260817143000_0001_D.LRF', 3, 0, 'x', 1,"
+        " 'seen', '2000-01-01T00:00:00+00:00')",
+        (volume_id,),
+    )
+
+    outcome = scanner.scan(ctx, fd, volume_id, profile)
+
+    assert outcome.vanished == 0
+    assert "DCIM/DJI_001/DJI_20260817143000_0001_D.LRF" in _paths(db)
+
+
+def test_a_cancelled_scan_does_not_sweep(scanning, db):
+    """途中で降りたスキャンは、見ていないだけのファイルを「消えた」と読む.
+
+    `mark_scanned` と同じ理由で、完走したときだけ掃除する。
+    """
+    scanner, ctx, fd, volume_id, profile, card = scanning
+    # **カードを空にしない。** 列挙が 1 度も回らないとキャンセルを観測できず、
+    # 「降りた」ではなく「数え終えた」になる（既存の `mark_scanned` と同じ）。
+    (card / "DCIM" / "DJI_001" / "DJI_20260817143001_0002_D.MP4").write_bytes(b"d" * 10)
+    scanner.scan(ctx, fd, volume_id, profile)
+    (card / "DCIM" / "DJI_001" / "DJI_20260817143000_0001_D.MP4").unlink()
+    JobStore(db).request_cancel(ctx.job_id)
+
+    outcome = scanner.scan(ctx, fd, volume_id, profile)
+
+    assert outcome.vanished == 0
+    assert "DCIM/DJI_001/DJI_20260817143000_0001_D.MP4" in _paths(db)
+
+
+def test_an_entry_a_staging_still_points_at_is_kept(scanning, db):
+    """公開の途中で落ちた行は消さない.
+
+    `artifact_staging.source_entry_id` は `ON DELETE RESTRICT` なので、消しに
+    行くとスキャンごと `IntegrityError` で落ちる。中身は起動時の
+    reconciliation（§9.6）が公開を完遂するので、行が要る。
+    """
+    scanner, ctx, fd, volume_id, profile, card = scanning
+    scanner.scan(ctx, fd, volume_id, profile)
+    entry_id = db.execute("SELECT id FROM source_entry").fetchone()["id"]
+    db.execute("UPDATE source_entry SET state = 'failed' WHERE id = ?", (entry_id,))
+    db.execute(
+        "INSERT INTO artifact_staging (id, kind, job_id, lease_token, state, staging_rel_path,"
+        " final_rel_path, expected_size, content_sha1, metadata_json, source_entry_id,"
+        " created_at, updated_at)"
+        " VALUES ('stg', 'import', ?, 'tok', 'staged', 'staging/x', 'library/x', 100, 'sha',"
+        " '{}', ?, '2000-01-01T00:00:00+00:00', '2000-01-01T00:00:00+00:00')",
+        (ctx.job_id, entry_id),
+    )
+    (card / "DCIM" / "DJI_001" / "DJI_20260817143000_0001_D.MP4").unlink()
+
+    outcome = scanner.scan(ctx, fd, volume_id, profile)
+
+    assert outcome.vanished == 0
+    assert _paths(db) == {"DCIM/DJI_001/DJI_20260817143000_0001_D.MP4"}
+
+
+def test_the_lease_is_kept_alive_while_sweeping(scanning, db):
+    """掃除も 1 件ずつ開くので、列挙と同じくリースを打ち続ける.
+
+    打たないと、消えた行が多いカード（実機では 1420 件）で掃除の最中に失効し、
+    走り続けているのに interrupted として表示される。
+    """
+    scanner, ctx, fd, volume_id, profile, card = scanning
+    (card / "DCIM" / "DJI_001" / "DJI_20260817143001_0002_D.MP4").write_bytes(b"d" * 10)
+    scanner.scan(ctx, fd, volume_id, profile)
+    (card / "DCIM" / "DJI_001" / "DJI_20260817143000_0001_D.MP4").unlink()
+    beats = []
+    real_heartbeat = ctx.heartbeat
+    ctx.heartbeat = lambda: (beats.append(1), real_heartbeat())[1]
+
+    outcome = scanner.scan(ctx, fd, volume_id, profile)
+
+    assert outcome.vanished == 1
+    # 列挙で 1 件（残ったファイル）＋ 掃除で 1 件（消えた候補）
+    assert len(beats) == outcome.total + outcome.vanished == 2

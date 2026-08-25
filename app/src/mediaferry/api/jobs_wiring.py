@@ -58,9 +58,12 @@ class JobWorld:
             outcome = Scanner(conn).scan(ctx, handle.dirfd, selection.volume_instance_id, profile)
         finally:
             self._volumes.release(selection)
+        # **消えた件数も出す。** 出さないと `pending_count` が減った理由が
+        # ログに残らず、「取り込む N 件」が黙って変わったように見える。
         ctx.emit(
             "info",
-            f"スキャン完了: 新規 {outcome.new} 件 / 取込済 {outcome.already_imported} 件",
+            f"スキャン完了: 新規 {outcome.new} 件 / 取込済 {outcome.already_imported} 件"
+            f" / 消えた {outcome.vanished} 件",
         )
 
     def run_import(self, ctx: JobContext, conn: sqlite3.Connection) -> None:

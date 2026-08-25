@@ -85,6 +85,10 @@
 | **結合物の公開は `ArtifactPublisher.publish_prepared`（`work` → `staging` を `os.link`）** | `write` コールバックで staging へ書き直すと 30 GiB をもう一度書く。`work/` と `staging/` は同一ファイルシステム（§7）なので link で移せる。11 手順と回収の性質は `publish` と同じ |
 | **EXIF はステージ済みのファイルから読む**（§9.3 手順 4 の後・手順 5 の中） | ソースを 2 度読むと、コピー中に書き換えられた場合に「取り込んだ中身と読んだ EXIF が違う」状態を作れる。前で読むと未完成のファイル、後で読むと `metadata_json` に載らない（レビューで見つかった）。`ArtifactRequest` の `captured` と `resolve_captured` は `__post_init__` でどちらか一方に強制する |
 | **画像以外では EXIF を読みに行かない** | `exifread` は認識できない入力に例外ではなく WARNING を出す（実測）。Canon は MOV も `source: exif` のプロファイルを通るので、呼べば動画 1 本ごとに警告が並ぶ。振り分けは `MediaProbe` と同じ `PHOTO_EXTENSIONS` で行う |
+| **カードから消えたファイルの `source_entry` は、スキャンが外す**（`_sweep_vanished`） | 外さないと `pending_count` が実体より多いまま残る。画面は「N 件取り込む」と言うのに、取り込みは開けない ENOENT で失敗し、落ちた行は `state='failed'` で取り込み対象に居座るので**以後の取り込みが毎回失敗する。画面から消す手段が無い**。実機で 70D のカードを抜いて PC で古い写真を消し、挿し直して踏んだ（1488 件のうち実体は 68 件だった） |
+| **消す前に 1 件ずつ開いて「無い」を確かめる** | 列挙に現れないことと、カードから消えたことは別。`scan.extensions` を狭めれば実在するファイルの行も列挙から外れるので、そこで消すと広げ直すまで取り込めたはずのものが黙って消える。**「無い」には観測を要求する**（§9.11 の削除規則と同じ原則） |
+| **外すのは取り込み対象の行だけ。`published` と、`artifact_staging` が指している行は残す** | `published` は「このカードから取り込んだ」という記録で、スタッキングの「同じカード」判定（§9.11）と `_known_files_survive` の標本が引く。staging が指す行は `ON DELETE RESTRICT` なので、消しに行くとスキャンごと `IntegrityError` で落ちる |
+| **`observed_at < スキャン開始` は候補の絞りであって守りではない** | 今回触れた行はカードに実在するので、絞りが無くても `exists_beneath` が残す。開き直す回数が減るだけ。**そのため変異試験で検出できない**（絞りを外しても全テストが通る） |
 | **派生物の mtime は `captured_at` の瞬間そのまま**（`_recording_end_ns`） | 取り込みの mtime も真の瞬間なので（下の「mtime は真の瞬間」）、ここで UTC と読み替えると `library/` と `derived/` で epoch が 9 時間ずれる。接尾辞の壁時計は、両方を同じ TZ で描画することでそろえる。オフセットの無い値はシステムの TZ で読まれてしまうので UTC と見なす |
 
 ## 撮影日時（`captured_at`）の算出と再計算
