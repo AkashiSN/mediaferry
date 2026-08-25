@@ -16,6 +16,7 @@ import { ErrorBanner } from "../../components/ErrorBanner";
 import { Icon } from "../../components/Icon";
 import { MediaTile, type Media } from "../../components/MediaTile";
 import { formatBytes } from "../../utils/formatBytes";
+import { groupIntoStacks } from "../../utils/stacks";
 
 type Destination = { id: string; name: string; enabled: boolean };
 type Destinations = { destinations: Destination[] };
@@ -197,6 +198,10 @@ export function SendScreen() {
             destination_id: destinationId,
             status: "unsent",
             page_size: String(PAGE_SIZE),
+            // **組を教えてもらうが、畳ませない。** 畳むと未送信の RAW が一覧から
+            // 消え、送られないまま Immich でスタックが組まれない
+            // （`docs/history/phase12-design.md` の 2）。
+            stack: "members",
           });
           if (day !== null) {
             query.set("captured_from", day.from);
@@ -315,6 +320,12 @@ export function SendScreen() {
     () => targetMedia.reduce((sum, media) => sum + media.size_bytes, 0),
     [targetMedia],
   );
+
+  // **タイルは組単位、数はファイル単位。** 返ってきた行の集合の中だけで組む
+  // ので、相方が対象でなければ単独のタイルになる。
+  const tiles = useMemo(() => groupIntoStacks(targetMedia), [targetMedia]);
+  const shown = tiles.slice(0, 16);
+  const shownFiles = shown.reduce((count, tile) => count + tile.rows.length, 0);
 
   // 開いた時点の対象（種類 × 宛先）。**変わったら確認はひとりでに閉じる。**
   const targetKey = `${preset}:${chosenKey}`;
@@ -486,18 +497,36 @@ export function SendScreen() {
         <div className="sechead" style={{ marginBottom: 11 }}>
           <h2 style={{ fontSize: "14.5px" }}>送るもの</h2>
           <span className="small">
-            {targetMedia.length} 件のうち、はじめの {Math.min(16, targetMedia.length)} 件
+            {targetMedia.length} 件のうち、はじめの {shownFiles} 件
           </span>
         </div>
         <div
           style={{
             display: "grid",
+            // **74px 未満にしない。** 320〜430px 幅の実測で、これより狭いと
+            // `JPG+RAW` の札が削れる。
             gridTemplateColumns: "repeat(auto-fill, minmax(74px, 1fr))",
             gap: 7,
           }}
         >
-          {targetMedia.slice(0, 16).map((media) => (
-            <MediaTile key={media.id} media={media} selected={false} />
+          {shown.map((tile) => (
+            // **タイルの `stack.members` は「このタイルが表すファイル」。**
+            // 一覧では組の全員だが、ここでは対象になっているぶんだけ ——
+            // 相方が送信済みなら、札を出さずに 1 枚として並べる。
+            <MediaTile
+              key={tile.primary.id}
+              media={{
+                ...tile.primary,
+                stack: {
+                  members: tile.rows.map((row) => ({
+                    id: row.id,
+                    rel_path: row.rel_path,
+                    size_bytes: row.size_bytes,
+                  })),
+                },
+              }}
+              selected={false}
+            />
           ))}
         </div>
       </section>
