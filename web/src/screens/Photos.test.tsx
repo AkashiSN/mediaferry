@@ -360,6 +360,119 @@ describe("写真の画面", () => {
     await screen.findByRole("button", { name: /a\.JPG/ });
     expect(screen.queryByText("2:05")).toBeNull();
   });
+
+  it("日付の丸で、その日を全部選ぶ", async () => {
+    stubApi({
+      "/media": {
+        media: [
+          media("a", "2026-08-18T15:12:00+09:00", { size_bytes: 100 }),
+          media("b", "2026-08-18T14:03:00+09:00", { size_bytes: 200 }),
+          media("c", "2026-08-17T09:12:00+09:00", { size_bytes: 400 }),
+        ],
+        total: 3,
+        page: 1,
+        page_size: 200,
+      },
+      "/destinations": { destinations: [] },
+    });
+    render(
+      <MemoryRouter>
+        <PhotosScreen />
+      </MemoryRouter>,
+    );
+
+    // `formatDate("2026-08-18…")` は `"2026年8月18日"`（`utils/formatDateTime.ts`）。
+    const day = await screen.findByRole("checkbox", { name: "2026年8月18日 をまとめて選ぶ" });
+    await userEvent.click(day);
+
+    expect(await screen.findByText("2 件を選択中")).toBeInTheDocument();
+    expect(screen.getByText(/合計 300 B/)).toBeInTheDocument();
+  });
+
+  it("全部選ばれている日の丸を押すと、その日を全部外す", async () => {
+    // **押した結果が予想できる**ようにする（全 → 無、それ以外 → 全）。
+    stubApi({
+      "/media": {
+        media: [media("a", "2026-08-18T15:12:00+09:00"), media("b", "2026-08-18T14:03:00+09:00")],
+        total: 2,
+        page: 1,
+        page_size: 200,
+      },
+      "/destinations": { destinations: [] },
+    });
+    render(
+      <MemoryRouter>
+        <PhotosScreen />
+      </MemoryRouter>,
+    );
+
+    const day = await screen.findByRole("checkbox", { name: /をまとめて選ぶ/ });
+    await userEvent.click(day);
+    expect(day).toHaveAttribute("aria-checked", "true");
+    await userEvent.click(day);
+
+    expect(day).toHaveAttribute("aria-checked", "false");
+    expect(screen.queryByText(/件を選択中/)).not.toBeInTheDocument();
+  });
+
+  it("一部だけ選ばれている日の丸は mixed になる", async () => {
+    // **`aria-pressed` のボタンにしない。** 「一部」は押下状態では表せず、
+    // 読み上げで全選択と区別が付かない。
+    stubApi({
+      "/media": {
+        media: [media("a", "2026-08-18T15:12:00+09:00"), media("b", "2026-08-18T14:03:00+09:00")],
+        total: 2,
+        page: 1,
+        page_size: 200,
+      },
+      "/destinations": { destinations: [] },
+    });
+    render(
+      <MemoryRouter>
+        <PhotosScreen />
+      </MemoryRouter>,
+    );
+
+    await userEvent.click(await screen.findByRole("button", { name: "選ぶ：a.JPG" }));
+
+    expect(screen.getByRole("checkbox", { name: /をまとめて選ぶ/ })).toHaveAttribute(
+      "aria-checked",
+      "mixed",
+    );
+  });
+
+  it("日付の丸は、その日の組の相方も一緒に選ぶ", async () => {
+    // **単位はタイル（＝組）。** タイル 1 つで 2 ファイルを表す。
+    stubApi({
+      "/media": {
+        media: [
+          media("j", "2026-08-18T15:12:00+09:00", {
+            size_bytes: 100,
+            stack: {
+              members: [
+                { id: "j", rel_path: "x/IMG_1.JPG", size_bytes: 100 },
+                { id: "r", rel_path: "x/IMG_1.CR2", size_bytes: 900 },
+              ],
+            },
+          }),
+        ],
+        total: 1,
+        page: 1,
+        page_size: 200,
+      },
+      "/destinations": { destinations: [] },
+    });
+    render(
+      <MemoryRouter>
+        <PhotosScreen />
+      </MemoryRouter>,
+    );
+
+    await userEvent.click(await screen.findByRole("checkbox", { name: /をまとめて選ぶ/ }));
+
+    expect(await screen.findByText("2 件を選択中")).toBeInTheDocument();
+    expect(screen.getByText(/合計 1000 B/)).toBeInTheDocument();
+  });
 });
 
 // **「つないだ動画」は宛先ごとの絞り込みではない。** 送り先が 0 件でも押せる

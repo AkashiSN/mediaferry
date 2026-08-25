@@ -242,6 +242,11 @@ export function PhotosScreen() {
     setParams(nextParams);
   }
 
+  /** この行が表すファイル（組なら members、組でなければその行 1 つ）。 */
+  function membersOf(item: Media): { id: string; size_bytes: number }[] {
+    return item.stack?.members ?? [{ id: item.id, size_bytes: item.size_bytes }];
+  }
+
   /**
    * **畳んだタイルは「1 枚（RAW+JPEG）」を表す**（`GET /media?collapse=stack`）。
    * 選ぶ丸も送るのもその単位に揃えないと、主（JPG）しか積まれず、相方（CR2）が
@@ -249,7 +254,7 @@ export function PhotosScreen() {
    * （`docs/history/phase10-design.md` §4「選んで送る画面の契約はそのまま」）。
    */
   function toggle(item: Media) {
-    const members = item.stack?.members ?? [{ id: item.id, size_bytes: item.size_bytes }];
+    const members = membersOf(item);
     setSelected((current) => {
       const next = new Map(current);
       const allSelected = members.every((member) => next.has(member.id));
@@ -258,6 +263,40 @@ export function PhotosScreen() {
           next.delete(member.id);
         } else {
           next.set(member.id, member.size_bytes);
+        }
+      }
+      return next;
+    });
+  }
+
+  /** その日がどれだけ選ばれているか。**見えている行だけを数える。** */
+  function dayState(items: Media[]): "all" | "some" | "none" {
+    const ids = items.flatMap((item) => membersOf(item).map((member) => member.id));
+    const on = ids.filter((id) => selected.has(id)).length;
+    if (on === 0) {
+      return "none";
+    }
+    return on === ids.length ? "all" : "some";
+  }
+
+  /**
+   * その日をまとめて選ぶ／外す。**全部選ばれているときだけ外し、それ以外は選ぶ。**
+   *
+   * **触るのは、いま画面に並んでいる行だけ。** 絞り込みで隠れているぶんや次の
+   * ページのぶんは触らない —— 見えていないものを選ぶ丸は、押した結果が
+   * 確かめられない。
+   */
+  function toggleDay(items: Media[]) {
+    const clearing = dayState(items) === "all";
+    setSelected((current) => {
+      const next = new Map(current);
+      for (const item of items) {
+        for (const member of membersOf(item)) {
+          if (clearing) {
+            next.delete(member.id);
+          } else {
+            next.set(member.id, member.size_bytes);
+          }
         }
       }
       return next;
@@ -381,6 +420,26 @@ export function PhotosScreen() {
         groups.map((group) => (
           <section key={group.label} style={{ display: "flex", flexDirection: "column", gap: 10 }}>
             <div className="sechead">
+              {/* **`role="checkbox"` の 3 状態にする。** 「一部選ばれている」は
+                  押下状態（`aria-pressed`）では表せず、読み上げで全選択と
+                  区別が付かない。`mixed` はチェックボックスにしかない。 */}
+              <button
+                type="button"
+                role="checkbox"
+                className={`pick day${dayState(group.items) === "none" ? "" : " on"}`}
+                aria-checked={
+                  dayState(group.items) === "all"
+                    ? "true"
+                    : dayState(group.items) === "some"
+                      ? "mixed"
+                      : "false"
+                }
+                aria-label={`${group.label} をまとめて選ぶ`}
+                onClick={() => toggleDay(group.items)}
+              >
+                {dayState(group.items) === "all" && <Icon name="check" size={12} />}
+                {dayState(group.items) === "some" && <span className="dash" />}
+              </button>
               <h2 style={{ fontSize: 14 }}>{group.label}</h2>
               <span className="small">{group.items.length} 件</span>
             </div>
