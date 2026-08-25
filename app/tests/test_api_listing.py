@@ -862,3 +862,57 @@ def test_media_detail_prioritizes_a_live_asset_over_an_unverified_record(client,
     assert body["destinations"][0]["presence"] == "present"
     assert body["deletable"] is False
     assert body["delete_blocked_reason"] == "Immich に入っている"
+
+
+# ------------------------------------------------------- delete_frees_sources
+#
+# **消すと元ファイルが「まだ送っていない」に戻るのは、現行グループの出力を
+# 消すときだけ.** 既に `skipped`／superseded なグループの出力は member が
+# 既に解放済みなので、消しても状態は変わらない。画面はグループの現行性を
+# 知らないので、サーバがこの真偽を返す（確認ダイアログの文言をこれで出し分ける）。
+
+
+def test_media_detail_says_deleting_frees_the_sources_of_a_live_group(client, db, ref):
+    """現行グループ（`status = 'merged'` かつ `superseded_by_id IS NULL`）の出力."""
+    output = a_media_file(db, ref, role="derived", rel_path="derived/dji-osmo/DCIM/OUT.MP4")
+    group = a_merge_group(db, ref, "digest-live", status="merged")
+    db.execute("UPDATE merge_group SET output_media_file_id = ? WHERE id = ?", (output, group))
+
+    body = client.get(f"/api/media/{output}").json()
+
+    assert body["delete_frees_sources"] is True
+
+
+def test_media_detail_of_a_skipped_groups_output_does_not_promise_release(client, db, ref):
+    """**既に「別々にした」グループの出力.** member は既に解放済みなので、
+    消しても何も起きないことを予告してはいけない."""
+    output = a_media_file(db, ref, role="derived", rel_path="derived/dji-osmo/DCIM/OUT2.MP4")
+    group = a_merge_group(db, ref, "digest-skipped", status="skipped")
+    db.execute("UPDATE merge_group SET output_media_file_id = ? WHERE id = ?", (output, group))
+
+    body = client.get(f"/api/media/{output}").json()
+
+    assert body["delete_frees_sources"] is False
+
+
+def test_media_detail_of_a_superseded_groups_output_does_not_promise_release(client, db, ref):
+    """**組み直しで置き換わったグループの出力.** 置き換えた側が現行なので、
+    こちらの出力を消しても古いグループの member は動かない."""
+    output = a_media_file(db, ref, role="derived", rel_path="derived/dji-osmo/DCIM/OUT3.MP4")
+    group = a_merge_group(db, ref, "digest-superseded", status="merged")
+    db.execute("UPDATE merge_group SET output_media_file_id = ? WHERE id = ?", (output, group))
+    newer = a_merge_group(db, ref, "digest-newer")
+    db.execute("UPDATE merge_group SET superseded_by_id = ? WHERE id = ?", (newer, group))
+
+    body = client.get(f"/api/media/{output}").json()
+
+    assert body["delete_frees_sources"] is False
+
+
+def test_media_detail_of_an_original_never_promises_release(client, db, ref):
+    """元ファイルにはそもそも持ち主のグループが無い."""
+    original = a_media_file(db, ref, rel_path="library/dji-osmo/DCIM/A.MP4")
+
+    body = client.get(f"/api/media/{original}").json()
+
+    assert body["delete_frees_sources"] is False

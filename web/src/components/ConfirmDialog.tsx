@@ -14,6 +14,7 @@ export type Confirmation =
   | { kind: "upload"; count: number; totalBytes: number; destinationNames: string[] }
   | { kind: "archive_destination"; name: string }
   | { kind: "discard_merge_group"; groupLabel: string; publishedCount: number }
+  | { kind: "delete_merged_video"; name: string; sourceCount: number; freesSources: boolean }
   | { kind: "delete_merge_history"; groupLabel: string }
   | { kind: "delete_stale_derived"; relPath: string }
   | { kind: "remerge_group"; groupLabel: string }
@@ -52,6 +53,30 @@ export function describe(confirmation: Confirmation): { title: string; body: Rea
           <p>
             {confirmation.groupLabel} を破棄します。公開済みのファイル
             {confirmation.publishedCount} 件は消えませんが、選択肢には出なくなります。
+          </p>
+        ),
+      };
+    case "delete_merged_video":
+      return {
+        title: "このつないだ動画を消しますか",
+        body: (
+          <p>
+            {confirmation.name} を消します。
+            {confirmation.freesSources ? (
+              <>
+                {" "}
+                <strong>
+                  元になった {confirmation.sourceCount} 件は残り、「まだ送っていない」に戻ります
+                </strong>
+                。
+              </>
+            ) : (
+              <>
+                {" "}
+                <strong>元になった {confirmation.sourceCount} 件は残ります</strong>。
+              </>
+            )}
+            この動画は NAS から消え、<strong>元に戻せません</strong>。
           </p>
         ),
       };

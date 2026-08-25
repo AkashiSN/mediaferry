@@ -180,6 +180,10 @@ def get_media(  # noqa: ANN201
         "destinations": _destinations(conn, media_id),
         "deletable": blocker is None,
         "delete_blocked_reason": blocker,
+        # **消すと元になったファイルが「まだ送っていない」に戻るか.** 現行グループの
+        # 出力を消すときだけ真。確認ダイアログの文言をこれで出し分ける
+        # （画面はグループの現行性を知らないので、ここで返す）。
+        "delete_frees_sources": repo.delete_frees_sources(media_id),
     }
 
 

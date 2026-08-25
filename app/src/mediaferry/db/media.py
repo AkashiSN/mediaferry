@@ -35,6 +35,20 @@ IN_FLIGHT_STATES = frozenset(
 _IN_FLIGHT = ", ".join(f"'{state}'" for state in sorted(IN_FLIGHT_STATES))
 
 
+def _is_current_group(group_row: sqlite3.Row | None) -> bool:
+    """このグループが現行か（`delete_derived` が `discard_locked` を呼ぶ条件.
+
+    `delete_derived` と `MediaRepository.delete_frees_sources` の両方がここを
+    呼ぶ。**条件を書き写さない** —— 片方だけ変えたら、消える予告と実際の挙動が
+    食い違う。グループが無い（出所不明）なら現行ではない。
+    """
+    return (
+        group_row is not None
+        and group_row["superseded_by_id"] is None
+        and group_row["status"] == "merged"
+    )
+
+
 class MediaRepository:
     def __init__(self, conn: sqlite3.Connection, data_root: Path) -> None:
         self._conn = conn
@@ -95,7 +109,7 @@ class MediaRepository:
             if group is None:
                 # 出所が分からない。孤立と同じ扱いで、判断はユーザに委ねる。
                 raise GroupNotEditable("この派生物の出所が分からない")
-            if group["superseded_by_id"] is None and group["status"] == "merged":
+            if _is_current_group(group):
                 MergeRepository(self._conn).discard_locked(group["id"])
             # 実体が無いのに指し続けない。
             self._conn.execute(
@@ -110,6 +124,20 @@ class MediaRepository:
         with contextlib.suppress(OSError):
             (self._data_root / rel_path).unlink()
         return rel_path
+
+    def delete_frees_sources(self, media_file_id: str) -> bool:
+        """**この 1 件を消すと、元になったファイルが「まだ送っていない」に戻るか.**
+
+        真なのは、持ち主のグループが現行（`_is_current_group`）のときだけ。
+        既に「別々にした」／組み直しで置き換わったグループの出力は、member が
+        既に解放済みなので消しても何も変わらない。くわしく画面の確認ダイアログは
+        この値で文言を出し分ける —— 起きないことを予告しないため。
+        """
+        group = self._conn.execute(
+            "SELECT status, superseded_by_id FROM merge_group WHERE output_media_file_id = ?",
+            (media_file_id,),
+        ).fetchone()
+        return _is_current_group(group)
 
     def deletion_blocker(self, media_file_id: str) -> str | None:
         """消せない理由を返す（消せるなら `None`）.
