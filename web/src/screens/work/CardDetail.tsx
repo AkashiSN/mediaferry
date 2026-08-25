@@ -20,6 +20,7 @@ import { Icon } from "../../components/Icon";
 import type { CardView } from "../../hooks/homeSections";
 import { useEventCount } from "../../hooks/useEvents";
 import { useReloadOnEvents } from "../../hooks/useReloadOnEvents";
+import { fileName } from "../../components/MediaTile";
 import { formatBytes } from "../../utils/formatBytes";
 
 /** カード 1 枚（`GET /devices` の 1 要素）。**判定関数がここにあるので、型もここに
@@ -44,6 +45,15 @@ export type Volume = {
 };
 
 type Devices = { volumes: Volume[] };
+/** カード 1 枚の中身（`GET /volumes/{id}/contents`）。**撮影時刻は無い** ——
+ * 取り込んで probe を通したあとにしか決まらないので、カード上の時刻だけが返る。 */
+type ContentEntry = { rel_path: string; size_bytes: number; mtime_ns: number };
+type Contents = {
+  entries: ContentEntry[];
+  pending_count: number;
+  pending_bytes: number;
+  truncated: boolean;
+};
 type Setting = { key: string; value: string | null };
 type Settings = { settings: Setting[] };
 type Profile = { slug: string; name: string };
@@ -171,6 +181,51 @@ export function autoImportState(volume: Volume, autoImport: string | null): stri
   }
 }
 
+/** カード 1 枚の中身（§13 の R8・R9）。**このカードに何が入っているかを名前で見せる。**
+ *
+ * **カードごとに 1 本引く。** 一覧（`/devices`）は件数しか持たないので、中身は
+ * 別の経路になる。カードは普通 1〜2 枚なので、まとめて引く仕組みは要らない。
+ */
+function CardContents({ volumeId }: { volumeId: string }) {
+  const contents = useQuery<Contents>(`/volumes/${volumeId}/contents`, [volumeId]);
+  const data = contents.data;
+  // **出すものが 1 件も無ければ、何も出さない。** 「取り込み待ち 0 件」は無い話に
+  // 1 行を使うだけ。**読めなかった応答でも同じに倒す** —— ここで落ちると、
+  // カードの操作ごと画面から消える。
+  const entries = data?.entries ?? [];
+  if (data === null || entries.length === 0) {
+    return null;
+  }
+  return (
+    <div style={{ marginTop: 10 }}>
+      <p className="small">
+        取り込み待ち: {data.pending_count} 件 ・ {formatBytes(data.pending_bytes)}
+        {/* **黙って切らない**（裁定 20）。数万件のカードでは一覧が上限で切れる。 */}
+        {data.truncated ? `（はじめの ${entries.length} 件を出しています）` : ""}
+      </p>
+      <ul
+        style={{
+          listStyle: "none",
+          display: "flex",
+          flexDirection: "column",
+          gap: 4,
+          marginTop: 6,
+        }}
+      >
+        {entries.map((entry) => (
+          <li key={entry.rel_path} className="row" style={{ gap: 8 }}>
+            {/* **内部の相対パスをそのまま出さない**（§13）。 */}
+            <span className="grow ident" style={{ fontSize: "13px" }}>
+              {fileName(entry.rel_path)}
+            </span>
+            <span className="small">{formatBytes(entry.size_bytes)}</span>
+          </li>
+        ))}
+      </ul>
+    </div>
+  );
+}
+
 export function CardDetailScreen() {
   const devices = useQuery<Devices>("/devices");
   const settings = useQuery<Settings>("/settings");
@@ -266,8 +321,10 @@ export function CardDetailScreen() {
                 </div>
                 <div className="grow">
                   <h2 style={{ fontSize: 16, fontWeight: 650 }}>{label}</h2>
+                  {/* **どちらのサイズか、読めば分かる形にする**（R8）。中身の合計は
+                      `CardContents` が別の欄で出す。 */}
                   <p className="small" style={{ marginTop: 4 }}>
-                    {formatBytes(volume.size_bytes)}
+                    カードの容量: {formatBytes(volume.size_bytes)}
                   </p>
                   <p className="small" style={{ marginTop: 4 }}>
                     判定: {profileName}
@@ -289,6 +346,7 @@ export function CardDetailScreen() {
                   {/* **抜いていいかは、押さずに読める**（§3）。文言は `CardStanding`
                       の 1 か所だけが持つ。 */}
                   <CardStanding card={cardView} />
+                  {actionable && <CardContents volumeId={volume.volume_instance_id} />}
                 </div>
               </div>
               {actionable && (

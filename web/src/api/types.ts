@@ -370,6 +370,32 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/volumes/{volume_instance_id}/contents": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Contents
+         * @description カード 1 枚の中身（取り込み待ちのファイル）.
+         *
+         *     **ボリュームの総容量とは別の欄で返す。** 画面に数字が 1 つしか無いと、
+         *     それが写真のサイズなのかカードのサイズなのか読めない（R8）。
+         *
+         *     **出せる時刻はカード上の `mtime_ns` だけ。** 撮影時刻は取り込んで probe を
+         *     通したあとにしか決まらないので、この経路では返さない。
+         */
+        get: operations["contents_api_volumes__volume_instance_id__contents_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/volumes/{volume_instance_id}/scan": {
         parameters: {
             query?: never;
@@ -436,6 +462,7 @@ export interface paths {
          *     tie-break を入れないとページの境目で重複・欠落する。
          *
          *     `status` は**宛先ごとの状態**なので、`destination_id` と併せて指定する。
+         *     `role=derived` で写真タブの「つないだ動画」だけに絞れる。
          */
         get: operations["list_media_api_media_get"];
         put?: never;
@@ -476,16 +503,21 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /** Get Media */
+        /**
+         * Get Media
+         * @description 1 件のくわしく（§13 の「くわしく」画面）.
+         *
+         *     **画面が要るものを 1 本で返す。** 複数の API を継ぎ足すと、片方だけ古い状態が出る。
+         */
         get: operations["get_media_api_media__media_id__get"];
         put?: never;
         post?: never;
         /**
          * Delete Media
-         * @description **古くなった派生物だけ**消す（やり直しの後片付け）.
+         * @description **Immich に生きていない `derived` だけ**消す（写真タブの「消す」）.
          *
-         *     元ファイルは消せない。現行のグループの結合結果も、送信の記録が指している
-         *     ものも消せない。理由は 409 で返す。
+         *     元ファイルは消せない。現行のグループの出力なら、グループごと「別々にした」
+         *     にしてから消す。消せない理由は 409 で返す（規則は `deletion_blocker`）。
          */
         delete: operations["delete_media_api_media__media_id__delete"];
         options?: never;
@@ -583,7 +615,13 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /** List Groups */
+        /**
+         * List Groups
+         * @description `pending` は**まだつないでいないものだけ**（つなぐ画面が使う）.
+         *
+         *     **`status` とは併せられない。** 片方を黙って無視すると、画面は絞ったつもりの
+         *     一覧を全件だと読む。
+         */
         get: operations["list_groups_api_merge_groups_get"];
         put?: never;
         /**
@@ -1561,6 +1599,41 @@ export interface operations {
             };
         };
     };
+    contents_api_volumes__volume_instance_id__contents_get: {
+        parameters: {
+            query?: {
+                limit?: number;
+            };
+            header?: never;
+            path: {
+                volume_instance_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        [key: string]: unknown;
+                    };
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
     scan_api_volumes__volume_instance_id__scan_post: {
         parameters: {
             query?: never;
@@ -1666,6 +1739,7 @@ export interface operations {
                 page?: number;
                 page_size?: number;
                 kind?: string | null;
+                role?: string | null;
                 profile?: string | null;
                 captured_from?: string | null;
                 captured_to?: string | null;
@@ -1740,9 +1814,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": {
-                        [key: string]: unknown;
-                    };
+                    "application/json": unknown;
                 };
             };
             /** @description Validation Error */
@@ -1916,6 +1988,7 @@ export interface operations {
                 status?: string | null;
                 limit?: number;
                 offset?: number;
+                pending?: boolean;
             };
             header?: never;
             path?: never;
