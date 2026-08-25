@@ -225,25 +225,25 @@ def test_the_identity_does_not_look_at_the_time():
     """
     late = replace(a_cr2(), captured_at="2026-08-17T14:31:00+00:00")
 
-    partners = identity_partners(a_jpg(), [a_jpg(), late], RULE)
+    identity = identity_partners(a_jpg(), [a_jpg(), late], RULE)
 
-    assert [c.rel_path for c in partners] == [late.rel_path]
+    assert [c.rel_path for c in identity.partners] == [late.rel_path]
 
 
 def test_the_identity_does_not_look_at_where_the_time_came_from():
     """`exifread` が JPG は読めて CR2 は読めなくても、組は同じ 1 枚である."""
     by_mtime = replace(a_cr2(), captured_at_source="mtime")
 
-    partners = identity_partners(a_jpg(), [a_jpg(), by_mtime], RULE)
+    identity = identity_partners(a_jpg(), [a_jpg(), by_mtime], RULE)
 
-    assert [c.rel_path for c in partners] == [by_mtime.rel_path]
+    assert [c.rel_path for c in identity.partners] == [by_mtime.rel_path]
 
 
 def test_the_identity_needs_the_same_card_and_stem():
     """別のカードの同じ名前は相方ではない（連番は一周する）."""
     other_card = replace(a_cr2(), volume_instance_id="another")
 
-    assert identity_partners(a_jpg(), [a_jpg(), other_card], RULE) == []
+    assert identity_partners(a_jpg(), [a_jpg(), other_card], RULE).partners == ()
 ```
 
 `a_jpg()` / `a_cr2()` / `RULE` は同ファイルに既にある。`replace` は
@@ -742,21 +742,21 @@ def test_a_partner_without_proof_of_copresence_is_not_a_partner():
     """
     stale = replace(a_cr2(), copresent_key=None)
 
-    assert identity_partners(a_jpg(), [a_jpg(), stale], RULE) == []
+    assert identity_partners(a_jpg(), [a_jpg(), stale], RULE).partners == ()
 
 
 def test_a_partner_from_another_copresence_is_not_a_partner():
     """別の機会に同席した相手とは組まない."""
     other = replace(a_cr2(), copresent_key="job2:DCIM/100CANON/IMG_0001.")
 
-    assert identity_partners(a_jpg(), [a_jpg(), other], RULE) == []
+    assert identity_partners(a_jpg(), [a_jpg(), other], RULE).partners == ()
 
 
 def test_the_primary_without_proof_has_no_partner():
     """自分の側に証拠が無ければ、相方が持っていても組まない."""
     mine = replace(a_jpg(), copresent_key=None)
 
-    assert identity_partners(mine, [mine, a_cr2()], RULE) == []
+    assert identity_partners(mine, [mine, a_cr2()], RULE).partners == ()
 ```
 
 `a_jpg()` / `a_cr2()` に `copresent_key="job1:DCIM/100CANON/IMG_0001."` を足す
@@ -999,6 +999,16 @@ def _members_of(conn, media_id: str, ranks_sql: str, ranks_params: tuple) -> lis
     if len(rows) < 2:  # noqa: PLR2004 - 1 つでは組にならない
         return None
     return rows
+```
+
+**応答に出すのは `id` / `rel_path` / `size_bytes` の 3 つだけ**（`rank` は並べ替えの
+ための内部の値なので落とす。画面の `StackMember` 型と一致させる）。
+
+```python
+    members = [
+        {"id": row["id"], "rel_path": row["rel_path"], "size_bytes": row["size_bytes"]}
+        for row in rows
+    ]
 ```
 
 **並べ替えは SQL の `ORDER BY r.rank` で行う**（Python 側で順位の dict を引くと、
