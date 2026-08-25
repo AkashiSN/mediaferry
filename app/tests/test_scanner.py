@@ -555,6 +555,34 @@ def test_a_changed_file_loses_its_mark(canon_scanning, db):
     assert _keys(db)["DCIM/100CANON/IMG_0001.JPG"] is None
 
 
+def test_a_newer_mtime_alone_loses_the_mark(canon_scanning, db):
+    """内容が同じに見えても、mtime が記録より新しければ印を落とす.
+
+    この行は `same`（サイズと `quick_fingerprint` と版が一致）でありながら、
+    mtime が記録と違うので `imported` の早期 return を抜け、mtime が記録より
+    新しいので `ambiguous` の早期 return も抜けて `UPDATE` に落ちる。
+
+    **印を消す引き金を `same` にしてはいけない。** `quick_fingerprint` は
+    サイズと 16 個の標本窓しか見ない確率的な鍵で、標本窓の外だけが変わった
+    ファイルは `same` のまま通る（`core/fingerprint.py`）。`same` で判断すると
+    その取りこぼしが古い印を引き継ぎ、撮り直した JPG が古い RAW と組む。
+    引き金は `media_file_id` が外れること —— この行がもう前の `media_file` を
+    代表しないと決めた拍で、証拠も一緒に外す。
+    """
+    scanner, ctx, fd, volume_id, profile, card = canon_scanning
+    scanner.scan(ctx, fd, volume_id, profile)
+    _import_all(db, profile)
+    (card / "DCIM" / "100CANON" / "IMG_0001.CR2").unlink()
+    # 中身には触れず mtime だけを 1 秒進める（`same` を保ったまま記録より新しくする）。
+    jpg = card / "DCIM" / "100CANON" / "IMG_0001.JPG"
+    stat = jpg.stat()
+    os.utime(jpg, ns=(stat.st_atime_ns, stat.st_mtime_ns + 1_000_000_000))
+
+    scanner.scan(ctx, fd, volume_id, profile)
+
+    assert _keys(db)["DCIM/100CANON/IMG_0001.JPG"] is None
+
+
 def test_the_touch_path_still_fills_in_extension(canon_scanning, db):
     """`_touch`（`published` のまま内容も mtime も変わっていない）でも `extension` を埋める.
 
