@@ -8,17 +8,19 @@
 // 取り違えうること）を書く（§12.1）。
 
 import { useState } from "react";
-import { Link, useNavigate } from "react-router-dom";
+import { Link } from "react-router-dom";
 
 import { request } from "../../api/client";
 import { useMutation, useQuery } from "../../api/hooks";
 import { CardStanding } from "../../components/CardStanding";
 import { ConfirmDialog, type Confirmation } from "../../components/ConfirmDialog";
+import { BackLink } from "../../components/BackLink";
 import { ErrorBanner } from "../../components/ErrorBanner";
 import { Icon } from "../../components/Icon";
 import type { CardView } from "../../hooks/homeSections";
 import { useEventCount } from "../../hooks/useEvents";
 import { useReloadOnEvents } from "../../hooks/useReloadOnEvents";
+import { fileName } from "../../components/MediaTile";
 import { formatBytes } from "../../utils/formatBytes";
 
 /** カード 1 枚（`GET /devices` の 1 要素）。**判定関数がここにあるので、型もここに
@@ -43,6 +45,15 @@ export type Volume = {
 };
 
 type Devices = { volumes: Volume[] };
+/** カード 1 枚の中身（`GET /volumes/{id}/contents`）。**撮影時刻は無い** ——
+ * 取り込んで probe を通したあとにしか決まらないので、カード上の時刻だけが返る。 */
+type ContentEntry = { rel_path: string; size_bytes: number; mtime_ns: number };
+type Contents = {
+  entries: ContentEntry[];
+  pending_count: number;
+  pending_bytes: number;
+  truncated: boolean;
+};
 type Setting = { key: string; value: string | null };
 type Settings = { settings: Setting[] };
 type Profile = { slug: string; name: string };
@@ -144,18 +155,20 @@ export function autoImportOutlook(volume: Volume, autoImport: string | null): Ou
 /** そのカードで自動取り込みがどうなるか（§12.1）。 */
 export function autoImportState(volume: Volume, autoImport: string | null): string {
   const outlook = autoImportOutlook(volume, autoImport);
-  // **承認すると、いま挿してあるこのカードの中身が対象になる。** watcher は
+  // **信頼すると、いま挿してあるこのカードの中身が対象になる。** watcher は
+  // **操作の名前は「信頼」1 つに揃える** —— 「承認」は日時の確認（`/approve`）の
+  // 語で、そちらは「承認する／却下する」で閉じている（§13）。
   // 毎 tick、現在 live な presence から候補を組み直すので、条件が揃っていれば
-  // 承認の数秒後に取り込みが始まる。「次に挿したときから」と書くと、同意の
+  // 信頼した数秒後に取り込みが始まる。「次に挿したときから」と書くと、同意の
   // 対象を取り違えさせる。**逆に、条件が揃っていないのに断言もしない。**
   if (!volume.trusted) {
     switch (outlook.state) {
       case "starts":
-        return "未承認です。承認すると、いま入っている中身も含めて、数秒後から自動で取り込みます。";
+        return "まだ信頼していません。信頼すると、いま入っている中身も含めて、数秒後から自動で取り込みます。";
       case "pending":
-        return `未承認です。承認すると、${outlook.reason}に、いま入っている中身も含めて自動で取り込みます。`;
+        return `まだ信頼していません。信頼すると、${outlook.reason}に、いま入っている中身も含めて自動で取り込みます。`;
       case "blocked":
-        return `未承認です。承認しても、${outlook.reason}ので、いまは自動取り込みは始まりません。`;
+        return `まだ信頼していません。信頼しても、${outlook.reason}ので、いまは自動取り込みは始まりません。`;
     }
   }
   switch (outlook.state) {
@@ -166,6 +179,51 @@ export function autoImportState(volume: Volume, autoImport: string | null): stri
     case "blocked":
       return `信頼済みですが、${outlook.reason}ので、いまは自動取り込みは始まりません。`;
   }
+}
+
+/** カード 1 枚の中身（§13 の R8・R9）。**このカードに何が入っているかを名前で見せる。**
+ *
+ * **カードごとに 1 本引く。** 一覧（`/devices`）は件数しか持たないので、中身は
+ * 別の経路になる。カードは普通 1〜2 枚なので、まとめて引く仕組みは要らない。
+ */
+function CardContents({ volumeId }: { volumeId: string }) {
+  const contents = useQuery<Contents>(`/volumes/${volumeId}/contents`, [volumeId]);
+  const data = contents.data;
+  // **出すものが 1 件も無ければ、何も出さない。** 「取り込み待ち 0 件」は無い話に
+  // 1 行を使うだけ。**読めなかった応答でも同じに倒す** —— ここで落ちると、
+  // カードの操作ごと画面から消える。
+  const entries = data?.entries ?? [];
+  if (data === null || entries.length === 0) {
+    return null;
+  }
+  return (
+    <div style={{ marginTop: 10 }}>
+      <p className="small">
+        取り込み待ち: {data.pending_count} 件 ・ {formatBytes(data.pending_bytes)}
+        {/* **黙って切らない**（裁定 20）。数万件のカードでは一覧が上限で切れる。 */}
+        {data.truncated ? `（はじめの ${entries.length} 件を出しています）` : ""}
+      </p>
+      <ul
+        style={{
+          listStyle: "none",
+          display: "flex",
+          flexDirection: "column",
+          gap: 4,
+          marginTop: 6,
+        }}
+      >
+        {entries.map((entry) => (
+          <li key={entry.rel_path} className="row" style={{ gap: 8 }}>
+            {/* **内部の相対パスをそのまま出さない**（§13）。 */}
+            <span className="grow ident" style={{ fontSize: "13px" }}>
+              {fileName(entry.rel_path)}
+            </span>
+            <span className="small">{formatBytes(entry.size_bytes)}</span>
+          </li>
+        ))}
+      </ul>
+    </div>
+  );
 }
 
 export function CardDetailScreen() {
@@ -181,7 +239,6 @@ export function CardDetailScreen() {
   const [confirming, setConfirming] = useState<{ confirmation: Confirmation; id: string } | null>(
     null,
   );
-  const navigate = useNavigate();
 
   // **未解決・失敗は `null` のまま持つ。** 既定値へ倒すと、同意の内容が実挙動と
   // ずれる（`watcher.py` は積まないのに「コピーされます」と書く）。
@@ -203,12 +260,7 @@ export function CardDetailScreen() {
 
   return (
     <section aria-label="カードの中身" className="wrap">
-      <div className="row">
-        <button type="button" className="btn sm" onClick={() => navigate("/")}>
-          <Icon name="back" size={16} />
-          ホームへ
-        </button>
-      </div>
+      <BackLink />
       <h1 className="page title-lg">カードの中身</h1>
 
       <ErrorBanner
@@ -269,8 +321,10 @@ export function CardDetailScreen() {
                 </div>
                 <div className="grow">
                   <h2 style={{ fontSize: 16, fontWeight: 650 }}>{label}</h2>
+                  {/* **どちらのサイズか、読めば分かる形にする**（R8）。中身の合計は
+                      `CardContents` が別の欄で出す。 */}
                   <p className="small" style={{ marginTop: 4 }}>
-                    {formatBytes(volume.size_bytes)}
+                    カードの容量: {formatBytes(volume.size_bytes)}
                   </p>
                   <p className="small" style={{ marginTop: 4 }}>
                     判定: {profileName}
@@ -292,6 +346,7 @@ export function CardDetailScreen() {
                   {/* **抜いていいかは、押さずに読める**（§3）。文言は `CardStanding`
                       の 1 か所だけが持つ。 */}
                   <CardStanding card={cardView} />
+                  {actionable && <CardContents volumeId={volume.volume_instance_id} />}
                 </div>
               </div>
               {actionable && (

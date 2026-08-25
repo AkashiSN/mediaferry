@@ -223,7 +223,7 @@ describe("ホーム", () => {
       "/settings": { settings: [{ key: "AUTO_IMPORT", value: "trusted" }], warnings: [] },
     });
     renderHome();
-    await waitFor(() => expect(screen.getByText(/未承認です/)).toBeInTheDocument());
+    await waitFor(() => expect(screen.getByText(/まだ信頼していません/)).toBeInTheDocument());
     expect(screen.getByRole("button", { name: "このカードを信頼する" })).toBeInTheDocument();
   });
 

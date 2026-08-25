@@ -8,10 +8,22 @@ import { useRef } from "react";
 import type { ReactNode } from "react";
 
 import { formatBytes } from "../utils/formatBytes";
+import { formatDate } from "../utils/formatDateTime";
 import { useDialogFocus } from "./useDialogFocus";
 
 export type Confirmation =
-  | { kind: "upload"; count: number; totalBytes: number; destinationNames: string[] }
+  | {
+      kind: "upload";
+      count: number;
+      totalBytes: number;
+      destinationNames: string[];
+      /** つないだ動画の数。**元のファイルとは別物**なので、内訳を出す。 */
+      derivedCount: number;
+      /** 撮影日の幅。読める値が 1 つも無ければ `null`。 */
+      capturedRange: { from: string; to: string } | null;
+      /** 対象が 1 度に読める上限で切れているか（裁定 20）。 */
+      truncated: boolean;
+    }
   | { kind: "archive_destination"; name: string }
   | { kind: "discard_merge_group"; groupLabel: string; publishedCount: number }
   | { kind: "delete_merged_video"; name: string; sourceCount: number; freesSources: boolean }
@@ -21,7 +33,65 @@ export type Confirmation =
   | { kind: "adopt_failed_merge"; groupLabel: string; reason: string }
   | { kind: "approve_datetime"; current: string | null; proposed: string }
   | { kind: "archive_profile"; slug: string }
-  | { kind: "trust_volume"; label: string; state: "starts" | "pending" | "blocked"; reason: string | null };
+  | { kind: "trust_volume"; label: string; state: "starts" | "pending" | "blocked"; reason: string | null }
+  | { kind: "reset"; scope: ResetScope };
+
+/** リセットの段（`db/reset.py` の `SCOPES` と同じ並び）。 */
+export type ResetScope = "jobs" | "uploads" | "library" | "all";
+
+const RESET_TITLE: Record<ResetScope, string> = {
+  jobs: "作業の記録を消しますか",
+  uploads: "送信の記録を消しますか",
+  library: "取り込んだファイルを消しますか",
+  all: "すべて消しますか",
+};
+
+/**
+ * リセットの確認（§13）。
+ *
+ * **「Immich からは何も消えません」と「戻せません」を、必ず両方書く。** 片方だけだと
+ * 読み違える —— 前者だけなら代償が無いように読め、後者だけなら Immich の写真が
+ * 消えると読める。
+ */
+const RESET_BODY: Record<ResetScope, ReactNode> = {
+  jobs: (
+    <p>
+      作業の履歴と、別々にした組み合わせの記録を消します。ファイルも送信の記録も
+      消えません。<strong>もう一度探せば戻ります。</strong>
+    </p>
+  ),
+  uploads: (
+    <p>
+      どれをどこへ送ったかの記録を消します。<strong>Immich からは何も消えません。</strong>
+      ただし<strong>戻せません</strong> —— 次に送ったときに「自分が上げた」と証明できなく
+      なるので、撮影日時の自動補正は 1 件ずつの承認に変わり、RAW と JPEG を 1 枚に
+      束ねるのも行われなくなります。
+    </p>
+  ),
+  library: (
+    <p>
+      NAS に取り込んだ写真と動画、つないだ動画を消します。
+      <strong>Immich からは何も消えません。</strong>
+      <strong>カードに元があれば、取り込み直せます。</strong>
+      送信の記録も一緒に消えるので、送り直したときの扱いは上の段と同じになります。
+    </p>
+  ),
+  all: (
+    <p>
+      上のすべてに加えて、カードの記録（どのカードを信頼したか）を消します。
+      <strong>Immich からは何も消えません。</strong>
+      <strong>送り先とカメラの種類は残ります</strong>ので、接続のやり直しは要りません。
+      <strong>戻せません。</strong>
+    </p>
+  ),
+};
+
+/** 撮影日の幅を 1 行にする。**同じ日なら範囲にしない**（「A 〜 A」は読みにくい）。 */
+function describeRange(range: { from: string; to: string }): string {
+  const from = formatDate(range.from);
+  const to = formatDate(range.to);
+  return from === to ? from : `${from} 〜 ${to}`;
+}
 
 export function describe(confirmation: Confirmation): { title: string; body: ReactNode } {
   switch (confirmation.kind) {
@@ -29,11 +99,30 @@ export function describe(confirmation: Confirmation): { title: string; body: Rea
       return {
         title: "この内容で送りますか",
         body: (
-          <ul>
-            <li>{confirmation.count} 件</li>
-            <li>合計 {formatBytes(confirmation.totalBytes)}</li>
-            <li>宛先: {confirmation.destinationNames.join(" / ")}</li>
-          </ul>
+          <>
+            <ul>
+              <li>{confirmation.count} 件</li>
+              {/* **0 件のときは書かない。** 「つないだ動画が 0 件」は、無い話を
+                  1 行使って言うだけで、読む側の負担にしかならない。 */}
+              {confirmation.derivedCount > 0 && (
+                <li>うち、つないだ動画が {confirmation.derivedCount} 件</li>
+              )}
+              <li>合計 {formatBytes(confirmation.totalBytes)}</li>
+              {confirmation.capturedRange !== null && (
+                <li>撮影日: {describeRange(confirmation.capturedRange)}</li>
+              )}
+              <li>宛先: {confirmation.destinationNames.join(" / ")}</li>
+            </ul>
+            {/* **押した後に「全部送った」と誤解させない**（裁定 20）。送る画面の
+                帯にも同じことが出ているが、**確認は押す直前の最後の 1 枚**なので、
+                ここでも言う。 */}
+            {confirmation.truncated && (
+              <p>
+                <strong>これで全部ではありません。</strong>
+                1 度に送れる分を超えているので、送り終えたらもう一度送ってください。
+              </p>
+            )}
+          </>
         ),
       };
     case "archive_destination":
@@ -144,7 +233,7 @@ export function describe(confirmation: Confirmation): { title: string; body: Rea
                 <strong>
                   いま入っている中身も含めて、以後このカードを挿すだけで NAS へコピーされます
                 </strong>
-                （画面の操作は要りません）。取り込みは承認の数秒後に始まります。
+                （画面の操作は要りません）。取り込みは信頼した数秒後に始まります。
               </p>
             )}
             {/* **条件は文全体に掛ける。** 約束を先に無条件で置いてから限定を
@@ -177,6 +266,11 @@ export function describe(confirmation: Confirmation): { title: string; body: Rea
             </p>
           </>
         ),
+      };
+    case "reset":
+      return {
+        title: RESET_TITLE[confirmation.scope],
+        body: RESET_BODY[confirmation.scope],
       };
     case "archive_profile":
       return {

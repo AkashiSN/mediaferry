@@ -24,6 +24,7 @@ import { SettingsScreen } from "./screens/Settings";
 import { DestinationsScreen } from "./screens/settings/Destinations";
 import { ProfilesScreen } from "./screens/settings/Profiles";
 import { GeneralScreen } from "./screens/settings/General";
+import { ResetScreen } from "./screens/settings/Reset";
 import { JobHistoryScreen } from "./screens/details/JobHistory";
 import { MergeHistoryScreen } from "./screens/details/MergeHistory";
 
@@ -77,6 +78,7 @@ function Framed() {
           <Route path="/settings/destinations" element={<DestinationsScreen />} />
           <Route path="/settings/profiles" element={<ProfilesScreen />} />
           <Route path="/settings/general" element={<GeneralScreen />} />
+          <Route path="/settings/reset" element={<ResetScreen />} />
           <Route path="/settings/jobs" element={<JobHistoryScreen />} />
           <Route path="/settings/merge-history" element={<MergeHistoryScreen />} />
           {/* **知らないパスで本文を空にしない**（§13）。ルート表に無いパスは

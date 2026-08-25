@@ -387,7 +387,7 @@ class MergeRepository:
         ).fetchone()
 
     def list_groups(
-        self, status: str | None = None, limit: int = 200, offset: int = 0
+        self, status: str | None = None, limit: int = 200, offset: int = 0, pending: bool = False
     ) -> list[sqlite3.Row]:
         """既定は**いま操作できるグループだけ**. 履歴は `status` を指定して取る.
 
@@ -395,7 +395,21 @@ class MergeRepository:
         構成そのものなので、一覧に並べる意味が無い（`status` を指定しても同じ）。
         `skipped` を既定から外すのは、破棄と組み直しのたびに操作できない行が
         増え、同じファイル名が繰り返し並ぶため。
+
+        `pending` は**まだつないでいないものだけ**（つなぐ画面）。既定からさらに
+        `merged` を外す —— つないだ動画への操作は、その 1 本を見ている画面
+        （`/photos/:id`）にある。**`merging` は残す**：走っている最中のものが
+        消えると、押した結合がどこへ行ったのか読めなくなる。
         """
+        if pending:
+            return list(
+                self._conn.execute(
+                    "SELECT * FROM merge_group WHERE superseded_by_id IS NULL"
+                    " AND status NOT IN ('skipped', 'merged')"
+                    " ORDER BY created_at DESC LIMIT ? OFFSET ?",
+                    (limit, offset),
+                )
+            )
         if status is None:
             return list(
                 self._conn.execute(

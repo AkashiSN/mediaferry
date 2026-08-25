@@ -7,9 +7,10 @@
 
 import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { MemoryRouter } from "react-router-dom";
+import { MemoryRouter, Route, Routes } from "react-router-dom";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
+import { BackLink } from "../components/BackLink";
 import { DashboardProvider } from "../api/dashboard";
 import { stubApi } from "../test/api";
 import { SettingsScreen } from "./Settings";
@@ -303,6 +304,42 @@ describe("設定のトップ", () => {
 
   // 同じ理由で「日時の確認」も常設にする。ホームの札は待っているものがある
   // ときだけ出るので、0 件になるとこの画面へ入る道が無くなる。
+  it("性質ごとに節を分ける（設定なのは詳しい設定だけ）", async () => {
+    // **作業・記録・設定を同じ形で並べない。** 7 つを 1 つの節に混ぜていたので、
+    // 「設定」というラベルで括られたものの中身が読めなかった。
+    stubApi(ROUTES);
+    renderTop();
+
+    const work = await screen.findByRole("region", { name: "ふだんは使わない操作" });
+    expect(within(work).getByRole("link", { name: /^つなぐ/ })).toBeInTheDocument();
+    expect(within(work).getByRole("link", { name: /^日時の確認/ })).toBeInTheDocument();
+    expect(within(work).getByRole("link", { name: /接続中のカード/ })).toBeInTheDocument();
+
+    const records = screen.getByRole("region", { name: "記録" });
+    expect(within(records).getByRole("link", { name: /作業の履歴/ })).toBeInTheDocument();
+    expect(within(records).getByRole("link", { name: /つないだ後の後片付け/ })).toBeInTheDocument();
+
+    // 設定そのものは 1 つだけ。**その 1 つを、作業や記録と混ぜない。**
+    const advanced = screen.getByRole("region", { name: "詳しい設定" });
+    expect(within(advanced).getByRole("link", { name: /^詳しい設定/ })).toBeInTheDocument();
+  });
+
+  it("設定から開いた画面は、設定へ戻れる（遷移元を渡す）", async () => {
+    // **入口は 2 つある**（ホームの「やること」と、この画面）。行き先を固定すると、
+    // もう片方から来た人が知らない画面へ飛ばされる。
+    stubApi(ROUTES);
+    render(
+      <MemoryRouter initialEntries={["/settings"]}>
+        <Routes>
+          <Route path="/settings" element={<SettingsScreen />} />
+          <Route path="/merge" element={<BackLink />} />
+        </Routes>
+      </MemoryRouter>,
+    );
+    await userEvent.click(await screen.findByRole("link", { name: /^つなぐ/ }));
+    expect(await screen.findByRole("link", { name: /設定へ/ })).toBeInTheDocument();
+  });
+
   it("日時の確認への入口が、詳しい情報に常設されている", async () => {
     stubApi(ROUTES);
     renderTop();

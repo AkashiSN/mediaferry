@@ -8,14 +8,13 @@
 // 承認のたびに全件を引き直すことになる。
 
 import { useState } from "react";
-import { useNavigate } from "react-router-dom";
 
 import { request } from "../../api/client";
 import { useDashboardReload } from "../../api/dashboard";
 import { useMutation, useQuery } from "../../api/hooks";
 import { ConfirmDialog } from "../../components/ConfirmDialog";
+import { BackLink } from "../../components/BackLink";
 import { ErrorBanner } from "../../components/ErrorBanner";
-import { Icon } from "../../components/Icon";
 import { fileName, MediaTile } from "../../components/MediaTile";
 import { useEvents } from "../../hooks/useEvents";
 import { useReloadOnEvents } from "../../hooks/useReloadOnEvents";
@@ -55,7 +54,6 @@ export function ApproveScreen() {
   useReloadOnEvents(received, records.reload);
   const [approving, setApproving] = useState<Record_ | null>(null);
   const refreshTasks = useDashboardReload();
-  const navigate = useNavigate();
 
   async function act(record: Record_, action: "approve" | "reject") {
     if (await decision.run(() => request(`/uploads/${record.id}/${action}`, { method: "POST" }))) {
@@ -79,12 +77,7 @@ export function ApproveScreen() {
 
   return (
     <section aria-label="確認" className="wrap">
-      <div className="row">
-        <button type="button" className="btn sm" onClick={() => navigate("/")}>
-          <Icon name="back" size={16} />
-          ホームへ
-        </button>
-      </div>
+      <BackLink />
       <div>
         <h1 className="page title-lg">
           写真の日時を直していいか確かめます

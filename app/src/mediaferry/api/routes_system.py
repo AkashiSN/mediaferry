@@ -6,7 +6,7 @@ import json
 from dataclasses import asdict
 from typing import Any
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Body, Depends
 
 from ..core.profiles.model import ProfileInvalid, parse_definition
 from ..db.jobs import JobStore
@@ -17,6 +17,7 @@ from ..db.profiles import (
     ProfileRegistry,
     UnknownProfile,
 )
+from ..db.reset import ResetNotPossible, UnknownScope, reset
 from ..db.selection import SENDABLE_CLAUSE
 from ..settings import SettingInvalid, SettingLocked, SettingsService, startup_warnings
 from .deps import conn as get_conn
@@ -30,6 +31,29 @@ _BUILTIN_MESSAGE = "ビルトインは編集できない。複製してから編
 public_router = APIRouter()
 
 _BUILTIN_MESSAGE = "ビルトインは編集できない。複製してから編集する"
+
+
+@router.post("/reset")
+def reset_data(
+    body: dict[str, Any] = Body(...),  # noqa: B008
+    conn=Depends(get_conn),  # noqa: ANN001, B008
+    state=Depends(get_state),  # noqa: ANN001, B008
+) -> dict[str, Any]:
+    """作り直すために、段まで捨てる（§13）.
+
+    **Immich にある資産は対象ではない** —— 消しに行かないし、消えない
+    （`db/reset.py`）。段は積み上げで、深い段は浅い段を含む。
+    """
+    try:
+        removed = reset(conn, state.settings.data_root, body.get("scope", ""))
+    except UnknownScope as exc:
+        raise ApiError(400, ErrorCode.BAD_REQUEST, str(exc)) from exc
+    except ResetNotPossible as exc:
+        # **generic な conflict にしない。** 画面は code で文面を選ぶので、
+        # conflict のままだと「いまの状態ではこの操作はできません」としか出ず、
+        # 何を待てばよいのかが読めない。
+        raise ApiError(409, ErrorCode.JOB_IN_FLIGHT, str(exc)) from exc
+    return {"status": "ok", "removed": removed}
 
 
 @public_router.get("/health")
@@ -369,7 +393,7 @@ def try_profile(
 
 @router.get("/jobs")
 def list_jobs(conn=Depends(get_conn)) -> dict[str, Any]:  # noqa: ANN001, B008
-    return {"jobs": [_job(row) for row in JobStore(conn).list_jobs()]}
+    return {"jobs": [_job(row, with_last_message=True) for row in JobStore(conn).list_jobs()]}
 
 
 @router.get("/jobs/{job_id}")
@@ -397,8 +421,13 @@ def cancel_job(job_id: str, conn=Depends(get_conn)) -> dict[str, str]:  # noqa: 
     return {"status": "cancelling"}
 
 
-def _job(row) -> dict[str, Any]:  # noqa: ANN001
-    return {
+def _job(row, with_last_message: bool = False) -> dict[str, Any]:  # noqa: ANN001
+    """ジョブ 1 行の表現.
+
+    `with_last_message` は一覧だけ（`list_jobs` の問い合わせがその欄を持つ）。
+    1 件を引く経路は `/jobs/{id}/events` で全文が読めるので、要約は要らない。
+    """
+    view = {
         "id": row["id"],
         "type": row["type"],
         "status": row["status"],
@@ -415,6 +444,11 @@ def _job(row) -> dict[str, Any]:  # noqa: ANN001
         # 永続化することになる。
         "progress": _progress(row),
     }
+    if with_last_message:
+        # **終わった作業の要約。** 画面が開く前に届いた知らせは持っていないので、
+        # ここで添えないと「完了」としか出せない（Phase 11 の N4）。
+        view["last_message"] = row["last_message"]
+    return view
 
 
 # 進捗を持ちうる状態。**終わった行に「いま何をしているか」は無い。**

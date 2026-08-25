@@ -6,7 +6,7 @@
 // `<section>` は `region` ロールになる。パスの誤字も、隣の画面の element と
 // 取り違える書き間違いも、どちらもこの `region` の名前で捕まる。
 
-import { render, screen, waitFor } from "@testing-library/react";
+import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -104,7 +104,13 @@ describe("ナビの現在地（App の配線として）", () => {
     window.history.pushState({}, "", "/merge");
     render(<App />);
     await screen.findByRole("region", { name: "つなぐ" });
-    expect(screen.getByRole("link", { name: /ホーム/ })).toHaveAttribute("aria-current", "page");
+    // **ナビの中で見る。** 作業の画面の戻る先もリンクで「ホームへ」と名乗るので、
+    // 画面全体から `/ホーム/` で引くと 2 つ当たる。
+    const nav = screen.getByRole("navigation", { name: "画面" });
+    expect(within(nav).getByRole("link", { name: /ホーム/ })).toHaveAttribute(
+      "aria-current",
+      "page",
+    );
   });
 
   it("/sending を開いている間もホームが現在地のまま", async () => {
@@ -199,7 +205,10 @@ describe("taskCount の配線", () => {
 
     window.history.pushState({}, "", "/approve");
     render(<App />);
-    const home = await screen.findByRole("link", { name: /ホーム/ });
+    // **ピルはナビの項目に付く。** 画面の戻る先も「ホームへ」と名乗るので、
+    // ナビの中で引く。
+    const nav = await screen.findByRole("navigation", { name: "画面" });
+    const home = within(nav).getByRole("link", { name: /ホーム/ });
     await waitFor(() => expect(home).toHaveTextContent("1"));
 
     await userEvent.click(await screen.findByRole("button", { name: "却下する" }));

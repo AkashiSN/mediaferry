@@ -444,3 +444,35 @@ describe("作業の履歴", () => {
     6000,
   );
 });
+
+
+// **開く前に終わった作業の要約**（Phase 11 の N4）。進捗の知らせは開いている間の
+// ぶんしか届かないので、サーバが添えた 1 文を読む。
+describe("終わった作業の要約", () => {
+  it("画面を開く前に終わった作業にも、最後の 1 文を出す", async () => {
+    stubApi({
+      "/jobs": {
+        jobs: [
+          {
+            id: "j1",
+            type: "scan",
+            status: "succeeded",
+            created_at: "2026-08-25T06:30:00Z",
+            started_at: "2026-08-25T06:30:00Z",
+            finished_at: "2026-08-25T06:31:00Z",
+            error: null,
+            volume_instance_id: null,
+            progress: null,
+            last_message: "スキャン完了: 新規 0 件 / 取込済 4 件 / 消えた 2 件",
+          },
+        ],
+      },
+    });
+    render(
+      <MemoryRouter>
+        <JobHistoryScreen />
+      </MemoryRouter>,
+    );
+    expect(await screen.findByText(/消えた 2 件/)).toBeInTheDocument();
+  });
+});

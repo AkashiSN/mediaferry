@@ -234,8 +234,21 @@ class JobStore:
         return self._conn.execute("SELECT * FROM job WHERE id = ?", (job_id,)).fetchone()
 
     def list_jobs(self, limit: int = 50) -> list[sqlite3.Row]:
+        """一覧。**最後の 1 文を添えて返す**（Phase 11 の N4）.
+
+        画面は進捗の知らせで受けた分しか要約を持てないので、**開く前に終わった
+        作業は「完了」としか出せなかった**。`スキャン完了: … / 消えた 2 件` の
+        ような 1 文は、なぜ件数が変わったのかを後から追う唯一の手がかりなので、
+        一覧が持って返す。**1 件ずつ引かない**（相関副問い合わせ 1 本で足りる）。
+        """
         return list(
-            self._conn.execute("SELECT * FROM job ORDER BY created_at DESC LIMIT ?", (limit,))
+            self._conn.execute(
+                "SELECT j.*,"
+                " (SELECT e.message FROM job_event e WHERE e.job_id = j.id"
+                "  ORDER BY e.seq DESC LIMIT 1) AS last_message"
+                " FROM job j ORDER BY j.created_at DESC LIMIT ?",
+                (limit,),
+            )
         )
 
     def events(self, job_id: str, after_seq: int = 0) -> list[sqlite3.Row]:

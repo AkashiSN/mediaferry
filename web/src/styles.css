@@ -81,7 +81,13 @@ body {
 button { font-family: inherit; cursor: pointer; }
 h1, h2, h3 { margin: 0; line-height: 1.4; }
 p { margin: 0; }
-ul { margin: 0; }
+/* **`margin` だけでは既定のインデントが残る。** `padding-left` の 40px が、
+   狭い欄（つなぐ画面の本文、確認の箇条書き）から丸ごと取られる。 */
+ul { margin: 0; padding: 0; }
+/* **リンクの色と下線は、こちらで決める。** 既定のままだと、ボタンの形をした
+   リンクにも下線が付き、本文中のリンクはトークンの外の青（#0000ee）で出る。 */
+a { color: var(--accent-deep); text-decoration: none; }
+a:hover { text-decoration: underline; }
 
 /* ---- 骨格：広いときは左の柱、狭いときは上の帯。DOM は 1 つ ---- */
 .main { min-width: 0; padding: 26px 32px 40px; }
@@ -234,6 +240,12 @@ h1.page.title-lg { font-size: 24px; }
   border: 1px solid var(--line); border-radius: 20px; background: var(--surface);
   color: var(--ink-2); font-size: 13.5px;
 }
+/* 名前とその補足を 2 行で見せる chip。**`.chip` 自体は 1 行のまま** ——
+   写真タブの絞り込みが同じクラスを使っており、そちらは 1 行が正しい。 */
+.chip.stacked {
+  flex-direction: column; align-items: flex-start; justify-content: center;
+  gap: 2px; height: 56px; border-radius: 14px; padding: 0 18px;
+}
 .chip[aria-pressed="true"] { border-color: var(--accent); background: var(--accent); color: var(--accent-ink); font-weight: 650; }
 .chip:disabled { opacity: .5; }
 
@@ -300,7 +312,10 @@ h1.page.title-lg { font-size: 24px; }
   border-color: rgba(255, 255, 255, .3); background: rgba(255, 255, 255, .14); color: #fff;
 }
 
+/* **見出しと本文の間隔は、ここで作る。** リセットで `h2` も `p` も `margin` が
+   0 なので、縦の `gap` が無いとタイトルと本文が地続きに見える。 */
 .dialog {
+  display: flex; flex-direction: column; gap: 14px;
   width: min(560px, 100%); max-height: 88vh; overflow: auto;
   border-radius: 16px; background: var(--surface); box-shadow: var(--shadow-lg); padding: 26px 26px 22px;
 }
@@ -310,7 +325,10 @@ h1.page.title-lg { font-size: 24px; }
   position: fixed; inset: 0; background: var(--scrim); z-index: 40;
   display: grid; place-items: center; padding: 20px;
 }
-.dialog-actions { display: flex; gap: 10px; margin-top: 22px; }
+/* 箇条書きの黒丸は、`ul` のリセットで欄の外へ出る。**確認の本文だけ戻す。** */
+.dialog ul { padding-left: 1.3em; }
+/* `gap` が上の余白を作るので、`margin-top` は操作の分だけ足す。 */
+.dialog-actions { display: flex; gap: 10px; margin-top: 8px; }
 .dialog-actions button {
   height: 44px; padding: 0 18px; border: 1px solid var(--line); border-radius: 9px;
   background: var(--surface); color: var(--ink); font-size: 14px;

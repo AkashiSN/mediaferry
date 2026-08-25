@@ -349,6 +349,33 @@ def test_the_list_shows_live_groups_only(client, api_db):
     ]
 
 
+def test_pending_leaves_out_the_groups_that_are_already_merged(client, api_db):
+    """つなぐ画面は「まだつないでいないもの」だけを出す（Phase 11）.
+
+    **結合済みを混ぜない。** つなぎ目の空白の判定は結合の前後を区別しないので、
+    済んだ組にも警告色と「確かめてから決めてください」が出る —— もう決めた後の
+    ものに、決める前の文が出ることになる。結合済みは写真タブで見る。
+
+    **`failed` は残す。** まだつながっていない側で、結合に失敗した組の member を
+    個別に送る入口はつなぐ画面にしかない（裁定 12）。
+    """
+    profile = ProfileRegistry(api_db).current("dji-osmo")
+    profile_ref = (profile.profile_id, profile.revision_id)
+    waiting = a_merge_group(api_db, profile_ref, "digest-waiting")
+    failed = a_merge_group(api_db, profile_ref, "digest-failed", status="failed")
+    a_merge_group(api_db, profile_ref, "digest-done", status="merged")
+    a_merge_group(api_db, profile_ref, "digest-dropped2", status="skipped")
+
+    listed = client.get("/api/merge-groups?pending=true").json()["groups"]
+
+    assert sorted(g["id"] for g in listed) == sorted([waiting, failed])
+
+
+def test_pending_and_status_are_not_combined(client, api_db):
+    """**両方は指定できない.** 黙って片方を無視すると、画面が読み違える."""
+    assert client.get("/api/merge-groups?pending=true&status=skipped").status_code == 400
+
+
 def test_a_discarded_group_can_be_deleted_from_the_history(client, api_db):
     """画面の「破棄した組み合わせ」から消せる."""
     profile = ProfileRegistry(api_db).current("dji-osmo")

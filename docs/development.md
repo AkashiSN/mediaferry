@@ -119,6 +119,33 @@ blocker が 2 件ずつ出た。**巡を重ねても止まらない。** Phase 5
   上限を置き、別スレッドで走らせて `join(timeout=…)` で見る。** Phase 5 では
   これで 2 度詰まった（`SilentBroker` と ReDoS の試験）
 
+### 画面を実際に描かせて確かめる
+
+**jsdom は `styles.css` を解析しない。** web のテストは 1 件も CSS の色と寸法を
+観測できないので、**見た目の壊れ方は実ブラウザでしか捕まらない**（E2E の幅の検査が
+それを担う）。E2E に載っていない状態を見たいときは、**E2E と同じ実サーバを手で
+立てる**（fake broker と fake Immich 2 台つきの本物）。
+
+```bash
+cd web && npm run build      # 実サーバは dist を配る。忘れると前の版を見ることになる
+rm -rf /tmp/mf-ui && mkdir -p /tmp/mf-ui
+PYTHONPATH=$PWD/app uv run python -m tests.system.serve /tmp/mf-ui "パスワード" &
+# 標準出力の 1 行目が {"url": …, "immich": [...], "data_root": …}
+```
+
+- **状態ディレクトリは短いパスに置く。** ブローカーのソケットが `AF_UNIX path too
+  long` で落ちる（`sun_path` は 108 バイト）。深いところに掘ると起動しない
+- 合成カードの実体は `<状態>/card`（DJI）と `<状態>/canon`（Canon）。ここへ
+  ファイルを足す・消してから画面の「スキャン」を押せば、**カード側の増減**を
+  そのまま再現できる
+- 合成カードの動画は 100 バイトで ffmpeg が読めない。結合まで通したいときは
+  `web/e2e/journey.spec.ts` の `mergeTwoParts` と同じく、`<data_root>/library`
+  配下の `.MP4` を小さな本物のクリップに差し替えてから「つなぐ」を押す
+- **片付けは自分の分だけ。** 親（`tests.system.serve`）を殺しても子の
+  `python3 -m mediaferry` は孤児として残る（下の「E2E がサーバを回収しない」）。
+  同じ木で別の E2E が走っていることがあるので、`/proc/<pid>/environ` の
+  `MEDIAFERRY_DATA_ROOT` で自分のものだと確かめてから落とす
+
 ### ブローカー（mountd）とテストの土台
 
 - **`BrokerServer._observe` は lister が返す `broker_epoch` と `generation` を捨てて、
@@ -476,7 +503,7 @@ TrueNAS ホストで。手順は [`history/phase0-findings.md`](history/phase0-f
    **ただし、このとき写真タブについて 4 件の設計課題が出た**（下の持ち越し）。
    題材は結合 → 組み直し → もう一度結合で作れる（`b1a6971` で
    `GET /media/stale-derived` と「もう使われていない出力」の節を足した。いまは
-   **設定 › 詳しい情報 › 使っていないファイル**にある）。
+   **設定 › 記録 › 使っていないファイル**にある）。
 5. **Canon EOS 70D の実カード（13〜17 番）。** プロファイルは仕様と知識から
    書いており、**実データを一度も見ていない**。**17 番は Phase 6 で増えた項目**
    （RAW+JPEG の組が実カードで成立するか。`exifread` が実機の CR2 から
