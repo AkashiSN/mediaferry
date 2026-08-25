@@ -316,3 +316,67 @@ def test_the_lease_is_kept_alive_while_sweeping(scanning, db):
     assert outcome.vanished == 1
     # 列挙で 1 件（残ったファイル）＋ 掃除で 1 件（消えた候補）
     assert len(beats) == outcome.total + outcome.vanished == 2
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root は権限を無視して開けてしまう")
+def test_an_entry_we_could_not_look_at_is_kept(scanning, db):
+    """**「無い」と「確かめられなかった」を分ける。**
+
+    `exists_beneath` は全 `OSError` を False にするので、EACCES・EIO・EMFILE でも
+    「無い」に見える。列挙側（`_walk`）も開けないディレクトリを黙って飛ばすので、
+    一時的な障害で**部分木ぶんの行がまとめて消える**。
+    """
+    scanner, ctx, fd, volume_id, profile, card = scanning
+    scanner.scan(ctx, fd, volume_id, profile)
+    (card / "DCIM" / "DJI_001").chmod(0o000)
+    try:
+        outcome = scanner.scan(ctx, fd, volume_id, profile)
+    finally:
+        (card / "DCIM" / "DJI_001").chmod(0o755)
+
+    assert outcome.vanished == 0
+    assert _paths(db) == {"DCIM/DJI_001/DJI_20260817143000_0001_D.MP4"}
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root は権限を無視して開けてしまう")
+def test_what_we_could_not_look_at_is_said_out_loud(scanning, db):
+    """黙って残すと、次の取り込みが ENOENT で落ちる理由が誰にも分からない."""
+    scanner, ctx, fd, volume_id, profile, card = scanning
+    scanner.scan(ctx, fd, volume_id, profile)
+    (card / "DCIM" / "DJI_001").chmod(0o000)
+    try:
+        scanner.scan(ctx, fd, volume_id, profile)
+    finally:
+        (card / "DCIM" / "DJI_001").chmod(0o755)
+
+    messages = [e["message"] for e in JobStore(db).events(ctx.job_id) if e["level"] == "warning"]
+    assert any("確かめられなかった" in m for m in messages)
+
+
+def test_a_cancelled_scan_of_an_empty_card_does_not_sweep(scanning, db):
+    """**掃除は破壊的なので、列挙が 1 度も回らなくてもキャンセルを見る。**
+
+    `ctx.cancelled()` を for の中でしか見ないと、一致するファイルが 0 件の
+    カードでは降りたことに気づけず、そのまま掃除してしまう。
+    """
+    scanner, ctx, fd, volume_id, profile, card = scanning
+    scanner.scan(ctx, fd, volume_id, profile)
+    for path in (card / "DCIM" / "DJI_001").iterdir():
+        path.unlink()
+    JobStore(db).request_cancel(ctx.job_id)
+
+    outcome = scanner.scan(ctx, fd, volume_id, profile)
+
+    assert outcome.vanished == 0
+    assert _paths(db) == {"DCIM/DJI_001/DJI_20260817143000_0001_D.MP4"}
+
+
+def test_a_cancelled_scan_of_an_empty_card_does_not_claim_to_have_counted(scanning, db):
+    scanner, ctx, fd, volume_id, profile, card = scanning
+    for path in (card / "DCIM" / "DJI_001").iterdir():
+        path.unlink()
+    JobStore(db).request_cancel(ctx.job_id)
+
+    scanner.scan(ctx, fd, volume_id, profile)
+
+    assert _scanned_at(db, volume_id) is None

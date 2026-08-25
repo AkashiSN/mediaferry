@@ -420,3 +420,44 @@ def test_a_card_held_by_a_running_job_is_busy(db, broker):
     finally:
         svc.release(view.selection)
     assert svc.refresh()[0].busy is False
+
+
+_KNOWN = "DCIM/DJI_001/DJI_20260817143000_0001_D.MP4"
+
+
+def _remember_a_published_observation(db, volume_instance_id: str) -> None:
+    db.execute(
+        "INSERT INTO source_entry (id, volume_instance_id, rel_path, size_bytes, mtime_ns,"
+        " quick_fingerprint, fingerprint_version, state, observed_at)"
+        " VALUES ('known', ?, ?, 100, 1, 'abc', 1, 'published', '2026-01-01T00:00:00+00:00')",
+        (volume_instance_id, _KNOWN),
+    )
+
+
+def test_a_card_still_holding_its_known_files_stays_high(db, broker, fake_card):
+    """中身が増えても、記録した観測がカードに残っていれば連続的とみなす.
+
+    **残存の判定が「在る」を「無い」と読むと**、承認済みのカードが挿し直すたびに
+    `low` へ落ち、自動取り込みが始まらなくなる。`_known_files_survive` の真偽を
+    ここで固定する（この向きを 1 本も見ていなかった）。
+    """
+    svc = service(db, broker)
+    svc.refresh()
+    view = svc.refresh()[0]
+    _remember_a_published_observation(db, view.volume_instance_id)
+    # manifest を変えて、残存率の判定まで落とす（一致していれば見ずに high）。
+    (fake_card / "DCIM" / "DJI_001" / "DJI_20260817143001_0002_D.MP4").write_bytes(b"x")
+
+    assert svc.refresh()[0].identity_confidence == "high"
+
+
+def test_a_card_that_lost_its_known_files_drops_to_low(db, broker, fake_card):
+    """記録した観測がカードから消えていれば、連続的とは言えない."""
+    svc = service(db, broker)
+    svc.refresh()
+    view = svc.refresh()[0]
+    _remember_a_published_observation(db, view.volume_instance_id)
+    (fake_card / "DCIM" / "DJI_001" / "DJI_20260817143000_0001_D.MP4").unlink()
+    (fake_card / "DCIM" / "DJI_001" / "DJI_20260817143001_0002_D.MP4").write_bytes(b"x")
+
+    assert svc.refresh()[0].identity_confidence == "low"

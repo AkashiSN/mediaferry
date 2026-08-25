@@ -8,6 +8,7 @@
 
 from __future__ import annotations
 
+import errno
 import os
 from collections.abc import Iterable, Iterator
 from dataclasses import dataclass
@@ -60,11 +61,34 @@ def open_beneath(dirfd: int, rel_path: str) -> int:
 
 
 def exists_beneath(dirfd: int, rel_path: str) -> bool:
-    """dirfd の下にそのパスがあるか. 開けるかどうかで判定する."""
+    """dirfd の下にそのパスがあるか. 開けるかどうかで判定する.
+
+    **「無い」と「確かめられなかった」を区別しない。** 消すかどうかの判断に使う
+    なら `probe_beneath` を使う（一時的な I/O 障害を「無い」と読むため）。
+    """
+    return probe_beneath(dirfd, rel_path) is True
+
+
+# 「そこに無い」と言い切れる errno。これ以外は**確かめられなかった**であって、
+# 無いことの証明ではない（EACCES・EIO・EMFILE・ESTALE など）。
+_ABSENT = frozenset({errno.ENOENT, errno.ENOTDIR})
+
+
+def probe_beneath(dirfd: int, rel_path: str) -> bool | None:
+    """在れば True、**無いと言い切れれば** False、確かめられなければ None.
+
+    **消す判断はこれを通す。** `open_beneath` が投げる `OSError` を一律に
+    「無い」と読むと、権限や I/O の一時的な失敗で実在するファイルの記録を
+    落とす。列挙側（`_walk`）も開けないディレクトリを黙って飛ばすので、
+    **部分木ぶんがまとめて消えうる**。
+    """
     try:
         fd = open_beneath(dirfd, rel_path)
-    except OSError, EscapeAttempt:
-        return False
+    except OSError as exc:
+        return False if exc.errno in _ABSENT else None
+    except EscapeAttempt:
+        # 列挙が作らない形の名前。開けないが「無い」の証明でもない。
+        return None
     os.close(fd)
     return True
 
