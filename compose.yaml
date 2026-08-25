@@ -8,6 +8,24 @@
 # MOUNTD_ALLOWED_UIDS に app の UID を指定すると、他プロセスからの接続を拒む。
 name: mediaferry
 
+# TrueNAS のアプリ画面に「Web UI」ボタンを出すなら、次を有効にする。middleware が
+# トップレベルの x-portals を読んでリンクを作る（scheme は http か https、
+# port はコンテナ側 8080 ではなく**公開したホスト側**の番号）。
+#
+#   x-portals:
+#     - name: Web UI
+#       scheme: https
+#       host: <app-fqdn>   # 0.0.0.0 は不可。実際に届く名前か IP
+#       port: 443
+#       path: /
+#
+# **キーを増やさない。** middleware は additionalProperties: false で検証し、
+# 落ちると portals ごと黙って捨てる（エラーは出ない）。
+#
+# **新規インストールのときに書くこと。** custom app では、あとから YAML を編集して
+# 保存しても読み直されない（更新経路は portals の再取得を飛ばす）。手当ては
+# docs/setup.md の「9. アプリ画面に Web UI ボタンを出す」。
+
 services:
   mountd:
     image: ghcr.io/akashisn/mediaferry-mountd:latest
@@ -62,6 +80,24 @@ services:
     #   MEDIAFERRY_BIND_HOST: 0.0.0.0
     #   MEDIAFERRY_AUTH_PASSWORD: <password>
     #   ports: ["<host-ip>:<host-port>:8080"]
+    #
+    # **リバースプロキシの後ろに置くときは、さらに 2 つ足す。**
+    #
+    #   MEDIAFERRY_TRUSTED_HOSTS: <app-fqdn>
+    #   FORWARDED_ALLOW_IPS: <docker-network-cidr>
+    #
+    # TRUSTED_HOSTS に名前を入れないと、その名前で来た要求を 421 で断る（既定で
+    # 通るのは IP そのものと localhost だけ。名前を許可制にして DNS rebinding を
+    # 塞いでいる）。
+    #
+    # FORWARDED_ALLOW_IPS は uvicorn の設定で、既定は 127.0.0.1。合っていないと
+    # X-Forwarded-Proto を無視して scheme を http と見なすので、https の Origin と
+    # 食い違い、**状態を変える要求が全部 403 になる**（GET は通るので気づきにくい）。
+    #
+    # **値は TrueNAS の Docker のアドレスプール次第で、環境ごとに違う。**
+    # プロキシのアドレスとも限らない（公開ポートへ回り込む経路では、送信元が
+    # ブリッジの gateway に付け替わる）。**必ず実測して決める**こと。手順は
+    # docs/setup.md の「8. リバースプロキシの後ろに置く」。
 
 volumes:
   app-tmp:
