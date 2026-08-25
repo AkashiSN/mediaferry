@@ -175,7 +175,7 @@ describe("写真の画面", () => {
     await waitFor(() => expect(container.querySelector(".tile .mark.sent")).not.toBeNull());
   });
 
-  it("タイルの aria-label は rel_path の末尾", async () => {
+  it("選ぶ丸の aria-label は rel_path の末尾", async () => {
     stubApi({
       "/media": {
         media: [
@@ -193,7 +193,7 @@ describe("写真の画面", () => {
       </MemoryRouter>,
     );
     // ディレクトリ部分を含まない、ファイル名だけの名前で掴める。
-    expect(await screen.findByRole("button", { name: "photo.JPG" })).toBeInTheDocument();
+    expect(await screen.findByRole("button", { name: "選ぶ：photo.JPG" })).toBeInTheDocument();
   });
 
   it("動画は長さを右下に出す", async () => {

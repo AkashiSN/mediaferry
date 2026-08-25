@@ -360,9 +360,10 @@ test("狭い画面で、下に貼り付く操作バーが隠れない", async ({
   await settled(page);
 
   // **実際に 1 枚選んでバーを出してから測る。** 選んでいない間はバーが無い。
-  const tile = page.locator("main button.tile").first();
-  await expect(tile).toBeVisible({ timeout: 60_000 });
-  await tile.click();
+  // タイルは押すと開くので、**選ぶのは隅の丸**を押す。
+  const pick = page.locator("main button.pick").first();
+  await expect(pick).toBeVisible({ timeout: 60_000 });
+  await pick.click();
   await expect(page.locator(".actionbar")).toBeVisible();
   const overActionbar = await covering(page, ".actionbar");
   expect(overActionbar, overActionbar.join(" / ")).toEqual([]);
@@ -480,8 +481,9 @@ for (const colorScheme of ["light", "dark"] as const) {
       }
       // **下に貼り付く帯は、1 枚選ぶまで描かれない。** 帯の地はトークンの外
       // （暗い帯）なので、選ばずに通り過ぎると帯の上の弱い操作が一度も測られない。
+      // タイルは押すと開くので、**選ぶのは隅の丸**を押す。
       if (path === "/photos") {
-        await page.locator("main button.tile").first().click({ timeout: 60_000 });
+        await page.locator("main button.pick").first().click({ timeout: 60_000 });
         await expect(page.locator(".actionbar")).toBeVisible();
       }
       for (const problem of await flatControls(page)) {
