@@ -317,3 +317,29 @@ def test_ambiguous_identity_refuses_the_group():
     refusal = resolve_group(a_cr2(), [a_cr2(), a_jpg(), lower], RULE)
 
     assert "自動では決められない" in refusal.reason
+
+
+def test_a_disabled_rule_is_seen_directly_by_the_identity():
+    """`resolve_group` の門に隠れない場所を守る.
+
+    一覧（送る前）は `resolve_group` を経由せず `identity_partners` を直接
+    呼ぶ（Task 6）。`resolve_group` 側の `rule.enabled` の門はここには立たない
+    ので、`identity_partners` 自身がこの門を持つことを直接確かめる。
+    """
+    rule = StackRule(enabled=False, extensions=("JPG", "CR2"))
+
+    identity = identity_partners(a_jpg(), [a_jpg(), a_cr2()], rule)
+
+    assert identity.partners == ()
+
+
+def test_a_partner_sharing_the_primarys_own_extension_is_ambiguous():
+    """**自分と同じ拡張子の別ファイルが相方に来る場合**も曖昧.
+
+    相方どうしが衝突するだけでなく、primary 自身と同じ正規化拡張子の別ファイルが
+    同じ鍵（ボリューム・stem）に来る場合も、どちらが primary かは機械には
+    決められない。
+    """
+    twin = replace(a_jpg(), media_file_id="other", rel_path="DCIM/100CANON/IMG_1234.jpg")
+
+    assert identity_partners(a_jpg(), [a_jpg(), twin], RULE).ambiguous
