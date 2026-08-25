@@ -42,11 +42,9 @@ merge:
     data: false
 stack:
   # RAW+JPEG の同時記録。**先頭が primary**（Immich の一覧で代表になる方）。
+  # **撮影時刻は見ない。** 組の身元はカード上の原名と同席の証拠で決まる。
   enabled: true
   extensions: ["JPG", "CR2"]
-  # **実カードを見ていないので緩めない**（merge.enabled: false と同じ理由）。
-  # 同じシャッターなら EXIF の DateTimeOriginal は秒まで一致する。
-  tolerance_seconds: 0
 immich:
   tags: ["Canon EOS"]
   tag_pre_existing: true

@@ -668,7 +668,7 @@ def test_the_current_profile_revision_decides_even_for_old_media(world):
         "canon-copy",
         replace(
             current.definition,
-            stack=StackRule(enabled=True, extensions=("JPG", "CR2"), tolerance_seconds=0),
+            stack=StackRule(enabled=True, extensions=("JPG", "CR2")),
         ),
     )
 

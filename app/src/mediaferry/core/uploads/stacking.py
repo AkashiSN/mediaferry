@@ -1,17 +1,21 @@
 """RAW/JPEG の組を決める規則（§6・§9.11）.
 
-**判断だけを持つ。** DB も相手も触らないので、4 条件を 1 つずつ壊す試験が書ける。
+**判断だけを持つ。** DB も相手も触らないので、条件を 1 つずつ壊す試験が書ける。
 
 組の同一性は**カード上の原名**（`source_entry.rel_path`）で取る。公開名
 （`media_file.rel_path`）は衝突時に改名されるので、連番が一周した別カードの
 ファイルと束ねうる。
+
+**撮影時刻は見ない。** 時刻は同じ 1 枚であることを弱めこそすれ強めない ——
+一括で日時を入れ直すと JPG だけ書き換わって CR2 が元のままになりうる
+（RAW に書き込める道具の方が少ない）ため、時刻の食い違いは誤って組を
+拒む理由にしかならない。
 """
 
 from __future__ import annotations
 
 from collections.abc import Sequence
 from dataclasses import dataclass
-from datetime import datetime
 from posixpath import splitext
 
 from ..profiles.model import StackRule
@@ -36,6 +40,9 @@ class Candidate:
     profile_id: str
     volume_instance_id: str
     rel_path: str  # **カード上の原名**
+    # `captured_at` / `captured_at_source` は組の判定には使わない（撮影時刻は
+    # 同じ 1 枚であることを弱めこそすれ強めない）。値そのものは呼び出し側が
+    # 日時の突き合わせに使うので、観測として持ち続ける。
     captured_at: str
     captured_at_source: str
     origin: str
@@ -76,7 +83,7 @@ def extension_of(rel_path: str) -> str:
 def resolve_group(
     primary: Candidate, candidates: Sequence[Candidate], rule: StackRule
 ) -> Group | Refusal:
-    """4 条件（§6）で組を決める. 同じ組はどの member から呼んでも同じになる."""
+    """§6 の規則で組を決める. 同じ組はどの member から呼んでも同じになる."""
     if not rule.enabled:
         return Refusal("カメラの種類がスタックを使わない")
     if extension_of(primary.rel_path) not in rule.extensions:
@@ -100,7 +107,7 @@ def resolve_group(
             partners.append(candidate)
     if not partners:
         return Refusal("相方が見つからない")
-    refusal = _refused(primary, partners, rule)
+    refusal = _refused(primary, partners)
     if refusal is not None:
         return refusal
     members = sorted(
@@ -109,7 +116,7 @@ def resolve_group(
     return Group(members=tuple(members))
 
 
-def _refused(primary: Candidate, partners: Sequence[Candidate], rule: StackRule) -> Refusal | None:
+def _refused(primary: Candidate, partners: Sequence[Candidate]) -> Refusal | None:
     """組めない理由を探す. **見つからなければ None。**"""
     for member in (primary, *partners):
         if member.origin != "created_by_us":
@@ -132,14 +139,4 @@ def _refused(primary: Candidate, partners: Sequence[Candidate], rule: StackRule)
             return Refusal("相方が別のカメラの種類に属している")
         if partner.invalidated or partner.state != "complete":
             return Refusal("相方はまだ送信が終わっていない")
-        if partner.captured_at_source != primary.captured_at_source:
-            return Refusal("相方と時刻の根拠が違う（EXIF と mtime を突き合わせない）")
-        if not _within(primary.captured_at, partner.captured_at, rule.tolerance_seconds):
-            return Refusal("相方と撮影時刻が一致しない")
     return None
-
-
-def _within(left: str, right: str, tolerance_seconds: int) -> bool:
-    """**文字列ではなく瞬間で比べる**（オフセットが違っても同じ時刻でありうる）."""
-    delta = datetime.fromisoformat(left) - datetime.fromisoformat(right)
-    return abs(delta.total_seconds()) <= tolerance_seconds

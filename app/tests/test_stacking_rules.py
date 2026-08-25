@@ -17,7 +17,7 @@ from mediaferry.core.uploads.stacking import (
     stem_prefix,
 )
 
-RULE = StackRule(enabled=True, extensions=("JPG", "CR2"), tolerance_seconds=0)
+RULE = StackRule(enabled=True, extensions=("JPG", "CR2"))
 
 
 def a_candidate(rel_path, **over):
@@ -136,34 +136,20 @@ def test_a_media_observed_twice_appears_once_in_the_group():
     assert len(group.members) == 2
 
 
-def test_a_different_capture_time_is_not_a_partner():
-    """**同じシャッターであることの直接の証拠**（§6）."""
+def test_a_different_capture_time_is_not_a_partner_but_still_pairs():
+    """**撮影時刻は身元を弱めない**（`docs/history/phase10-design.md` §2）.
+
+    一括で日時を入れ直すと JPG だけ書き換わって CR2 が元のままになりうるので、
+    撮影時刻の食い違いは組を拒む理由にしない。
+    """
     late = a_cr2(captured_at="2026-08-19T10:30:01+09:00")
-    assert "撮影時刻" in resolve_group(a_jpg(), [a_jpg(), late], RULE).reason
+    assert isinstance(resolve_group(a_jpg(), [a_jpg(), late], RULE), Group)
 
 
-def test_the_tolerance_is_honoured():
-    late = a_cr2(captured_at="2026-08-19T10:30:01+09:00")
-    group = resolve_group(a_jpg(), [a_jpg(), late], replace(RULE, tolerance_seconds=2))
-    assert isinstance(group, Group)
-
-
-def test_the_tolerance_is_inclusive_at_the_boundary():
-    late = a_cr2(captured_at="2026-08-19T10:30:02+09:00")
-    group = resolve_group(a_jpg(), [a_jpg(), late], replace(RULE, tolerance_seconds=2))
-    assert isinstance(group, Group)
-
-
-def test_a_different_time_source_is_not_a_partner():
-    """EXIF の時刻と mtime の時刻という**別々の時計**を突き合わせない（§6）."""
+def test_a_different_time_source_still_pairs():
+    """EXIF の時刻と mtime の時刻という**別々の時計**でも、身元の判定には使わない."""
     fallen_back = a_cr2(captured_at_source="mtime")
-    assert "時刻の根拠" in resolve_group(a_jpg(), [a_jpg(), fallen_back], RULE).reason
-
-
-def test_offsets_are_compared_as_instants_not_strings():
-    """`captured_at` はオフセット付きで保存される（§8 の唯一の例外）."""
-    same_instant = a_cr2(captured_at="2026-08-19T01:30:00+00:00")
-    assert isinstance(resolve_group(a_jpg(), [a_jpg(), same_instant], RULE), Group)
+    assert isinstance(resolve_group(a_jpg(), [a_jpg(), fallen_back], RULE), Group)
 
 
 def test_a_partner_that_is_not_ours_refuses_the_group():

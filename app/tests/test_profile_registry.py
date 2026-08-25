@@ -114,11 +114,7 @@ def a_copy_with_stacking(db, enabled):
     registry.sync_builtins()
     registry.duplicate("canon-eos", "my-canon", "私の Canon")
     current = registry.current("my-canon")
-    rule = (
-        StackRule(enabled=True, extensions=("JPG", "CR2"), tolerance_seconds=0)
-        if enabled
-        else STACK_DISABLED
-    )
+    rule = StackRule(enabled=True, extensions=("JPG", "CR2")) if enabled else STACK_DISABLED
     registry.update("my-canon", replace(current.definition, stack=rule))
     return registry
 
@@ -141,7 +137,7 @@ def test_a_new_revision_that_changes_the_stack_rule_reopens_the_skips(db):
         "my-canon",
         replace(
             current.definition,
-            stack=StackRule(enabled=True, extensions=("JPG", "CR2"), tolerance_seconds=0),
+            stack=StackRule(enabled=True, extensions=("JPG", "CR2")),
         ),
     )
 
@@ -172,7 +168,7 @@ def test_a_builtin_sync_that_changes_the_stack_rule_reopens_the_skips(db):
     record = a_skipped_record(db, "canon-eos")
 
     changed = definition_to_json(registry.current("canon-eos").definition).replace(
-        '"tolerance_seconds":0', '"tolerance_seconds":2'
+        '"extensions":["JPG","CR2"]', '"extensions":["CR2","JPG"]'
     )
     registry._upsert_revision("canon-eos", changed)  # noqa: SLF001
 
@@ -273,7 +269,7 @@ def test_the_revision_and_the_reopen_are_one_transaction(db, monkeypatch):
             "my-canon",
             replace(
                 registry.current("my-canon").definition,
-                stack=StackRule(enabled=True, extensions=("JPG", "CR2"), tolerance_seconds=0),
+                stack=StackRule(enabled=True, extensions=("JPG", "CR2")),
             ),
         )
 

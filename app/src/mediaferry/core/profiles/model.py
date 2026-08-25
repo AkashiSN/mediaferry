@@ -95,18 +95,17 @@ class MergeRule:
 class StackRule:
     """RAW+JPEG の組の規則（§6）.
 
-    `extensions` は**先頭ほど primary**。`tolerance_seconds` は `captured_at` の
-    許容差で、既定は完全一致。
+    `extensions` は**先頭ほど primary**。**撮影時刻は見ない** —— 組の身元は
+    カード上の原名と同席の証拠で決まる（`docs/history/phase10-design.md`）。
     """
 
     enabled: bool
     extensions: tuple[str, ...]
-    tolerance_seconds: int
 
 
 # **`stack` は省略できる。** 既存リビジョンの `definition_json` にこのキーは無く、
 # 必須にすると適用済みの DB を開けなくなる。
-STACK_DISABLED = StackRule(enabled=False, extensions=(), tolerance_seconds=0)
+STACK_DISABLED = StackRule(enabled=False, extensions=())
 
 
 @dataclass(frozen=True)
@@ -360,9 +359,11 @@ def _parse_merge(data: Mapping[str, Any]) -> MergeRule:
 
 
 def _parse_stack(data: Mapping[str, Any], scan: ScanRule) -> StackRule:
+    # **`tolerance_seconds` は許すが読まない。** 既存リビジョンの
+    # `definition_json` に入っているので、弾くと適用済みの DB を開けなくなる。
     _reject_unknown(data, {"enabled", "extensions", "tolerance_seconds"}, "stack")
     if not _bool(data, "enabled"):
-        # 無効なら拡張子も許容差も要らない（`merge` と同じ扱い）。
+        # 無効なら拡張子も要らない（`merge` と同じ扱い）。
         return STACK_DISABLED
     extensions = _strings(data, "extensions")
     for ext in extensions:
@@ -374,11 +375,7 @@ def _parse_stack(data: Mapping[str, Any], scan: ScanRule) -> StackRule:
         raise ProfileInvalid("stack.extensions は 2 つ以上必要（1 つでは組にならない）")
     if len(set(extensions)) != len(extensions):
         raise ProfileInvalid(f"stack.extensions に重複がある: {extensions}")
-    return StackRule(
-        enabled=True,
-        extensions=extensions,
-        tolerance_seconds=_positive_int(data, "tolerance_seconds"),
-    )
+    return StackRule(enabled=True, extensions=extensions)
 
 
 def _parse_immich(data: Mapping[str, Any]) -> ImmichRule:
