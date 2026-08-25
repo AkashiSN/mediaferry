@@ -303,6 +303,81 @@ describe("つないだ動画の絞り込みと、タイルの行き先", () => {
     await waitFor(() => expect(screen.getByRole("link", { name: /a\.JPG/ })).toBeInTheDocument());
     expect(screen.getByRole("link", { name: /a\.JPG/ })).toHaveAttribute("href", "/photos/a");
   });
+
+  // **送り先が 0 件でも、実際に role=derived を問い合わせられる。** チップが
+  // `disabled` でないだけでは、押した結果が正しいクエリになっているかを見ない
+  // （宛先が 1 件だと `effectiveDestinationId` が偶然 truthy になり、宛先ごとの
+  // 絞り込みへ倒す変異があっても気付けない）。
+  it("送り先が無くても、つないだ動画を押すと role=derived を問い合わせる", async () => {
+    const { calls } = stubApi({
+      "/media": { media: [], total: 0, page: 1, page_size: 200 },
+      "/destinations": { destinations: [] },
+    });
+    render(
+      <MemoryRouter>
+        <PhotosScreen />
+      </MemoryRouter>,
+    );
+    await userEvent.click(await screen.findByRole("button", { name: "つないだ動画" }));
+    await waitFor(() =>
+      expect(
+        calls().some(
+          (c) => c.path === "/media?role=derived&page_size=200" && c.method === "GET",
+        ),
+      ).toBe(true),
+    );
+  });
+
+  // **`role` は他の絞り込みと同じく、切り替えたら後始末する。** `kind` や
+  // `status` の前に `role` が残っていると、`filterFromParams` は `kind` より先に
+  // `role` を読むので、`derived` から抜けられなくなる。「すべて」と、
+  // 宛先ごとの絞り込み（`status`）の両方で確かめる —— `video` だけだと、
+  // `filterFromParams` が `kind` を先に見るぶん偶然通ってしまう。
+  it("つないだ動画から他へ切り替えると role が消える", async () => {
+    const { calls } = stubApi({
+      "/media": { media: [], total: 0, page: 1, page_size: 200 },
+      "/destinations": { destinations: [{ id: "d1", name: "家", enabled: true }] },
+    });
+    const lastMediaCall = () => calls().filter((c) => c.path.startsWith("/media")).at(-1);
+
+    render(
+      <MemoryRouter>
+        <PhotosScreen />
+      </MemoryRouter>,
+    );
+
+    await userEvent.click(await screen.findByRole("button", { name: "つないだ動画" }));
+    await waitFor(() => expect(lastMediaCall()?.path).toContain("role=derived"));
+
+    await userEvent.click(screen.getByRole("button", { name: "すべて" }));
+    await waitFor(() => expect(lastMediaCall()?.path).toBe("/media?page_size=200"));
+
+    await userEvent.click(screen.getByRole("button", { name: "つないだ動画" }));
+    await waitFor(() => expect(lastMediaCall()?.path).toContain("role=derived"));
+
+    await userEvent.click(screen.getByRole("button", { name: "まだ送っていない" }));
+    await waitFor(() =>
+      expect(lastMediaCall()?.path).toBe("/media?status=unsent&destination_id=d1&page_size=200"),
+    );
+  });
+
+  // **Task 8 が設定画面からこの住所（`/photos?role=derived`）へ直接リンクする。**
+  // 直接開いたときにチップが選択状態で描かれることを確かめる。
+  it("role=derived で直接開くと、つないだ動画のチップが選択状態になる", async () => {
+    stubApi({
+      "/media": { media: [], total: 0, page: 1, page_size: 200 },
+      "/destinations": { destinations: [] },
+    });
+    render(
+      <MemoryRouter initialEntries={["/photos?role=derived"]}>
+        <PhotosScreen />
+      </MemoryRouter>,
+    );
+    expect(await screen.findByRole("button", { name: "つないだ動画" })).toHaveAttribute(
+      "aria-pressed",
+      "true",
+    );
+  });
 });
 
 // **絞り込みで隠れても、選んだものの合計は変わらない。** 表示中のタイルから
