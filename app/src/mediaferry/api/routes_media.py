@@ -109,6 +109,8 @@ _AMBIGUOUS_EXISTS = _ambiguous_exists_sql("m.id")
 
 _KNOWN_COLLAPSE_VALUES = frozenset({"stack"})
 
+_KNOWN_STACK_VALUES = frozenset({"members"})
+
 
 @router.get("/media")
 def list_media(  # noqa: PLR0913
@@ -123,6 +125,7 @@ def list_media(  # noqa: PLR0913
     destination_id: str | None = None,
     status: str | None = None,
     collapse: str | None = None,
+    stack: str | None = None,
     conn=Depends(get_conn),  # noqa: ANN001, B008
 ) -> dict[str, Any]:
     """ライブラリの一覧（§11）.
@@ -138,52 +141,63 @@ def list_media(  # noqa: PLR0913
     させず、従の行だけを隠す。主の行には `stack.members` が付く。**既定は
     畳まない** —— ホームの「さっき取り込んだもの」と選んで送る画面が同じ
     この API を使うので、`collapse` を指定しない限り契約を変えない。
+
+    `stack=members` は**従を隠さずに**、組に属する行すべてへ `stack` を付ける。
+    送る画面が使う —— 送る対象は絞り込みが返した行そのもので、畳むと未送信の
+    RAW が送られなくなる（`docs/history/phase12-design.md` の 2）。**`collapse=stack`
+    と併せて来たら `collapse` が勝つ**（隠す）。片方だけを 400 にすると、既存の
+    呼び出し元が壊れる。
     """
     if collapse is not None and collapse not in _KNOWN_COLLAPSE_VALUES:
         raise ApiError(400, ErrorCode.BAD_REQUEST, "collapse は stack だけ", {"collapse": collapse})
+    if stack is not None and stack not in _KNOWN_STACK_VALUES:
+        raise ApiError(400, ErrorCode.BAD_REQUEST, "stack は members だけ", {"stack": stack})
     clause, params = _filters(
         "m", kind, role, profile, captured_from, captured_to, q, destination_id, status
     )
     where = f"WHERE {clause}" if clause else ""
     limit, offset = page_bounds(page, page_size)
 
-    # **`ranks` が空なら何もしない**（`VALUES` は 0 行を書けない）。`stack` が
-    # 有効なプロファイルが 1 つも無ければ、隠す従も無い。
+    # **組を教えるのと、従を隠すのは別。** 隠すのは写真タブ（`collapse=stack`）
+    # だけで、送る画面は隠されると未送信の RAW を送れなくなる。順位表はどちらでも
+    # 要るので、先に 1 度だけ作る。
     ranks_sql = ""
     ranks_params: tuple[Any, ...] = ()
     prefix = ""
-    if collapse == "stack":
+    prefix_params: tuple[Any, ...] = ()
+    if collapse == "stack" or stack == "members":
         ranks_sql, ranks_params = _ranks(conn)
-        if ranks_sql:
-            prefix = f"WITH rank(profile_id, extension, rank) AS (VALUES {ranks_sql}) "
-            # **`_AMBIGUOUS_EXISTS` は従外しを打ち消す保護であって、独立の除外
-            # 条件ではない。** 「従に見える行」でも、その身元が曖昧（同じ順位の
-            # 別候補がいる）なら、どちらが本当の主か決まらないので隠さない ——
-            # `identity_partners` が曖昧なら組まないのと同じ判断
-            # （`docs/history/phase10-plan.md` の「曖昧なら組まない。…一覧も
-            # 畳まない」）。**隠される側（`m`）と主（`sm`。`_secondary_exists_sql`
-            # の中）の両方で見る** —— 曖昧さは観測ごとに向きが変わるので、片側
-            # からしか見ないと、実在するファイルが名乗り手の無いまま一覧から消える。
-            #
-            # **同じ絞り込みを兄弟（`sm`）にも当てる。** 引数は主の分の後ろに
-            # もう一度、同じ順で積む。
-            sibling_clause, sibling_params = _filters(
-                "sm", kind, role, profile, captured_from, captured_to, q, destination_id, status
-            )
-            secondary = _secondary_exists_sql(sibling_clause or "1")
-            hide_as_secondary = f"({secondary}) AND NOT ({_AMBIGUOUS_EXISTS})"
-            exclude = f"NOT ({hide_as_secondary})"
-            where = f"{where} AND {exclude}" if where else f"WHERE {exclude}"
-            params = (*params, *sibling_params)
+    if collapse == "stack" and ranks_sql:
+        prefix = f"WITH rank(profile_id, extension, rank) AS (VALUES {ranks_sql}) "
+        prefix_params = ranks_params
+        # **`_AMBIGUOUS_EXISTS` は従外しを打ち消す保護であって、独立の除外
+        # 条件ではない。** 「従に見える行」でも、その身元が曖昧（同じ順位の
+        # 別候補がいる）なら、どちらが本当の主か決まらないので隠さない ——
+        # `identity_partners` が曖昧なら組まないのと同じ判断
+        # （`docs/history/phase10-plan.md` の「曖昧なら組まない。…一覧も
+        # 畳まない」）。**隠される側（`m`）と主（`sm`。`_secondary_exists_sql`
+        # の中）の両方で見る** —— 曖昧さは観測ごとに向きが変わるので、片側
+        # からしか見ないと、実在するファイルが名乗り手の無いまま一覧から消える。
+        #
+        # **同じ絞り込みを兄弟（`sm`）にも当てる。** 引数は主の分の後ろに
+        # もう一度、同じ順で積む。
+        sibling_clause, sibling_params = _filters(
+            "sm", kind, role, profile, captured_from, captured_to, q, destination_id, status
+        )
+        secondary = _secondary_exists_sql(sibling_clause or "1")
+        hide_as_secondary = f"({secondary}) AND NOT ({_AMBIGUOUS_EXISTS})"
+        exclude = f"NOT ({hide_as_secondary})"
+        where = f"{where} AND {exclude}" if where else f"WHERE {exclude}"
+        params = (*params, *sibling_params)
 
     total = conn.execute(
         f"{prefix}SELECT count(*) AS n FROM media_file m {where}",  # noqa: S608
-        (*ranks_params, *params),
+        (*prefix_params, *params),
     ).fetchone()["n"]
     rows = conn.execute(
         f"{prefix}SELECT m.* FROM media_file m {where}"  # noqa: S608
         " ORDER BY m.captured_at DESC, m.id DESC LIMIT ? OFFSET ?",
-        (*ranks_params, *params, limit, offset),
+        (*prefix_params, *params, limit, offset),
     )
     media = []
     for row in rows:

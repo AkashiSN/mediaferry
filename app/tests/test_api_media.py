@@ -127,6 +127,59 @@ def test_an_unknown_collapse_value_is_a_bad_request(client):
     assert response.status_code == 400
 
 
+def test_stack_members_names_the_pair_without_hiding_the_raw(client, canon_pair):
+    """**隠さない。** 送る画面は返ってきた行を送るので、従を隠すと RAW が送られない."""
+    body = client.get("/api/media?stack=members").json()
+
+    names = [m["rel_path"].split("/")[-1] for m in body["media"]]
+    assert "IMG_0001.CR2" in names
+    assert "IMG_0001.JPG" in names
+    for item in body["media"]:
+        assert [m["rel_path"].split("/")[-1] for m in item["stack"]["members"]] == [
+            "IMG_0001.JPG",
+            "IMG_0001.CR2",
+        ]
+
+
+def test_stack_members_leaves_a_lone_file_without_a_stack(client, canon_pair_without_proof):
+    """組でない行には**キーごと付けない**（空の組を作らない）.
+
+    **一覧は「無いこと」を `null` では言わない。** 既にある 4 本
+    （同ファイルの `assert "stack" not in …`）がそれを仕様として固定している ——
+    行に `null` を足すと `collapse=stack` の契約が変わる。詳細（Task 1）は 1 件の
+    応答で欄が固定なので、そちらだけ `"stack": None` を明示する。
+    """
+    body = client.get("/api/media?stack=members").json()
+
+    assert len(body["media"]) == 2
+    for item in body["media"]:
+        assert "stack" not in item
+
+
+def test_collapse_wins_over_stack_members(client, canon_pair):
+    """**両方来たら `collapse` が勝つ**（隠す）. 新設の 400 にしない —— 既存の
+    呼び出し元が壊れる."""
+    body = client.get("/api/media?collapse=stack&stack=members").json()
+
+    names = [m["rel_path"].split("/")[-1] for m in body["media"]]
+    assert "IMG_0001.CR2" not in names
+
+
+def test_an_unknown_stack_value_is_a_bad_request(client):
+    """`stack` は `members` だけ受け付ける."""
+    response = client.get("/api/media?stack=bogus")
+
+    assert response.status_code == 400
+    assert response.json()["error"]["code"] == "bad_request"
+
+
+def test_stack_members_does_not_change_the_total(client, canon_pair):
+    """**総数は変わらない。** 隠さないのだから、`collapse` 無しと同じ数."""
+    plain = client.get("/api/media").json()["total"]
+
+    assert client.get("/api/media?stack=members").json()["total"] == plain
+
+
 def test_the_ambiguous_pair_is_not_collapsed(client, canon_pair, ambiguous_sibling):
     """同じ順位の兄弟が 2 つあると、どちらが主か決まらない. **CR2 も隠さない。**
 

@@ -492,6 +492,12 @@ export interface paths {
          *     させず、従の行だけを隠す。主の行には `stack.members` が付く。**既定は
          *     畳まない** —— ホームの「さっき取り込んだもの」と選んで送る画面が同じ
          *     この API を使うので、`collapse` を指定しない限り契約を変えない。
+         *
+         *     `stack=members` は**従を隠さずに**、組に属する行すべてへ `stack` を付ける。
+         *     送る画面が使う —— 送る対象は絞り込みが返した行そのもので、畳むと未送信の
+         *     RAW が送られなくなる（`docs/history/phase12-design.md` の 2）。**`collapse=stack`
+         *     と併せて来たら `collapse` が勝つ**（隠す）。片方だけを 400 にすると、既存の
+         *     呼び出し元が壊れる。
          */
         get: operations["list_media_api_media_get"];
         put?: never;
@@ -1813,6 +1819,7 @@ export interface operations {
                 destination_id?: string | null;
                 status?: string | null;
                 collapse?: string | null;
+                stack?: string | null;
             };
             header?: never;
             path?: never;
