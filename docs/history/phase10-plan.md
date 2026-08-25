@@ -636,8 +636,10 @@ from ..core.uploads.stacking import extension_of, stem_prefix
         **印は `<job_id>:<stem prefix>`。** スキャンの id だけにすると、1 回の
         スキャンが書いた別々の組が同じ印になる（一覧が無関係な写真を畳む）。
 
-        **拡張子が 2 種類以上あることを要求する。** 同じ拡張子は鍵の下に 1 つ
-        しか無いので実際には起きないが、条件を「2 件以上」と書くと意図が読めない。
+        **拡張子が 2 種類以上あることを要求する。** 大小文字違い（`IMG_0001.JPG` と
+        `IMG_0001.jpg`）は同じ正規化拡張子になるので、条件を「2 件以上」と書くと
+        その 2 つを組と読んでしまう。組めるかは `identity_partners` が `ambiguous`
+        として決める。
         """
         by_prefix: dict[str, list[str]] = {}
         for rel_path in eligible:
@@ -646,6 +648,10 @@ from ..core.uploads.stacking import extension_of, stem_prefix
             if len({extension_of(path) for path in paths}) < 2:
                 continue
             for rel_path in paths:
+                # **1 行ごとに fsync が起きる**（接続は `synchronous = FULL` の
+                # autocommit）。1488 件のカードでは `_sweep_vanished` と同じ規模に
+                # なるので、同じように心拍を打ち続ける。
+                ctx.heartbeat()
                 self._conn.execute(
                     "UPDATE source_entry SET copresent_key = ?"
                     " WHERE volume_instance_id = ? AND rel_path = ?",
@@ -729,6 +735,10 @@ from ..core.uploads.stacking import extension_of, stem_prefix
 期待: 全部 PASS（Task 4 より前のテストも含めて）
 
 - [ ] **Step 5: 変異試験**
+
+**このタスクのテストは、書いた本数では足りない。** 実測では下の 5 つのうち 4 つが
+ブリーフ付属のテストでは検出できなかった（`counted` の門・`< 2` の閾値・`same` での
+分岐・`_touch` の `extension`）。**変異を当ててから、区別できるテストを足すこと。**
 
 壊すもの: `counted` の門 / `< 2` の閾値 / 印から `prefix` を落として `job_id` だけに
 する / `if not same` を落として常に消す / `if not same` を落として一度も消さない。
