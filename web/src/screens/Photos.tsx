@@ -147,6 +147,9 @@ export function PhotosScreen() {
   // 宛先が 1 つしか無ければ、黙ってそれを使う。2 つ以上あるときは選ばせる。
   const effectiveDestinationId =
     destinationRows.length === 1 ? destinationRows[0].id : chosenDestinationId;
+  // **ここもメモ化する。** 下の `rows` の `useMemo` がこの値に依存しており、
+  // 生の式のままだと React Compiler が `rows` 側の手動メモ化を安全に保てず、
+  // 最適化を諦める（lint の react-hooks/preserve-manual-memoization が指す）。
   const needsDestination = useMemo(
     () => DESTINATION_SCOPED.has(filter) && effectiveDestinationId === null,
     [filter, effectiveDestinationId],

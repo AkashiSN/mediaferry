@@ -267,15 +267,25 @@ describe("写真の画面", () => {
     expect(calls().some((c) => c.path.includes("destination_id=d1"))).toBe(false);
   });
 
-  it("宛先ごとの絞り込みが効いていても、状態の印は出さない", async () => {
+  it("宛先ごとの絞り込みが効いていても、状態の印も凡例も出さない", async () => {
     // **印は行ごとに引いていなかった。** 宛先ごとの絞り込みが効いている間だけ
     // 全行へ同じ印を被せていたので、直前に押したチップの繰り返しにしかならない。
-    stubApi({
+    const { calls } = stubApi({
       "/media": {
         media: [media("a", "2026-08-18T14:03:00+09:00")],
         total: 1,
         page: 1,
         page_size: 50,
+      },
+      // クリック後の応答は別のタイル（b）で返す。**a のままでは確かめられない**
+      // —— クリック直後、前の絞り込みの行がまだ並んでいる間に確かめると、
+      // その一瞬だけ緑になってしまう。b が出てから確かめれば、応答が
+      // 実際に画面へ反映されたあとだと分かる。
+      "/media?status=sent&destination_id=d1&collapse=stack&page_size=200": {
+        media: [media("b", "2026-08-18T14:03:00+09:00")],
+        total: 1,
+        page: 1,
+        page_size: 200,
       },
       "/destinations": { destinations: [{ id: "d1", name: "家", enabled: true }] },
     });
@@ -285,8 +295,20 @@ describe("写真の画面", () => {
       </MemoryRouter>,
     );
     await userEvent.click(await screen.findByRole("button", { name: /送信済み/ }));
-    await waitFor(() => expect(screen.getByRole("button", { name: /a\.JPG/ })).toBeInTheDocument());
+    await waitFor(() =>
+      expect(
+        calls().some(
+          (c) =>
+            c.path === "/media?status=sent&destination_id=d1&collapse=stack&page_size=200" &&
+            c.method === "GET",
+        ),
+      ).toBe(true),
+    );
+    await waitFor(() => expect(screen.getByRole("button", { name: /b\.JPG/ })).toBeInTheDocument());
     expect(container.querySelector(".tile .mark")).toBeNull();
+    // **タイルがあり、宛先ごとの絞り込みも効いている状態でも凡例は出さない。**
+    // 「印が出るときだけ凡例を出す」中間形も、印そのものが無い以上は同じく空。
+    expect(document.querySelector(".legend")).toBeNull();
   });
 
   it("凡例を出さない", async () => {
