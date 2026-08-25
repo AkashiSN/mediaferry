@@ -9,7 +9,7 @@ from fastapi.responses import FileResponse
 
 from ..adapters.thumbnails import ThumbnailFailed, quantise
 from ..core.listing import DEFAULT_PAGE_SIZE, escape_like, page_bounds
-from ..db.media import IN_FLIGHT_STATES, MediaRepository
+from ..db.media import IN_FLIGHT_STATES, MediaRepository, owner_group
 from ..db.merges import GroupNotEditable
 from ..db.selection import SENDABLE_CLAUSE
 from .deps import conn as get_conn
@@ -188,13 +188,20 @@ def get_media(  # noqa: ANN201
 
 
 def _sources(conn, media_id: str) -> list[dict[str, Any]]:  # noqa: ANN001
-    """この 1 件の元になったファイル. **`position` 順**（つないだ順）."""
+    """この 1 件の元になったファイル. **`position` 順**（つないだ順）.
+
+    **持ち主のグループ 1 つの member だけを出す。** 同じ出力を複数のグループが
+    指しうる（`db.media.owner_group`）ので、`output_media_file_id` で直に join すると
+    元ファイルが 2 重に並び、確認ダイアログの「元になった N 件」も 2 倍になる。
+    """
+    group = owner_group(conn, media_id)
+    if group is None:
+        return []
     rows = conn.execute(
         "SELECT mm.position, m.id, m.rel_path, m.missing_at"
-        " FROM merge_group g JOIN merge_member mm ON mm.merge_group_id = g.id"
-        " JOIN media_file m ON m.id = mm.media_file_id"
-        " WHERE g.output_media_file_id = ? ORDER BY mm.position",
-        (media_id,),
+        " FROM merge_member mm JOIN media_file m ON m.id = mm.media_file_id"
+        " WHERE mm.merge_group_id = ? ORDER BY mm.position",
+        (group["id"],),
     )
     return [
         {

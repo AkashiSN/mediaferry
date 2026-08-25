@@ -463,6 +463,18 @@ def test_unsent_excludes_a_missing_original(client, db):
 
 
 # ---------------------------------------------------------------- くわしく（`GET /media/{id}`）
+def a_derived_with_owner(db, ref, digest, rel_path, *, status="skipped"):
+    """持ち主のグループを持つ派生物を作る.
+
+    **出所の分からない派生物は、記録の状態に関わらず消せない**（孤立と同じ扱い）。
+    削除の可否を記録の状態で見たいテストは、まず持ち主を与えて**その検査を通す**。
+    """
+    output = a_media_file(db, ref, role="derived", rel_path=rel_path)
+    group = a_merge_group(db, ref, digest, status=status)
+    db.execute("UPDATE merge_group SET output_media_file_id = ? WHERE id = ?", (output, group))
+    return output
+
+
 def test_media_detail_lists_the_files_it_was_made_from(client, db, data_root, ref):
     """くわしく画面は、元になったファイルを **`position` 順** に出す."""
     first = a_media_file(db, ref, rel_path="library/dji-osmo/DCIM/A.MP4")
@@ -507,7 +519,9 @@ def test_media_detail_says_whether_it_can_be_deleted(client, db, data_root, ref)
 
 
 def test_media_detail_marks_a_trashed_asset(client, db, ref):
-    output = a_media_file(db, ref, role="derived")
+    # **持ち主のグループを付ける.** 出所の分からない派生物はそれだけで消せないので、
+    # 付けないと「ゴミ箱なら消せる」を確かめたつもりで別の理由を見てしまう。
+    output = a_derived_with_owner(db, ref, "digest-trashed", "derived/dji-osmo/DCIM/TRASHED.MP4")
     dest = a_destination(db)
     an_upload(
         db,
@@ -785,7 +799,9 @@ def test_priority_places_deletion_blocking_states_before_non_blocking_ones(clien
 
     deletable_by_presence: dict[str, bool] = {}
     for label, kwargs in simple_scenarios.items():
-        output = a_media_file(db, ref, role="derived", rel_path=f"library/inv/{label}.MP4")
+        # **持ち主のグループを付ける.** 出所が分からないだけで消せなくなるので、
+        # 付けないと全部の語彙が「消せない」に倒れ、不変条件が空振りする。
+        output = a_derived_with_owner(db, ref, f"digest-inv-{label}", f"library/inv/{label}.MP4")
         dest = a_destination(db, name=f"inv-{label}")
         if kwargs is not None:
             an_upload(db, dest, output, **kwargs)
@@ -794,7 +810,7 @@ def test_priority_places_deletion_blocking_states_before_non_blocking_ones(clien
         assert presence == label, f"前提が崩れている: {label} の作り方が違う"
         deletable_by_presence[label] = body["deletable"]
     for label, extra in complete_scenarios.items():
-        output = a_media_file(db, ref, role="derived", rel_path=f"library/inv/{label}.MP4")
+        output = a_derived_with_owner(db, ref, f"digest-inv-{label}", f"library/inv/{label}.MP4")
         dest = a_destination(db, name=f"inv-{label}")
         an_upload(db, dest, output, state="complete", destination_revision_id=dest[1], **extra)
         body = client.get(f"/api/media/{output}").json()
@@ -916,3 +932,42 @@ def test_media_detail_of_an_original_never_promises_release(client, db, ref):
     body = client.get(f"/api/media/{original}").json()
 
     assert body["delete_frees_sources"] is False
+
+
+# ----------------------------------------- 同じ出力を 2 つのグループが指すとき
+#
+# 構成を変えない組み直し（やり直し）は正規の経路で、旧グループは出力を持ったまま
+# superseded になる。新グループの出力は `rel_path` が同じなので同じ `media_file`
+# 行が再利用され、**1 つの出力を 2 つのグループが指す**。
+
+
+def test_media_detail_lists_the_sources_of_a_rebuilt_output_once(client, db, data_root, ref):
+    """**元になったファイルを 2 重に出さない.**
+
+    `output_media_file_id` で直に join すると、旧グループと新グループの member が
+    両方並ぶ。件数（確認ダイアログの「元になった N 件」）が 2 倍になり、画面の
+    `key` も重複する。
+    """
+    from .test_stale_derived import a_rebuilt_output
+
+    media_id, _, _, member, _ = a_rebuilt_output(db, data_root, ref)
+
+    body = client.get(f"/api/media/{media_id}").json()
+
+    assert [source["media_file_id"] for source in body["sources"]] == [member]
+    # 現行グループの出力なので、消せば元ファイルは「まだ送っていない」に戻る。
+    assert body["delete_frees_sources"] is True
+
+
+def test_a_rebuilt_output_can_be_deleted_through_the_api(client, db, data_root, ref):
+    """**500 にしない.** 片方のグループだけ出力を外すと `ON DELETE RESTRICT` に
+    当たり、`GroupNotEditable` ではないので 409 にすらならない."""
+    from .test_stale_derived import a_rebuilt_output
+
+    media_id, _, _, _, path = a_rebuilt_output(db, data_root, ref)
+
+    assert client.get(f"/api/media/{media_id}").json()["deletable"] is True
+    response = client.delete(f"/api/media/{media_id}")
+
+    assert response.status_code == 200, response.json()
+    assert not path.exists()

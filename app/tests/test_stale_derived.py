@@ -424,3 +424,169 @@ def test_a_derived_living_in_immich_is_not_deleted(world, db, data_root):
     with pytest.raises(GroupNotEditable, match="Immich に入っている"):
         repo.delete_derived(media_id)
     assert path.exists()
+
+
+# ----------------------------------------------------------------------
+# 同じ出力を 2 つのグループが指す（構成を変えない組み直し＝やり直し）
+#
+# **これは正規の経路。** `merges.supersede` の「やり直し」は構成を変えないので、
+# 旧グループは `output_media_file_id` を持ったまま superseded になる。新グループが
+# 結合すると出力の `rel_path` が同じなので `publisher._commit` の
+# `WHERE rel_path = ?` が同じ `media_file` 行を再利用し、**1 つの出力を 2 つの
+# グループが指す**。持ち主を 1 つに決めずに書くと、判定・予告・削除がそれぞれ
+# 違うグループを見る。
+
+
+def a_rebuilt_output(db, data_root, ref):
+    """やり直しの後の形を作る（旧グループと新グループが同じ出力を指す）.
+
+    戻り値は `(出力, 旧グループ, 新グループ, 元ファイル, 実体のパス)`。
+    """
+    rel = "derived/dji-osmo/DCIM/REBUILT.MP4"
+    path = data_root / rel
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(b"merged output")
+    media_id = a_media_file(db, ref, rel_path=rel, role="derived")
+    member = a_media_file(db, ref, rel_path="library/dji-osmo/DCIM/REBUILT_PART.MP4")
+    old_group = a_merge_group(db, ref, "digest-rebuilt-old", status="merged")
+    new_group = a_merge_group(db, ref, "digest-rebuilt", status="merged")
+    # **本物と同じ順で組む。** 先に旧グループを向け直すと trigger が旧 member を
+    # 落とすので、同じファイルを新グループが active に握れる（先に握らせると
+    # `merge_member_one_active_group` に当たる）。
+    db.execute("INSERT INTO merge_member VALUES (?, ?, 0, 1)", (old_group, member))
+    db.execute(
+        "UPDATE merge_group SET output_media_file_id = ?, superseded_by_id = ? WHERE id = ?",
+        (media_id, new_group, old_group),
+    )
+    db.execute("INSERT INTO merge_member VALUES (?, ?, 0, 1)", (new_group, member))
+    db.execute(
+        "UPDATE merge_group SET output_media_file_id = ? WHERE id = ?", (media_id, new_group)
+    )
+    return media_id, old_group, new_group, member, path
+
+
+def test_deleting_a_rebuilt_output_clears_every_group_that_points_at_it(world, db, data_root):
+    """**片方だけ外さない.**
+
+    `output_media_file_id` は `ON DELETE RESTRICT`。持ち主 1 つだけを外すと、
+    残った側が指したままなので `media_file` の削除が `IntegrityError` になり、
+    `GroupNotEditable` でもないので 409 にすらならず 500 が画面に出る。
+    """
+    repo, _, ref = world
+    media_id, _, _, _, path = a_rebuilt_output(db, data_root, ref)
+
+    repo.delete_derived(media_id)
+
+    assert not path.exists()
+    pointing = db.execute(
+        "SELECT count(*) FROM merge_group WHERE output_media_file_id = ?", (media_id,)
+    ).fetchone()[0]
+    assert pointing == 0
+    remaining = db.execute("SELECT count(*) FROM media_file WHERE id = ?", (media_id,)).fetchone()[
+        0
+    ]
+    assert remaining == 0
+
+
+def test_deleting_a_rebuilt_output_discards_the_current_group(world, db, data_root):
+    """**持ち主は現行の側.** superseded 側を拾うと、現行グループが `merged` のまま
+    member を握り続け、再検出も組み直しも塞がって二度とつなげなくなる."""
+    repo, _, ref = world
+    media_id, old_group, new_group, member, _ = a_rebuilt_output(db, data_root, ref)
+
+    repo.delete_derived(media_id)
+
+    assert (
+        db.execute("SELECT status FROM merge_group WHERE id = ?", (new_group,)).fetchone()["status"]
+        == "skipped"
+    )
+    # 置き換えられた側は触らない（既に member を解放している）。
+    assert (
+        db.execute("SELECT status FROM merge_group WHERE id = ?", (old_group,)).fetchone()["status"]
+        == "merged"
+    )
+    active = db.execute(
+        "SELECT active FROM merge_member WHERE merge_group_id = ? AND media_file_id = ?",
+        (new_group, member),
+    ).fetchone()["active"]
+    assert active == 0
+
+
+def test_a_rebuilt_output_promises_to_free_its_sources(world, db, data_root):
+    """**予告は現行グループで決める.**
+
+    superseded 側を拾うと「元になった N 件は残ります」とだけ言い、実際には起きる
+    「まだ送っていないに戻る」を予告しないまま消してしまう。
+    """
+    repo, _, ref = world
+    media_id, _, _, _, _ = a_rebuilt_output(db, data_root, ref)
+    assert repo.delete_frees_sources(media_id) is True
+
+
+def test_the_listing_hides_a_rebuilt_output_a_current_group_still_owns(world, db, data_root):
+    """現行グループが握っている出力は「もう使われていない」欄に出さない.
+
+    superseded な側だけを見て並べると、いま使っている出力が消してよいものに見える。
+    """
+    repo, _, ref = world
+    a_rebuilt_output(db, data_root, ref)
+    assert repo.list_stale_derived() == []
+
+
+def test_the_listing_shows_a_twice_rebuilt_output_once(world, db, data_root):
+    """2 度やり直すと、同じ出力を指す superseded なグループが 2 つになる.
+
+    素直に join すると同じファイルが 2 行出て、1 つ消したのに残っているように見える。
+    """
+    repo, _, ref = world
+    media_id, _, new_group, _, _ = a_rebuilt_output(db, data_root, ref)
+    newest = a_merge_group(db, ref, "digest-rebuilt-newest")
+    db.execute("UPDATE merge_group SET superseded_by_id = ? WHERE id = ?", (newest, new_group))
+
+    got = repo.list_stale_derived()
+
+    assert [row["id"] for row in got] == [media_id]
+    assert got[0]["reason"] == "superseded"
+
+
+# ----------------------------------------------------------------------
+# 現行かどうかは「member を握っているか」で決まる（結合が終わったかではない）
+#
+# `publisher` は `merging` のうちに `output_media_file_id` を入れるので、
+# `mark_merged` の前に落ちれば**出力を持ったまま `merging` / `failed` で残る**。
+# `detected` も同じ（`release` が `merging` を戻す）。どれも member を
+# `active = 1` のまま握っているので、出力を消すならグループごと手放す。
+
+
+@pytest.mark.parametrize("status", ["detected", "merging", "failed"])
+def test_the_output_of_a_group_that_never_finished_is_owned_by_it(world, db, data_root, status):
+    repo, _, ref = world
+    media_id, group_id, path = a_derived_with_group(db, data_root, ref, status=status)
+    member = a_media_file(db, ref, rel_path=f"library/dji-osmo/DCIM/PART_{status}.MP4")
+    db.execute("INSERT INTO merge_member VALUES (?, ?, 0, 1)", (group_id, member))
+
+    # 消せば元ファイルは解放される —— 予告もそう言わなければならない。
+    assert repo.delete_frees_sources(media_id) is True
+
+    repo.delete_derived(media_id)
+
+    assert not path.exists()
+    assert (
+        db.execute("SELECT status FROM merge_group WHERE id = ?", (group_id,)).fetchone()["status"]
+        == "skipped"
+    )
+    active = db.execute(
+        "SELECT active FROM merge_member WHERE merge_group_id = ?", (group_id,)
+    ).fetchone()["active"]
+    assert active == 0
+
+
+def test_a_derived_with_no_owner_is_not_offered_for_deletion(world, db, data_root):
+    """**判定と削除で規則をそろえる.**
+
+    出所が分からない派生物は `delete_derived` が断るので、`deletion_blocker` も
+    断らなければ「消せます」と言って 409 になるボタンが画面に並ぶ。
+    """
+    repo, _, ref = world
+    media_id = a_media_file(db, ref, rel_path="derived/dji-osmo/DCIM/NO_OWNER.MP4", role="derived")
+    assert repo.deletion_blocker(media_id) == "元になったファイルが分からない"
