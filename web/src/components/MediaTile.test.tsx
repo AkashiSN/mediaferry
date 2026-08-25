@@ -103,7 +103,7 @@ describe("MediaTile", () => {
     // 送る画面では、相方が送信済みで CR2 だけが対象になることがある。
     // **`media.stack.members` は「このタイルが表すファイル」**なので、1 つなら
     // 組ではない。
-    renderTile({
+    const { container } = renderTile({
       to: "/photos/m1",
       onToggle: vi.fn(),
       media: {
@@ -112,6 +112,11 @@ describe("MediaTile", () => {
       },
     });
     expect(screen.queryByText(/RAW/)).toBeNull();
+    // **文字だけでは見えない崩れ方がある。** `label` の判定元を取り違えると、
+    // 中身が空の `.madeof.raw`（`background` を持つただの色付きの丸）だけが
+    // 残る崩れ方をする。それはテキストの検査には映らないので、入れ物ごと
+    // 無いことを別に見る。
+    expect(container.querySelector(".madeofs")).toBeNull();
   });
 
   // **「つないだ」と `RAW` は独立に立つ。** どちらを出すかは `role` と `stack` が
