@@ -331,6 +331,7 @@ API 側は、相手由来の値と内部の文言を利用者へ流さないた�
 | **開き直しの待ちは二重に積まない** | `onerror` は同じ接続で何度も鳴りうる。待ちを上書きすると先の待ちが生き残ったまま両方が開き、**1 タブ 1 本**（`MAX_CONNECTIONS` を守る前提）が崩れる |
 | **送信の記録の一覧に、状態で引く索引は足さない**（測ったうえで） | `GET /uploads?state=…` は `upload_record` を走査する。60,000 行で **3.7 ms**、`(state, updated_at DESC)` の索引を置くと 0.4 ms（実測）。**この差のために索引を 1 本増やさない** —— `upload_record` の `state` は 1 件の送信で何度も動くので、書き込みのたびに維持費がかかる。`0019` の場面（1.3 秒 → 2.5 ms）とは桁が違う。行が桁で増えたら測り直す |
 | **`/dashboard` が `SENDABLE_CLAUSE` を宛先の数だけ回すのは、そのままにする** | 「まだ送っていない」は全体で 1 回、宛先ごとに 1 回。**宛先は 1〜2 個という前提の設計**（§12.3）なので、実際に回るのは 2〜3 回。1 回あたりは `0019` の部分索引で速い |
+| **写真タブの「つないだ動画」絞り込みは、`role='derived'` だけの部分索引で速くする**（`0023`。全体索引の `0022` は `DROP` して置き換えた） | `GET /media?role=derived` は `captured_at DESC, id DESC` の並び索引を辿りながら絞り込む形になり、`derived` は全体のごく一部なので **`LIMIT` を満たすまでにほぼ全件を舐める**（実測: original 60,000 行・derived 200 行で **57.7 ms**）。`(role, captured_at DESC, id DESC)` の全体索引（`0022`）を足すとそこは 0.29 ms まで落ちるが、**`SENDABLE_CLAUSE` の `role` 等値の 2 つの枝（original 側・derived 側）の両方にこの索引が使えてしまい**、無関係な `GET /media?status=unsent&destination_id=…` が `MULTI-INDEX OR` ＋全件ソートに落ちて **0.58 ms → 74 ms に退行した**（レビューが自分で実測して発見。実装者が測っていたのは絞り込み先の経路だけで、**測る対象が足りていなかった**）。**`role='derived'` だけの部分索引**に差し替えると、original 側の枝には索引が無いままなので `MULTI-INDEX OR` の対象から外れ、`role=derived` は **0.28 ms**、退行していた経路も **0.42 ms** に戻る。**`_filters` の `role` 節は、バインド変数ではなく既知 2 値をリテラルで埋める**（`_status_clause` の `known[status]` と同じ作法）—— SQLite の部分索引は述語が prepare 時に**証明できる**ときしか選ばれず、バインド変数のままだと選ばれる保証が無い。詳しい実測は [`history/phase9-record.md`](history/phase9-record.md) |
 
 ## セキュリティと秘密の扱い
 
