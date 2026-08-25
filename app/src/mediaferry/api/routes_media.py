@@ -10,11 +10,12 @@ from fastapi.responses import FileResponse
 from ..adapters.thumbnails import ThumbnailFailed, quantise
 from ..core.listing import DEFAULT_PAGE_SIZE, escape_like, page_bounds
 from ..db.media import IN_FLIGHT_STATES, MediaRepository, owner_group
-from ..db.merges import GroupNotEditable
+from ..db.merges import GroupNotEditable, MergeRepository
 from ..db.selection import SENDABLE_CLAUSE
 from .deps import conn as get_conn
 from .deps import state as get_state
 from .errors import ApiError, ErrorCode
+from .routes_merges import _current_revisions, group_view
 
 router = APIRouter()
 
@@ -184,7 +185,28 @@ def get_media(  # noqa: ANN201
         # 出力を消すときだけ真。確認ダイアログの文言をこれで出し分ける
         # （画面はグループの現行性を知らないので、ここで返す）。
         "delete_frees_sources": repo.delete_frees_sources(media_id),
+        # **この出力を持っているグループ**（元のファイルなら `None`）。つなぐ画面は
+        # 「まだつないでいないもの」だけを出すので、採用・やり直し・構成の変更・
+        # 別々にするの入口はこの画面にある。**判断に要る欄を同じ 1 本で返す** ——
+        # 別の API を継ぎ足すと、検証結果と「消せるか」が別々の時点の状態になる。
+        "group": _merge_group(conn, media_id),
     }
+
+
+def _merge_group(conn, media_id: str) -> dict[str, Any] | None:  # noqa: ANN001
+    """持ち主のグループを、つなぐ画面と同じ形で返す.
+
+    **表現を書き写さない。** `routes_merges.group_view` を呼ぶ —— `profile_changed`
+    の導き方が 2 か所にあると、採用の入口だけが古い条件を持つことになる。
+    """
+    owner = owner_group(conn, media_id)
+    if owner is None:
+        return None
+    repo = MergeRepository(conn)
+    row = repo.get(owner["id"])
+    if row is None:
+        return None
+    return group_view(repo, row, _current_revisions(conn))
 
 
 def _sources(conn, media_id: str) -> list[dict[str, Any]]:  # noqa: ANN001

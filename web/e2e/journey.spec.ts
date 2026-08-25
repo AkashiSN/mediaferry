@@ -125,7 +125,15 @@ async function mergeTwoParts(page: Page): Promise<void> {
   }
 
   await mergeButton.click();
-  await expect(page.getByText(/できたファイル/)).toBeVisible({ timeout: 60_000 });
+  // **つないだ結果は、つなぐ画面には出ない**（Phase 11）。この画面が出すのは
+  // 「まだつないでいないもの」だけなので、済んだことは**組がここから消えること**と、
+  // **写真 › つないだ動画に出ること**で確かめる。
+  await expect(page.getByRole("heading", { name: "つなぐものはありません" })).toBeVisible({
+    timeout: 60_000,
+  });
+  await page.goto(app.url + "/photos?role=derived");
+  await settled(page);
+  await expect(page.locator("main .tile").first()).toBeVisible({ timeout: 60_000 });
 }
 
 /**
@@ -803,6 +811,12 @@ test("つないだ動画を開いて、消せる", async ({ page }) => {
   await expect(page.getByRole("heading", { name: "元になったファイル" })).toBeVisible({
     timeout: 60_000,
   });
+  // **つないだ結果への操作は、この画面にある**（Phase 11）。つなぐ画面から
+  // 移したので、ここに無いと検証に落ちた動画を送る手段が消える。
+  await expect(page.getByRole("heading", { name: "つないだ結果" })).toBeVisible({
+    timeout: 60_000,
+  });
+  await expect(page.getByRole("button", { name: "これは別々" })).toBeVisible();
 
   // 一度も送っていないので消せる。確認ダイアログを経て消す。
   await page.getByRole("button", { name: "消す" }).click();

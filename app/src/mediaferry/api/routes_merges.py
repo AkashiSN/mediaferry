@@ -89,19 +89,26 @@ def list_groups(
     status: str | None = None,
     limit: int = 200,
     offset: int = 0,
+    pending: bool = False,
     conn=Depends(get_conn),  # noqa: ANN001, B008
 ) -> dict[str, Any]:
+    """`pending` は**まだつないでいないものだけ**（つなぐ画面が使う）.
+
+    **`status` とは併せられない。** 片方を黙って無視すると、画面は絞ったつもりの
+    一覧を全件だと読む。
+    """
+    if pending and status is not None:
+        raise ApiError(400, ErrorCode.BAD_REQUEST, "pending と status は同時に指定できない")
     repo = MergeRepository(conn)
     current = _current_revisions(conn)
-    return {
-        "groups": [_group(repo, row, current) for row in repo.list_groups(status, limit, offset)]
-    }
+    rows = repo.list_groups(status, limit, offset, pending=pending)
+    return {"groups": [group_view(repo, row, current) for row in rows]}
 
 
 @router.get("/merge-groups/{group_id}")
 def get_group(group_id: str, conn=Depends(get_conn)) -> dict[str, Any]:  # noqa: ANN001, B008
     repo = MergeRepository(conn)
-    return _group(repo, _found(repo, group_id), _current_revisions(conn))
+    return group_view(repo, _found(repo, group_id), _current_revisions(conn))
 
 
 @router.post("/merge-groups/{group_id}/merge")
@@ -307,7 +314,14 @@ def _current_revisions(conn) -> dict[str, str]:  # noqa: ANN001
     }
 
 
-def _group(repo: MergeRepository, row, current_revisions: dict[str, str]) -> dict[str, Any]:  # noqa: ANN001
+def group_view(repo: MergeRepository, row, current_revisions: dict[str, str]) -> dict[str, Any]:  # noqa: ANN001
+    """グループ 1 つの表現。**この形を作るのはここだけ.**
+
+    つなぐ画面の一覧と、1 件のくわしく（`routes_media.get_media`）が同じものを
+    読む。**書き写すと、片方だけが `profile_changed` の導き方を古いまま持つ**
+    —— 採用の入口はくわしく側にあるので、そこだけ条件がずれると「押しても
+    送れるようにならないボタン」が出る。
+    """
     return {
         "id": row["id"],
         "status": row["status"],

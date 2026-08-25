@@ -5,7 +5,7 @@
 // に置く。
 
 import { useRef, useState } from "react";
-import { useNavigate } from "react-router-dom";
+import { Link, useNavigate } from "react-router-dom";
 
 import { request } from "../../api/client";
 import { useDashboardReload } from "../../api/dashboard";
@@ -20,7 +20,7 @@ import { useReloadOnEvents } from "../../hooks/useReloadOnEvents";
 import { formatBytes } from "../../utils/formatBytes";
 import { formatDateTime } from "../../utils/formatDateTime";
 
-type Member = {
+export type Member = {
   position: number;
   media_file_id: string;
   rel_path: string;
@@ -44,7 +44,7 @@ export type Verification = {
   // 経路のコンテナが運べずに外したストリーム（TS 経路の `tmcd` など）。
   route_dropped_streams: unknown[];
 };
-type Group = {
+export type Group = {
   id: string;
   status: string;
   detected_by: string;
@@ -100,7 +100,7 @@ export function failureReason(verification: Verification): string {
 }
 
 /** 検証の結果。**採用の判断ができるように、検査ごとに出す**（§13「検証結果」）。 */
-function VerificationResult({ verification }: { verification: Verification }) {
+export function VerificationResult({ verification }: { verification: Verification }) {
   const dropped = verification.route_dropped_streams ?? [];
   return (
     <div className="small" style={{ marginTop: 6 }}>
@@ -124,7 +124,7 @@ function VerificationResult({ verification }: { verification: Verification }) {
 type Groups = { groups: Group[] };
 
 /** `position` 順に並べる。**API の順を信用しない**（表示も計算もこの順で行う）。 */
-function ordered(members: Member[]): Member[] {
+export function ordered(members: Member[]): Member[] {
   return [...members].sort((a, b) => a.position - b.position);
 }
 
@@ -203,7 +203,7 @@ function totalMinutes(members: Member[]): number {
  * 採用できる組か（`db/merges.py` の `adopt` が受け付ける条件と揃える）。
  * 組み直された組と、既に採用した組には出さない —— 押しても 409 か無反応になる。
  */
-function adoptable(group: Group): boolean {
+export function adoptable(group: Group): boolean {
   return (
     // **カメラの種類が変わった組には出さない。** 採用しても `group_is_current`
     // が断るので、押しても送れるようにはならない。
@@ -220,7 +220,10 @@ function adoptable(group: Group): boolean {
 export function MergeScreen() {
   // **1 件多く読む。** ちょうど上限の件数だったときに「ほかにもあります」と
   // 書かないため（読めた数だけでは、切れたのか出し切ったのかが分からない）。
-  const groups = useQuery<Groups>(`/merge-groups?limit=${MERGE_PAGE + 1}`);
+  // **まだつないでいないものだけ。** 結合済みへの操作は、その 1 本を見ている
+  // 画面（`/photos/:id`）にある。**絞るのはサーバ側** —— 手元で外すと、
+  // 上限の 200 件を結合済みが埋めて「ほかにもあります」が出ない。
+  const groups = useQuery<Groups>(`/merge-groups?pending=true&limit=${MERGE_PAGE + 1}`);
   // 手で組むときの選択肢（**検出が拾えなかった並びを人が組む**）。
   const media = useQuery<{ media: { id: string; rel_path: string }[] }>("/media?page_size=200");
   const [picked, setPicked] = useState<Set<string>>(new Set());
@@ -290,7 +293,9 @@ export function MergeScreen() {
             <ul style={{ display: "flex", flexDirection: "column", gap: 6, marginTop: 10, listStyle: "none" }}>
               {members.map((member) => (
                 <li key={member.media_file_id} className="row" style={{ justifyContent: "space-between" }}>
-                  <span style={{ fontSize: 13 }}>{member.rel_path}</span>
+                  <span className="ident" style={{ fontSize: 13 }}>
+                    {member.rel_path}
+                  </span>
                   <span className="small">
                     {formatBytes(member.size_bytes)} ・ {formatDateTime(member.captured_at)} ・
                     {member.duration_seconds === null ? "—" : ` ${Math.round(member.duration_seconds)} 秒`}
@@ -298,25 +303,7 @@ export function MergeScreen() {
                 </li>
               ))}
             </ul>
-            {group.output && (
-              <p className="small" style={{ marginTop: 8 }}>
-                できたファイル: <code>{group.output.rel_path}</code>（
-                {formatBytes(group.output.size_bytes)}
-                {group.output.missing ? "・見つかりません" : ""}）
-              </p>
-            )}
             {group.verification && <VerificationResult verification={group.verification} />}
-            {group.adopted_at !== null && (
-              <p className="small" style={{ marginTop: 3 }}>
-                中身を見て採用しました。
-              </p>
-            )}
-            {/* **行き止まりにしない**（§13）。使えない理由と、次にやることを書く。 */}
-            {group.profile_changed && group.status === "merged" && (
-              <p className="small" style={{ marginTop: 3, color: "var(--warn)" }}>
-                つないだあとにカメラの種類が変わったので、この結果はもう使えません。「同じ構成でやり直す」でつなぎ直してください。
-              </p>
-            )}
           </div>
           <div className="acts">
             {group.status === "detected" && (
@@ -341,49 +328,6 @@ export function MergeScreen() {
                 }
               >
                 個別に送る
-              </button>
-            )}
-            {adoptable(group) && (
-              // §10 の `adopted_derived`。**検証に落ちた出力は、人が中身を見て
-              // 採用しない限り送る候補に出ない**（`SENDABLE_CLAUSE` は
-              // `passed` か `adopted_at` を見る）。ここがその唯一の入口。
-              <button
-                type="button"
-                className="btn sm"
-                disabled={edit.busy}
-                onClick={() =>
-                  setConfirmation({
-                    value: {
-                      kind: "adopt_failed_merge",
-                      groupLabel: members[0]?.rel_path ?? group.id,
-                      reason: failureReason(group.verification as Verification),
-                    },
-                    run: () => act(`/merge-groups/${group.id}?action=adopt`),
-                  })
-                }
-              >
-                中身を見て、これを使う
-              </button>
-            )}
-            {group.status === "merged" && group.superseded_by_id === null && (
-              <button
-                type="button"
-                className="btn sm"
-                disabled={edit.busy}
-                onClick={() =>
-                  setConfirmation({
-                    value: {
-                      kind: "remerge_group",
-                      groupLabel: members[0]?.rel_path ?? group.id,
-                    },
-                    run: () =>
-                      act(`/merge-groups/${group.id}?action=regroup`, {
-                        media_ids: members.map((member) => member.media_file_id),
-                      }),
-                  })
-                }
-              >
-                同じ構成でやり直す
               </button>
             )}
             {group.superseded_by_id === null && (
@@ -436,6 +380,16 @@ export function MergeScreen() {
           カメラは長い動画を、ある大きさごとに区切って保存します。ここでつないでおくと、
           Immich には 1 本の動画として並びます。つないだあとも、元の分かれたファイルは
           NAS に残ります。
+        </p>
+        {/* **行き止まりにしない**（§13）。この画面はこれからつなぐものだけを出すので、
+            つないだ結果がどこにあるかを書く。**構成を変える・別々にするといった
+            操作も、つないだ後はその 1 本のくわしくで行う。** */}
+        <p className="muted" style={{ marginTop: 7 }}>
+          つないだ動画はここには出ません。{" "}
+          <Link to="/photos?role=derived" className="btn sm quiet">
+            写真 › つないだ動画
+          </Link>{" "}
+          で見て、構成を変えたり別々に戻したりできます。
         </p>
       </div>
 
@@ -539,7 +493,7 @@ export function MergeScreen() {
  * （このダイアログを開くボタン自体が `busy` の間は押せず、開いている間に `busy`
  * を真にできる経路も無い）。
  */
-function RegroupDialog({
+export function RegroupDialog({
   group,
   onCancel,
   onSubmit,

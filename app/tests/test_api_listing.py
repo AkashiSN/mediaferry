@@ -971,3 +971,33 @@ def test_a_rebuilt_output_can_be_deleted_through_the_api(client, db, data_root, 
 
     assert response.status_code == 200, response.json()
     assert not path.exists()
+
+
+# ------------------------------------------------------------------ group
+#
+# **つないだ動画への操作は、その 1 本を見ている画面で行う**（Phase 11）。
+# つなぐ画面は「まだつないでいないもの」だけを出すので、採用・やり直し・構成の
+# 変更・別々にするの入口はくわしくへ移る。**判断に要る欄を同じ 1 本の応答で返す**
+# —— 別の API を継ぎ足すと、検証結果と「消せるか」が別々の時点の状態になる。
+
+
+def test_media_detail_carries_the_owning_merge_group(client, db, ref):
+    """出力を持っているグループを、判断に要る欄つきで返す."""
+    output = a_media_file(db, ref, role="derived", rel_path="derived/dji-osmo/DCIM/OUT9.MP4")
+    group = a_merge_group(db, ref, "digest-owner", status="merged")
+    db.execute("UPDATE merge_group SET output_media_file_id = ? WHERE id = ?", (output, group))
+
+    body = client.get(f"/api/media/{output}").json()
+
+    assert body["group"]["id"] == group
+    assert body["group"]["status"] == "merged"
+    assert body["group"]["adopted_at"] is None
+    assert body["group"]["superseded_by_id"] is None
+    assert body["group"]["profile_changed"] is False
+
+
+def test_media_detail_of_an_original_has_no_group(client, db, ref):
+    """**元のファイルには持ち主が居ない.** 空の器を返して画面に判定させない."""
+    media = a_media_file(db, ref, role="original", rel_path="library/dji-osmo/DCIM/A.MP4")
+
+    assert client.get(f"/api/media/{media}").json()["group"] is None

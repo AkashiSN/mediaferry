@@ -14,6 +14,16 @@ import { Icon } from "../components/Icon";
 import { fileName } from "../components/MediaTile";
 import { formatBytes } from "../utils/formatBytes";
 import { formatDateTime } from "../utils/formatDateTime";
+// **つなぐ画面と同じ部品・同じ判断を使う。** 書き写すと、採用できる条件が
+// 2 か所に分かれ、片方だけが古くなる（`SENDABLE_CLAUSE` と揃っていないと、
+// 押しても送れるようにならないボタンが出る）。
+import {
+  adoptable,
+  failureReason,
+  RegroupDialog,
+  VerificationResult,
+  type Group,
+} from "./work/Merge";
 
 type SourceItem = {
   media_file_id: string;
@@ -45,6 +55,8 @@ type MediaDetail = {
   deletable: boolean;
   delete_blocked_reason: string | null;
   delete_frees_sources: boolean;
+  /** この出力を持っているグループ（元のファイルなら `null`）。 */
+  group: Group | null;
 };
 
 /**
@@ -69,14 +81,41 @@ function formatDuration(seconds: number): string {
   return `${minutes}:${String(secs).padStart(2, "0")}`;
 }
 
+/** 確認に出すグループの名乗り。**内部の ID を出さない**（§13）ので、元のファイル名を使う。 */
+function groupLabel(data: MediaDetail): string {
+  return data.sources[0]?.rel_path ?? fileName(data.rel_path);
+}
+
 export function PhotoDetailScreen() {
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
   const detail = useQuery<MediaDetail>(id === undefined ? "" : `/media/${id}`, [id]);
   const deletion = useMutation();
   const [confirming, setConfirming] = useState(false);
+  // グループへの操作（採用・やり直し・構成の変更・別々にする）。**消すのとは
+  // 別の状態で持つ** —— 片方の確認が開いている間に、もう片方が実行されないように。
+  const edit = useMutation();
+  const [groupConfirm, setGroupConfirm] = useState<{
+    value: Confirmation;
+    run: () => Promise<unknown>;
+  } | null>(null);
+  const [regrouping, setRegrouping] = useState(false);
 
   const data = detail.data;
+  // **置き換えられた組にも、何だったのかは出す。** 検証の結果は「なぜこの出力が
+  // 残っているのか」の手がかりで、行き止まりにしないための材料でもある。
+  // **ただし操作は出さない** —— 構成そのものが古く、押しても何も起きない
+  // （つなぐ画面の判断と同じ）。
+  const group = data?.group ?? null;
+  const editable = group !== null && group.superseded_by_id === null;
+
+  /** グループへの操作。**成功したら詳細を引き直す**（検証も採用済みの印も変わる）。 */
+  async function act(path: string, body?: unknown): Promise<void> {
+    if (await edit.run(() => request(path, { method: "PATCH", body }))) {
+      detail.reload();
+    }
+    setGroupConfirm(null);
+  }
 
   async function runDelete() {
     if (id === undefined) {
@@ -109,14 +148,27 @@ export function PhotoDetailScreen() {
         </Link>
       </div>
 
-      <ErrorBanner error={detail.error ?? deletion.error} onDismiss={deletion.clear} />
+      {/* **画面が持つ失敗は 1 本**（帯も 1 本）。消すのとグループへの操作を分けて
+          出すと、どちらの話なのか読む側には分からない。 */}
+      <ErrorBanner
+        error={detail.error ?? deletion.error ?? edit.error}
+        onDismiss={() => {
+          deletion.clear();
+          edit.clear();
+        }}
+      />
 
       {data && (
         <>
           <img
             src={`/api/media/${data.id}/thumbnail`}
             alt=""
-            style={{ width: "100%", maxHeight: 360, objectFit: "contain", borderRadius: 12 }}
+            style={{
+              width: "100%",
+              maxHeight: 360,
+              objectFit: "contain",
+              borderRadius: 12,
+            }}
           />
 
           <div>
@@ -144,7 +196,14 @@ export function PhotoDetailScreen() {
             {data.destinations.length === 0 ? (
               <p className="small">宛先がありません。</p>
             ) : (
-              <ul style={{ listStyle: "none", display: "flex", flexDirection: "column", gap: 12 }}>
+              <ul
+                style={{
+                  listStyle: "none",
+                  display: "flex",
+                  flexDirection: "column",
+                  gap: 12,
+                }}
+              >
                 {data.destinations.map((dest) => (
                   // **状況は名前の直下に置く。** 左右に離して置くと、狭い画面では
                   // 状況だけが次の行へ落ち、どの宛先の状況なのか読めなくなる。
@@ -167,7 +226,14 @@ export function PhotoDetailScreen() {
               {data.sources.length === 0 ? (
                 <p className="small">見つかりません。</p>
               ) : (
-                <ul style={{ listStyle: "none", display: "flex", flexDirection: "column", gap: 8 }}>
+                <ul
+                  style={{
+                    listStyle: "none",
+                    display: "flex",
+                    flexDirection: "column",
+                    gap: 8,
+                  }}
+                >
                   {[...data.sources]
                     .sort((left, right) => left.position - right.position)
                     .map((source) => (
@@ -183,11 +249,116 @@ export function PhotoDetailScreen() {
             </section>
           )}
 
+          {group !== null && (
+            <section className="card pad">
+              <div className="sechead" style={{ marginBottom: 12 }}>
+                <h2>つないだ結果</h2>
+              </div>
+              {group.verification !== null && (
+                <VerificationResult verification={group.verification} />
+              )}
+              {group.adopted_at !== null && (
+                <p className="small" style={{ marginTop: 6 }}>
+                  中身を見て採用しました。
+                </p>
+              )}
+              {/* **行き止まりにしない**（§13）。使えない理由と、次にやることを書く。 */}
+              {group.profile_changed && group.status === "merged" && (
+                <p className="small" style={{ marginTop: 6, color: "var(--warn)" }}>
+                  つないだあとにカメラの種類が変わったので、この結果はもう使えません。「同じ構成でやり直す」でつなぎ直してください。
+                </p>
+              )}
+              {!editable && (
+                <p className="small" style={{ marginTop: 6 }}>
+                  つなぎ直しで置き換わった結果なので、ここからの操作はありません。
+                </p>
+              )}
+              <div className="acts" style={{ marginTop: 14 }}>
+                {editable && adoptable(group) && (
+                  // §10 の `adopted_derived`。**検証に落ちた出力は、人が中身を見て
+                  // 採用しない限り送る候補に出ない**（`SENDABLE_CLAUSE` は `passed` か
+                  // `adopted_at` を見る）。**ここがその唯一の入口。**
+                  <button
+                    type="button"
+                    className="btn sm"
+                    disabled={edit.busy}
+                    onClick={() =>
+                      setGroupConfirm({
+                        value: {
+                          kind: "adopt_failed_merge",
+                          groupLabel: groupLabel(data),
+                          reason: failureReason(
+                            group.verification as NonNullable<typeof group.verification>,
+                          ),
+                        },
+                        run: () => act(`/merge-groups/${group.id}?action=adopt`),
+                      })
+                    }
+                  >
+                    中身を見て、これを使う
+                  </button>
+                )}
+                {editable && (
+                  <>
+                    <button
+                      type="button"
+                      className="btn sm"
+                      disabled={edit.busy}
+                      onClick={() =>
+                        setGroupConfirm({
+                          value: {
+                            kind: "remerge_group",
+                            groupLabel: groupLabel(data),
+                          },
+                          run: () =>
+                            act(`/merge-groups/${group.id}?action=regroup`, {
+                              media_ids: group.members.map((member) => member.media_file_id),
+                            }),
+                        })
+                      }
+                    >
+                      同じ構成でやり直す
+                    </button>
+                    <button
+                      type="button"
+                      className="btn sm"
+                      disabled={edit.busy}
+                      onClick={() => setRegrouping(true)}
+                    >
+                      構成を変える
+                    </button>
+                    <button
+                      type="button"
+                      className="btn sm"
+                      disabled={edit.busy}
+                      onClick={() =>
+                        setGroupConfirm({
+                          value: {
+                            kind: "discard_merge_group",
+                            groupLabel: groupLabel(data),
+                            publishedCount: group.status === "merged" ? 1 : 0,
+                          },
+                          run: () => act(`/merge-groups/${group.id}?action=discard`),
+                        })
+                      }
+                    >
+                      これは別々
+                    </button>
+                  </>
+                )}
+              </div>
+            </section>
+          )}
+
           <div className="acts">
             <button
               type="button"
               className="btn primary"
-              onClick={() => navigate("/send", { state: { ids: [data.id], destinationIds: [] } })}
+              onClick={() =>
+                navigate("/send", {
+                  state: { ids: [data.id], destinationIds: [] },
+                })
+              }
             >
               送る
             </button>
@@ -212,6 +383,28 @@ export function PhotoDetailScreen() {
           busy={deletion.busy}
           onCancel={() => setConfirming(false)}
           onConfirm={() => void runDelete()}
+        />
+      )}
+
+      {regrouping && group !== null && (
+        <RegroupDialog
+          group={group}
+          onCancel={() => setRegrouping(false)}
+          onSubmit={(mediaIds) => {
+            setRegrouping(false);
+            void act(`/merge-groups/${group.id}?action=regroup`, {
+              media_ids: mediaIds,
+            });
+          }}
+        />
+      )}
+
+      {groupConfirm !== null && (
+        <ConfirmDialog
+          confirmation={groupConfirm.value}
+          busy={edit.busy}
+          onCancel={() => setGroupConfirm(null)}
+          onConfirm={() => void groupConfirm.run()}
         />
       )}
     </section>
