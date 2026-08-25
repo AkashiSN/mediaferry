@@ -163,11 +163,10 @@ export function PhotosScreen() {
   // 言葉・ページ・宛先をすべて含むので、これが変わることは並びが変わること。
   // 捨てないと、変わったあとのアンカーが利用者の見ていたものと違う範囲を指す。
   //
-  // **描画の途中で比べて、その場で捨てる。** `useEffect` で捨てると、古い
-  // アンカーのまま 1 回よけいに描画されてから消えるので、その 1 回の間だけ
-  // 古い並びに対して範囲が組めてしまう（react-hooks の
-  // set-state-in-effect が指摘する「効果の中で同期的に setState する」形も
-  // 避けられる）。
+  // **`useEffect` ではなく、描画の途中で比べてその場で捨てる。** `useEffect`
+  // で書くと、このリポジトリの react-hooks/set-state-in-effect（「効果の中で
+  // 同期的に setState する」形を避けるルール）に引っかかる。加えて、描画のたびに
+  // 比べる形なら、値が変わった回に余分な描画を挟まずに済む。
   if (anchorMediaQuery !== mediaQuery) {
     setAnchorMediaQuery(mediaQuery);
     setAnchor(null);
@@ -283,7 +282,11 @@ export function PhotosScreen() {
   }
 
   /**
-   * アンカーから今回のタイルまでを**選ぶ**（外さない）。
+   * アンカーから今回のタイルまでを**選ぶ**（外さない）。**アンカーが `rows` に
+   * 無ければ何もせず `false` を返す**（呼び出し側が 1 枚だけの選択にフォール
+   * バックする）。SSE の再取得（`useReloadOnEvents`）は `mediaQuery` を変えない
+   * ので、絞り込みを変えていなくても、取り込みで 200 件の外へ押し出されたり、
+   * つなぎ直しで消えたりして、アンカーの行が並びから居なくなることがある。
    *
    * **選ぶ側に倒す。** アンカーの選択状態に合わせて外す作りもあるが、
    * 「シフトで選び、要らないものを個別に外す」の方が手数が少なく、押した
@@ -293,11 +296,11 @@ export function PhotosScreen() {
    * まとまりはまたぐ —— 利用者が見ている並びは 1 本の流れで、まとまりは
    * 見出しにすぎない。
    */
-  function selectRange(fromId: string, toId: string) {
+  function selectRange(fromId: string, toId: string): boolean {
     const from = rows.findIndex((row) => row.id === fromId);
     const to = rows.findIndex((row) => row.id === toId);
     if (from === -1 || to === -1) {
-      return;
+      return false;
     }
     const span = rows.slice(Math.min(from, to), Math.max(from, to) + 1);
     setSelected((current) => {
@@ -309,6 +312,7 @@ export function PhotosScreen() {
       }
       return next;
     });
+    return true;
   }
 
   /**
@@ -316,11 +320,15 @@ export function PhotosScreen() {
    * 選ぶ丸も送るのもその単位に揃えないと、主（JPG）しか積まれず、相方（CR2）が
    * 送られないまま Immich でスタックが組まれない
    * （`docs/history/phase10-design.md` §4「選んで送る画面の契約はそのまま」）。
+   *
+   * **範囲が組めなかったときは、1 枚だけの選択にフォールバックする。** アンカー
+   * が無い場合（`anchor === null`）も、あった場合（`selectRange` が `false` を
+   * 返す＝並びから消えていた）も、同じ 1 行にまとめる —— 別々に書くと、片方だけ
+   * 直して片方を忘れる形で 2 つが食い違いうる。
    */
   function toggle(item: Media, modifiers: { shift: boolean }) {
-    if (modifiers.shift && anchor !== null) {
-      selectRange(anchor, item.id);
-    } else {
+    const ranged = modifiers.shift && anchor !== null && selectRange(anchor, item.id);
+    if (!ranged) {
       toggleOne(item);
     }
     setAnchor(item.id);

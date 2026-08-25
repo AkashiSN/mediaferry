@@ -516,6 +516,57 @@ describe("Shift+クリックで範囲を選ぶ", () => {
     expect(await screen.findByText("3 件を選択中")).toBeInTheDocument();
   });
 
+  // **Phase 10 の事故そのもの。** 範囲の中に組（RAW+JPEG）のタイルが混ざって
+  // いるとき、その相方まで選ばなければ、送るときに主（JPG）しか積まれず
+  // Immich でスタックが組まれない。`membersOf` を通さず `item.id` だけを
+  // 積む変異でもテストが全部通ってしまわないよう、範囲選択のテストの中に
+  // `stack` を持つ行を混ぜて確かめる。
+  //
+  // **組の行はアンカーにしない、範囲の途中に置く。** 組の行をアンカー（最初に
+  // 素のクリックで押す行）にすると、そのクリックは `toggleOne` を通るので
+  // 相方まで選ばれてしまい、`selectRange` 側の集計が壊れていても隠れてしまう
+  // （実際にこの並びで確かめて気付いた）。素のクリックで押すのは組を持たない
+  // b、Shift の範囲の中で初めて j の相方が要る場面を作る。
+  it("Shift の範囲に組のタイルが入っていたら、相方も一緒に選ぶ", async () => {
+    stubApi({
+      "/media": {
+        media: [
+          media("b", "2026-08-18T15:12:00+09:00", { size_bytes: 50 }),
+          media("j", "2026-08-18T14:12:00+09:00", {
+            rel_path: "library/x/IMG_1.JPG",
+            size_bytes: 100,
+            stack: {
+              members: [
+                { id: "j", rel_path: "library/x/IMG_1.JPG", size_bytes: 100 },
+                { id: "r", rel_path: "library/x/IMG_1.CR2", size_bytes: 200 },
+              ],
+            },
+          }),
+          media("c", "2026-08-18T13:12:00+09:00", { size_bytes: 25 }),
+        ],
+        total: 3,
+        page: 1,
+        page_size: 200,
+      },
+      "/destinations": { destinations: [] },
+    });
+    render(
+      <MemoryRouter>
+        <PhotosScreen />
+      </MemoryRouter>,
+    );
+
+    const user = userEvent.setup();
+    await user.click(await screen.findByRole("button", { name: "選ぶ：b.JPG" }));
+    await user.keyboard("{Shift>}");
+    await user.click(await screen.findByRole("button", { name: "選ぶ：c.JPG" }));
+    await user.keyboard("{/Shift}");
+
+    // j の相方 r（200 B）を数え落とすと、3 件・175 B になってしまう。
+    expect(await screen.findByText("4 件を選択中")).toBeInTheDocument();
+    expect(screen.getByText(/合計 375 B/)).toBeInTheDocument();
+  });
+
   it("Shift の範囲は日付のまとまりをまたぐ", async () => {
     // **利用者が見ている並びは 1 本の流れ**で、まとまりは見出しにすぎない。
     stubApi({
@@ -678,6 +729,59 @@ describe("Shift+クリックで範囲を選ぶ", () => {
 
     // アンカーが直前の f のままなら f〜a の 2 件。もし起点の c に固定された
     // ままなら c〜a の 5 件になってしまう。
+    expect(await screen.findByText("2 件を選択中")).toBeInTheDocument();
+  });
+
+  it("アンカーが並びから消えていても、押したタイルは選ぶ", async () => {
+    // **SSE の再取得は `mediaQuery` を変えない。** `useReloadOnEvents` が取り込み
+    // や送信の進みで取り直しても、絞り込み・検索・ページ・宛先は変わらないので
+    // アンカーは捨てられない。それでも取り込みで 200 件の外へ押し出されたり、
+    // つなぎ直しで消えたりして、アンカーの行そのものが並びから居なくなることが
+    // ある。そのときの Shift+クリックが黙って何も起きないのは事故——アンカーが
+    // 無いときと同じ「押した 1 枚だけを選ぶ」に倒すべき。
+    const routes: Record<string, unknown> = {
+      "/media": {
+        media: [
+          media("a", "2026-08-18T15:12:00+09:00"),
+          media("b", "2026-08-18T14:03:00+09:00"),
+        ],
+        total: 2,
+        page: 1,
+        page_size: 200,
+      },
+      "/destinations": { destinations: [] },
+    };
+    const { calls } = stubApi(routes);
+    render(
+      <MemoryRouter>
+        <PhotosScreen />
+      </MemoryRouter>,
+    );
+
+    await userEvent.click(await screen.findByRole("button", { name: "選ぶ：a.JPG" }));
+    expect(await screen.findByText("1 件を選択中")).toBeInTheDocument();
+
+    // a が並びから消える（mediaQuery はそのまま）。
+    routes["/media"] = {
+      media: [media("b", "2026-08-18T14:03:00+09:00"), media("c", "2026-08-18T13:03:00+09:00")],
+      total: 2,
+      page: 1,
+      page_size: 200,
+    };
+    const before = calls().filter((c) => c.path.startsWith("/media?")).length;
+    emitJob({ job_id: "j1", seq: 1, level: "info", message: "取り込んだ", data: null, at: "" });
+    await waitFor(() =>
+      expect(calls().filter((c) => c.path.startsWith("/media?")).length).toBeGreaterThan(before),
+    );
+    await waitFor(() => expect(screen.queryByRole("button", { name: "選ぶ：a.JPG" })).toBeNull());
+
+    const user = userEvent.setup();
+    await user.keyboard("{Shift>}");
+    await user.click(await screen.findByRole("button", { name: "選ぶ：c.JPG" }));
+    await user.keyboard("{/Shift}");
+
+    // 何も起きないままなら 1 件（a）のまま。c が新たに選ばれれば 2 件
+    // （a は隠れても選んだままなので、合計に残る）。
     expect(await screen.findByText("2 件を選択中")).toBeInTheDocument();
   });
 });
