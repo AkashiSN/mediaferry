@@ -306,9 +306,34 @@ def test_two_partners_with_the_same_extension_are_ambiguous():
     case-sensitive な FS では `IMG_0001.JPG` と `IMG_0001.jpg` が同じ拡張子になる。
     **どちらが相方かは機械には決められない。**
     """
-    lower = replace(a_jpg(), media_file_id="other", rel_path="DCIM/100CANON/IMG_0001.jpg")
+    # **stem は `a_jpg()` の既定に合わせる。** 合わないと `source_key` の門で
+    # 先に落ちて、曖昧さの判定に届かない（`ambiguous` が常に False になる）。
+    lower = replace(a_jpg(), media_file_id="other", rel_path="DCIM/100CANON/IMG_1234.jpg")
 
     assert identity_partners(a_cr2(), [a_cr2(), a_jpg(), lower], RULE).ambiguous
+```
+
+**primary 自身が衝突する側の 1 つになる場合も、別に 1 本書く。** 上のテストは
+*相方どうし*の衝突しか見ておらず、「自分と同じ拡張子の別ファイルが相方に来る」
+という設計意図そのものを守らない。
+
+```python
+def test_a_partner_sharing_the_primarys_extension_is_ambiguous():
+    """primary 自身も曖昧さの数え上げに入る."""
+    lower = replace(a_jpg(), media_file_id="other", rel_path="DCIM/100CANON/IMG_1234.jpg")
+
+    assert identity_partners(a_jpg(), [a_jpg(), lower], RULE).ambiguous
+```
+
+**`identity_partners` を無効な規則で直接呼ぶテストも 1 本書く。** `resolve_group`
+にも同じ門があるので、経由すると隠れて検出できない。**Task 6 の一覧側は
+`resolve_group` を経由しない**ので、この門が単独で効く入口ができる。
+
+```python
+def test_a_profile_without_stacking_has_no_partners():
+    disabled = StackRule(enabled=False, extensions=("JPG", "CR2"))
+
+    assert identity_partners(a_jpg(), [a_jpg(), a_cr2()], disabled).partners == ()
 ```
 
 ```python
