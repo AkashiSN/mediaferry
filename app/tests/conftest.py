@@ -239,7 +239,9 @@ class CanonPair:
     proof: str | None
 
 
-def _insert_source_entry(db, *, volume_id, rel_path, media_id, extension, copresent_key):
+def _insert_source_entry(
+    db, *, volume_id, rel_path, media_id, extension, copresent_key, state="published"
+):
     """`source_entry` を 1 行作る. **`extension` を明示する**
 
     （`一覧の従外しは `source_entry.extension` を rank と突き合わせるので、
@@ -249,8 +251,18 @@ def _insert_source_entry(db, *, volume_id, rel_path, media_id, extension, copres
         "INSERT INTO source_entry (id, volume_instance_id, rel_path, size_bytes, mtime_ns,"
         " quick_fingerprint, fingerprint_version, media_file_id, state, observed_at,"
         " copresent_key, extension)"
-        " VALUES (?, ?, ?, 10, 1, ?, 1, ?, 'published', ?, ?, ?)",
-        (new_id(), volume_id, rel_path, new_id(), media_id, now_iso(), copresent_key, extension),
+        " VALUES (?, ?, ?, 10, 1, ?, 1, ?, ?, ?, ?, ?)",
+        (
+            new_id(),
+            volume_id,
+            rel_path,
+            new_id(),
+            media_id,
+            state,
+            now_iso(),
+            copresent_key,
+            extension,
+        ),
     )
 
 
@@ -337,6 +349,80 @@ def ambiguous_sibling(db, canon_pair):
     )
     db.commit()
     return media_id
+
+
+def _second_card(
+    db, canon_pair, *, shared: str, fresh: str, shared_state: str = "published"
+) -> str:
+    """`canon_pair` と同じ原名の 2 枚組が載った、2 枚目のカードを足す.
+
+    `shared` の拡張子は 1 枚目と**同じ中身**なので同じ `media_file`（観測が 2 つに
+    増えるだけ）、`fresh` の拡張子は中身が違うので**別の** `media_file` になる。
+    返すのは新しくできた `media_file` の id。
+    """
+    registry = ProfileRegistry(db)
+    profile = registry.current("canon-eos")
+    volume_id = a_volume(db, (profile.profile_id, profile.revision_id), fs_uuid="CANON-EOS-0002")
+    proof = "job2:DCIM/100CANON/IMG_0001."
+    _insert_source_entry(
+        db,
+        volume_id=volume_id,
+        rel_path=f"DCIM/100CANON/IMG_0001.{shared}",
+        media_id=canon_pair.media_ids[shared],
+        extension=shared,
+        copresent_key=proof,
+        state=shared_state,
+    )
+    media_id = a_media_file(
+        db,
+        (canon_pair.profile_id, canon_pair.revision_id),
+        rel_path=f"library/canon-eos/DCIM/100CANON/IMG_0001_2.{fresh}",
+        kind="photo",
+        duration_seconds=None,
+        captured_at="2026-08-19T10:30:00+09:00",
+        captured_at_source="exif",
+    )
+    _insert_source_entry(
+        db,
+        volume_id=volume_id,
+        rel_path=f"DCIM/100CANON/IMG_0001.{fresh}",
+        media_id=media_id,
+        extension=fresh,
+        copresent_key=proof,
+    )
+    db.commit()
+    return media_id
+
+
+@pytest.fixture
+def second_card_with_another_raw(db, canon_pair):
+    """同じ JPG が 2 枚目のカードにも在り、そのカードには**別の** CR2 が在る.
+
+    `identity_partners` は主の**複数の観測にまたがって** `by_extension` を数える
+    ので、JPG から見ると CR2 が 2 つ＝曖昧。**主が曖昧なら従を隠さない**。
+    """
+    return _second_card(db, canon_pair, shared="JPG", fresh="CR2")
+
+
+@pytest.fixture
+def second_card_with_another_jpeg(db, canon_pair):
+    """同じ CR2 が 2 枚目のカードにも在り、そのカードには**別の** JPG が在る.
+
+    従（CR2）の側だけが曖昧になる形。主（どちらの JPG）から見た相方は 1 枚に
+    決まるので、主の曖昧さだけを見ると CR2 が隠れてしまう。
+    """
+    return _second_card(db, canon_pair, shared="CR2", fresh="JPG")
+
+
+@pytest.fixture
+def second_card_still_importing(db, canon_pair):
+    """2 枚目のカードの CR2 は公開済みだが、同じカードの JPG はまだ取り込み中.
+
+    **公開されていない観測は、身元の材料に数えない**（`sources_of` /
+    `siblings_on_card` と同じ）。数えると、1 枚目の組が「CR2 が 2 つある」に
+    見えて畳まれなくなる。
+    """
+    return _second_card(db, canon_pair, shared="JPG", fresh="CR2", shared_state="importing")
 
 
 @pytest.fixture

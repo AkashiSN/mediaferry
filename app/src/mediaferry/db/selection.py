@@ -55,7 +55,9 @@ _DERIVED = (
 )
 
 # §10「既定で選択肢に出すもの」を 1 個の SQL の断片にしたもの. **`media_file` の
-# 別名は `m`.** `_ORIGINALS` の member 条件・`_DERIVED` の group 条件と同じ §10 の
+# 別名は呼び出し側が決める**（`{m}`。既定の `SENDABLE_CLAUSE` は `m`）——
+# `GET /media?collapse=stack` は、同じ条件を主の行と兄弟の行の 2 つの別名へ当てる。
+# `_ORIGINALS` の member 条件・`_DERIVED` の group 条件と同じ §10 の
 # 条件を表している。**片方を変えたらもう片方も変える。**
 #
 # digest そのもの（§10 の derived 条件の最後の 1 つ）はここでは計算できない。現行の
@@ -73,12 +75,12 @@ _DERIVED = (
 # `json_type(...) = 'true'` は本物の JSON bool にだけ一致し、`{"passed": 1}` の
 # ような数値や `{"passed": "false"}` のような文字列を合格に数えない
 # （`_verification_passed` の `is True` と同じ判断になる）。
-SENDABLE_CLAUSE = (
-    "m.missing_at IS NULL AND ("
-    " (m.role = 'original' AND NOT EXISTS ("
-    "   SELECT 1 FROM merge_member mm WHERE mm.media_file_id = m.id AND mm.active = 1))"
-    " OR (m.role = 'derived' AND EXISTS ("
-    "   SELECT 1 FROM merge_group g WHERE g.output_media_file_id = m.id"
+_SENDABLE_TEMPLATE = (
+    "{m}.missing_at IS NULL AND ("
+    " ({m}.role = 'original' AND NOT EXISTS ("
+    "   SELECT 1 FROM merge_member mm WHERE mm.media_file_id = {m}.id AND mm.active = 1))"
+    " OR ({m}.role = 'derived' AND EXISTS ("
+    "   SELECT 1 FROM merge_group g WHERE g.output_media_file_id = {m}.id"
     "    AND g.superseded_by_id IS NULL AND g.status = 'merged'"
     "    AND g.profile_revision_id = ("
     "      SELECT p.current_revision_id FROM device_profile p WHERE p.id = g.profile_id)"
@@ -87,6 +89,17 @@ SENDABLE_CLAUSE = (
     "             AND json_type(g.verification_json, '$.passed') = 'true'))))"
     ")"
 )
+
+
+def sendable_clause(alias: str) -> str:
+    """§10 の条件を、指定した `media_file` の別名に当てた SQL の断片.
+
+    **別名は呼び出し側の定数だけ**（値を埋める口ではない）。
+    """
+    return _SENDABLE_TEMPLATE.format(m=alias)
+
+
+SENDABLE_CLAUSE = sendable_clause("m")
 
 # **`skipped` はここに来ない。** 破棄したグループは member を手放すので（`0017`）、
 # その構成ファイルは `_ORIGINALS` に戻る —— 破棄は「このまとまりは無し」であって、

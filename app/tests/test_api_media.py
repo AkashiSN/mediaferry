@@ -5,8 +5,15 @@
 
 from dataclasses import dataclass
 
+import pytest
+
+from mediaferry.clock import now_iso
 from mediaferry.core.listing import stack_extension_ranks
 from mediaferry.core.profiles.model import StackRule
+from mediaferry.core.uploads.stacking import Candidate, Group, resolve_group
+from mediaferry.db.profiles import ProfileRegistry
+
+from .test_schema_uploads import a_destination, an_upload
 
 
 @dataclass
@@ -166,3 +173,210 @@ def test_a_sibling_under_a_different_profile_is_not_wrongly_hidden(
     paths = [m["rel_path"] for m in body["media"]]
     assert any(p.endswith(".JPG") for p in paths)
     assert any(p.endswith(".CR2") for p in paths)
+
+
+def test_a_failed_raw_is_listed_when_its_jpeg_succeeded(client, db, canon_pair):
+    """**絞り込みを通らない主は、従を隠す根拠にならない。**
+
+    写真タブは全部の絞り込みに `collapse=stack` を付ける。JPG が `complete`・
+    CR2 が `failed` のとき、主（JPG）が同じ絞り込みを通るかを見ずに従を隠すと、
+    **失敗した CR2 が画面から消えて再試行に辿り着けない**。
+    """
+    destination = a_destination(db, name="stack-retry")
+    an_upload(
+        db,
+        destination,
+        canon_pair.media_ids["JPG"],
+        state="complete",
+        destination_revision_id=destination[1],
+    )
+    an_upload(db, destination, canon_pair.media_ids["CR2"], state="failed")
+    db.commit()
+
+    body = client.get(
+        f"/api/media?collapse=stack&destination_id={destination[0]}&status=failed"
+    ).json()
+
+    assert [m["rel_path"].split("/")[-1] for m in body["media"]] == ["IMG_0001.CR2"]
+    assert body["total"] == 1
+
+
+def test_an_unsendable_jpeg_does_not_hide_its_raw(client, db, canon_pair):
+    """`status=unsent` の判断（`sendable_clause`）も、兄弟の行に当てる.
+
+    元のファイルが行方不明になった JPG は送る候補に出ない（§10）。一覧にも出ない
+    のに従を隠す根拠として数えると、**送れる CR2 が「まだ送っていない」から消える**。
+    """
+    db.execute(
+        "UPDATE media_file SET missing_at = ? WHERE id = ?",
+        (now_iso(), canon_pair.media_ids["JPG"]),
+    )
+    destination = a_destination(db, name="stack-unsent")
+    db.commit()
+
+    body = client.get(
+        f"/api/media?collapse=stack&destination_id={destination[0]}&status=unsent"
+    ).json()
+
+    assert [m["rel_path"].split("/")[-1] for m in body["media"]] == ["IMG_0001.CR2"]
+
+
+def test_searching_for_the_raw_by_name_finds_it(client, canon_pair):
+    """名前で探した従は出す. **主（JPG）はこの `q` を通らない。**"""
+    body = client.get("/api/media?collapse=stack&q=IMG_0001.CR2").json()
+
+    assert [m["rel_path"].split("/")[-1] for m in body["media"]] == ["IMG_0001.CR2"]
+    assert body["total"] == 1
+
+
+def test_the_raw_is_still_hidden_when_the_filter_keeps_the_jpeg(client, canon_pair):
+    """**主も同じ絞り込みを通るなら、従はこれまでどおり隠す。**
+
+    絞り込みが付いたら畳むのをやめる、のではない —— 「主が絞り込みを通るか」だけを
+    足す。両方が通る `kind=photo` では、畳みの結果が絞り込み無しと同じになる。
+    """
+    body = client.get("/api/media?collapse=stack&kind=photo").json()
+
+    paths = [m["rel_path"] for m in body["media"]]
+    assert [p for p in paths if p.endswith(".CR2")] == []
+    jpeg = next(m for m in body["media"] if m["rel_path"].endswith(".JPG"))
+    assert len(jpeg["stack"]["members"]) == 2  # noqa: PLR2004 - JPG と CR2
+
+
+def test_the_same_jpeg_on_two_cards_with_two_raws_is_ambiguous(
+    client, canon_pair, second_card_with_another_raw
+):
+    """**曖昧さは、主の観測 1 つの中では数え切れない。**
+
+    同じ JPG が 2 枚のカードに在り（中身が同じなので 1 つの `media_file`）、
+    各カードに別々の CR2 が在る。`identity_partners` は主の**複数の鍵にまたがって**
+    `by_extension` を数えるので CR2 が 2 つ＝曖昧で、`resolve_group` は
+    「同じ拡張子の相方が複数ある」と断る。同席の鍵 1 つの中だけを見ると曖昧に
+    ならず、**画面が Immich の作らない 3 枚組を宣言し、実在する 2 つの RAW が
+    一覧から消える。**
+
+    JPG の側だけが曖昧で、**CR2 の側から見た相方は 1 枚に決まる**（`resolve_group`
+    もそれぞれ 2 枚の組を返す）ので、CR2 のタイルは自分と JPG の組を名乗る。
+    どの行も消えず、3 枚組はどこにも現れないのが正しい。
+    """
+    body = client.get("/api/media?collapse=stack").json()
+
+    by_name = {m["rel_path"].split("/")[-1]: m for m in body["media"]}
+    assert set(by_name) == {"IMG_0001.JPG", "IMG_0001.CR2", "IMG_0001_2.CR2"}
+    assert "stack" not in by_name["IMG_0001.JPG"]
+    for name in ("IMG_0001.CR2", "IMG_0001_2.CR2"):
+        members = {m["id"] for m in by_name[name]["stack"]["members"]}
+        assert members == {canon_pair.media_ids["JPG"], by_name[name]["id"]}
+    assert body["total"] == len(body["media"])
+
+
+def test_a_raw_shared_by_two_cards_is_not_hidden(client, canon_pair, second_card_with_another_jpeg):
+    """**身元が曖昧な行は、誰の従としても隠さない。**
+
+    同じ CR2 が 2 枚のカードに在り、各カードに別々の JPG が在る。どちらの JPG から
+    見ても相方は 1 枚に決まる（主は曖昧でない）ので、主の側の判断だけでは CR2 が
+    隠れる。**CR2 自身から見ると相方の JPG が 2 枚**で `resolve_group` は断るので、
+    隠すと「どの組にも決まらないファイル」が画面から消える。3 行とも出す。
+    """
+    body = client.get("/api/media?collapse=stack").json()
+
+    by_name = {m["rel_path"].split("/")[-1]: m for m in body["media"]}
+    assert set(by_name) == {"IMG_0001.JPG", "IMG_0001.CR2", "IMG_0001_2.JPG"}
+    assert "stack" not in by_name["IMG_0001.CR2"]
+    assert body["total"] == len(body["media"])
+
+
+def test_an_unpublished_observation_does_not_make_the_pair_ambiguous(
+    client, canon_pair, second_card_still_importing
+):
+    """**公開されていない観測は、身元の材料に数えない。**
+
+    2 枚目のカードの CR2 はもう公開済みだが、同じカードの JPG はまだ取り込み中。
+    `identity_partners` が読む観測（`sources_of` / `siblings_on_card`）はどちらも
+    `state = 'published'` で絞るので、この CR2 は 1 枚目の組の相方候補にならない。
+    数えてしまうと「CR2 が 2 つある」に見えて、1 枚目の組が畳まれなくなる。
+    """
+    body = client.get("/api/media?collapse=stack").json()
+
+    by_name = {m["rel_path"].split("/")[-1]: m for m in body["media"]}
+    assert set(by_name) == {"IMG_0001.JPG", "IMG_0001_2.CR2"}
+    assert {m["id"] for m in by_name["IMG_0001.JPG"]["stack"]["members"]} == {
+        canon_pair.media_ids["JPG"],
+        canon_pair.media_ids["CR2"],
+    }
+
+
+def _candidates_of(db) -> list[Candidate]:
+    """DB の `source_entry` を、`identity_partners` が読む観測の並びにほどく.
+
+    宛先まわり（`origin` / `state` / `remote_asset_id`）は、**組める側に倒した
+    値**を入れる —— ここで見たいのは身元の判断だけなので、資格で断られると
+    「畳むか」との一致を確かめられない。
+    """
+    rows = db.execute(
+        "SELECT se.media_file_id AS media_file_id, se.volume_instance_id AS volume_instance_id,"
+        "       se.rel_path AS rel_path, se.copresent_key AS copresent_key,"
+        "       m.profile_id AS profile_id, m.captured_at AS captured_at,"
+        "       m.captured_at_source AS captured_at_source"
+        "  FROM source_entry se JOIN media_file m ON m.id = se.media_file_id"
+        " WHERE se.state = 'published'"
+    ).fetchall()
+    return [
+        Candidate(
+            record_id=row["media_file_id"],
+            media_file_id=row["media_file_id"],
+            profile_id=row["profile_id"],
+            volume_instance_id=row["volume_instance_id"],
+            rel_path=row["rel_path"],
+            copresent_key=row["copresent_key"],
+            captured_at=row["captured_at"],
+            captured_at_source=row["captured_at_source"],
+            origin="created_by_us",
+            state="complete",
+            remote_asset_id=row["media_file_id"],
+            invalidated=False,
+        )
+        for row in rows
+    ]
+
+
+@pytest.mark.parametrize(
+    "extra",
+    [
+        None,
+        "second_card_with_another_raw",
+        "second_card_with_another_jpeg",
+        "second_card_still_importing",
+    ],
+)
+def test_the_listing_collapses_exactly_when_a_group_can_be_made(
+    request, client, db, canon_pair, extra
+):
+    """**「畳むか」と「組むか」は同じ結論でなければならない。**
+
+    一覧の SQL と `identity_partners` / `resolve_group` は別々に書かれている。
+    食い違うと、画面は Immich が作らない組を宣言するか（畳んだのに組めない）、
+    隠した行がどのタイルからも辿れなくなる。同じ筋書きを両方へ流し、**行ごとに**
+    突き合わせる（`docs/history/phase10-design.md` の「画面に出す組と Immich が
+    作る組は、同じ関数が決める」）。
+    """
+    if extra is not None:
+        request.getfixturevalue(extra)
+    rule = ProfileRegistry(db).current("canon-eos").definition.stack
+    candidates = _candidates_of(db)
+
+    body = client.get("/api/media?collapse=stack").json()
+
+    declared: set[str] = set()
+    for item in body["media"]:
+        primary = next(c for c in candidates if c.media_file_id == item["id"])
+        decision = resolve_group(primary, candidates, rule)
+        assert ("stack" in item) is isinstance(decision, Group), item["rel_path"]
+        if isinstance(decision, Group):
+            members = {member.media_file_id for member in decision.members}
+            assert {m["id"] for m in item["stack"]["members"]} == members
+            declared |= members
+    # **隠した行は、必ずどれかのタイルの組の中に居る。** 名乗り手の無い行を隠すと、
+    # 実在するファイルが画面から黙って消える。
+    every = {row["id"] for row in db.execute("SELECT id FROM media_file")}
+    assert every - {m["id"] for m in body["media"]} <= declared

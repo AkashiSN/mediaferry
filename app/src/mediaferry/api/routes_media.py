@@ -12,7 +12,7 @@ from ..core.listing import DEFAULT_PAGE_SIZE, escape_like, page_bounds, stack_ex
 from ..db.media import IN_FLIGHT_STATES, MediaRepository, owner_group
 from ..db.merges import GroupNotEditable
 from ..db.profiles import ProfileRegistry
-from ..db.selection import SENDABLE_CLAUSE
+from ..db.selection import sendable_clause
 from .deps import conn as get_conn
 from .deps import state as get_state
 from .errors import ApiError, ErrorCode
@@ -24,10 +24,63 @@ router = APIRouter()
 _KNOWN_ROLES = frozenset({"original", "derived"})
 
 
+# **曖昧な組は畳まない**（`identity_partners` の `ambiguous` と同じ判断）。
+# 同じ順位の兄弟が 2 つあると、どちらが主か決まらない。畳むと片方が消える。
+#
+# **数える範囲は主の観測すべて。** `identity_partners` の `by_extension` は、主が
+# 持つ**複数の鍵にまたがって**相方を集めてから拡張子ごとに数える。ここも `a` と
+# `b` が同じ鍵を共有することは求めず、**それぞれが主のいずれかの観測（`mea` /
+# `meb`）の鍵を共有していれば**曖昧に数える —— 同じ JPG が 2 枚のカードに在り、
+# 各カードに別々の CR2 が在る形は、鍵 1 つの中だけを見ると曖昧にならないので、
+# 画面が Immich の作らない 3 枚組を宣言し、実在する 2 つの RAW が一覧から消える。
+#
+# **主語（`m.id` / `sm.id` / `?`）だけを差し替えられる形にする。** 一覧の除外節
+# （相関）と `_members_of`（束縛変数、`?`）の両方が、同じ判断を同じ SQL から
+# 作る —— 曖昧さの定義を 2 か所に書くと、`_members_of` だけが曖昧な組にも
+# `stack.members` を付けてしまう（Task 6 レビューで実際に見つかった穴）。
+def _ambiguous_exists_sql(media_ref: str) -> str:
+    sql = f"""
+EXISTS (
+  SELECT 1
+    FROM source_entry mea
+    JOIN source_entry a
+      ON a.volume_instance_id = mea.volume_instance_id
+     AND a.copresent_key = mea.copresent_key
+     AND a.media_file_id IS NOT NULL AND a.state = 'published'
+    JOIN source_entry meb
+      ON meb.media_file_id = mea.media_file_id
+     AND meb.state = 'published'
+     AND meb.copresent_key IS NOT NULL
+    JOIN source_entry b
+      ON b.volume_instance_id = meb.volume_instance_id
+     AND b.copresent_key = meb.copresent_key
+     AND b.media_file_id IS NOT NULL AND b.state = 'published'
+     AND b.media_file_id <> a.media_file_id
+     AND b.extension = a.extension
+   WHERE mea.media_file_id = {media_ref}
+     AND mea.state = 'published'
+     AND mea.copresent_key IS NOT NULL
+)
+"""  # noqa: S608 - media_ref は呼び出し側の定数（"m.id" / "sm.id" / "?"）のみ
+    return sql
+
+
 # **従を外す節。** 「同じカードで、同じ同席の印を持ち、自分より順位が上の
 # 拡張子の兄弟が居る」行は主ではないので一覧に出さない。組がページの境目を
 # またがないよう、束ねずに隠す（`docs/history/phase10-design.md` の 4）。
-_SECONDARY_EXISTS = """
+#
+# **隠すのは、その主（`sm`）が組を宣言するときだけ。** 主が曖昧なら
+# `_members_of` は `stack.members` を返さないので、隠した従はどのタイルからも
+# 辿れなくなる。曖昧さは主の観測すべてにまたがるため（`_ambiguous_exists_sql`）、
+# 隠される側の `m` から見た曖昧さでは主の判断を代弁できない。
+#
+# **主も同じ絞り込みを通るときだけ隠す。** 写真タブは全部の絞り込みに
+# `collapse=stack` を付けるので、絞り込みを見ずに隠すと「JPG は `complete`・
+# CR2 は `failed`」の CR2 が `status=failed` の一覧から消え、再試行に辿り着け
+# なくなる（`q` や `profile` でも同じ）。`sibling_where` は `_filters` が別名
+# `sm` に対して組み立てた同じ節で、束縛変数は主の分の後ろにもう一度積む。
+def _secondary_exists_sql(sibling_where: str) -> str:
+    sql = f"""
 EXISTS (
   SELECT 1
     FROM source_entry me
@@ -44,37 +97,10 @@ EXISTS (
      AND me.state = 'published'
      AND me.copresent_key IS NOT NULL
      AND theirs.rank < mine.rank
+     AND NOT ({_ambiguous_exists_sql("sm.id")})
+     AND ({sibling_where})
 )
-"""
-
-
-# **曖昧な組は畳まない**（`identity_partners` の `ambiguous` と同じ判断）。
-# 同じ順位の兄弟が 2 つあると、どちらが主か決まらない。畳むと片方が消える。
-#
-# **主語（`m.id` か `?`）だけを差し替えられる形にする。** 一覧の除外節（相関、
-# `m.id`）と `_members_of`（束縛変数、`?`）の両方が、同じ判断を同じ SQL から
-# 作る —— 曖昧さの定義を 2 か所に書くと、`_members_of` だけが曖昧な組にも
-# `stack.members` を付けてしまう（Task 6 レビューで実際に見つかった穴）。
-def _ambiguous_exists_sql(media_ref: str) -> str:
-    sql = f"""
-EXISTS (
-  SELECT 1
-    FROM source_entry me
-    JOIN source_entry a
-      ON a.volume_instance_id = me.volume_instance_id
-     AND a.copresent_key = me.copresent_key
-     AND a.media_file_id IS NOT NULL AND a.state = 'published'
-    JOIN source_entry b
-      ON b.volume_instance_id = me.volume_instance_id
-     AND b.copresent_key = me.copresent_key
-     AND b.media_file_id IS NOT NULL AND b.state = 'published'
-     AND b.media_file_id <> a.media_file_id
-     AND b.extension = a.extension
-   WHERE me.media_file_id = {media_ref}
-     AND me.state = 'published'
-     AND me.copresent_key IS NOT NULL
-)
-"""  # noqa: S608 - media_ref は呼び出し側の定数（"m.id" か "?"）のみ
+"""  # noqa: S608 - sibling_where は `_filters` が組む節（値は束縛変数）
     return sql
 
 
@@ -114,9 +140,10 @@ def list_media(  # noqa: PLR0913
     """
     if collapse is not None and collapse not in _KNOWN_COLLAPSE_VALUES:
         raise ApiError(400, ErrorCode.BAD_REQUEST, "collapse は stack だけ", {"collapse": collapse})
-    where, params = _filters(
-        kind, role, profile, captured_from, captured_to, q, destination_id, status
+    clause, params = _filters(
+        "m", kind, role, profile, captured_from, captured_to, q, destination_id, status
     )
+    where = f"WHERE {clause}" if clause else ""
     limit, offset = page_bounds(page, page_size)
 
     # **`ranks` が空なら何もしない**（`VALUES` は 0 行を書けない）。`stack` が
@@ -130,16 +157,25 @@ def list_media(  # noqa: PLR0913
             ranks_sql = ", ".join(["(?, ?, ?)"] * len(ranks))
             ranks_params = tuple(value for row in ranks for value in row)
             prefix = f"WITH rank(profile_id, extension, rank) AS (VALUES {ranks_sql}) "
-            # **`_AMBIGUOUS_EXISTS` は `_SECONDARY_EXISTS` を打ち消す保護であって、
-            # 独立の除外条件ではない。** 「従に見える行」でも、その身元が曖昧
-            # （同じ順位の別候補がいる）なら、どちらが本当の主か決まらないので
-            # 隠さない —— `identity_partners` が曖昧なら組まないのと同じ判断
+            # **`_AMBIGUOUS_EXISTS` は従外しを打ち消す保護であって、独立の除外
+            # 条件ではない。** 「従に見える行」でも、その身元が曖昧（同じ順位の
+            # 別候補がいる）なら、どちらが本当の主か決まらないので隠さない ——
+            # `identity_partners` が曖昧なら組まないのと同じ判断
             # （`docs/history/phase10-plan.md` の「曖昧なら組まない。…一覧も
-            # 畳まない」）。**両方入れる** —— `_AMBIGUOUS_EXISTS` を落とすと、
-            # 曖昧な組の従が実在するファイルなのに一覧から消える。
-            hide_as_secondary = f"({_SECONDARY_EXISTS}) AND NOT ({_AMBIGUOUS_EXISTS})"
+            # 畳まない」）。**隠される側（`m`）と主（`sm`。`_secondary_exists_sql`
+            # の中）の両方で見る** —— 曖昧さは観測ごとに向きが変わるので、片側
+            # からしか見ないと、実在するファイルが名乗り手の無いまま一覧から消える。
+            #
+            # **同じ絞り込みを兄弟（`sm`）にも当てる。** 引数は主の分の後ろに
+            # もう一度、同じ順で積む。
+            sibling_clause, sibling_params = _filters(
+                "sm", kind, role, profile, captured_from, captured_to, q, destination_id, status
+            )
+            secondary = _secondary_exists_sql(sibling_clause or "1")
+            hide_as_secondary = f"({secondary}) AND NOT ({_AMBIGUOUS_EXISTS})"
             exclude = f"NOT ({hide_as_secondary})"
             where = f"{where} AND {exclude}" if where else f"WHERE {exclude}"
+            params = (*params, *sibling_params)
 
     total = conn.execute(
         f"{prefix}SELECT count(*) AS n FROM media_file m {where}",  # noqa: S608
@@ -217,6 +253,7 @@ def _members_of(
 
 
 def _filters(  # noqa: PLR0913
+    alias: str,
     kind: str | None,
     role: str | None,
     profile: str | None,
@@ -226,11 +263,15 @@ def _filters(  # noqa: PLR0913
     destination_id: str | None,
     status: str | None,
 ) -> tuple[str, tuple[Any, ...]]:
-    """WHERE 節と引数を組み立てる. **文字列を連結して値を埋めない。**"""
+    """絞り込みの節（`WHERE` は付けない）と引数. **文字列を連結して値を埋めない。**
+
+    **`alias` は `media_file` の別名**（呼び出し側の定数）。一覧は主の行に `m` で
+    当て、`collapse=stack` の従外しは同じ節を兄弟の行に `sm` で当てる。
+    """
     clauses: list[str] = []
     params: list[Any] = []
     if kind is not None:
-        clauses.append("m.kind = ?")
+        clauses.append(f"{alias}.kind = ?")  # noqa: S608 - alias は呼び出し側の定数
         params.append(kind)
     if role is not None:
         # **既知の 2 値だけリテラルで埋める。** `_KNOWN_ROLES` に無い値（利用者が
@@ -241,7 +282,7 @@ def _filters(  # noqa: PLR0913
         # 時に `role = 'derived'` を証明できず、`0023` の部分索引
         # （`WHERE role = 'derived'`）が選ばれる保証が無い。
         if role in _KNOWN_ROLES:
-            clauses.append(f"m.role = '{role}'")  # noqa: S608 - 語彙は上で固定
+            clauses.append(f"{alias}.role = '{role}'")  # noqa: S608 - 語彙は上で固定
         else:
             # 知らない値（＝ CHECK 制約の外）は、そもそも 1 行も一致しない。
             clauses.append("0")
@@ -250,33 +291,40 @@ def _filters(  # noqa: PLR0913
         # 見なして、索引があっても並べ替えを外せない（`0014` が効かず、その
         # プロファイルの全行を拾ってから並べ替える）。slug は UNIQUE なので
         # 値は高々 1 つで、意味は変わらない（無ければ NULL 比較で 0 件）。
-        clauses.append("m.profile_id = (SELECT id FROM device_profile WHERE slug = ?)")
+        clauses.append(
+            f"{alias}.profile_id = (SELECT id FROM device_profile WHERE slug = ?)"  # noqa: S608
+        )
         params.append(profile)
     if captured_from is not None:
-        clauses.append("m.captured_at >= ?")
+        clauses.append(f"{alias}.captured_at >= ?")  # noqa: S608 - alias は呼び出し側の定数
         params.append(captured_from)
     if captured_to is not None:
-        clauses.append("m.captured_at <= ?")
+        clauses.append(f"{alias}.captured_at <= ?")  # noqa: S608 - alias は呼び出し側の定数
         params.append(captured_to)
     if q is not None:
         # 保存先の名前で探す（カード上の原名は列に持っていない）。
-        clauses.append("m.rel_path LIKE ? ESCAPE '\\'")
+        clauses.append(  # noqa: S608 - alias は呼び出し側の定数
+            f"{alias}.rel_path LIKE ? ESCAPE '\\'"
+        )
         params.append(f"%{escape_like(q)}%")
     if status is not None:
         if destination_id is None:
             raise ApiError(400, ErrorCode.BAD_REQUEST, "status は destination_id と一緒に指定する")
-        clauses.append(_status_clause(status))
+        clauses.append(_status_clause(status, alias))
         params.append(destination_id)
     elif destination_id is not None:
         clauses.append("1 = 1 AND ? IS NOT NULL")
         params.append(destination_id)
-    return ("WHERE " + " AND ".join(clauses)) if clauses else "", tuple(params)
+    return " AND ".join(clauses), tuple(params)
 
 
-def _status_clause(status: str) -> str:
-    """宛先ごとの状態。**無効化された記録は数えない**（§10）."""
+def _status_clause(status: str, alias: str) -> str:
+    """宛先ごとの状態。**無効化された記録は数えない**（§10）.
+
+    **`alias` は `media_file` の別名**（`_filters` から渡る呼び出し側の定数）。
+    """
     existing = (
-        "SELECT 1 FROM upload_record u WHERE u.media_file_id = m.id"
+        f"SELECT 1 FROM upload_record u WHERE u.media_file_id = {alias}.id"  # noqa: S608
         " AND u.destination_id = ? AND u.invalidated_at IS NULL"
     )
     if status == "unsent":
@@ -284,7 +332,7 @@ def _status_clause(status: str) -> str:
         # `failed` は再試行という別の操作、`pending` は既に積んである。
         # **積んだまま claim されない `pending` はここに出てこない。** `/dashboard` の
         # 宛先ごとの `pending` 件数で別に見せる（`status=pending` でも個別に絞れる）。
-        return f"NOT EXISTS ({existing}) AND {SENDABLE_CLAUSE}"  # noqa: S608 - 定数のみ
+        return f"NOT EXISTS ({existing}) AND {sendable_clause(alias)}"  # noqa: S608 - 定数のみ
     known = {
         "sent": "complete",
         "failed": "failed",

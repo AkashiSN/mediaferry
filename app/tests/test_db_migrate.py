@@ -558,7 +558,8 @@ def test_a_profile_filtered_listing_does_not_sort_the_whole_profile(tmp_path):
     # 絞り込みの形（`IN` か `=` か）を変えても試験が落ちない。
     from mediaferry.api.routes_media import _filters
 
-    where, params = _filters(
+    clause, params = _filters(
+        "m",
         kind=None,
         role=None,
         profile="x",
@@ -574,7 +575,7 @@ def test_a_profile_filtered_listing_does_not_sort_the_whole_profile(tmp_path):
         row[3]
         for row in conn.execute(
             "EXPLAIN QUERY PLAN"  # noqa: S608 - 値は params で渡す
-            f" SELECT m.* FROM media_file m {where}"
+            f" SELECT m.* FROM media_file m WHERE {clause}"
             " ORDER BY m.captured_at DESC, m.id DESC LIMIT ? OFFSET ?",
             (*params, 50, 0),
         )
@@ -602,7 +603,8 @@ def test_a_role_filtered_listing_does_not_scan_the_capture_time_index(tmp_path):
     """
     from mediaferry.api.routes_media import _filters
 
-    where, params = _filters(
+    clause, params = _filters(
+        "m",
         kind=None,
         role="derived",
         profile=None,
@@ -618,7 +620,7 @@ def test_a_role_filtered_listing_does_not_scan_the_capture_time_index(tmp_path):
         row[3]
         for row in conn.execute(
             "EXPLAIN QUERY PLAN"  # noqa: S608 - 値は params で渡す
-            f" SELECT m.* FROM media_file m {where}"
+            f" SELECT m.* FROM media_file m WHERE {clause}"
             " ORDER BY m.captured_at DESC, m.id DESC LIMIT ? OFFSET ?",
             (*params, 50, 0),
         )
@@ -649,7 +651,8 @@ def test_the_unsent_listing_does_not_multi_index_or(tmp_path):
 
     # **一覧が実際に組み立てる WHERE を使う。** `status=unsent` は
     # `SENDABLE_CLAUSE` を経由するので、手で書き写すとこの退行を捕まえられない。
-    where, params = _filters(
+    clause, params = _filters(
+        "m",
         kind=None,
         role=None,
         profile=None,
@@ -665,7 +668,7 @@ def test_the_unsent_listing_does_not_multi_index_or(tmp_path):
         row[3]
         for row in conn.execute(
             "EXPLAIN QUERY PLAN"  # noqa: S608 - 値は params で渡す
-            f" SELECT m.* FROM media_file m {where}"
+            f" SELECT m.* FROM media_file m WHERE {clause}"
             " ORDER BY m.captured_at DESC, m.id DESC LIMIT ? OFFSET ?",
             (*params, 50, 0),
         )
