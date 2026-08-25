@@ -311,14 +311,15 @@ SQL の曖昧さ判定は**同席グループ単位**、`identity_partners` は*
 
 | コマンド | 結果 |
 | --- | --- |
-| `PYTHONDONTWRITEBYTECODE=1 uv run pytest` | 1614 passed, 5 deselected（4 分 11 秒） |
+| `PYTHONDONTWRITEBYTECODE=1 uv run pytest` | 1615 passed, 5 deselected（4 分 11 秒） |
 | `uv run ruff check .` | All checks passed |
 | `uv run ruff format --check .` | 192 files already formatted |
 | `npm --prefix web run test -- --run` | 27 files / 535 passed |
 | `npm --prefix web run test:e2e` | 19 passed |
 
-base（`aa6d9be`）の時点は 1561 / 528 / 19 だったので、**Python 53 本・web 7 本**増えた
-（8 タスクを終えた時点では 1598 / 533。**全体レビューの修正で Python が 16 本増えた**）。
+base（`aa6d9be`）の時点は 1561 / 528 / 19 だったので、**Python 54 本・web 7 本**増えた
+（8 タスクを終えた時点では 1598 / 533。**全体レビューとその修正のレビューで、Python が
+17 本増えた**）。
 
 ## 実機へ入れるとき
 
