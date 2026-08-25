@@ -1,4 +1,4 @@
-// つないだ動画の記録（§13）。別々のままにした組み合わせと、使っていない出力は操作
+// つないだ後の後片付け（§13）。別々のままにした組み合わせと、使っていない出力は操作
 // できない記録なので、ここでは一覧と削除の確認だけを見る。
 
 import { render, screen, waitFor, within } from "@testing-library/react";
@@ -47,7 +47,7 @@ beforeEach(() => {
 });
 afterEach(() => vi.restoreAllMocks());
 
-describe("つないだ動画の記録", () => {
+describe("つないだ後の後片付け", () => {
   // 消すのはジョブにならないので、取り直さないと枠の数（写真の合計・未送信）が
   // 古いまま残る。
   it("消したあと、枠の集計を取り直す", async () => {
@@ -404,7 +404,7 @@ describe("つないだ動画の記録", () => {
     expect(await screen.findByRole("alert")).toBeInTheDocument();
   });
 
-  it("見出しと領域の名は「つないだ動画の記録」（内部の名前を出さない）", async () => {
+  it("見出しと領域の名は「つないだ後の後片付け」（内部の名前を出さない）", async () => {
     stubApi(EMPTY_ROUTES);
     const { container } = render(
       <MemoryRouter>
@@ -412,11 +412,26 @@ describe("つないだ動画の記録", () => {
       </MemoryRouter>,
     );
     await screen.findByText("別々のままにした組み合わせはありません。");
-    expect(screen.getByRole("heading", { level: 1, name: "つないだ動画の記録" })).toBeInTheDocument();
-    expect(container.querySelector('section[aria-label="つないだ動画の記録"]')).not.toBeNull();
+    expect(screen.getByRole("heading", { level: 1, name: "つないだ後の後片付け" })).toBeInTheDocument();
+    expect(container.querySelector('section[aria-label="つないだ後の後片付け"]')).not.toBeNull();
     // §13「破棄 → これは別々」。節の見出しも内部語のままにしない。
     expect(screen.getByRole("heading", { level: 2, name: "別々のままにした組み合わせ" })).toBeInTheDocument();
     expect(screen.getByRole("heading", { level: 2, name: "使っていない出力" })).toBeInTheDocument();
+  });
+
+  it("名前が中身と合っていて、つないだ動画の在り処を案内する", async () => {
+    stubApi(EMPTY_ROUTES);
+    render(
+      <MemoryRouter>
+        <MergeHistoryScreen />
+      </MemoryRouter>,
+    );
+    await screen.findByText("別々のままにした組み合わせはありません。");
+    // **探しに来た人を迷子にしない。** 成功した結合は写真タブにある。
+    expect(screen.getByRole("link", { name: /つないだ動画/ })).toHaveAttribute(
+      "href",
+      "/photos?role=derived",
+    );
   });
 
   it("設定へ戻る導線を出す", async () => {
