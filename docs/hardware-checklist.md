@@ -190,6 +190,13 @@ ls /path/to/mount/DCIM/100CANON | head
 - **カードリーダー経由で見える USB ID がリーダーのものであることを確かめる**
   （`hints.usb_ids` を空にした根拠。機種の ID が見えるなら足してよい）
 
+> **2026-08-25 の結果: 合格、ただし根拠が違う。** `canon-eos` に `identity_confidence:
+> high`・`provisional: false` で確定した。**ただし `fs_label` は空で `EOS_DIGITAL`
+> ではなく、`hints.volume_labels` は一致に寄与していない**（確定は `require` だけで
+> 起きている）。`DCIM/100CANON/` の 1 ディレクトリに `IMG_####.JPG` / `IMG_####.CR2`
+> / `MVI_####.MOV` が 1488 件並び、`filename_pattern` の外れは 0 件だった。くわしくは
+> [`history/hardware-verification.md`](history/hardware-verification.md)。
+
 ### 14. EOS 70D の 4GB 分割が連番から判別できるか
 
 **`merge.enabled` を有効化してよいかの判断**。誤結合は公開済みの `media_file` を
@@ -199,6 +206,13 @@ ls /path/to/mount/DCIM/100CANON | head
   `MVI_0002.MOV` なのか、別の規則があるのか）
 - **連続した別録画と区別が付くか。** 付かないなら `merge.enabled` は無効のまま、
   手動結合（Phase 4）に委ねる
+
+> **2026-08-25 の結果: 題材が無く、決着していない。** カードの MOV は 2 本だけで、
+> `MVI_8234` と `MVI_8240` の間に静止画が 5 枚挟まる＝別々の録画だった。**Canon は
+> 静止画と動画で採番カウンタを共有する**（`IMG` の欠番 `8234` / `8240` がそのまま
+> MOV の番号）ことは分かったが、それは「分割も別録画も隣り合う」を意味するので、
+> **連番だけでは区別が付かないという懸念は解消していない**。`merge.enabled` は
+> 無効のまま。4GB を超える録画の入ったカードで踏み直す。
 
 ### 15. Canon の MOV の `creation_time` が壁時計か UTC か
 
