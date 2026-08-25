@@ -33,7 +33,58 @@ export type Confirmation =
   | { kind: "adopt_failed_merge"; groupLabel: string; reason: string }
   | { kind: "approve_datetime"; current: string | null; proposed: string }
   | { kind: "archive_profile"; slug: string }
-  | { kind: "trust_volume"; label: string; state: "starts" | "pending" | "blocked"; reason: string | null };
+  | { kind: "trust_volume"; label: string; state: "starts" | "pending" | "blocked"; reason: string | null }
+  | { kind: "reset"; scope: ResetScope };
+
+/** リセットの段（`db/reset.py` の `SCOPES` と同じ並び）。 */
+export type ResetScope = "jobs" | "uploads" | "library" | "all";
+
+const RESET_TITLE: Record<ResetScope, string> = {
+  jobs: "作業の記録を消しますか",
+  uploads: "送信の記録を消しますか",
+  library: "取り込んだファイルを消しますか",
+  all: "すべて消しますか",
+};
+
+/**
+ * リセットの確認（§13）。
+ *
+ * **「Immich からは何も消えません」と「戻せません」を、必ず両方書く。** 片方だけだと
+ * 読み違える —— 前者だけなら代償が無いように読め、後者だけなら Immich の写真が
+ * 消えると読める。
+ */
+const RESET_BODY: Record<ResetScope, ReactNode> = {
+  jobs: (
+    <p>
+      作業の履歴と、別々にした組み合わせの記録を消します。ファイルも送信の記録も
+      消えません。<strong>もう一度探せば戻ります。</strong>
+    </p>
+  ),
+  uploads: (
+    <p>
+      どれをどこへ送ったかの記録を消します。<strong>Immich からは何も消えません。</strong>
+      ただし<strong>戻せません</strong> —— 次に送ったときに「自分が上げた」と証明できなく
+      なるので、撮影日時の自動補正は 1 件ずつの承認に変わり、RAW と JPEG を 1 枚に
+      束ねるのも行われなくなります。
+    </p>
+  ),
+  library: (
+    <p>
+      NAS に取り込んだ写真と動画、つないだ動画を消します。
+      <strong>Immich からは何も消えません。</strong>
+      <strong>カードに元があれば、取り込み直せます。</strong>
+      送信の記録も一緒に消えるので、送り直したときの扱いは上の段と同じになります。
+    </p>
+  ),
+  all: (
+    <p>
+      上のすべてに加えて、カードの記録（どのカードを信頼したか）を消します。
+      <strong>Immich からは何も消えません。</strong>
+      <strong>送り先とカメラの種類は残ります</strong>ので、接続のやり直しは要りません。
+      <strong>戻せません。</strong>
+    </p>
+  ),
+};
 
 /** 撮影日の幅を 1 行にする。**同じ日なら範囲にしない**（「A 〜 A」は読みにくい）。 */
 function describeRange(range: { from: string; to: string }): string {
@@ -215,6 +266,11 @@ export function describe(confirmation: Confirmation): { title: string; body: Rea
             </p>
           </>
         ),
+      };
+    case "reset":
+      return {
+        title: RESET_TITLE[confirmation.scope],
+        body: RESET_BODY[confirmation.scope],
       };
     case "archive_profile":
       return {

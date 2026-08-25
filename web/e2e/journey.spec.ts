@@ -38,6 +38,9 @@ const SCREENS = [
   "/settings/jobs",
   "/settings/merge-history",
   "/settings/general",
+  "/settings/reset",
+  // Phase 11: 1 件のくわしくも巡る。**ここだけ巡っていなかった**ので、
+  // ファイル名が箱から出る壊れ方をどの網も見ていなかった。
 ];
 
 test.beforeAll(async () => {

@@ -216,6 +216,7 @@ const BY_KIND: Record<Confirmation["kind"], Confirmation> = {
   approve_datetime: { kind: "approve_datetime", current: "a", proposed: "b" },
   archive_profile: { kind: "archive_profile", slug: "a" },
   trust_volume: { kind: "trust_volume", label: "a", state: "starts", reason: null },
+  reset: { kind: "reset", scope: "jobs" },
 };
 
 // `trust_volume` は state で、`delete_merged_video` は freesSources で本文が
@@ -236,6 +237,11 @@ const EVERY_KIND: Confirmation[] = [
     capturedRange: { from: "2026-02-05T10:00:00+09:00", to: "2026-08-17T14:31:00+09:00" },
     truncated: true,
   },
+  // リセットは段ごとに本文が別物。**4 つとも巡る**（禁止語と Markdown の網は、
+  // 出た文字しか見られない）。
+  { kind: "reset", scope: "uploads" },
+  { kind: "reset", scope: "library" },
+  { kind: "reset", scope: "all" },
 ];
 
 

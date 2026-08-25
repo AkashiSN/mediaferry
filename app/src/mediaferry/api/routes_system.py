@@ -6,7 +6,7 @@ import json
 from dataclasses import asdict
 from typing import Any
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Body, Depends
 
 from ..core.profiles.model import ProfileInvalid, parse_definition
 from ..db.jobs import JobStore
@@ -17,6 +17,7 @@ from ..db.profiles import (
     ProfileRegistry,
     UnknownProfile,
 )
+from ..db.reset import ResetNotPossible, UnknownScope, reset
 from ..db.selection import SENDABLE_CLAUSE
 from ..settings import SettingInvalid, SettingLocked, SettingsService, startup_warnings
 from .deps import conn as get_conn
@@ -30,6 +31,29 @@ _BUILTIN_MESSAGE = "ビルトインは編集できない。複製してから編
 public_router = APIRouter()
 
 _BUILTIN_MESSAGE = "ビルトインは編集できない。複製してから編集する"
+
+
+@router.post("/reset")
+def reset_data(
+    body: dict[str, Any] = Body(...),  # noqa: B008
+    conn=Depends(get_conn),  # noqa: ANN001, B008
+    state=Depends(get_state),  # noqa: ANN001, B008
+) -> dict[str, Any]:
+    """作り直すために、段まで捨てる（§13）.
+
+    **Immich にある資産は対象ではない** —— 消しに行かないし、消えない
+    （`db/reset.py`）。段は積み上げで、深い段は浅い段を含む。
+    """
+    try:
+        removed = reset(conn, state.settings.data_root, body.get("scope", ""))
+    except UnknownScope as exc:
+        raise ApiError(400, ErrorCode.BAD_REQUEST, str(exc)) from exc
+    except ResetNotPossible as exc:
+        # **generic な conflict にしない。** 画面は code で文面を選ぶので、
+        # conflict のままだと「いまの状態ではこの操作はできません」としか出ず、
+        # 何を待てばよいのかが読めない。
+        raise ApiError(409, ErrorCode.JOB_IN_FLIGHT, str(exc)) from exc
+    return {"status": "ok", "removed": removed}
 
 
 @public_router.get("/health")
