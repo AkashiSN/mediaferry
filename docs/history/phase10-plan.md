@@ -22,6 +22,24 @@
   `uv run pytest` / `uv run ruff check .` / `uv run ruff format --check .` /
   `npm --prefix web run test -- --run` / `npm --prefix web run test:e2e`
 
+## codex のレビューで直した点（2026-08-25）
+
+**blocker 2 件・major 2 件が計画に対して出た。** 全部こちらで裏を取って受け入れた。
+
+| | 何が壊れていたか | どう直したか |
+| --- | --- | --- |
+| B | 証拠を捨てる引き金が `if not same` で、この `same` は `quick_fingerprint`（サイズと 16 窓）の**確率的**判定。標本窓の外だけが変わった同サイズのファイルは `same=True` のまま印を持ち越し、**新しい JPG が古い RAW と組む** | **引き金を構造的なものに変える** —— `media_file_id` を NULL にするとき（＝この行がもう前の media_file を代表しないと決めたとき）に消す。指紋の強さに依らない |
+| A | 「同じ拡張子の相方が 2 つ」は**到達する**。`iter_media_files` は `{ext.upper()}` で突き合わせるので `IMG_0001.JPG` と `IMG_0001.jpg` が同じ正規化拡張子になる | **曖昧なら組まない。** 利用者が最初に選んだ「組まずに送り、画面に理由を出す」を実装する。一覧も畳まない |
+| —— | `_touch` 経路で `extension` を埋めないので、**移行対象そのもの**（既存の published で同内容の行）が従判定されない | `_touch` でも埋める（Task 4） |
+| —— | `_members_of` が現行の `stack` 規則で絞らないので、`extensions` を変えたときに `identity_partners` と食い違う | 順位表へ join して現行対象の拡張子だけに限る（Task 6） |
+
+**B の直し方が効く理由。** 危ないのは「撮り直したファイルが新しい `media_file` として
+取り込まれ、古い相方の行が `published` のまま残る」場合だけ。そのとき行は必ず
+UPDATE 経路を通って `media_file_id = NULL` になる。**そこで消せば取りこぼしが無い。**
+一方 `_touch`（`published` のまま変わっていない）経路は印を保つので、「一度証明された
+同席は消えない」も守られる。`seen` / `failed` の行で消えても害が無い —— まだ
+`media_file` が無く、相方が居るなら同じスキャンの `_mark_copresence` が書き直す。
+
 ## 設計からの変更（実装で分かったこと）
 
 **同席の印を「スキャンの `job_id` だけ」にすると足りない。** 1 回のスキャンは
@@ -176,8 +194,24 @@ git commit -m "refactor(stack): 組の規則から tolerance_seconds を落と�
 - 試験: `app/tests/test_stacking_rules.py`
 
 **この先が使うもの:**
-`identity_partners(primary: Candidate, candidates: Sequence[Candidate], rule: StackRule) -> list[Candidate]`
-—— 身元だけで相方を返す。資格（`origin` / `remote_asset_id` / `state` / `profile_id`）は見ない。
+`identity_partners(primary: Candidate, candidates: Sequence[Candidate], rule: StackRule) -> Identity`
+—— 身元だけで相方を決める。資格（`origin` / `remote_asset_id` / `state` / `profile_id`）は見ない。
+
+```python
+@dataclass(frozen=True)
+class Identity:
+    """身元だけで決まる組。**曖昧さを潰さずに返す。**"""
+
+    partners: tuple[Candidate, ...]
+    # 同じ鍵に**同じ正規化拡張子**が 2 つ以上ある。`iter_media_files` は
+    # `{ext.upper()}` で突き合わせるので、case-sensitive な FS では
+    # `IMG_0001.JPG` と `IMG_0001.jpg` がこれになる。**自動では決められない。**
+    ambiguous: bool
+```
+
+**曖昧なら組まない。** `resolve_group` は `Refusal("同じ拡張子の相方が複数ある。
+自動では決められない")` を返し、一覧も畳まない（Task 6）。**「どちらかを選ぶ」を
+機械にやらせない** —— 利用者の判断（送信は止めず、理由を画面に出す）。
 
 - [ ] **Step 1: 失敗するテストを書く**
 
@@ -241,20 +275,40 @@ def identity_partners(
     keys = {c.source_key for c in candidates if c.media_file_id == primary.media_file_id}
     partners: list[Candidate] = []
     seen: set[str] = set()
+    by_extension: dict[str, set[str]] = {}
     for candidate in candidates:
         if candidate.media_file_id == primary.media_file_id:
             continue
         # **鍵は組で比べる**（同じカードの、同じディレクトリの、同じ stem）。
         if candidate.source_key not in keys:
             continue
-        if extension_of(candidate.rel_path) not in rule.extensions:
+        extension = extension_of(candidate.rel_path)
+        if extension not in rule.extensions:
             continue
         # **同じ資産を 2 回送らない。** 1 つの media_file が複数の観測で候補に入る。
         if candidate.media_file_id in seen:
             continue
         seen.add(candidate.media_file_id)
+        by_extension.setdefault(extension, set()).add(candidate.media_file_id)
         partners.append(candidate)
-    return partners
+    # **1 つの拡張子に 2 つ以上の media_file が来たら曖昧。** 自分の拡張子も数える
+    # （自分と同じ拡張子の別ファイルが相方に来る場合がある）。
+    by_extension.setdefault(extension_of(primary.rel_path), set()).add(primary.media_file_id)
+    ambiguous = any(len(ids) > 1 for ids in by_extension.values())
+    return Identity(partners=tuple(partners), ambiguous=ambiguous)
+```
+
+**曖昧さを試験する 1 本も同じ Step で書く。**
+
+```python
+def test_two_partners_with_the_same_extension_are_ambiguous():
+    """`iter_media_files` は拡張子を大文字化して突き合わせるので、
+    case-sensitive な FS では `IMG_0001.JPG` と `IMG_0001.jpg` が同じ拡張子になる。
+    **どちらが相方かは機械には決められない。**
+    """
+    lower = replace(a_jpg(), media_file_id="other", rel_path="DCIM/100CANON/IMG_0001.jpg")
+
+    assert identity_partners(a_cr2(), [a_cr2(), a_jpg(), lower], RULE).ambiguous
 ```
 
 ```python
@@ -266,7 +320,11 @@ def resolve_group(
         return Refusal("カメラの種類がスタックを使わない")
     if extension_of(primary.rel_path) not in rule.extensions:
         return Refusal("この拡張子は組の対象ではない")
-    partners = identity_partners(primary, candidates, rule)
+    identity = identity_partners(primary, candidates, rule)
+    if identity.ambiguous:
+        # **「どちらかを選ぶ」を機械にやらせない。** 送信は止めず、理由を出す。
+        return Refusal("同じ拡張子の相方が複数ある。自動では決められない")
+    partners = list(identity.partners)
     if not partners:
         return Refusal("相方が見つからない")
     refusal = _refused(primary, partners, rule)
@@ -596,15 +654,48 @@ from ..core.uploads.stacking import extension_of, stem_prefix
 **その直後に、中身が変わったときだけ印を消す**。
 
 ```python
-        if not same:
-            # **中身が変わった行は、前の中身での同席を失う。** ここで消さないと、
-            # 撮り直した JPG が無関係な古い RAW と組む。
-            # **`same` のときは消さない** —— 取り込み待ちのまま再スキャンされた
-            # だけの行が、毎回証拠を失う。
-            self._conn.execute(
-                "UPDATE source_entry SET copresent_key = NULL WHERE id = ?", (row["id"],)
-            )
+既存の UPDATE 経路（`media_file_id = NULL` を書いている文）に
+`copresent_key = NULL` を**同じ UPDATE の中で**足す。
+
+```python
+        self._conn.execute(
+            "UPDATE source_entry SET size_bytes = ?, mtime_ns = ?, quick_fingerprint = ?,"
+            " fingerprint_version = ?, state = 'seen', media_file_id = NULL,"
+            # **`media_file_id` を外すのと同じ拍で証拠も外す。** この行がもう前の
+            # media_file を代表しないと決めた瞬間だから。**`same` では判断しない**
+            # —— quick_fingerprint はサイズと 16 窓しか見ない確率的な判定で、
+            # 標本窓の外だけが変わったファイルを取りこぼす（core/fingerprint.py の
+            # docstring）。取りこぼすと、撮り直した JPG が古い RAW と組む。
+            " copresent_key = NULL, extension = ?, observed_at = ?"
+            " WHERE id = ?",
+            (
+                found.size_bytes,
+                found.mtime_ns,
+                fingerprint,
+                FINGERPRINT_VERSION,
+                extension_of(found.rel_path),
+                now_iso(),
+                row["id"],
+            ),
+        )
         return "new"
+```
+
+**`_touch` 経路（`published` のまま変わっていない）では消さない。** 「一度証明された
+同席は消えない」はここで守られる。`seen` / `failed` の行で消えても害は無い ——
+まだ `media_file` が無く、相方が居るなら同じスキャンの `_mark_copresence` が書き直す。
+
+**`_touch` でも `extension` を埋める。** 埋めないと、**移行対象そのもの**（既存の
+`published` で内容も mtime も変わっていない行）が NULL のままになり、Task 6 の
+`rank` への join が外れて従判定されない。
+
+```python
+    def _touch(self, entry_id: str, extension: str) -> None:
+        self._conn.execute(
+            "UPDATE source_entry SET observed_at = ?, extension = ? WHERE id = ?",
+            (now_iso(), extension, entry_id),
+        )
+```
 ```
 
 - [ ] **Step 4: 通ることを確かめる**
@@ -695,10 +786,11 @@ def test_the_primary_without_proof_has_no_partner():
 ```
 
 ```python
-# ループの中、extension の門の直後に足す
+# ループの中、extension の門の直後（`seen` の重複除けより前）に足す
         proof = proofs.get(candidate.source_key)
         # **「同じ時点でカードに在った」を要求する。** 鍵だけでは、片方だけ
-        # 撮り直したときに古い published な行と組む。
+        # 撮り直したときに古い published な行と組む。**曖昧さの数え上げより
+        # 前で落とす** —— 証拠の無い相手は相方候補ですらない。
         if proof is None or candidate.copresent_key != proof:
             continue
 ```
@@ -828,6 +920,28 @@ def stack_extension_ranks(profiles: Iterable[ProfileRef]) -> list[tuple[str, str
 # **従を外す節。** 「同じカードで、同じ同席の印を持ち、自分より順位が上の
 # 拡張子の兄弟が居る」行は主ではないので一覧に出さない。組がページの境目を
 # またがないよう、束ねずに隠す（`docs/history/phase10-design.md` の 4）。
+# **曖昧な組は畳まない**（`identity_partners` の `ambiguous` と同じ判断）。
+# 同じ順位の兄弟が 2 つあると、どちらが主か決まらない。畳むと片方が消える。
+_AMBIGUOUS_EXISTS = """
+EXISTS (
+  SELECT 1
+    FROM source_entry me
+    JOIN source_entry a
+      ON a.volume_instance_id = me.volume_instance_id
+     AND a.copresent_key = me.copresent_key
+     AND a.media_file_id IS NOT NULL AND a.state = 'published'
+    JOIN source_entry b
+      ON b.volume_instance_id = me.volume_instance_id
+     AND b.copresent_key = me.copresent_key
+     AND b.media_file_id IS NOT NULL AND b.state = 'published'
+     AND b.media_file_id <> a.media_file_id
+     AND b.extension = a.extension
+   WHERE me.media_file_id = m.id
+     AND me.state = 'published'
+     AND me.copresent_key IS NOT NULL
+)
+"""
+
 _SECONDARY_EXISTS = """
 EXISTS (
   SELECT 1
@@ -851,35 +965,60 @@ EXISTS (
 
 `list_media` に `collapse: str | None = None` を足し、`collapse == "stack"` の
 ときだけ `WITH rank(profile_id, extension, rank) AS (VALUES ...)` を前置して
-`AND NOT <_SECONDARY_EXISTS>` を `where` に足す。`ranks` が空なら**何もしない**
+`AND NOT (<_SECONDARY_EXISTS>) AND NOT (<_AMBIGUOUS_EXISTS>)` を `where` に足す。
+**両方入れる** —— 曖昧な組を畳むと、同じ順位の 2 つのうち片方が黙って消える。`ranks` が空なら**何もしない**
 （`VALUES` は 0 行を書けない）。`collapse` が `"stack"` でも `None` でもなければ
 `ApiError(400, ErrorCode.INVALID, "collapse は stack だけ")`。
 
 組の中身は、主の行 1 つにつき 1 回だけ引く。
 
 ```python
-def _members_of(conn, media_id: str) -> list[dict[str, Any]] | None:
-    """主から見た組の中身（**主を先頭に**、順位の順）. 組でなければ None."""
+def _members_of(conn, media_id: str, ranks_sql: str, ranks_params: tuple) -> list | None:
+    """主から見た組の中身（**主を先頭に**、順位の順）. 組でなければ None.
+
+    **現行の `stack` 規則で絞る。** `copresent_key` は残り続けるのに順位は現行版
+    なので、絞らないと `extensions` を変えた後に `identity_partners` と食い違う
+    （「同じ関数が決める」が崩れ、順位の dict 引きも KeyError になる）。
+    """
     rows = conn.execute(
-        "SELECT DISTINCT sm.id AS id, sm.rel_path AS rel_path, sm.size_bytes AS size_bytes,"
-        "       sib.extension AS extension"
-        "  FROM source_entry me"
-        "  JOIN source_entry sib"
-        "    ON sib.volume_instance_id = me.volume_instance_id"
-        "   AND sib.copresent_key = me.copresent_key"
-        "   AND sib.media_file_id IS NOT NULL AND sib.state = 'published'"
-        "  JOIN media_file sm ON sm.id = sib.media_file_id"
-        " WHERE me.media_file_id = ? AND me.state = 'published'"
-        "   AND me.copresent_key IS NOT NULL",
-        (media_id,),
+        f"WITH rank(profile_id, extension, rank) AS (VALUES {ranks_sql})"  # noqa: S608
+        " SELECT DISTINCT sm.id AS id, sm.rel_path AS rel_path,"
+        "        sm.size_bytes AS size_bytes, r.rank AS rank"
+        "   FROM source_entry me"
+        "   JOIN source_entry sib"
+        "     ON sib.volume_instance_id = me.volume_instance_id"
+        "    AND sib.copresent_key = me.copresent_key"
+        "    AND sib.media_file_id IS NOT NULL AND sib.state = 'published'"
+        "   JOIN media_file sm ON sm.id = sib.media_file_id"
+        "   JOIN rank r ON r.profile_id = sm.profile_id AND r.extension = sib.extension"
+        "  WHERE me.media_file_id = ? AND me.state = 'published'"
+        "    AND me.copresent_key IS NOT NULL"
+        "  ORDER BY r.rank",
+        (*ranks_params, media_id),
     ).fetchall()
     if len(rows) < 2:  # noqa: PLR2004 - 1 つでは組にならない
         return None
     return rows
 ```
 
-順位で並べ替えるのは Python 側（`ranks` を dict にして `sort`）。**主が先頭に
-来ることをテストで固定する**（上の Step 1 の 1 本目）。
+**並べ替えは SQL の `ORDER BY r.rank` で行う**（Python 側で順位の dict を引くと、
+現行規則から外れた拡張子で `KeyError` になる）。**主が先頭に来ることをテストで
+固定する**（上の Step 1 の 1 本目）。
+
+**`_members_of` を現行規則で絞ることの試験も、この Step で書く。**
+
+```python
+def test_members_follow_the_current_rule(client, canon_pair, narrowed_stack_rule):
+    """`extensions` から CR2 を外した後は、CR2 は組の中身に出ない.
+
+    `copresent_key` は残り続けるので、絞らないと `identity_partners`（現行規則で
+    CR2 を外す）と食い違い、「同じ関数が決める」という設計の要が崩れる。
+    """
+    body = client.get("/api/media?collapse=stack").json()
+
+    assert all("stack" not in m or len(m["stack"]["members"]) >= 2 for m in body["media"])
+    assert not any(m["rel_path"].endswith(".CR2") for m in body["media"] if m.get("stack"))
+```
 
 - [ ] **Step 4: 通ることを確かめる**
 
@@ -895,7 +1034,8 @@ def _members_of(conn, media_id: str) -> list[dict[str, Any]] | None:
 
 壊すもの: `theirs.rank < mine.rank` を `<=` / `me.copresent_key IS NOT NULL` を外す /
 `sib.media_file_id <> m.id` を外す / `rule.enabled` の門を外す / `total` を
-畳む前の件数にする。
+畳む前の件数にする / **`_AMBIGUOUS_EXISTS` の除外を外す** / **`_members_of` の
+`rank` への join を外す**。
 
 - [ ] **Step 7: コミット**
 

@@ -17,7 +17,7 @@ import os
 import sqlite3
 from dataclasses import dataclass
 
-from ..adapters.fs import exists_beneath, iter_media_files, open_beneath
+from ..adapters.fs import iter_media_files, open_beneath, probe_beneath
 from ..clock import now_iso
 from ..core.fingerprint import FINGERPRINT_VERSION, quick_fingerprint
 from ..db.jobs import JobContext
@@ -46,7 +46,7 @@ class Scanner:
         defn = profile.definition
         # 掃除の候補を絞る基準。列挙より先に採ることで、今回触れた行が候補から
         # 外れる。**絞りであって守りではない** —— 触れた行はカードに実在するので、
-        # 基準が無くても `exists_beneath` が残す。開き直す回数が減るだけ。
+        # 基準が無くても `probe_beneath` が残す。開き直す回数が減るだけ。
         started = now_iso()
         total = new = imported = ambiguous = vanished = 0
         counted = True
@@ -65,6 +65,11 @@ class Scanner:
             else:
                 new += 1
             ctx.emit("info", f"{found.rel_path}: {verdict}", {"size_bytes": found.size_bytes})
+        # **列挙が 1 度も回らなくてもキャンセルを見る。** 一致するファイルが 0 件の
+        # カードでは for の中の判定に届かないので、降りたことに気づけない。
+        # 掃除は破壊的なので、気づかないまま実行してはいけない。
+        if ctx.cancelled():
+            counted = False
         if counted:
             # **最後まで見たときだけ**。途中で降りたスキャンを数え終わったことに
             # すると、1 件も見ていないカードに画面が「取り込むものはありません。」と
@@ -94,6 +99,10 @@ class Scanner:
         残す —— `ON DELETE RESTRICT` なので消しに行くとスキャンごと落ちる。
 
         **1 件ずつ開くので、列挙と同じくリースを打ち続ける**（`heartbeat`）。
+
+        **「無い」と言い切れた行だけ消す。** 権限や I/O の一時的な失敗を「無い」と
+        読むと、実在するファイルの記録を落とす。列挙側も開けないディレクトリを
+        黙って飛ばすので、確かめずに消すと部分木ぶんがまとめて消える。
         """
         rows = self._conn.execute(
             "SELECT id, rel_path FROM source_entry"  # noqa: S608
@@ -103,12 +112,20 @@ class Scanner:
             (volume_instance_id, started),
         ).fetchall()
         gone = []
+        unknown = 0
         for row in rows:
             ctx.heartbeat()
-            if not exists_beneath(dirfd, row["rel_path"]):
+            present = probe_beneath(dirfd, row["rel_path"])
+            if present is None:
+                unknown += 1
+            elif present is False:
                 gone.append(row["id"])
         for entry_id in gone:
             self._conn.execute("DELETE FROM source_entry WHERE id = ?", (entry_id,))
+        if unknown:
+            # **黙って残さない。** 次の取り込みがこの行で失敗したとき、理由が
+            # どこにも無いと追えない（起動時の回収で同じことがあった）。
+            ctx.emit("warning", f"{unknown} 件は在るか確かめられなかった（そのまま残す）")
         return len(gone)
 
     def _fingerprint(self, dirfd: int, rel_path: str, size: int) -> str:

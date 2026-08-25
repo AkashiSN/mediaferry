@@ -130,6 +130,14 @@ UNIQUE (volume_instance_id, rel_path)
 いるところ（`_reconcile_entry` の UPDATE 経路）と同じ。無いと、上の例の新しい JPG が
 **古い同席の印を持ち越す**。
 
+> **引き金は「中身が変わったか」ではなく「`media_file_id` を外すか」に直した**
+> （codex のレビュー）。中身が変わったかの判定（`same`）は `quick_fingerprint` ——
+> サイズと 16 個の標本窓しか見ない**確率的**な判定で、標本窓の外だけが変わった
+> 同サイズのファイルを取りこぼす。取りこぼすと、**まさにここで防ぎたい誤組が
+> 起きる**。`media_file_id` を外す瞬間は「この行はもう前の `media_file` を代表
+> しない」と決めた瞬間なので、**指紋の強さに依らない**。
+> 詳しくは [`phase10-plan.md`](phase10-plan.md) の冒頭。
+
 **途中で降りたスキャンは印を書かない**（`mark_scanned` と `_sweep_vanished` と同じ
 `counted` の条件）。見ていないだけの相方を「居なかった」と読むため。
 
