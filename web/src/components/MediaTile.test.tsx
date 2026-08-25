@@ -65,7 +65,7 @@ describe("MediaTile", () => {
     expect(screen.queryByRole("button")).toBeNull();
   });
 
-  it("onToggle だけ渡すと選ぶ丸はあるが、開く道は出ない（いまの Photos.tsx の形）", () => {
+  it("onToggle だけ渡すと選ぶ丸はあるが、開く道は出ない", () => {
     renderTile({ onToggle: vi.fn() });
     expect(screen.getByRole("button", { name: "選ぶ：A.MP4" })).toBeInTheDocument();
     expect(screen.queryByRole("link")).toBeNull();
