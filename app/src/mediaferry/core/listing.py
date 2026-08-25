@@ -6,6 +6,10 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterable
+
+from ..db.profiles import ProfileRef
+
 # 1 ページの既定と上限。上限を置かないと、1 回の要求で全件を引ける。
 DEFAULT_PAGE_SIZE = 50
 MAX_PAGE_SIZE = 200
@@ -25,3 +29,20 @@ def escape_like(raw: str) -> str:
     （後にすると、直前に足した `\\` をもう一度置き換えてしまう）。
     """
     return raw.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+
+
+def stack_extension_ranks(profiles: Iterable[ProfileRef]) -> list[tuple[str, str, int]]:
+    """`(profile_id, 拡張子, 順位)` の一覧. **順位は現行リビジョンから読む。**
+
+    取り込んだ版ではなく現行版を使うのは、組が「取り込みの記録」ではなく
+    「いま適用する操作」だから（`docs/decisions.md`）。`stack` が無効なプロファイルは
+    1 行も出さない —— 出さなければ、その行は決して従にならない。
+    """
+    ranks: list[tuple[str, str, int]] = []
+    for profile in profiles:
+        rule = profile.definition.stack
+        if not rule.enabled:
+            continue
+        for position, extension in enumerate(rule.extensions):
+            ranks.append((profile.profile_id, extension, position))
+    return ranks

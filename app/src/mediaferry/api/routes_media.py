@@ -8,9 +8,10 @@ from fastapi import APIRouter, Depends, Request, Response
 from fastapi.responses import FileResponse
 
 from ..adapters.thumbnails import ThumbnailFailed, quantise
-from ..core.listing import DEFAULT_PAGE_SIZE, escape_like, page_bounds
+from ..core.listing import DEFAULT_PAGE_SIZE, escape_like, page_bounds, stack_extension_ranks
 from ..db.media import IN_FLIGHT_STATES, MediaRepository, owner_group
 from ..db.merges import GroupNotEditable
+from ..db.profiles import ProfileRegistry
 from ..db.selection import SENDABLE_CLAUSE
 from .deps import conn as get_conn
 from .deps import state as get_state
@@ -21,6 +22,54 @@ router = APIRouter()
 # `media_file.role` の CHECK 制約が許す値そのもの（`db/migrations/0003_*.sql`）。
 # `_filters` の role 節がこの外の値をリテラルで埋めないために使う。
 _KNOWN_ROLES = frozenset({"original", "derived"})
+
+
+# **従を外す節。** 「同じカードで、同じ同席の印を持ち、自分より順位が上の
+# 拡張子の兄弟が居る」行は主ではないので一覧に出さない。組がページの境目を
+# またがないよう、束ねずに隠す（`docs/history/phase10-design.md` の 4）。
+_SECONDARY_EXISTS = """
+EXISTS (
+  SELECT 1
+    FROM source_entry me
+    JOIN rank mine ON mine.profile_id = m.profile_id AND mine.extension = me.extension
+    JOIN source_entry sib
+      ON sib.volume_instance_id = me.volume_instance_id
+     AND sib.copresent_key = me.copresent_key
+     AND sib.media_file_id IS NOT NULL
+     AND sib.media_file_id <> m.id
+     AND sib.state = 'published'
+    JOIN media_file sm ON sm.id = sib.media_file_id
+    JOIN rank theirs ON theirs.profile_id = sm.profile_id AND theirs.extension = sib.extension
+   WHERE me.media_file_id = m.id
+     AND me.state = 'published'
+     AND me.copresent_key IS NOT NULL
+     AND theirs.rank < mine.rank
+)
+"""
+
+# **曖昧な組は畳まない**（`identity_partners` の `ambiguous` と同じ判断）。
+# 同じ順位の兄弟が 2 つあると、どちらが主か決まらない。畳むと片方が消える。
+_AMBIGUOUS_EXISTS = """
+EXISTS (
+  SELECT 1
+    FROM source_entry me
+    JOIN source_entry a
+      ON a.volume_instance_id = me.volume_instance_id
+     AND a.copresent_key = me.copresent_key
+     AND a.media_file_id IS NOT NULL AND a.state = 'published'
+    JOIN source_entry b
+      ON b.volume_instance_id = me.volume_instance_id
+     AND b.copresent_key = me.copresent_key
+     AND b.media_file_id IS NOT NULL AND b.state = 'published'
+     AND b.media_file_id <> a.media_file_id
+     AND b.extension = a.extension
+   WHERE me.media_file_id = m.id
+     AND me.state = 'published'
+     AND me.copresent_key IS NOT NULL
+)
+"""
+
+_KNOWN_COLLAPSE_VALUES = frozenset({"stack"})
 
 
 @router.get("/media")
@@ -35,6 +84,7 @@ def list_media(  # noqa: PLR0913
     q: str | None = None,
     destination_id: str | None = None,
     status: str | None = None,
+    collapse: str | None = None,
     conn=Depends(get_conn),  # noqa: ANN001, B008
 ) -> dict[str, Any]:
     """ライブラリの一覧（§11）.
@@ -44,23 +94,108 @@ def list_media(  # noqa: PLR0913
 
     `status` は**宛先ごとの状態**なので、`destination_id` と併せて指定する。
     `role=derived` で写真タブの「つないだ動画」だけに絞れる。
+
+    `collapse=stack` で、組の従（`stack.extensions` で後ろの拡張子）を一覧から
+    外す。**組は束ねない。** 束ねるとページの境目を組がまたぐので、行は増減
+    させず、従の行だけを隠す。主の行には `stack.members` が付く。**既定は
+    畳まない** —— ホームの「さっき取り込んだもの」と選んで送る画面が同じ
+    この API を使うので、`collapse` を指定しない限り契約を変えない。
     """
+    if collapse is not None and collapse not in _KNOWN_COLLAPSE_VALUES:
+        raise ApiError(400, ErrorCode.BAD_REQUEST, "collapse は stack だけ", {"collapse": collapse})
     where, params = _filters(
         kind, role, profile, captured_from, captured_to, q, destination_id, status
     )
     limit, offset = page_bounds(page, page_size)
-    total = conn.execute(f"SELECT count(*) AS n FROM media_file m {where}", params).fetchone()["n"]  # noqa: S608
+
+    # **`ranks` が空なら何もしない**（`VALUES` は 0 行を書けない）。`stack` が
+    # 有効なプロファイルが 1 つも無ければ、隠す従も無い。
+    ranks_sql = ""
+    ranks_params: tuple[Any, ...] = ()
+    prefix = ""
+    if collapse == "stack":
+        ranks = stack_extension_ranks(ProfileRegistry(conn).all())
+        if ranks:
+            ranks_sql = ", ".join(["(?, ?, ?)"] * len(ranks))
+            ranks_params = tuple(value for row in ranks for value in row)
+            prefix = f"WITH rank(profile_id, extension, rank) AS (VALUES {ranks_sql}) "
+            # **`_AMBIGUOUS_EXISTS` は `_SECONDARY_EXISTS` を打ち消す保護であって、
+            # 独立の除外条件ではない。** 「従に見える行」でも、その身元が曖昧
+            # （同じ順位の別候補がいる）なら、どちらが本当の主か決まらないので
+            # 隠さない —— `identity_partners` が曖昧なら組まないのと同じ判断
+            # （`docs/history/phase10-plan.md` の「曖昧なら組まない。…一覧も
+            # 畳まない」）。**両方入れる** —— `_AMBIGUOUS_EXISTS` を落とすと、
+            # 曖昧な組の従が実在するファイルなのに一覧から消える。
+            hide_as_secondary = f"({_SECONDARY_EXISTS}) AND NOT ({_AMBIGUOUS_EXISTS})"
+            exclude = f"NOT ({hide_as_secondary})"
+            where = f"{where} AND {exclude}" if where else f"WHERE {exclude}"
+
+    total = conn.execute(
+        f"{prefix}SELECT count(*) AS n FROM media_file m {where}",  # noqa: S608
+        (*ranks_params, *params),
+    ).fetchone()["n"]
     rows = conn.execute(
-        f"SELECT m.* FROM media_file m {where}"  # noqa: S608
+        f"{prefix}SELECT m.* FROM media_file m {where}"  # noqa: S608
         " ORDER BY m.captured_at DESC, m.id DESC LIMIT ? OFFSET ?",
-        (*params, limit, offset),
+        (*ranks_params, *params, limit, offset),
     )
+    media = []
+    for row in rows:
+        item = _media(row)
+        if ranks_sql:
+            # 組の中身は、主の行 1 つにつき 1 回だけ引く。
+            member_rows = _members_of(conn, row["id"], ranks_sql, ranks_params)
+            if member_rows is not None:
+                item["stack"] = {
+                    "members": [
+                        {
+                            "id": member["id"],
+                            "rel_path": member["rel_path"],
+                            "size_bytes": member["size_bytes"],
+                        }
+                        for member in member_rows
+                    ]
+                }
+        media.append(item)
     return {
-        "media": [_media(row) for row in rows],
+        "media": media,
         "total": total,
         "page": max(1, page),
         "page_size": limit,
     }
+
+
+def _members_of(
+    conn,  # noqa: ANN001
+    media_id: str,
+    ranks_sql: str,
+    ranks_params: tuple[Any, ...],
+) -> list[Any] | None:
+    """主から見た組の中身（**主を先頭に**、順位の順）. 組でなければ None.
+
+    **現行の `stack` 規則で絞る。** `copresent_key` は残り続けるのに順位は現行版
+    なので、絞らないと `extensions` を変えた後に `identity_partners` と食い違う
+    （「同じ関数が決める」が崩れ、順位の dict 引きも KeyError になる）。
+    """
+    rows = conn.execute(
+        f"WITH rank(profile_id, extension, rank) AS (VALUES {ranks_sql})"  # noqa: S608
+        " SELECT DISTINCT sm.id AS id, sm.rel_path AS rel_path,"
+        "        sm.size_bytes AS size_bytes, r.rank AS rank"
+        "   FROM source_entry me"
+        "   JOIN source_entry sib"
+        "     ON sib.volume_instance_id = me.volume_instance_id"
+        "    AND sib.copresent_key = me.copresent_key"
+        "    AND sib.media_file_id IS NOT NULL AND sib.state = 'published'"
+        "   JOIN media_file sm ON sm.id = sib.media_file_id"
+        "   JOIN rank r ON r.profile_id = sm.profile_id AND r.extension = sib.extension"
+        "  WHERE me.media_file_id = ? AND me.state = 'published'"
+        "    AND me.copresent_key IS NOT NULL"
+        "  ORDER BY r.rank",
+        (*ranks_params, media_id),
+    ).fetchall()
+    if len(rows) < 2:  # noqa: PLR2004 - 1 つでは組にならない
+        return None
+    return rows
 
 
 def _filters(  # noqa: PLR0913
