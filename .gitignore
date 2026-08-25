@@ -224,3 +224,8 @@ graphify-out/
 
 # ブレインストーミングの視覚用コンパニオンが置くモック（追跡しない）
 .superpowers/
+
+# Claude Code の作業場。環境ごとの設定（settings.local.json）と、
+# リポジトリの中に置く worktree が入る。**worktree を追跡すると、
+# 別ブランチの作業一式がコミットに紛れる**ので、まとめて外す
+.claude/
