@@ -57,6 +57,8 @@ type MediaDetail = {
   delete_frees_sources: boolean;
   /** この出力を持っているグループ（元のファイルなら `null`）。 */
   group: Group | null;
+  /** この 1 件が属する組（RAW+JPEG。組でなければ `null`）。**主が先頭。** */
+  stack: { members: { id: string; rel_path: string; size_bytes: number }[] } | null;
 };
 
 /**
@@ -108,6 +110,32 @@ export function PhotoDetailScreen() {
   // （つなぐ画面の判断と同じ）。
   const group = data?.group ?? null;
   const editable = group !== null && group.superseded_by_id === null;
+
+  // 送るものとして選んでいる member。**組でなければ `null`**（この 1 件を送る）。
+  // **既定は全部オン** —— 一覧の丸が組ごとに選ぶのと揃える。外したい人だけが
+  // 操作する。送るまでの一時的な選択なので、URL には持たない。
+  const members = data?.stack?.members ?? null;
+  // **id の並びで見る。** `members` は毎回新しい配列なので、そのまま比べると
+  // 描画のたびに選択が既定へ戻る。
+  const memberKey = members === null ? "" : members.map((member) => member.id).join(",");
+  const [includedKey, setIncludedKey] = useState("");
+  const [included, setIncluded] = useState<Set<string> | null>(null);
+  // **描画の途中で比べてその場で更新する。** `useEffect` で書くと、このリポジトリの
+  // react-hooks/set-state-in-effect（「効果の中で同期的に setState する」形を
+  // 避けるルール）に引っかかる（`Photos.tsx` の並び替えと同じ形）。
+  if (includedKey !== memberKey) {
+    setIncludedKey(memberKey);
+    setIncluded(memberKey === "" ? null : new Set(memberKey.split(",")));
+  }
+
+  /** 「送る」へ渡す id。**組ならチェックの付いたぶんだけ**、組でなければこの 1 件。 */
+  const sendingIds = data === null ? [] : included === null ? [data.id] : [...included];
+  const sendingBytes =
+    members === null
+      ? (data?.size_bytes ?? 0)
+      : members
+          .filter((member) => included?.has(member.id))
+          .reduce((sum, member) => sum + member.size_bytes, 0);
 
   /** グループへの操作。**成功したら詳細を引き直す**（検証も採用済みの印も変わる）。 */
   async function act(path: string, body?: unknown): Promise<void> {
@@ -186,6 +214,46 @@ export function PhotoDetailScreen() {
               {` ・ ${formatBytes(data.size_bytes)}`}
             </p>
           </div>
+
+          {members !== null && (
+            <section className="card pad">
+              <div className="sechead" style={{ marginBottom: 12 }}>
+                <h2>この 1 枚を作っているファイル</h2>
+              </div>
+              <ul style={{ listStyle: "none", display: "flex", flexDirection: "column", gap: 8 }}>
+                {members.map((member) => (
+                  // **選ぶ的と開く的を分ける**（タイルの「丸で選ぶ・絵で開く」と
+                  // 同じ形）。従は一覧に出ないので、名前からその 1 件へ行けないと
+                  // 「宛先ごとの状況」も「消す」も届かなくなる（§13）。
+                  <li key={member.id} className="row">
+                    <input
+                      type="checkbox"
+                      checked={included?.has(member.id) ?? false}
+                      aria-label={`送る：${fileName(member.rel_path)}`}
+                      onChange={() =>
+                        setIncluded((current) => {
+                          const next = new Set(current ?? []);
+                          if (next.has(member.id)) {
+                            next.delete(member.id);
+                          } else {
+                            next.add(member.id);
+                          }
+                          return next;
+                        })
+                      }
+                    />
+                    <Link to={`/photos/${member.id}`} className="ident grow">
+                      {fileName(member.rel_path)}
+                    </Link>
+                    <span className="small">{formatBytes(member.size_bytes)}</span>
+                  </li>
+                ))}
+              </ul>
+              <p className="small" style={{ marginTop: 10 }}>
+                {sendingIds.length} 枚 ・ {formatBytes(sendingBytes)} を送ります
+              </p>
+            </section>
+          )}
 
           <section className="card pad">
             {/* **`.sechead` で包む。** 素の `<h2>` はブラウザ既定の大きさで描かれ、
@@ -354,9 +422,10 @@ export function PhotoDetailScreen() {
             <button
               type="button"
               className="btn primary"
+              disabled={sendingIds.length === 0}
               onClick={() =>
                 navigate("/send", {
-                  state: { ids: [data.id], destinationIds: [] },
+                  state: { ids: sendingIds, destinationIds: [] },
                 })
               }
             >
