@@ -26,6 +26,17 @@ CSP = (
 # API として扱う接頭辞。ここに落ちた要求は画面に化けない。
 API_PREFIXES = ("/api",)
 
+# 根の名前で取りにくる資産（ブラウザが `/favicon.ico` のように決め打ちで来る）。
+# **一覧を明示する。** 「根にあるファイルは何でも配る」にすると、置き忘れた物まで
+# 配られてしまう。ここに無い名前は、これまでどおり画面（`index.html`）になる。
+ROOT_FILES = {
+    "favicon.ico": "image/x-icon",
+    "favicon.svg": "image/svg+xml",
+    "icon.svg": "image/svg+xml",
+    "icon-512.png": "image/png",
+    "apple-touch-icon.png": "image/png",
+}
+
 
 def web_root(env) -> Path | None:  # noqa: ANN001
     """ビルド済み資産の場所. 無ければ `None`（開発とテストでは普通に無い）."""
@@ -44,6 +55,12 @@ def install_web(app: FastAPI, root: Path) -> None:
             # ここへ来るのはルータが拾わなかった `/api` の要求だけ。**画面に化けさせない**
             # （消したはずの API が 200 を返すと、画面もテストも気づけない）。
             return error_response(404, ErrorCode.NOT_FOUND, "その API は無い", {})
+        if (media_type := ROOT_FILES.get(full_path)) is not None:
+            # **画面に化けさせない。** 中身が HTML のアイコンは、無いより分かりにくい。
+            icon = root / full_path
+            if not icon.is_file():
+                return error_response(404, ErrorCode.NOT_FOUND, "その資産は無い", {})
+            return FileResponse(icon, media_type=media_type)
         response = FileResponse(
             root / "index.html",
             headers={"Content-Security-Policy": CSP, "Cache-Control": "no-store"},

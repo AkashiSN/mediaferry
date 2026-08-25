@@ -110,3 +110,33 @@ def test_an_empty_web_root_is_not_mounted(data_root, broker, monkeypatch, tmp_pa
     with TestClient(app, base_url="http://127.0.0.1:8080") as client:
         assert client.get("/api/health").status_code == 200
         assert client.get("/").status_code == 404
+
+
+def test_the_icons_are_served(built):
+    """アイコンは根の名前で取りにくる（`/assets` の下に置けない）."""
+    client, dist = built
+    (dist / "favicon.svg").write_text("<svg/>", encoding="utf-8")
+    (dist / "favicon.ico").write_bytes(b"\x00\x00\x01\x00")
+    (dist / "apple-touch-icon.png").write_bytes(b"\x89PNG")
+
+    svg = client.get("/favicon.svg")
+    assert svg.status_code == 200
+    assert svg.text == "<svg/>"
+    assert svg.headers["content-type"].startswith("image/svg+xml")
+
+    assert client.get("/favicon.ico").content == b"\x00\x00\x01\x00"
+    assert client.get("/apple-touch-icon.png").content == b"\x89PNG"
+
+
+def test_a_missing_icon_is_not_the_page(built):
+    """**画面に化けさせない。** 中身が HTML の favicon は、無いより分かりにくい."""
+    client, _ = built
+    assert client.get("/favicon.ico").status_code == 404
+
+
+def test_only_the_listed_root_files_are_served(built):
+    """根に何を置いても配られる、ということにはしない."""
+    client, dist = built
+    (dist / "secret.txt").write_text("秘密", encoding="utf-8")
+    response = client.get("/secret.txt")
+    assert "秘密" not in response.text

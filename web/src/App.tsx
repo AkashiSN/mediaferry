@@ -118,7 +118,9 @@ export function App() {
   useEffect(load, [load]);
 
   if (session === null) {
-    return <p>読み込み中…</p>;
+    // ログインと同じ場所（画面の中央）に出す。**枠はまだ組めない** —— 認証が
+    // 要るかどうかが決まる前なので、ナビを描いてから消すことになる。
+    return <p className="signin muted">読み込み中…</p>;
   }
   if (session.required && !session.authenticated) {
     return <LoginScreen onSignedIn={load} />;

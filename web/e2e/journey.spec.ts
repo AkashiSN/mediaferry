@@ -817,3 +817,54 @@ test("つないだ動画を開いて、消せる", async ({ page }) => {
   await settled(page);
   await expect(page.locator("main .tile")).toHaveCount(0);
 });
+
+// ---- ログイン画面 ----
+//
+// **上のどの網にも掛かっていない。** 44px もコントラストもはみ出しも、`signIn()`
+// を済ませてから `main` の中だけを測る。ログインは枠（`Layout`）の外に出る唯一の
+// 画面で `main` も `nav` も持たないので、ここで別に見る。
+
+test("ログイン画面の押せるものも 44px 以上", async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.goto(app.url);
+  await expect(page.getByRole("heading", { name: "ログイン" })).toBeVisible();
+
+  const tooSmall: string[] = [];
+  const targets: [string, ReturnType<Page["getByLabel"]>][] = [
+    ["パスワード", page.getByLabel("パスワード")],
+    ["ログイン", page.getByRole("button", { name: "ログイン" })],
+  ];
+  for (const [name, locator] of targets) {
+    const box = await locator.boundingBox();
+    if (box !== null && box.height < 44) {
+      tooSmall.push(`「${name}」が ${Math.round(box.height)}px`);
+    }
+  }
+  expect(tooSmall, tooSmall.join(" / ")).toEqual([]);
+});
+
+test("ログイン画面は 1 枚のカードを中央に置く", async ({ page }) => {
+  await page.setViewportSize({ width: 1280, height: 900 });
+  await page.goto(app.url);
+  await expect(page.getByRole("heading", { name: "ログイン" })).toBeVisible();
+
+  const panel = await page.evaluate(() => {
+    const card = document.querySelector("form")?.closest(".card") ?? null;
+    if (card === null) {
+      return null;
+    }
+    const rect = card.getBoundingClientRect();
+    return {
+      left: Math.round(rect.left),
+      right: Math.round(window.innerWidth - rect.right),
+      width: Math.round(rect.width),
+      viewport: window.innerWidth,
+    };
+  });
+
+  expect(panel, "ログインのフォームがカードに入っていない").not.toBeNull();
+  // **本文の幅いっぱいに広げない。** 読む列としても押す的としても広すぎる。
+  expect(panel!.width, `カードが ${panel!.width}px`).toBeLessThanOrEqual(panel!.viewport / 2);
+  // 左右の余りが等しい ＝ 中央にある。
+  expect(Math.abs(panel!.left - panel!.right), "中央に無い").toBeLessThanOrEqual(2);
+});
