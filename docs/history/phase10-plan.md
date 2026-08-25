@@ -1000,8 +1000,17 @@ EXISTS (
 
 `list_media` に `collapse: str | None = None` を足し、`collapse == "stack"` の
 ときだけ `WITH rank(profile_id, extension, rank) AS (VALUES ...)` を前置して
-`AND NOT (<_SECONDARY_EXISTS>) AND NOT (<_AMBIGUOUS_EXISTS>)` を `where` に足す。
-**両方入れる** —— 曖昧な組を畳むと、同じ順位の 2 つのうち片方が黙って消える。`ranks` が空なら**何もしない**
+`AND NOT (<_SECONDARY_EXISTS> AND NOT <_AMBIGUOUS_EXISTS>)` を `where` に足す。
+
+**独立した 2 つの除外にしてはいけない。** `AND NOT(_SECONDARY) AND NOT(_AMBIGUOUS)`
+と書くと、`_AMBIGUOUS_EXISTS` は**同席グループ全体に対する述語**なので、グループ内の
+曖昧でない行（CR2 など）にも真になり、**曖昧な組の行が丸ごと一覧から消える**。
+意図は真逆（曖昧なら畳まずに全部出す）。**曖昧さは「隠すことからの保護」であって、
+独立した除外条件ではない。**
+
+同じ除外は `_members_of` にも要る。**曖昧なら `None` を返す** —— `identity_partners`
+は同じ状況を `ambiguous` として組を作らないので、返すと**画面だけが Immich の作らない
+組を宣言する**（`RAW` の札は `media.stack` の有無で出る）。`ranks` が空なら**何もしない**
 （`VALUES` は 0 行を書けない）。`collapse` が `"stack"` でも `None` でもなければ
 `ApiError(400, ErrorCode.INVALID, "collapse は stack だけ")`。
 
@@ -1076,6 +1085,11 @@ def test_members_follow_the_current_rule(client, canon_pair, narrowed_stack_rule
 実測の両方で確かめ、値を `phase10-record.md` に書く。
 
 - [ ] **Step 6: 変異試験**
+
+**「構造的に検出できない」と決めつけないこと。** 実測では下の 1 番が検出可能だった
+—— 順位は `media_file` 自身のプロファイルで引くので単射性は 1 つの `media_file` の
+中でしか効かず、**別プロファイルの `media_file` が同席グループに混ざる**と拡張子が
+違うのに順位が並ぶ。`<=` にすると**両方の行が一覧から消える**。
 
 壊すもの: `theirs.rank < mine.rank` を `<=` / `me.copresent_key IS NOT NULL` を外す /
 `sib.media_file_id <> m.id` を外す / `rule.enabled` の門を外す / `total` を
