@@ -339,10 +339,18 @@ def test_stack_members_names_the_pair_without_hiding_the_raw(client, canon_pair)
 
 
 def test_stack_members_leaves_a_lone_file_without_a_stack(client, canon_pair_without_proof):
-    """組でない行には付けない（空の組を作らない）."""
+    """組でない行には**キーごと付けない**（空の組を作らない）.
+
+    **一覧は「無いこと」を `null` では言わない。** 既にある 4 本
+    （同ファイルの `assert "stack" not in …`）がそれを仕様として固定している ——
+    行に `null` を足すと `collapse=stack` の契約が変わる。詳細（Task 1）は 1 件の
+    応答で欄が固定なので、そちらだけ `"stack": None` を明示する。
+    """
     body = client.get("/api/media?stack=members").json()
 
-    assert [item["stack"] for item in body["media"]] == [None, None]
+    assert len(body["media"]) == 2
+    for item in body["media"]:
+        assert "stack" not in item
 
 
 def test_collapse_wins_over_stack_members(client, canon_pair):
@@ -704,9 +712,16 @@ export function groupIntoStacks<T extends StackRow>(rows: T[]): StackTile<T>[] {
     if (placed.has(row.id)) {
       continue;
     }
+    const members = row.stack?.members;
+    if (members === undefined || members === null) {
+      placed.add(row.id);
+      tiles.push({ primary: row, rows: [row] });
+      continue;
+    }
     // **主は `stack.members` の並び**（先頭が主）のうち、集合に実際に居る先頭。
-    const members = row.stack?.members ?? [{ id: row.id, rel_path: "", size_bytes: 0 }];
-    const present = members.map((member) => byId.get(member.id)).filter((one): one is T => one !== undefined);
+    const present = members
+      .map((member) => byId.get(member.id))
+      .filter((one): one is T => one !== undefined);
     const mine = present.length === 0 ? [row] : present;
     for (const one of mine) {
       placed.add(one.id);
@@ -957,7 +972,8 @@ it("日付の丸で、その日を全部選ぶ", async () => {
     </MemoryRouter>,
   );
 
-  const day = await screen.findByRole("checkbox", { name: /2026.*8.*18.*をまとめて選ぶ/ });
+  // `formatDate("2026-08-18…")` は `"2026年8月18日"`（`utils/formatDateTime.ts`）。
+  const day = await screen.findByRole("checkbox", { name: "2026年8月18日 をまとめて選ぶ" });
   await userEvent.click(day);
 
   expect(await screen.findByText("2 件を選択中")).toBeInTheDocument();
@@ -1458,10 +1474,20 @@ npm --prefix web test -- src/screens/Photos.test.tsx
                   onToggle={(_id, modifiers) => toggle(item, modifiers)}
 ```
 
-**`onToggle` を渡している他の画面**（`grep -rn "onToggle" web/src` で確かめる）も
-新しい型に合わせる。呼ぶ側が修飾キーを使わないなら `() => …` のままでよい
-（TypeScript は引数を減らした関数を受け付ける）。**`npm --prefix web run typecheck`
-が通ることで確かめる。**
+**非テストの呼び出し元は `Photos.tsx:394` の 1 か所だけ**（実測済み。`work/` の
+どの画面も `onToggle` を渡していない）。他を探しに行かなくてよい。
+
+**既存のテストを 1 行直す。** `web/src/components/MediaTile.test.tsx` の
+「押すと開き、選ぶのは隅の丸」が、引数を 1 つで当てている。
+
+```tsx
+    await userEvent.click(screen.getByRole("button", { name: "選ぶ：A.MP4" }));
+    // **修飾キーは、押していなければ `false` で渡る。** ここでしか固定されない。
+    expect(onToggle).toHaveBeenCalledWith("m1", { shift: false });
+```
+
+**この行を消して通さない。** 消すと「Shift を押していないときに `false` が渡る」を
+守るものが 1 つも無くなる。
 
 - [ ] **Step 4: 通ることを確かめる**
 
