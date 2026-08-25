@@ -848,3 +848,35 @@ describe("確認の内容と、実際に送るもの", () => {
     await waitFor(() => expect(screen.getByRole("button", { name: /内容を確かめる/ })).toBeEnabled());
   });
 });
+
+describe("画面の組み立て", () => {
+  const EMPTY = { media: [], total: 0, page: 1, page_size: 50 };
+
+  it("「やめる」は行に包まれている（幅いっぱいに伸びない）", async () => {
+    // **jsdom は幅を測れない。** 測れるのは構造だけなので、`.wrap` の直下に
+    // 置かないことを見る —— 伸びるかどうかはそこで決まる（`styles.css` の
+    // `.wrap` は縦並びで、`align-items` の既定が `stretch`）。
+    stubApi({ "/destinations": DESTINATIONS, "/media": EMPTY });
+    renderSend();
+    const cancel = await screen.findByRole("button", { name: /やめる/ });
+    expect(cancel.parentElement).toHaveClass("row");
+  });
+
+  it("宛先の名前と接続状況は、2 行に分かれる", async () => {
+    // `.chip` は横並びなので、名前と状況が 1 行に押し込まれる。**縦並びの派生**を
+    // 当てる（`.chip` そのものは写真タブの絞り込みが使うので変えない）。
+    stubApi({ "/destinations": DESTINATIONS, "/media": EMPTY });
+    renderSend();
+    const chip = await screen.findByRole("button", { name: /家の Immich/ });
+    expect(chip).toHaveClass("stacked");
+  });
+
+  it("「すでにある写真は〜」の説明は、アイコンと同じ行に入る", async () => {
+    // `.rowtop` は `flex-wrap: wrap` で、**行に詰めるかを flex-basis で決める**。
+    // `.grow` が無いと basis が max-content になり、縮む前に改行される。
+    stubApi({ "/destinations": DESTINATIONS, "/media": EMPTY });
+    renderSend();
+    const note = await screen.findByText(/すでにある写真/);
+    expect(note).toHaveClass("grow");
+  });
+});

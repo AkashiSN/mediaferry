@@ -1,6 +1,6 @@
 // 1 件のくわしく（§13）。「それが何かを知り、いらなければ消す」がここで完結する。
 
-import { render, screen, waitFor } from "@testing-library/react";
+import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { MemoryRouter, Route, Routes, useLocation } from "react-router-dom";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -180,5 +180,44 @@ describe("1 件のくわしく", () => {
     renderDetail({ rel_path: "derived/dji-osmo/DCIM/OUT.MP4" });
     await waitFor(() => expect(screen.getByText("OUT.MP4")).toBeInTheDocument());
     expect(screen.queryByText(/derived\/dji-osmo/)).not.toBeInTheDocument();
+  });
+});
+
+describe("節の組み立て", () => {
+  it("ファイル名は、狭い画面でも箱に収まる形で置く", async () => {
+    // **`_` は折り返しの機会にならない。** `DJI_20260817143100_0002_D.MP4` は
+    // 1 語として扱われるので、`.ident`（`overflow-wrap: anywhere`）が無いと
+    // 狭い画面で画面の外へ流れ出る（実機で確認）。
+    renderDetail({ rel_path: "library/dji-osmo/DCIM/DJI_20260817143100_0002_D.MP4" });
+    const title = await screen.findByRole("heading", { name: /DJI_20260817143100_0002_D\.MP4/ });
+    expect(title).toHaveClass("ident");
+  });
+
+  it("節の見出しは、画面の見出しと同じ階層に見えない", async () => {
+    // **`.sechead h2` は `.sechead` の子にしか効かない。** 素の `<h2>` は
+    // ブラウザ既定の大きさで描かれ、画面の見出し（`h1.page.title-lg`）と
+    // ほとんど変わらなくなる。大きさは jsdom で測れないので、**規則が当たる
+    // 形になっていること**を見る。
+    renderDetail({ role: "derived", sources: [] });
+    for (const name of ["宛先ごとの状況", "元になったファイル"]) {
+      const heading = await screen.findByRole("heading", { name });
+      expect(heading.parentElement).toHaveClass("sechead");
+    }
+  });
+
+  it("宛先の名前と状況は、同じ塊に入る（どれの状況か読める）", async () => {
+    // 名前と状況を兄弟として左右に置くと、狭い画面では状況だけが次の行へ落ち、
+    // **どの宛先の状況なのかが読めなくなる**。名前の直下に置く。
+    renderDetail({
+      destinations: [
+        { destination_id: "d1", name: "家の Immich", state: null, presence: "not_sent" },
+        { destination_id: "d2", name: "旅行用 Immich", state: "complete", presence: "present" },
+      ],
+    });
+    const name = await screen.findByText("家の Immich");
+    const block = name.closest(".grow");
+    expect(block).not.toBeNull();
+    expect(within(block as HTMLElement).getByText("まだ送っていません")).toBeInTheDocument();
+    expect(within(block as HTMLElement).queryByText("Immich に入っています")).toBeNull();
   });
 });

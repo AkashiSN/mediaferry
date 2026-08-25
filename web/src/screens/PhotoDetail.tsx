@@ -120,7 +120,9 @@ export function PhotoDetailScreen() {
           />
 
           <div>
-            <h1 className="page title-lg">{fileName(data.rel_path)}</h1>
+            {/* **`.ident` を外さない。** ファイル名は `_` でも `/` でも折り返さない
+                1 語として扱われるので、狭い画面では箱の外へ流れ出る。 */}
+            <h1 className="page title-lg ident">{fileName(data.rel_path)}</h1>
             {data.role === "derived" && (
               <p className="muted">つないだ動画（{data.sources.length} 本から）</p>
             )}
@@ -134,15 +136,23 @@ export function PhotoDetailScreen() {
           </div>
 
           <section className="card pad">
-            <h2>宛先ごとの状況</h2>
+            {/* **`.sechead` で包む。** 素の `<h2>` はブラウザ既定の大きさで描かれ、
+                画面の見出し（`h1.page.title-lg`）とほとんど変わらなくなる。 */}
+            <div className="sechead" style={{ marginBottom: 12 }}>
+              <h2>宛先ごとの状況</h2>
+            </div>
             {data.destinations.length === 0 ? (
               <p className="small">宛先がありません。</p>
             ) : (
-              <ul style={{ listStyle: "none", padding: 0, display: "flex", flexDirection: "column", gap: 8 }}>
+              <ul style={{ listStyle: "none", display: "flex", flexDirection: "column", gap: 12 }}>
                 {data.destinations.map((dest) => (
-                  <li key={dest.destination_id} className="rowtop">
-                    <span className="grow">{dest.name}</span>
-                    <span className="small">{PRESENCE[dest.presence] ?? dest.presence}</span>
+                  // **状況は名前の直下に置く。** 左右に離して置くと、狭い画面では
+                  // 状況だけが次の行へ落ち、どの宛先の状況なのか読めなくなる。
+                  <li key={dest.destination_id} className="row">
+                    <div className="grow">
+                      <div style={{ fontSize: "13.5px", fontWeight: 600 }}>{dest.name}</div>
+                      <div className="small">{PRESENCE[dest.presence] ?? dest.presence}</div>
+                    </div>
                   </li>
                 ))}
               </ul>
@@ -151,16 +161,20 @@ export function PhotoDetailScreen() {
 
           {data.role === "derived" && (
             <section className="card pad">
-              <h2>元になったファイル</h2>
+              <div className="sechead" style={{ marginBottom: 12 }}>
+                <h2>元になったファイル</h2>
+              </div>
               {data.sources.length === 0 ? (
                 <p className="small">見つかりません。</p>
               ) : (
-                <ul style={{ listStyle: "none", padding: 0, display: "flex", flexDirection: "column", gap: 8 }}>
+                <ul style={{ listStyle: "none", display: "flex", flexDirection: "column", gap: 8 }}>
                   {[...data.sources]
                     .sort((left, right) => left.position - right.position)
                     .map((source) => (
                       <li key={source.media_file_id}>
-                        <Link to={`/photos/${source.media_file_id}`}>{fileName(source.rel_path)}</Link>
+                        <Link to={`/photos/${source.media_file_id}`} className="ident">
+                          {fileName(source.rel_path)}
+                        </Link>
                         {source.missing && <span className="small"> （見当たりません）</span>}
                       </li>
                     ))}
