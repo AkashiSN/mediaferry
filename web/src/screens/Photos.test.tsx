@@ -475,6 +475,213 @@ describe("写真の画面", () => {
   });
 });
 
+// **Shift+クリックで、直前に押したものから今回のものまでを範囲で選ぶ。**
+// アンカー（起点）は「並び」に属する状態なので、絞り込みが変わったら捨てる。
+describe("Shift+クリックで範囲を選ぶ", () => {
+  beforeEach(() => {
+    document.cookie = "XSRF-TOKEN=token; path=/";
+  });
+  afterEach(() => vi.restoreAllMocks());
+
+  it("Shift で、直前に押したものから範囲を選ぶ", async () => {
+    stubApi({
+      "/media": {
+        media: [
+          media("a", "2026-08-18T15:12:00+09:00"),
+          media("b", "2026-08-18T14:03:00+09:00"),
+          media("c", "2026-08-18T13:03:00+09:00"),
+          media("d", "2026-08-18T12:03:00+09:00"),
+        ],
+        total: 4,
+        page: 1,
+        page_size: 200,
+      },
+      "/destinations": { destinations: [] },
+    });
+    render(
+      <MemoryRouter>
+        <PhotosScreen />
+      </MemoryRouter>,
+    );
+
+    // **同じ `user` を使い続ける。** 直接 `userEvent.click` / `userEvent.keyboard`
+    // を別々に呼ぶと、呼び出しごとに新しい「押している状態」が始まって Shift が
+    // 継続しない —— `setup()` の 1 つのインスタンスだけが状態を共有する。
+    const user = userEvent.setup();
+    await user.click(await screen.findByRole("button", { name: "選ぶ：a.JPG" }));
+    await user.keyboard("{Shift>}");
+    await user.click(screen.getByRole("button", { name: "選ぶ：c.JPG" }));
+    await user.keyboard("{/Shift}");
+
+    expect(await screen.findByText("3 件を選択中")).toBeInTheDocument();
+  });
+
+  it("Shift の範囲は日付のまとまりをまたぐ", async () => {
+    // **利用者が見ている並びは 1 本の流れ**で、まとまりは見出しにすぎない。
+    stubApi({
+      "/media": {
+        media: [
+          media("a", "2026-08-18T15:12:00+09:00"),
+          media("b", "2026-08-17T14:03:00+09:00"),
+          media("c", "2026-08-16T13:03:00+09:00"),
+        ],
+        total: 3,
+        page: 1,
+        page_size: 200,
+      },
+      "/destinations": { destinations: [] },
+    });
+    render(
+      <MemoryRouter>
+        <PhotosScreen />
+      </MemoryRouter>,
+    );
+
+    const user = userEvent.setup();
+    await user.click(await screen.findByRole("button", { name: "選ぶ：a.JPG" }));
+    await user.keyboard("{Shift>}");
+    await user.click(screen.getByRole("button", { name: "選ぶ：c.JPG" }));
+    await user.keyboard("{/Shift}");
+
+    expect(await screen.findByText("3 件を選択中")).toBeInTheDocument();
+  });
+
+  it("Shift の範囲は選ぶ側に倒す（すでに選ばれているものを外さない）", async () => {
+    stubApi({
+      "/media": {
+        media: [
+          media("a", "2026-08-18T15:12:00+09:00"),
+          media("b", "2026-08-18T14:03:00+09:00"),
+          media("c", "2026-08-18T13:03:00+09:00"),
+        ],
+        total: 3,
+        page: 1,
+        page_size: 200,
+      },
+      "/destinations": { destinations: [] },
+    });
+    render(
+      <MemoryRouter>
+        <PhotosScreen />
+      </MemoryRouter>,
+    );
+
+    const user = userEvent.setup();
+    await user.click(await screen.findByRole("button", { name: "選ぶ：b.JPG" }));
+    await user.click(await screen.findByRole("button", { name: "選ぶ：a.JPG" }));
+    await user.keyboard("{Shift>}");
+    await user.click(screen.getByRole("button", { name: "選ぶ：c.JPG" }));
+    await user.keyboard("{/Shift}");
+
+    expect(await screen.findByText("3 件を選択中")).toBeInTheDocument();
+  });
+
+  it("アンカーが無ければ、Shift は 1 つだけ選ぶ", async () => {
+    stubApi({
+      "/media": {
+        media: [media("a", "2026-08-18T15:12:00+09:00"), media("b", "2026-08-18T14:03:00+09:00")],
+        total: 2,
+        page: 1,
+        page_size: 200,
+      },
+      "/destinations": { destinations: [] },
+    });
+    render(
+      <MemoryRouter>
+        <PhotosScreen />
+      </MemoryRouter>,
+    );
+
+    const user = userEvent.setup();
+    await user.keyboard("{Shift>}");
+    await user.click(await screen.findByRole("button", { name: "選ぶ：b.JPG" }));
+    await user.keyboard("{/Shift}");
+
+    expect(await screen.findByText("1 件を選択中")).toBeInTheDocument();
+  });
+
+  it("絞り込みを変えたらアンカーを捨てる", async () => {
+    // **並びが変わったあとのアンカーは、利用者の見ていたものと違う範囲を指す。**
+    // 選んだものは覚えたまま（Phase 7 の判断）でも、アンカーは並びに属する状態。
+    const { calls } = stubApi({
+      "/media": {
+        media: [
+          media("a", "2026-08-18T15:12:00+09:00"),
+          media("b", "2026-08-18T14:03:00+09:00"),
+          media("c", "2026-08-18T13:03:00+09:00"),
+        ],
+        total: 3,
+        page: 1,
+        page_size: 200,
+      },
+      "/destinations": { destinations: [{ id: "d1", name: "家", enabled: true }] },
+    });
+    render(
+      <MemoryRouter>
+        <PhotosScreen />
+      </MemoryRouter>,
+    );
+
+    const user = userEvent.setup();
+    await user.click(await screen.findByRole("button", { name: "選ぶ：a.JPG" }));
+    await user.click(screen.getByRole("button", { name: /^動画$/ }));
+    await waitFor(() => expect(calls().some((c) => c.path.includes("kind=video"))).toBe(true));
+    await user.keyboard("{Shift>}");
+    await user.click(await screen.findByRole("button", { name: "選ぶ：c.JPG" }));
+    await user.keyboard("{/Shift}");
+
+    // a（絞り込み前に選んだもの）は覚えたまま、c が 1 つ増えるだけ。b は入らない。
+    expect(await screen.findByText("2 件を選択中")).toBeInTheDocument();
+  });
+
+  it("Shift を続けて 2 回押すと、2 回目のアンカーは直前に押したものから始まる", async () => {
+    // **単なる件数の比較では区別が付かない。** `selectRange` は足すだけ（外さない）
+    // ので、アンカーを起点のまま固定しても直前のものへ更新しても、選んだ範囲が
+    // すでに選ばれている部分と重なる限り、結果の件数は一致してしまう。ここでは
+    // 日付の丸でいったん選択を空にしてから確かめる —— `toggleDay` はアンカーに
+    // 触らないので、空にした直後の Shift 範囲だけがアンカーの値をそのまま映す。
+    stubApi({
+      "/media": {
+        media: [
+          media("c", "2026-08-18T15:00:00+09:00"),
+          media("d", "2026-08-18T14:00:00+09:00"),
+          media("e", "2026-08-18T13:00:00+09:00"),
+          media("f", "2026-08-18T12:00:00+09:00"),
+          media("a", "2026-08-17T10:00:00+09:00"),
+        ],
+        total: 5,
+        page: 1,
+        page_size: 200,
+      },
+      "/destinations": { destinations: [] },
+    });
+    render(
+      <MemoryRouter>
+        <PhotosScreen />
+      </MemoryRouter>,
+    );
+
+    const user = userEvent.setup();
+    await user.click(await screen.findByRole("button", { name: "選ぶ：c.JPG" }));
+    await user.keyboard("{Shift>}");
+    await user.click(screen.getByRole("button", { name: "選ぶ：f.JPG" }));
+    await user.keyboard("{/Shift}");
+    expect(await screen.findByText("4 件を選択中")).toBeInTheDocument();
+
+    // 8/18 の日付の丸で、選んだ 4 件をいったん空にする。
+    await user.click(screen.getByRole("checkbox", { name: "2026年8月18日 をまとめて選ぶ" }));
+    expect(screen.queryByText(/件を選択中/)).toBeNull();
+
+    await user.keyboard("{Shift>}");
+    await user.click(await screen.findByRole("button", { name: "選ぶ：a.JPG" }));
+    await user.keyboard("{/Shift}");
+
+    // アンカーが直前の f のままなら f〜a の 2 件。もし起点の c に固定された
+    // ままなら c〜a の 5 件になってしまう。
+    expect(await screen.findByText("2 件を選択中")).toBeInTheDocument();
+  });
+});
+
 // **「つないだ動画」は宛先ごとの絞り込みではない。** 送り先が 0 件でも押せる
 // （`DESTINATION_SCOPED` に入れない）。
 describe("つないだ動画の絞り込みと、タイルの行き先", () => {

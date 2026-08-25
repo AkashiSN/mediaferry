@@ -136,6 +136,9 @@ export function PhotosScreen() {
   // **選んだものは、隠れても覚えておく。** 大きさも一緒に持つ —— 表示中の行から
   // 計算すると、絞り込みで隠した分が合計から抜けて、確認の数字が実際と食い違う。
   const [selected, setSelected] = useState<Map<string, number>>(new Map());
+  // **Shift の範囲の起点。** `selected` と違って、これは「並び」に属する状態
+  // なので、並びが変われば無効になる（下で、並びと一緒に捨てる）。
+  const [anchor, setAnchor] = useState<string | null>(null);
 
   const destinations = useQuery<Destinations>("/destinations");
   const destinationRows = destinations.data?.destinations ?? [];
@@ -154,6 +157,21 @@ export function PhotosScreen() {
     params,
   );
   const media = useQuery<MediaPage>(`/media?${mediaQuery}`, [mediaQuery]);
+  // **アンカーを最後に見た `mediaQuery`。** 変わっていれば下でアンカーを捨てる。
+  const [anchorMediaQuery, setAnchorMediaQuery] = useState(mediaQuery);
+  // **並びが変わったらアンカーを捨てる。** `mediaQuery` は絞り込み・探している
+  // 言葉・ページ・宛先をすべて含むので、これが変わることは並びが変わること。
+  // 捨てないと、変わったあとのアンカーが利用者の見ていたものと違う範囲を指す。
+  //
+  // **描画の途中で比べて、その場で捨てる。** `useEffect` で捨てると、古い
+  // アンカーのまま 1 回よけいに描画されてから消えるので、その 1 回の間だけ
+  // 古い並びに対して範囲が組めてしまう（react-hooks の
+  // set-state-in-effect が指摘する「効果の中で同期的に setState する」形も
+  // 避けられる）。
+  if (anchorMediaQuery !== mediaQuery) {
+    setAnchorMediaQuery(mediaQuery);
+    setAnchor(null);
+  }
   // 取り込みや送信が進んだら取り直す（**画面を再読み込みせずに進む**。§13）。
   const { received } = useEvents();
   useReloadOnEvents(received, media.reload);
@@ -247,13 +265,8 @@ export function PhotosScreen() {
     return item.stack?.members ?? [{ id: item.id, size_bytes: item.size_bytes }];
   }
 
-  /**
-   * **畳んだタイルは「1 枚（RAW+JPEG）」を表す**（`GET /media?collapse=stack`）。
-   * 選ぶ丸も送るのもその単位に揃えないと、主（JPG）しか積まれず、相方（CR2）が
-   * 送られないまま Immich でスタックが組まれない
-   * （`docs/history/phase10-design.md` §4「選んで送る画面の契約はそのまま」）。
-   */
-  function toggle(item: Media) {
+  /** 1 タイルぶんを選ぶ／外す（**組は全員まとめて**）。 */
+  function toggleOne(item: Media) {
     const members = membersOf(item);
     setSelected((current) => {
       const next = new Map(current);
@@ -267,6 +280,50 @@ export function PhotosScreen() {
       }
       return next;
     });
+  }
+
+  /**
+   * アンカーから今回のタイルまでを**選ぶ**（外さない）。
+   *
+   * **選ぶ側に倒す。** アンカーの選択状態に合わせて外す作りもあるが、
+   * 「シフトで選び、要らないものを個別に外す」の方が手数が少なく、押した
+   * 結果が予想しやすい。
+   *
+   * **並びは `rows`**（API の `captured_at DESC, id DESC` そのまま）。日付の
+   * まとまりはまたぐ —— 利用者が見ている並びは 1 本の流れで、まとまりは
+   * 見出しにすぎない。
+   */
+  function selectRange(fromId: string, toId: string) {
+    const from = rows.findIndex((row) => row.id === fromId);
+    const to = rows.findIndex((row) => row.id === toId);
+    if (from === -1 || to === -1) {
+      return;
+    }
+    const span = rows.slice(Math.min(from, to), Math.max(from, to) + 1);
+    setSelected((current) => {
+      const next = new Map(current);
+      for (const item of span) {
+        for (const member of membersOf(item)) {
+          next.set(member.id, member.size_bytes);
+        }
+      }
+      return next;
+    });
+  }
+
+  /**
+   * **畳んだタイルは「1 枚（RAW+JPEG）」を表す**（`GET /media?collapse=stack`）。
+   * 選ぶ丸も送るのもその単位に揃えないと、主（JPG）しか積まれず、相方（CR2）が
+   * 送られないまま Immich でスタックが組まれない
+   * （`docs/history/phase10-design.md` §4「選んで送る画面の契約はそのまま」）。
+   */
+  function toggle(item: Media, modifiers: { shift: boolean }) {
+    if (modifiers.shift && anchor !== null) {
+      selectRange(anchor, item.id);
+    } else {
+      toggleOne(item);
+    }
+    setAnchor(item.id);
   }
 
   /** その日がどれだけ選ばれているか。**見えている行だけを数える。** */
@@ -417,45 +474,47 @@ export function PhotosScreen() {
           <p className="muted">この絞り込みに当てはまる写真はありません。</p>
         </div>
       ) : (
-        groups.map((group) => (
-          <section key={group.label} style={{ display: "flex", flexDirection: "column", gap: 10 }}>
-            <div className="sechead">
-              {/* **`role="checkbox"` の 3 状態にする。** 「一部選ばれている」は
-                  押下状態（`aria-pressed`）では表せず、読み上げで全選択と
-                  区別が付かない。`mixed` はチェックボックスにしかない。 */}
-              <button
-                type="button"
-                role="checkbox"
-                className={`pick day${dayState(group.items) === "none" ? "" : " on"}`}
-                aria-checked={
-                  dayState(group.items) === "all"
-                    ? "true"
-                    : dayState(group.items) === "some"
-                      ? "mixed"
-                      : "false"
-                }
-                aria-label={`${group.label} をまとめて選ぶ`}
-                onClick={() => toggleDay(group.items)}
-              >
-                {dayState(group.items) === "all" && <Icon name="check" size={12} />}
-                {dayState(group.items) === "some" && <span className="dash" />}
-              </button>
-              <h2 style={{ fontSize: 14 }}>{group.label}</h2>
-              <span className="small">{group.items.length} 件</span>
-            </div>
-            <div className="grid">
-              {group.items.map((item) => (
-                <MediaTile
-                  key={item.id}
-                  media={item}
-                  to={`/photos/${item.id}`}
-                  selected={selected.has(item.id)}
-                  onToggle={() => toggle(item)}
-                />
-              ))}
-            </div>
-          </section>
-        ))
+        groups.map((group) => {
+          // **1 グループにつき 1 回だけ求める。** className・aria-checked・
+          // アイコンの分岐がそれぞれ呼ぶと、同じ結果を描画ごとに何度も計算する。
+          const state = dayState(group.items);
+          return (
+            <section
+              key={group.label}
+              style={{ display: "flex", flexDirection: "column", gap: 10 }}
+            >
+              <div className="sechead">
+                {/* **`role="checkbox"` の 3 状態にする。** 「一部選ばれている」は
+                    押下状態（`aria-pressed`）では表せず、読み上げで全選択と
+                    区別が付かない。`mixed` はチェックボックスにしかない。 */}
+                <button
+                  type="button"
+                  role="checkbox"
+                  className={`pick day${state === "none" ? "" : " on"}`}
+                  aria-checked={state === "all" ? "true" : state === "some" ? "mixed" : "false"}
+                  aria-label={`${group.label} をまとめて選ぶ`}
+                  onClick={() => toggleDay(group.items)}
+                >
+                  {state === "all" && <Icon name="check" size={12} />}
+                  {state === "some" && <span className="dash" />}
+                </button>
+                <h2 style={{ fontSize: 14 }}>{group.label}</h2>
+                <span className="small">{group.items.length} 件</span>
+              </div>
+              <div className="grid">
+                {group.items.map((item) => (
+                  <MediaTile
+                    key={item.id}
+                    media={item}
+                    to={`/photos/${item.id}`}
+                    selected={selected.has(item.id)}
+                    onToggle={(_id, modifiers) => toggle(item, modifiers)}
+                  />
+                ))}
+              </div>
+            </section>
+          );
+        })
       )}
 
       {/* **1 ページに収まらないときだけ出す。** 収まっているのに前後のボタンが

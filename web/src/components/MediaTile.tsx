@@ -59,7 +59,9 @@ export function MediaTile({
 }: {
   media: TileMedia;
   selected: boolean;
-  onToggle?: (id: string) => void;
+  /** 隅の丸を押したとき。**修飾キーは「利用者が何を押したか」だけを渡す**
+   * —— イベントそのものを渡すと、呼ぶ側が `preventDefault` などを触れてしまう。 */
+  onToggle?: (id: string, modifiers: { shift: boolean }) => void;
   /** 押したときに開く先。**選ぶのとは別の的**（隅の丸が選ぶ）。 */
   to?: string;
 }) {
@@ -111,7 +113,7 @@ export function MediaTile({
           className={`pick${selected ? " on" : ""}`}
           aria-label={`選ぶ：${name}`}
           aria-pressed={selected}
-          onClick={() => onToggle(media.id)}
+          onClick={(event) => onToggle(media.id, { shift: event.shiftKey })}
         >
           {selected && <Icon name="check" size={12} />}
         </button>

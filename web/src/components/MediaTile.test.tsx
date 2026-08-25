@@ -27,7 +27,8 @@ describe("MediaTile", () => {
 
     // **選ぶのは丸だけ。**
     await userEvent.click(screen.getByRole("button", { name: "選ぶ：A.MP4" }));
-    expect(onToggle).toHaveBeenCalledWith("m1");
+    // **修飾キーは、押していなければ `false` で渡る。** ここでしか固定されない。
+    expect(onToggle).toHaveBeenCalledWith("m1", { shift: false });
   });
 
   it("選ぶ丸は、選んでいるかどうかを名乗る", () => {
