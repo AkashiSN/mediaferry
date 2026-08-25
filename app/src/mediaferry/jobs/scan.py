@@ -218,7 +218,14 @@ class Scanner:
             # —— quick_fingerprint はサイズと 16 窓しか見ない確率的な判定で、標本窓の
             # 外だけが変わったファイルを取りこぼす（`core/fingerprint.py` の
             # docstring）。取りこぼすと、撮り直した JPG が古い RAW と組む。
-            " copresent_key = NULL, extension = ?, observed_at = ?"
+            #
+            # **SET の式は更新前の行を見る**ので、`media_file_id` は「この UPDATE で
+            # 外れる前の値」。もともと NULL（取り込み待ち）の行は外すものが無いので
+            # 印を残す —— 無条件に消すと、末尾の `_mark_copresence` に届かない
+            # スキャンが組の 2 行を非対称にし、その組が二度と成立しなくなる。
+            " copresent_key = CASE WHEN media_file_id IS NOT NULL THEN NULL"
+            "                      ELSE copresent_key END,"
+            " extension = ?, observed_at = ?"
             " WHERE id = ?",
             (
                 found.size_bytes,

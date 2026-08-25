@@ -805,3 +805,74 @@ def test_progress_left_on_a_finished_job_is_cleared(tmp_path):
     # 走っているものには触らない。
     assert rows["j-live"] is not None
     conn.close()
+
+
+def test_existing_skips_go_back_to_unevaluated(tmp_path):
+    """`0025`。組の判定から撮影時刻を外したので、既存の見送りを未評価へ戻す.
+
+    **リビジョンの公開では戻らない。** `_publish_revision` が比べるのは
+    `StackRule` へパースした後の値で、`tolerance_seconds` は dataclass に無く
+    パーサも読まないため、旧 JSON と新 JSON が同じ値にパースされて差が出ない。
+    他の戻し口（`retry` は `failed` だけ、`requeue` はリモートから消えた
+    `complete` だけ、`recompute` の `_reopen_stack` はその実行で `captured_at` が
+    動いた行だけ）も、**両方が見送りの組**には効かない。一度きりの移行で戻す。
+
+    **既に組んだものには触らない。** `stacked` は「その資産を送った結果」なので、
+    未評価へ戻すと同じ組をもう一度作りに行く。
+    """
+    from .test_schema_artifacts import a_media_file
+    from .test_schema_sources import a_profile
+    from .test_schema_uploads import a_destination, an_upload
+
+    conn = Database(tmp_path / "old.sqlite3").connect()
+    apply_migrations(conn)
+    profile = a_profile(conn)
+    destination = a_destination(conn)
+    revision_id = destination[1]
+    before = "2026-01-01T00:00:00Z"
+    skipped = an_upload(
+        conn,
+        destination,
+        a_media_file(conn, profile),
+        state="complete",
+        destination_revision_id=revision_id,
+        remote_asset_id="asset-skipped",
+        stack_state="skipped",
+        stack_reason="組の相方が見つからない",
+        updated_at=before,
+    )
+    stacked = an_upload(
+        conn,
+        destination,
+        a_media_file(conn, profile),
+        state="complete",
+        destination_revision_id=revision_id,
+        remote_asset_id="asset-stacked",
+        stack_state="stacked",
+        remote_stack_id="stack-1",
+        updated_at=before,
+    )
+    unevaluated = an_upload(
+        conn,
+        destination,
+        a_media_file(conn, profile),
+        state="complete",
+        destination_revision_id=revision_id,
+        remote_asset_id="asset-unevaluated",
+        updated_at=before,
+    )
+    conn.execute("DELETE FROM schema_migration WHERE version = 25")
+
+    assert apply_migrations(conn) == [25]
+
+    rows = {row["id"]: row for row in conn.execute("SELECT * FROM upload_record")}
+    assert rows[skipped]["stack_state"] is None
+    assert rows[skipped]["stack_reason"] is None
+    assert rows[skipped]["updated_at"] != before
+    # 既に組んだものはそのまま。
+    assert rows[stacked]["stack_state"] == "stacked"
+    assert rows[stacked]["remote_stack_id"] == "stack-1"
+    assert rows[stacked]["updated_at"] == before
+    # 未評価の行は書き換えない（同じ値を書くだけでも `updated_at` が動く）。
+    assert rows[unevaluated]["updated_at"] == before
+    conn.close()

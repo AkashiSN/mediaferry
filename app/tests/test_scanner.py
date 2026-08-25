@@ -1,11 +1,14 @@
 import os
+from dataclasses import replace
 
 import pytest
 
+from mediaferry.core.profiles.model import StackRule
 from mediaferry.db.jobs import JobStore
 from mediaferry.db.profiles import ProfileRegistry
 from mediaferry.jobs.scan import Scanner
 
+from .test_schema_artifacts import a_media_file
 from .test_schema_sources import a_volume
 
 
@@ -400,6 +403,25 @@ def canon_scanning(db, tmp_path):
     os.close(fd)
 
 
+def _import_all(db, profile) -> None:
+    """取り込みが済んだ姿にする（`media_file` を作り、`source_entry` から指す）.
+
+    **`media_file_id` まで埋める。** 印を消す引き金はこの列が外れることなので、
+    `state` だけを `published` にした行では引き金そのものが立たない。
+    """
+    for row in db.execute("SELECT id, rel_path FROM source_entry").fetchall():
+        media_id = a_media_file(
+            db,
+            (profile.profile_id, profile.revision_id),
+            rel_path=f"library/canon-eos/{row['rel_path']}",
+            kind="photo",
+        )
+        db.execute(
+            "UPDATE source_entry SET state = 'published', media_file_id = ? WHERE id = ?",
+            (media_id, row["id"]),
+        )
+
+
 def _keys(db) -> dict[str, str | None]:
     return {
         r["rel_path"]: r["copresent_key"]
@@ -497,21 +519,23 @@ def test_a_mark_survives_the_partner_leaving_the_card(canon_scanning, db):
     assert _keys(db)["DCIM/100CANON/IMG_0001.JPG"] == before
 
 
-def test_a_mark_on_an_unpublished_row_does_not_survive_the_partner_leaving(canon_scanning, db):
-    """`published` だけの特例ではない。**印を消す引き金は `media_file_id` を外すこと**.
+def test_an_unimported_row_keeps_its_mark_when_the_partner_leaves(canon_scanning, db):
+    """**印を消す引き金は `media_file_id` を外すこと**。外すものが無ければ消さない.
 
-    公開前（`seen`）の行でも、中身は変わっていない（`same`）のに相方が消えたら
-    印は消える。引き金を `same` にすると、公開前のまま中身が変わっていない行が
-    この経路を素通りしてしまい、消えたはずの相方との印を残す。
+    取り込み待ち（`media_file_id` が NULL）の行は、まだどの `media_file` も代表して
+    いないので外すものが無い。ここで消しに行くと、途中で降りたスキャンが組の片方
+    だけを落とす。**残った印が相方を作ることもない** —— 消えた側の行は
+    `_sweep_vanished` が外し、印の一致は同じカードの実在する行どうしでしか見ない。
     """
     scanner, ctx, fd, volume_id, profile, card = canon_scanning
     scanner.scan(ctx, fd, volume_id, profile)  # 両方 'seen' のまま、印が付く
-    assert _keys(db)["DCIM/100CANON/IMG_0001.JPG"] is not None
+    before = _keys(db)["DCIM/100CANON/IMG_0001.JPG"]
+    assert before is not None
     (card / "DCIM" / "100CANON" / "IMG_0001.CR2").unlink()
 
     scanner.scan(ctx, fd, volume_id, profile)
 
-    assert _keys(db)["DCIM/100CANON/IMG_0001.JPG"] is None
+    assert _keys(db) == {"DCIM/100CANON/IMG_0001.JPG": before}
 
 
 def test_a_changed_file_loses_its_mark(canon_scanning, db):
@@ -522,7 +546,7 @@ def test_a_changed_file_loses_its_mark(canon_scanning, db):
     """
     scanner, ctx, fd, volume_id, profile, card = canon_scanning
     scanner.scan(ctx, fd, volume_id, profile)
-    db.execute("UPDATE source_entry SET state = 'published'")
+    _import_all(db, profile)
     (card / "DCIM" / "100CANON" / "IMG_0001.CR2").unlink()
     (card / "DCIM" / "100CANON" / "IMG_0001.JPG").write_bytes(b"z" * 100)
 
@@ -584,3 +608,94 @@ def test_a_scan_cancelled_right_after_seeing_the_pair_still_writes_no_mark(canon
     scanner.scan(ctx, fd, volume_id, profile)
 
     assert all(v is None for v in _keys(db).values())
+
+
+def test_a_cancelled_rescan_keeps_the_two_marks_in_step(canon_scanning, db):
+    """途中で降りたスキャンが、組の片方の印だけを落とさない.
+
+    `_reconcile_entry` の `UPDATE` は取り込み待ち（`media_file_id` が NULL）の行も
+    通る。ここで印を無条件に消すと、**末尾の `_mark_copresence` に届かない**
+    スキャンが 2 つの行を非対称にし、その組は二度と成立しない（書き直せるのは
+    完走したスキャンだけ）。
+    """
+    scanner, ctx, fd, volume_id, profile, _ = canon_scanning
+    scanner.scan(ctx, fd, volume_id, profile)
+    before = _keys(db)
+    assert before["DCIM/100CANON/IMG_0001.JPG"] is not None
+    calls = 0
+
+    def fake_cancelled() -> bool:
+        nonlocal calls
+        calls += 1
+        # 1 件目を照合したところで降りる（2 件目には届かない）。
+        return calls > 1
+
+    ctx.cancelled = fake_cancelled
+
+    scanner.scan(ctx, fd, volume_id, profile)
+
+    keys = _keys(db)
+    assert keys["DCIM/100CANON/IMG_0001.JPG"] == keys["DCIM/100CANON/IMG_0001.CR2"]
+    assert keys == before
+
+
+def test_a_profile_without_stacking_gets_no_marks(scanning, db):
+    """`stack.enabled = false` のプロファイルには印を書かない.
+
+    印は組の身元の材料でしかないので、組を持たない機種（DJI は RAW を書かない）に
+    書いても意味が無い。書くと、`stack` を後から有効にしたときに**その時点で並んで
+    いただけの 2 ファイル**が、同席を確かめた組として通ってしまう。
+    """
+    scanner, ctx, fd, volume_id, profile, card = scanning
+    assert profile.definition.stack.enabled is False
+    # `scan.extensions` には両方入っているので、門が無ければ 2 種類そろう。
+    (card / "DCIM" / "DJI_001" / "DJI_20260817143000_0001_D.JPG").write_bytes(b"j" * 50)
+
+    scanner.scan(ctx, fd, volume_id, profile)
+
+    assert set(_keys(db)) == {
+        "DCIM/DJI_001/DJI_20260817143000_0001_D.MP4",
+        "DCIM/DJI_001/DJI_20260817143000_0001_D.JPG",
+    }
+    assert all(v is None for v in _keys(db).values())
+
+
+def test_a_disabled_rule_with_extensions_still_gets_no_marks(canon_scanning, db):
+    """`enabled` と `extensions` は `StackRule` の別々の欄。**両方を見る**.
+
+    拡張子だけを見る門は「無効な規則の拡張子」を通す。組を持たない機種として
+    保存された規則が拡張子を残していれば、印だけが書かれ続ける。
+    """
+    scanner, ctx, fd, volume_id, profile, _ = canon_scanning
+    disabled = replace(
+        profile,
+        definition=replace(
+            profile.definition, stack=StackRule(enabled=False, extensions=("JPG", "CR2"))
+        ),
+    )
+
+    scanner.scan(ctx, fd, volume_id, disabled)
+
+    assert all(v is None for v in _keys(db).values())
+
+
+def test_an_extension_outside_the_stack_rule_gets_no_mark(canon_scanning, db):
+    """`stack.extensions` の外は相方の候補にならないので、同席も数えない.
+
+    Canon の `scan.extensions` には `MOV` が入っているが `stack.extensions` には
+    無い。門が拡張子を見ないと、`IMG_0002.JPG` と `IMG_0002.MOV` が「2 種類」に
+    数えられて印を持ち、動画と写真の組が宣言される。
+    """
+    scanner, ctx, fd, volume_id, profile, card = canon_scanning
+    assert "MOV" in profile.definition.scan.extensions
+    assert "MOV" not in profile.definition.stack.extensions
+    (card / "DCIM" / "100CANON" / "IMG_0002.JPG").write_bytes(b"j" * 50)
+    (card / "DCIM" / "100CANON" / "IMG_0002.MOV").write_bytes(b"m" * 60)
+
+    scanner.scan(ctx, fd, volume_id, profile)
+
+    keys = _keys(db)
+    assert keys["DCIM/100CANON/IMG_0002.JPG"] is None
+    assert keys["DCIM/100CANON/IMG_0002.MOV"] is None
+    # 規則の中の組（JPG + CR2）は、これまでどおり印を持つ。
+    assert keys["DCIM/100CANON/IMG_0001.JPG"] is not None
