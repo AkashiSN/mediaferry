@@ -242,13 +242,23 @@ export function PhotosScreen() {
     setParams(nextParams);
   }
 
-  function toggle(id: string, sizeBytes: number) {
+  /**
+   * **畳んだタイルは「1 枚（RAW+JPEG）」を表す**（`GET /media?collapse=stack`）。
+   * 選ぶ丸も送るのもその単位に揃えないと、主（JPG）しか積まれず、相方（CR2）が
+   * 送られないまま Immich でスタックが組まれない
+   * （`docs/history/phase10-design.md` §4「選んで送る画面の契約はそのまま」）。
+   */
+  function toggle(item: Media) {
+    const members = item.stack?.members ?? [{ id: item.id, size_bytes: item.size_bytes }];
     setSelected((current) => {
       const next = new Map(current);
-      if (next.has(id)) {
-        next.delete(id);
-      } else {
-        next.set(id, sizeBytes);
+      const allSelected = members.every((member) => next.has(member.id));
+      for (const member of members) {
+        if (allSelected) {
+          next.delete(member.id);
+        } else {
+          next.set(member.id, member.size_bytes);
+        }
       }
       return next;
     });
@@ -381,7 +391,7 @@ export function PhotosScreen() {
                   media={item}
                   to={`/photos/${item.id}`}
                   selected={selected.has(item.id)}
-                  onToggle={() => toggle(item.id, item.size_bytes)}
+                  onToggle={() => toggle(item)}
                 />
               ))}
             </div>

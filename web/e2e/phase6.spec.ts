@@ -64,16 +64,17 @@ test("RAW+JPEG が 1 スタックになり、見送りの理由も画面に出�
   await expect(page.getByRole("button", { name: /^選ぶ：IMG_0003\.(JPG|CR2)$/ })).toHaveCount(1);
   await expect(page.locator(".tile", { has: combined }).getByText("RAW")).toBeVisible();
 
-  // 4. 写真タブは組を畳んで見せるだけなので、実際に送るのは「まだ送っていない
-  //    もの、すべて」から行う（**畳んでいない一覧なので、RAW も自分の分として
-  //    送られる**。カードの 4 件——IMG_0001・IMG_0002・IMG_0003.JPG・
-  //    IMG_0003.CR2——のうち、組めるのは IMG_0003 の 2 枚だけ）。
-  await page.goto(app.url + "/send");
+  // 4. 畳んだタイルは 1 枚で組の両方（JPG+CR2）を表すので、**1 つ選ぶだけで
+  //    相方も一緒に選ばれる。** これに、組にならない 1 枚（相方の無い
+  //    IMG_0001.JPG）を選んで送る。
+  await combined.click();
+  await page.getByRole("button", { name: "選ぶ：IMG_0001.JPG" }).click();
+  await page.getByRole("button", { name: "送る", exact: true }).click();
   await expect(page.getByRole("heading", { name: "Immich へ送る" })).toBeVisible();
   // 送り先が 1 つしか無ければ、黙ってそれを使う。
   await expect(page.getByText("送り先：immich-1")).toBeVisible();
   await page.getByRole("button", { name: "内容を確かめる" }).click();
-  await expect(page.getByRole("dialog")).toContainText("4 件");
+  await expect(page.getByRole("dialog")).toContainText("3 件");
   await page.getByRole("button", { name: "実行する" }).click();
   await expect(page.getByRole("heading", { name: "送っています" })).toBeVisible({ timeout: 60_000 });
 
@@ -93,11 +94,10 @@ test("RAW+JPEG が 1 スタックになり、見送りの理由も画面に出�
   };
   await expect.poll(membersOfTheStack, { timeout: 60_000 }).toBe(2);
 
-  // 6. **束ねられなかった 2 枚（IMG_0001・IMG_0002）は、理由が送り先の画面に出る。**
+  // 6. **束ねられなかった 1 枚（IMG_0001）は、理由が送り先の画面に出る。**
   //    「対象外のときだけ出す」形にしないので、文言まで当てる（Phase 5 の教訓）。
   await page.goto(app.url + "/settings/destinations");
-  await expect(page.getByText(/相方が見つからない/).first()).toBeVisible({ timeout: 60_000 });
-  await expect(page.getByText(/相方が見つからない/)).toHaveCount(2);
+  await expect(page.getByText(/相方が見つからない/)).toBeVisible({ timeout: 60_000 });
 
   expect(crashes).toEqual([]);
 });

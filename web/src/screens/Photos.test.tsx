@@ -82,6 +82,49 @@ describe("写真の画面", () => {
     expect(screen.getByText(/2 KiB/)).toBeInTheDocument();
   });
 
+  // **畳んだタイルは「1 枚（RAW+JPEG）」を表す。** 選択もその単位でないと、
+  // 送るときに主（JPG）しか積まれず、相方（CR2）が Immich に送られないまま
+  // スタックが組まれない（`docs/history/phase10-design.md` §4「選んで送る
+  // 画面の契約はそのまま」）。
+  it("組のタイルを選ぶと、相方も一緒に選ぶ", async () => {
+    stubApi({
+      "/media": {
+        media: [
+          media("a", "2026-08-18T14:03:00+09:00", {
+            rel_path: "library/x/IMG_0001.JPG",
+            size_bytes: 100,
+            stack: {
+              members: [
+                { id: "a", rel_path: "library/x/IMG_0001.JPG", size_bytes: 100 },
+                { id: "raw", rel_path: "library/x/IMG_0001.CR2", size_bytes: 900 },
+              ],
+            },
+          }),
+        ],
+        total: 1,
+        page: 1,
+        page_size: 50,
+      },
+      "/destinations": { destinations: [{ id: "d1", name: "家", enabled: true }] },
+    });
+    render(
+      <MemoryRouter>
+        <PhotosScreen />
+      </MemoryRouter>,
+    );
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: /IMG_0001\.JPG/ })).toBeInTheDocument(),
+    );
+    await userEvent.click(screen.getByRole("button", { name: /IMG_0001\.JPG/ }));
+    // 主（100 B）＋相方（900 B）＝ 2 件・1000 B。主の分だけでは 1 件・100 B になる。
+    expect(screen.getByText(/2 件を選択中/)).toBeInTheDocument();
+    expect(screen.getByText(/1000 B/)).toBeInTheDocument();
+
+    // もう一度押すと、両方まとめて選択から外れる（片方だけ残らない）。
+    await userEvent.click(screen.getByRole("button", { name: /IMG_0001\.JPG/ }));
+    expect(screen.queryByText(/件を選択中/)).toBeNull();
+  });
+
   it("当てはまるものが無ければ、そう書く", async () => {
     stubApi({
       "/media": { media: [], total: 0, page: 1, page_size: 50 },
@@ -883,5 +926,40 @@ describe("送るへ戻すとき", () => {
     await userEvent.click(screen.getByRole("button", { name: "送る" }));
     expect(await screen.findByTestId("send-ids")).toHaveTextContent("a");
     expect(screen.getByTestId("send-destinations")).toHaveTextContent("d2");
+  });
+
+  it("組のタイルを選んで送ると、相方の id も一緒に渡す", async () => {
+    stubApi({
+      "/media": {
+        media: [
+          media("a", "2026-08-18T14:03:00+09:00", {
+            rel_path: "library/x/IMG_0001.JPG",
+            stack: {
+              members: [
+                { id: "a", rel_path: "library/x/IMG_0001.JPG", size_bytes: 100 },
+                { id: "raw", rel_path: "library/x/IMG_0001.CR2", size_bytes: 900 },
+              ],
+            },
+          }),
+        ],
+        total: 1,
+        page: 1,
+        page_size: 200,
+      },
+      "/destinations": { destinations: [{ id: "d1", name: "家", enabled: true }] },
+    });
+    render(
+      <MemoryRouter initialEntries={["/photos"]}>
+        <Routes>
+          <Route path="/photos" element={<PhotosScreen />} />
+          <Route path="/send" element={<SendProbe />} />
+        </Routes>
+      </MemoryRouter>,
+    );
+    await userEvent.click(await screen.findByRole("button", { name: /IMG_0001\.JPG/ }));
+    await userEvent.click(screen.getByRole("button", { name: "送る" }));
+    // **id 順は問わない。** 積む順は実装の都合で、送信側は集合として扱う。
+    const sentIds = (await screen.findByTestId("send-ids")).textContent?.split(",").sort();
+    expect(sentIds).toEqual(["a", "raw"]);
   });
 });
