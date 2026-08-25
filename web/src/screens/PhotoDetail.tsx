@@ -130,12 +130,12 @@ export function PhotoDetailScreen() {
 
   /** 「送る」へ渡す id。**組ならチェックの付いたぶんだけ**、組でなければこの 1 件。 */
   const sendingIds = data === null ? [] : included === null ? [data.id] : [...included];
-  const sendingBytes =
-    members === null
-      ? (data?.size_bytes ?? 0)
-      : members
-          .filter((member) => included?.has(member.id))
-          .reduce((sum, member) => sum + member.size_bytes, 0);
+  // **組のときだけ出す節でしか使わない。** `members` が `null` の値は実際には
+  // 描画されない（呼び出し側が `members !== null` で包む）ので、フォールバックは
+  // 空配列だけで足りる。
+  const sendingBytes = (members ?? [])
+    .filter((member) => included?.has(member.id))
+    .reduce((sum, member) => sum + member.size_bytes, 0);
 
   /** グループへの操作。**成功したら詳細を引き直す**（検証も採用済みの印も変わる）。 */
   async function act(path: string, body?: unknown): Promise<void> {

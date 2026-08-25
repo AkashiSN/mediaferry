@@ -648,4 +648,56 @@ describe("組（RAW+JPEG）", () => {
       "/photos/m2",
     );
   });
+
+  it("別の写真へ移ったときは、選択が引き継がれない", async () => {
+    // **同じマウントのまま id だけ変わる。** `/photos/:id` は同じ要素なので、
+    // ページ内のリンク（相方や元になったファイル）で別の写真へ移っても、
+    // 画面は作り直されない。選択の再初期化が `memberKey`（組の中身）ではなく
+    // 「一度でも選ばれていたか」だけを見ていると、ここで前の写真の選択を
+    // 引きずってしまう（前の組の id を、新しい写真の「送る」に渡してしまう）。
+    renderDetail(
+      {
+        role: "original",
+        rel_path: "library/canon/IMG_1.JPG",
+        stack: {
+          members: [
+            { id: "m1", rel_path: "library/canon/IMG_1.JPG", size_bytes: 3_000_000 },
+            { id: "m3", rel_path: "library/canon/IMG_1.CR2", size_bytes: 22_000_000 },
+          ],
+        },
+      },
+      {
+        "/media/m3": detail({
+          id: "m3",
+          role: "original",
+          rel_path: "library/canon/IMG_9.CR2",
+          stack: {
+            members: [
+              { id: "m9", rel_path: "library/canon/IMG_9.JPG", size_bytes: 4_000_000 },
+              { id: "m3", rel_path: "library/canon/IMG_9.CR2", size_bytes: 23_000_000 },
+            ],
+          },
+        }),
+      },
+    );
+
+    expect(await screen.findByRole("checkbox", { name: "送る：IMG_1.JPG" })).toBeChecked();
+    expect(screen.getByRole("checkbox", { name: "送る：IMG_1.CR2" })).toBeChecked();
+
+    // 相方（CR2 = m3）のリンクで、m3 自身のくわしくへ移る（別の組）。
+    await userEvent.click(screen.getByRole("link", { name: "IMG_1.CR2" }));
+
+    // 新しい写真の組が、両方チェックされた既定の状態で出る。
+    expect(await screen.findByRole("checkbox", { name: "送る：IMG_9.JPG" })).toBeChecked();
+    expect(screen.getByRole("checkbox", { name: "送る：IMG_9.CR2" })).toBeChecked();
+    expect(screen.queryByRole("checkbox", { name: "送る：IMG_1.JPG" })).not.toBeInTheDocument();
+
+    await userEvent.click(screen.getByRole("button", { name: "送る" }));
+
+    const state = await screen.findByTestId("send-state");
+    expect(JSON.parse(state.textContent ?? "null")).toEqual({
+      ids: ["m9", "m3"],
+      destinationIds: [],
+    });
+  });
 });
