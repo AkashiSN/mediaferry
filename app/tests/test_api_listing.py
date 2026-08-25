@@ -646,7 +646,7 @@ def test_media_detail_still_shows_an_archived_destination_with_a_record(client, 
 def test_media_detail_folds_multiple_epochs_of_the_same_destination_into_one_row(client, db, ref):
     """向き先が変わっても、旧 epoch の `complete` は履歴として invalidate されない
     （`db/destinations.py` の `_invalidate_old_epoch_locked` は `state <> 'complete'`
-    だけを破棄する）。**1 宛先 1 行に畳み、生きている状態を優先する** —— 画面に
+    だけを破棄する）。**1 宛先 1 行に畳み、削除を断る状態を優先する** —— 画面に
     出る状況と `deletable` / `delete_blocked_reason` が食い違わないようにする。
     """
     output = a_media_file(db, ref, role="derived")
@@ -685,12 +685,180 @@ def test_media_detail_folds_multiple_epochs_of_the_same_destination_into_one_row
 
     # (a) 同じ宛先が 2 行に分かれない。
     assert len(body["destinations"]) == 1
-    # (b) 「生きている」状態（present）が優先される。
-    assert body["destinations"][0]["presence"] == "present"
-    # (c) 画面の状況（present）と削除の可否が食い違わない —— present な記録が
-    # 残っている以上、必ず消せない。理由の文言は `deletion_blocker` が
-    # 「当てはまりの強い順」（決着していない記録を最優先）に選ぶため、旧 epoch の
-    # `present` ではなく新 epoch の `pending`（送信中）の方になる。理由の文言は
-    # 畳んだ presence とは別に決まるが、**消せるか／消せないかの判定は必ず一致する**。
+    # (b) `deletion_blocker` が実際に断る理由（決着していない記録が最優先）と
+    # そろえて `sending` が選ばれる。
+    assert body["destinations"][0]["presence"] == "sending"
+    # (c) 画面の状況と削除の可否・理由の文言が完全に一致する。
     assert body["deletable"] is False
     assert body["delete_blocked_reason"] == "送信中か、確認を待っている記録がある"
+
+
+def test_media_detail_prioritizes_an_unverified_record_over_a_trashed_one(client, db, ref):
+    """`unknown`（未観測）は `trashed`（ゴミ箱、消せる）より優先度が高い ——
+    確かめていない記録が残っている限り、画面は「消せます」と言ってはいけない。
+    """
+    output = a_media_file(db, ref, role="derived")
+    dest_id, old_revision_id, credential_id = a_destination(
+        db, name="unknown-over-trashed", epoch=1
+    )
+    new_revision_id = new_id()
+    db.execute(
+        "INSERT INTO destination_revision (id, destination_id, revision, target_epoch,"
+        " base_url, credential_id, created_at) VALUES (?, ?, 2, 2, 'http://immich.invalid', ?, ?)",
+        (new_revision_id, dest_id, credential_id, now_iso()),
+    )
+    db.execute(
+        "UPDATE upload_destination SET current_revision_id = ? WHERE id = ?",
+        (new_revision_id, dest_id),
+    )
+    # 旧 epoch: ゴミ箱（それだけなら消せる）。
+    an_upload(
+        db,
+        (dest_id, old_revision_id, credential_id),
+        output,
+        target_epoch=1,
+        state="complete",
+        destination_revision_id=old_revision_id,
+        remote_asset_id="asset-old",
+        remote_is_trashed=1,
+        remote_checked_at=now_iso(),
+    )
+    # 新 epoch: 確かめていない（`0007` で洗った形。これだけなら消せない）。
+    an_upload(
+        db,
+        (dest_id, new_revision_id, credential_id),
+        output,
+        target_epoch=2,
+        state="complete",
+        destination_revision_id=new_revision_id,
+        remote_asset_id=None,
+        remote_checked_at=None,
+    )
+
+    body = client.get(f"/api/media/{output}").json()
+
+    assert len(body["destinations"]) == 1
+    assert body["destinations"][0]["presence"] == "unknown"
+    assert body["deletable"] is False
+
+
+def test_priority_places_deletion_blocking_states_before_non_blocking_ones(client, db, ref):
+    """`_PRESENCE_PRIORITY` の不変条件.
+
+    **削除を断る状態（`sending` / `present` / `unknown`）は、断らない状態
+    （`trashed` / `gone` / `failed` / `not_sent`）より必ず上にある。** 並びを
+    ベタ書きで比べるのではなく、各語彙が実際に `deletable` をどちらへ倒すかを
+    1 件ずつ作って確かめ、その結果と並び順を突き合わせる —— 語彙が増えても
+    この不変条件が崩れれば必ず落ちる。
+    """
+    from mediaferry.api.routes_media import _PRESENCE_PRIORITY
+
+    # 単独の記録 1 件で決まる語彙（`not_sent` は記録そのものが無い）。
+    simple_scenarios = {
+        "not_sent": None,
+        "sending": {"state": "pending"},
+        "failed": {"state": "failed"},
+    }
+    # `complete` 系は `destination_revision_id` が要る。
+    complete_scenarios = {
+        "present": {
+            "remote_asset_id": "asset-1",
+            "remote_is_trashed": 0,
+            "remote_checked_at": now_iso(),
+        },
+        "trashed": {
+            "remote_asset_id": "asset-1",
+            "remote_is_trashed": 1,
+            "remote_checked_at": now_iso(),
+        },
+        "gone": {"remote_asset_id": None, "remote_checked_at": now_iso()},
+        "unknown": {"remote_asset_id": None, "remote_checked_at": None},
+    }
+
+    def presence_of(body, destination_id):
+        # **`_destinations` は DB にある宛先を全部返す**（他の反復で作った宛先も
+        # 混ざる）。この反復で作った宛先だけを id で拾う。
+        for entry in body["destinations"]:
+            if entry["destination_id"] == destination_id:
+                return entry["presence"]
+        return "not_sent"
+
+    deletable_by_presence: dict[str, bool] = {}
+    for label, kwargs in simple_scenarios.items():
+        output = a_media_file(db, ref, role="derived", rel_path=f"library/inv/{label}.MP4")
+        dest = a_destination(db, name=f"inv-{label}")
+        if kwargs is not None:
+            an_upload(db, dest, output, **kwargs)
+        body = client.get(f"/api/media/{output}").json()
+        presence = presence_of(body, dest[0])
+        assert presence == label, f"前提が崩れている: {label} の作り方が違う"
+        deletable_by_presence[label] = body["deletable"]
+    for label, extra in complete_scenarios.items():
+        output = a_media_file(db, ref, role="derived", rel_path=f"library/inv/{label}.MP4")
+        dest = a_destination(db, name=f"inv-{label}")
+        an_upload(db, dest, output, state="complete", destination_revision_id=dest[1], **extra)
+        body = client.get(f"/api/media/{output}").json()
+        presence = presence_of(body, dest[0])
+        assert presence == label, f"前提が崩れている: {label} の作り方が違う"
+        deletable_by_presence[label] = body["deletable"]
+
+    blocking = {label for label, deletable in deletable_by_presence.items() if not deletable}
+    non_blocking = set(deletable_by_presence) - blocking
+    assert blocking and non_blocking  # 両方揃っていないと不変条件そのものが空振りする
+
+    for blocked in blocking:
+        for allowed in non_blocking:
+            assert _PRESENCE_PRIORITY.index(blocked) < _PRESENCE_PRIORITY.index(allowed), (
+                f"{blocked}（消せない）が {allowed}（消せる）より優先度で下にある"
+            )
+
+
+def test_media_detail_prioritizes_a_live_asset_over_an_unverified_record(client, db, ref):
+    """`present` は `unknown` より優先度が高い —— `deletion_blocker` は
+    「Immich に入っている」を「確かめていない」より先に見る（当てはまりの強い順）
+    ので、画面の presence もその順にそろえないと理由の文言と食い違う。
+    """
+    output = a_media_file(db, ref, role="derived")
+    dest_id, old_revision_id, credential_id = a_destination(
+        db, name="present-over-unknown", epoch=1
+    )
+    new_revision_id = new_id()
+    db.execute(
+        "INSERT INTO destination_revision (id, destination_id, revision, target_epoch,"
+        " base_url, credential_id, created_at) VALUES (?, ?, 2, 2, 'http://immich.invalid', ?, ?)",
+        (new_revision_id, dest_id, credential_id, now_iso()),
+    )
+    db.execute(
+        "UPDATE upload_destination SET current_revision_id = ? WHERE id = ?",
+        (new_revision_id, dest_id),
+    )
+    # 旧 epoch: Immich に入っている。
+    an_upload(
+        db,
+        (dest_id, old_revision_id, credential_id),
+        output,
+        target_epoch=1,
+        state="complete",
+        destination_revision_id=old_revision_id,
+        remote_asset_id="asset-old",
+        remote_is_trashed=0,
+        remote_checked_at=now_iso(),
+    )
+    # 新 epoch: 確かめていない。
+    an_upload(
+        db,
+        (dest_id, new_revision_id, credential_id),
+        output,
+        target_epoch=2,
+        state="complete",
+        destination_revision_id=new_revision_id,
+        remote_asset_id=None,
+        remote_checked_at=None,
+    )
+
+    body = client.get(f"/api/media/{output}").json()
+
+    assert len(body["destinations"]) == 1
+    assert body["destinations"][0]["presence"] == "present"
+    assert body["deletable"] is False
+    assert body["delete_blocked_reason"] == "Immich に入っている"

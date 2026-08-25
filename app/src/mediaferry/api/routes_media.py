@@ -211,7 +211,13 @@ def _sources(conn, media_id: str) -> list[dict[str, Any]]:  # noqa: ANN001
 # epoch を区別せず有効な記録を全部見るので、現行 epoch だけを出す画面は
 # 「旧 epoch に `present` な資産が残っていて消せない」を説明できなくなる。
 # 優先度で畳めば、画面に出る状況と削除の可否が必ず一致する。
-_PRESENCE_PRIORITY = ("present", "sending", "trashed", "gone", "unknown", "failed", "not_sent")
+#
+# **削除を断る 3 状態（`sending` / `present` / `unknown`）は、断らない 4 状態
+# （`trashed` / `gone` / `failed` / `not_sent`）より必ず上に置く。** 下にあると、
+# 画面が「消せそうな状況」を出しているのに `deletion_blocker` が断る組み合わせが
+# できる。3 状態の中の順は `deletion_blocker` が理由を選ぶ順（決着していない
+# 記録を最優先）にそろえる。
+_PRESENCE_PRIORITY = ("sending", "present", "unknown", "trashed", "gone", "failed", "not_sent")
 
 
 def _destinations(conn, media_id: str) -> list[dict[str, Any]]:  # noqa: ANN001
