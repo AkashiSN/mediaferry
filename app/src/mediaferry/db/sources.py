@@ -157,3 +157,36 @@ def detach_absent(conn: sqlite3.Connection, seen_presence_ids: Sequence[str]) ->
         (now_iso(), *seen_presence_ids),
     )
     return cursor.rowcount
+
+
+def pending_contents(
+    conn: sqlite3.Connection, volume_instance_id: str, limit: int
+) -> tuple[list[sqlite3.Row], int, int]:
+    """取り込み待ちの一覧と、その件数・合計サイズ（Phase 11 の R8・R9）.
+
+    返すのは `(rows, count, total_bytes)`。**件数と合計は上限で切らない** ——
+    出せる分だけを合計にすると、画面が「このカードにどれだけ入っているか」を
+    小さく見せる（裁定 20 の「黙って切らない」と同じ考え方）。
+
+    **条件は `PENDING_CLAUSE` を引く。** ホームの「N 件を取り込む」と同じもので、
+    別々に書くと札の数と一覧の数が食い違う。
+
+    **撮影時刻は無い。** `captured_at` は取り込んで probe を通したあとにしか
+    決まらないので、ここで出せる時刻はカード上の `mtime_ns` だけ。
+    """
+    from ..jobs.volumes import PENDING_CLAUSE
+
+    totals = conn.execute(
+        "SELECT count(*) AS n, coalesce(sum(size_bytes), 0) AS bytes"  # noqa: S608
+        f" FROM source_entry WHERE volume_instance_id = ? AND {PENDING_CLAUSE}",
+        (volume_instance_id,),
+    ).fetchone()
+    rows = list(
+        conn.execute(
+            "SELECT rel_path, size_bytes, mtime_ns FROM source_entry"  # noqa: S608
+            f" WHERE volume_instance_id = ? AND {PENDING_CLAUSE}"
+            " ORDER BY rel_path LIMIT ?",
+            (volume_instance_id, limit),
+        )
+    )
+    return rows, totals["n"], totals["bytes"]

@@ -7,7 +7,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { DashboardProvider } from "../../api/dashboard";
 import { stubApi } from "../../test/api";
-import { SendScreen, mergeMedia, summarise } from "./Send";
+import { SendScreen, capturedRange, mergeMedia, summarise } from "./Send";
 
 const DESTINATIONS = {
   destinations: [
@@ -109,6 +109,43 @@ describe("送る", () => {
     await userEvent.click(screen.getByRole("button", { name: /内容を確かめる/ }));
     expect(screen.getByRole("dialog")).toHaveTextContent("この内容で送りますか");
     expect(calls().some((c) => c.method === "POST")).toBe(false);
+  });
+
+  it("確認には、つないだ動画の内訳と撮影日の範囲も渡す", async () => {
+    stubApi({
+      "/destinations": DESTINATIONS,
+      "/media?destination_id=d1&status=unsent&page_size=200": {
+        media: [
+          {
+            id: "m1",
+            rel_path: "derived/OUT.MP4",
+            kind: "video",
+            captured_at: "2026-08-17T14:31:00+09:00",
+            size_bytes: 10,
+            role: "derived",
+          },
+          {
+            id: "m2",
+            rel_path: "library/IMG_0001.JPG",
+            kind: "photo",
+            captured_at: "2026-02-05T10:00:00+09:00",
+            size_bytes: 20,
+            role: "original",
+          },
+        ],
+        total: 2,
+        page: 1,
+        page_size: 200,
+      },
+    });
+    renderSend();
+    await userEvent.click(await screen.findByRole("button", { name: /家の Immich/ }));
+    await waitFor(() => expect(screen.getByRole("button", { name: /内容を確かめる/ })).toBeEnabled());
+    await userEvent.click(screen.getByRole("button", { name: /内容を確かめる/ }));
+
+    const dialog = await screen.findByRole("dialog");
+    expect(dialog).toHaveTextContent(/つないだ動画が 1 件/);
+    expect(dialog).toHaveTextContent(/2026年2月5日 〜 2026年8月17日/);
   });
 
   it("確認には件数・合計サイズ・送り先を出す", async () => {
@@ -846,5 +883,61 @@ describe("確認の内容と、実際に送るもの", () => {
 
     release?.();
     await waitFor(() => expect(screen.getByRole("button", { name: /内容を確かめる/ })).toBeEnabled());
+  });
+});
+
+describe("撮影日の幅", () => {
+  const at = (id: string, when: string) => ({
+    id,
+    rel_path: `${id}.JPG`,
+    kind: "photo",
+    captured_at: when,
+    size_bytes: 1,
+  });
+
+  it("いちばん古い日といちばん新しい日を返す", () => {
+    expect(
+      capturedRange([
+        at("m1", "2026-08-17T14:31:00+09:00"),
+        at("m2", "2026-02-05T10:00:00+09:00"),
+        at("m3", "2026-05-01T00:00:00+09:00"),
+      ]),
+    ).toEqual({ from: "2026-02-05T10:00:00+09:00", to: "2026-08-17T14:31:00+09:00" });
+  });
+
+  it("読める値が 1 つも無ければ null（無い日付を作らない）", () => {
+    expect(capturedRange([at("m1", "")])).toBeNull();
+  });
+});
+
+describe("画面の組み立て", () => {
+  const EMPTY = { media: [], total: 0, page: 1, page_size: 50 };
+
+  it("「やめる」は行に包まれている（幅いっぱいに伸びない）", async () => {
+    // **jsdom は幅を測れない。** 測れるのは構造だけなので、`.wrap` の直下に
+    // 置かないことを見る —— 伸びるかどうかはそこで決まる（`styles.css` の
+    // `.wrap` は縦並びで、`align-items` の既定が `stretch`）。
+    stubApi({ "/destinations": DESTINATIONS, "/media": EMPTY });
+    renderSend();
+    const cancel = await screen.findByRole("button", { name: /やめる/ });
+    expect(cancel.parentElement).toHaveClass("row");
+  });
+
+  it("宛先の名前と接続状況は、2 行に分かれる", async () => {
+    // `.chip` は横並びなので、名前と状況が 1 行に押し込まれる。**縦並びの派生**を
+    // 当てる（`.chip` そのものは写真タブの絞り込みが使うので変えない）。
+    stubApi({ "/destinations": DESTINATIONS, "/media": EMPTY });
+    renderSend();
+    const chip = await screen.findByRole("button", { name: /家の Immich/ });
+    expect(chip).toHaveClass("stacked");
+  });
+
+  it("「すでにある写真は〜」の説明は、アイコンと同じ行に入る", async () => {
+    // `.rowtop` は `flex-wrap: wrap` で、**行に詰めるかを flex-basis で決める**。
+    // `.grow` が無いと basis が max-content になり、縮む前に改行される。
+    stubApi({ "/destinations": DESTINATIONS, "/media": EMPTY });
+    renderSend();
+    const note = await screen.findByText(/すでにある写真/);
+    expect(note).toHaveClass("grow");
   });
 });

@@ -447,3 +447,44 @@ def test_a_job_with_no_card_says_so(client, db):
     db.commit()
     jobs = {job["id"]: job for job in client.get("/api/jobs").json()["jobs"]}
     assert jobs["j2"]["volume_instance_id"] is None
+
+
+# ---------------------------------------------------------------- 作業の要約
+#
+# **終わった作業の要約が、後から読めない**（Phase 11 の N4）。画面は進捗の知らせで
+# 受けた分しか要約を持てないので、開く前に終わったものは「完了」としか出せなかった。
+# `スキャン完了: 新規 0 件 / 取込済 4 件 / 消えた 2 件` のような 1 文は、**なぜ件数が
+# 変わったのかを後から追う唯一の手がかり**なので、一覧が持って返す。
+
+
+def test_the_job_list_carries_the_last_message_of_each_job(client):
+    """終わった作業にも、最後の 1 文を添える."""
+    from mediaferry.db.jobs import JobStore
+
+    conn = client.app.state.mediaferry.database.connect()
+    try:
+        store = JobStore(conn)
+        job_id = store.enqueue("scan", {})
+        store.emit(job_id, "info", "はじめました")
+        store.emit(job_id, "info", "スキャン完了: 新規 0 件 / 取込済 4 件 / 消えた 2 件")
+    finally:
+        conn.close()
+
+    row = next(job for job in client.get("/api/jobs").json()["jobs"] if job["id"] == job_id)
+
+    assert row["last_message"] == "スキャン完了: 新規 0 件 / 取込済 4 件 / 消えた 2 件"
+
+
+def test_a_job_without_events_has_no_last_message(client):
+    """**無い話を作らない.** 1 件も出していない作業には添えるものが無い."""
+    from mediaferry.db.jobs import JobStore
+
+    conn = client.app.state.mediaferry.database.connect()
+    try:
+        job_id = JobStore(conn).enqueue("scan", {})
+    finally:
+        conn.close()
+
+    row = next(job for job in client.get("/api/jobs").json()["jobs"] if job["id"] == job_id)
+
+    assert row["last_message"] is None

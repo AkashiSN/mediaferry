@@ -33,11 +33,14 @@ describe("カードの信頼登録", () => {
 
   let calls: { path: string; method: string }[] = [];
 
+  const NO_CONTENTS = { entries: [], pending_count: 0, pending_bytes: 0, truncated: false };
+
   function stubDevices(
     volumes: unknown[],
     autoImport = "trusted",
     settingsStatus = 200,
     profiles: unknown[] = [],
+    contents: unknown = NO_CONTENTS,
   ) {
     calls = [];
     vi.stubGlobal(
@@ -71,7 +74,9 @@ describe("カードの信頼登録", () => {
               ? { volumes }
               : path === "/profiles"
                 ? { profiles }
-                : {};
+                : path.endsWith("/contents")
+                  ? contents
+                  : {};
         return Promise.resolve(new Response(JSON.stringify(body), { status: 200 }));
       }),
     );
@@ -91,9 +96,9 @@ describe("カードの信頼登録", () => {
 
     await userEvent.click(await screen.findByRole("button", { name: "SD_Card を取り込む" }));
     await waitFor(() => {
-      expect(calls.some((call) => call.path === "/volumes/v1/import" && call.method === "POST")).toBe(
-        true,
-      );
+      expect(
+        calls.some((call) => call.path === "/volumes/v1/import" && call.method === "POST"),
+      ).toBe(true);
     });
     expect(calls.some((call) => call.path === "/volumes/v1/close")).toBe(false);
   });
@@ -280,12 +285,9 @@ describe("カードの信頼登録", () => {
   });
 
   it("「対象だが中身が無い」は、カメラの種類の表示名を使う", async () => {
-    stubDevices(
-      [{ ...base, provisional: true }],
-      "trusted",
-      200,
-      [{ slug: "dji-osmo", name: "DJI Osmo Pocket" }],
-    );
+    stubDevices([{ ...base, provisional: true }], "trusted", 200, [
+      { slug: "dji-osmo", name: "DJI Osmo Pocket" },
+    ]);
     renderCardDetail();
 
     expect(
@@ -327,8 +329,8 @@ describe("カードの信頼登録", () => {
     ]);
     renderCardDetail();
 
-    expect(await screen.findByText("477 GiB")).toBeInTheDocument();
-    expect(screen.getByText("108 GiB")).toBeInTheDocument();
+    expect(await screen.findByText(/477 GiB/)).toBeInTheDocument();
+    expect(screen.getByText(/108 GiB/)).toBeInTheDocument();
     expect(screen.queryByText(/512711688192/)).toBeNull();
   });
 
@@ -350,7 +352,7 @@ describe("カードの信頼登録", () => {
       </MemoryRouter>,
     );
 
-    await userEvent.click(await screen.findByRole("button", { name: "ホームへ" }));
+    await userEvent.click(await screen.findByRole("link", { name: "ホームへ" }));
 
     expect(await screen.findByText("ホームのページ")).toBeInTheDocument();
   });
@@ -502,9 +504,9 @@ describe("カードの信頼登録", () => {
 
     resolveTrust?.(new Response(JSON.stringify({}), { status: 200 }));
     await waitFor(() => {
-      expect(calls.some((call) => call.path === "/volumes/v1/trust" && call.method === "POST")).toBe(
-        true,
-      );
+      expect(
+        calls.some((call) => call.path === "/volumes/v1/trust" && call.method === "POST"),
+      ).toBe(true);
     });
     await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
   });
@@ -524,7 +526,21 @@ describe("カードの信頼登録", () => {
     expect(calls.some((call) => call.path.includes("trust"))).toBe(false);
   });
 
-  it("未承認のカードには、いま挿してある中身も対象だと書く", async () => {
+  it("カードの文脈では「承認」を使わない（操作の名前は「信頼」1 つ）", async () => {
+    // **同じ操作を 2 つの名前で呼ばない。** 本文が「承認」、ボタンとダイアログが
+    // 「信頼」だと、押す前に読む文と押すボタンが別の話に見える。
+    //
+    // **「承認」は日時の確認（`/approve`）の語**として残す —— そちらは
+    // 「承認する／却下する」で 1 つの意味に閉じている。
+    stubDevices([{ ...base, trusted: false }]);
+    renderCardDetail();
+
+    expect(await screen.findByText(/まだ信頼していません/)).toBeInTheDocument();
+    const main = document.querySelector("section[aria-label='カードの中身']");
+    expect(main?.textContent ?? "").not.toMatch(/承認/);
+  });
+
+  it("信頼していないカードには、いま挿してある中身も対象だと書く", async () => {
     // **承認すると、いま挿してあるこのカードの中身が次の監視周期で取り込まれる。**
     // watcher は毎 tick、現在 live な presence を候補に組み直すため（§12.1）。
     // 「次に挿したときから」と書くと、同意の対象を取り違えさせる。
@@ -559,7 +575,7 @@ describe("カードの信頼登録", () => {
     expect(screen.queryByText(/確かめられしだい/)).toBeNull();
   });
 
-  it("確度が低い未承認カードの確認は、同意の対象を示したまま条件を添える", async () => {
+  it("確度が低い、まだ信頼していないカードの確認は、同意の対象を示したまま条件を添える", async () => {
     stubDevices([{ ...base, trusted: false, identity_confidence: "low" }]);
     renderCardDetail();
 
@@ -572,7 +588,7 @@ describe("カードの信頼登録", () => {
     expect(dialog).toHaveTextContent(/確かめられた場合に限り/);
     expect(dialog).toHaveTextContent(/いま入っている中身も含めて/);
     expect(dialog).toHaveTextContent(/取り違え/);
-    expect(dialog).not.toHaveTextContent(/承認の数秒後に始まります/);
+    expect(dialog).not.toHaveTextContent(/信頼した数秒後に始まります/);
   });
 
   it("確度が高いカードの確認だけが、条件なしで約束する", async () => {
@@ -582,7 +598,7 @@ describe("カードの信頼登録", () => {
     await userEvent.click(await screen.findByRole("button", { name: "SD_Card を信頼する" }));
 
     const dialog = await screen.findByRole("dialog");
-    expect(dialog).toHaveTextContent(/承認の数秒後に始まります/);
+    expect(dialog).toHaveTextContent(/信頼した数秒後に始まります/);
     expect(dialog).not.toHaveTextContent(/確かめられた場合に限り/);
   });
 
@@ -660,5 +676,56 @@ describe("カードの信頼登録", () => {
 
     expect(await screen.findByText(/挿すと自動で取り込みます/)).toBeInTheDocument();
     expect(screen.queryByText(/が切ってあります/)).toBeNull();
+  });
+
+  // 中身で見分けられるようにする。**
+  describe("何が入っているか", () => {
+    const CONTENTS = {
+      entries: [
+        { rel_path: "DCIM/100CANON/IMG_0001.JPG", size_bytes: 30, mtime_ns: 1700000000000000000 },
+        { rel_path: "DCIM/100CANON/IMG_0002.JPG", size_bytes: 12, mtime_ns: 1700000000000000000 },
+      ],
+      pending_count: 2,
+      pending_bytes: 42,
+      truncated: false,
+    };
+
+    it("カードの容量と、取り込み待ちの合計を、それぞれ名前を付けて出す", async () => {
+      // **数字が 1 つだけ出ていると、写真のサイズなのかカードのサイズなのか読めない。**
+      stubDevices([{ ...base, trusted: true }], "trusted", 200, [], CONTENTS);
+      renderCardDetail();
+
+      expect(await screen.findByText(/カードの容量/)).toBeInTheDocument();
+      expect(await screen.findByText(/取り込み待ち/)).toBeInTheDocument();
+    });
+
+    it("入っているファイルの名前を出す（どのカードか見分けられるように）", async () => {
+      stubDevices([{ ...base, trusted: true }], "trusted", 200, [], CONTENTS);
+      renderCardDetail();
+
+      expect(await screen.findByText("IMG_0001.JPG")).toBeInTheDocument();
+      expect(screen.getByText("IMG_0002.JPG")).toBeInTheDocument();
+      // **内部の相対パスをそのまま出さない**（§13）。
+      expect(screen.queryByText(/DCIM\/100CANON/)).toBeNull();
+    });
+
+    it("上限で切れているときは、そう書く", async () => {
+      stubDevices([{ ...base, trusted: true }], "trusted", 200, [], {
+        ...CONTENTS,
+        pending_count: 900,
+        truncated: true,
+      });
+      renderCardDetail();
+
+      expect(await screen.findByText(/はじめの 2 件/)).toBeInTheDocument();
+    });
+
+    it("取り込むものが無いカードには、一覧を出さない", async () => {
+      stubDevices([{ ...base, trusted: true }], "trusted", 200, [], NO_CONTENTS);
+      renderCardDetail();
+
+      await screen.findByRole("heading", { name: "SD_Card" });
+      expect(screen.queryByText(/取り込み待ち/)).toBeNull();
+    });
   });
 });

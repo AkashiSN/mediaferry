@@ -40,33 +40,6 @@ const GROUP = {
   ],
 };
 
-/**
- * 実際の `core/merge/verify.py` の `to_json` が返す形（`passed` / `route` /
- * `checks[]`）。**トップレベルに `verdict` も `reason` も無い。** 画面が読むのは
- * `passed` と `checks[]` で、`db/selection.py` の `SENDABLE_CLAUSE` が見ているのも
- * `passed` である。
- */
-function verification(
-  passed: boolean,
-  verdicts: [string, string, string, string],
-  routeDropped: unknown[] = [],
-) {
-  const names = ["duration", "streams", "frames", "size"];
-  return {
-    passed,
-    route: "concat",
-    pipeline_version: 1,
-    checks: names.map((name, index) => ({
-      name,
-      verdict: verdicts[index],
-      detail: {},
-    })),
-    dropped_streams: [],
-    route_dropped_streams: routeDropped,
-    seam_offsets: [600.0],
-  };
-}
-
 const ROUTES = {
   "/merge-groups?status=skipped": { groups: [] },
   "/media": { media: [] },
@@ -461,35 +434,6 @@ describe("つなぐ", () => {
     expect(screen.getByText(/結合に失敗しました/)).toBeInTheDocument();
   });
 
-  it("できたファイルと検証結果を表示する", async () => {
-    const withOutput = {
-      ...GROUP,
-      id: "g8",
-      status: "merged",
-      output: { media_file_id: "mo1", rel_path: "library/OUT.MP4", size_bytes: 2147483648, missing: false },
-      verification: verification(true, ["pass", "pass", "inconclusive", "inconclusive"]),
-    };
-    stubApi({ ...ROUTES, "/merge-groups": { groups: [withOutput] } });
-    render(
-      <MemoryRouter>
-        <MergeScreen />
-      </MemoryRouter>,
-    );
-    await waitFor(() => expect(screen.getByText(/library\/OUT\.MP4/)).toBeInTheDocument());
-    expect(screen.getByText(/2 GiB/)).toBeInTheDocument();
-    expect(screen.getByText(/検証: 合格/)).toBeInTheDocument();
-    // **検査ごとに読める形で出す**（内部の名前をそのまま出さない。§13）。
-    expect(screen.getByText("長さ: 合っています")).toBeInTheDocument();
-    expect(screen.getByText("中身の構成: 合っています")).toBeInTheDocument();
-    expect(screen.getByText("コマ数: 確かめられませんでした")).toBeInTheDocument();
-    expect(screen.getByText("ファイルの大きさ: 確かめられませんでした")).toBeInTheDocument();
-    expect(screen.queryByText(/duration|streams|frames|size/)).toBeNull();
-    // 合格した組に採用の操作は要らない（採用は不合格のものを救う手段）。
-    expect(screen.queryByRole("button", { name: "中身を見て、これを使う" })).toBeNull();
-    // 現行のグループの出力は消せない（消せるのは details/MergeHistory.tsx の
-    // 使っていない出力だけ）。
-    expect(screen.queryByRole("button", { name: /このファイルを消す/ })).toBeNull();
-  });
 
   it("「つなぐ」は検出済みの候補を結合する", async () => {
     const { calls } = stubApi({ ...ROUTES, "/merge-groups": { groups: [GROUP] } });
@@ -623,103 +567,10 @@ describe("つなぐ", () => {
     );
   });
 
-  it("「中身を見て、これを使う」は確認を取ってから採用する", async () => {
-    // 言い換えの表（brief）：「不合格でも採用する」→「中身を見て、これを使う」。
-    const { calls } = stubApi({
-      ...ROUTES,
-      "/merge-groups": {
-        groups: [
-          {
-            ...GROUP,
-            id: "g3",
-            status: "merged",
-            adopted_at: null,
-            // 結合が終わった組には必ず出力がある（`_group` の `output`）。
-            output: {
-              media_file_id: "mo3",
-              rel_path: "library/OUT3.MP4",
-              size_bytes: 2147483648,
-              missing: false,
-            },
-            verification: verification(false, ["fail", "pass", "fail", "inconclusive"]),
-          },
-        ],
-      },
-    });
-    render(
-      <MemoryRouter>
-        <MergeScreen />
-      </MemoryRouter>,
-    );
-    const adopt = await screen.findByRole("button", { name: "中身を見て、これを使う" });
-    await userEvent.click(adopt);
-    // 不合格だった検査の名前を、そのまま理由にする。
-    expect(screen.getByRole("dialog")).toHaveTextContent("長さ / コマ数が合いません");
-    expect(calls().some((c) => c.method === "PATCH")).toBe(false);
-    await userEvent.click(screen.getByRole("button", { name: "実行する" }));
-    await waitFor(() =>
-      expect(calls().some((c) => c.path === "/merge-groups/g3?action=adopt" && c.method === "PATCH")).toBe(true),
-    );
-  });
 
   // カメラの種類を保存すると版が上がり、その版で作った出力は `group_is_current`
   // が必ず断る。押しても送れるようにならないボタンを残さない（§13）。
-  it("カメラの種類が変わった組には、採用のボタンを出さず、理由を書く", async () => {
-    const stale = {
-      ...GROUP,
-      id: "g30",
-      status: "merged",
-      adopted_at: null,
-      profile_changed: true,
-      output: {
-        media_file_id: "mo30",
-        rel_path: "library/OUT30.MP4",
-        size_bytes: 2147483648,
-        missing: false,
-      },
-      verification: verification(false, ["fail", "pass", "pass", "pass"]),
-    };
-    stubApi({ ...ROUTES, "/merge-groups": { groups: [stale] } });
-    render(
-      <MemoryRouter>
-        <MergeScreen />
-      </MemoryRouter>,
-    );
-    expect(
-      await screen.findByText(
-        "つないだあとにカメラの種類が変わったので、この結果はもう使えません。「同じ構成でやり直す」でつなぎ直してください。",
-      ),
-    ).toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: "中身を見て、これを使う" })).toBeNull();
-    // つなぎ直す道は残す。
-    expect(screen.getByRole("button", { name: "同じ構成でやり直す" })).toBeInTheDocument();
-  });
 
-  it("「同じ構成でやり直す」は確認のあと、全 member で regroup する", async () => {
-    const merged = { ...GROUP, id: "g20", status: "merged" };
-    const { calls, bodies } = stubApiWithBodies({ ...ROUTES, "/merge-groups": { groups: [merged] } });
-    render(
-      <MemoryRouter>
-        <MergeScreen />
-      </MemoryRouter>,
-    );
-    await userEvent.click(await screen.findByRole("button", { name: "同じ構成でやり直す" }));
-    expect(screen.getByRole("dialog")).toBeInTheDocument();
-    expect(calls().some((c) => c.method === "PATCH")).toBe(false);
-    await userEvent.click(screen.getByRole("button", { name: "実行する" }));
-    await waitFor(() =>
-      expect(calls().some((c) => c.path === "/merge-groups/g20?action=regroup" && c.method === "PATCH")).toBe(true),
-    );
-    const sent = bodies.find((b) => b.path === "/merge-groups/g20?action=regroup");
-    expect(sent?.body).toEqual({ media_ids: ["m1", "m2"] });
-    // **組み直した後は一覧を引き直す。** 叩いたところまでしか見ないと、
-    // 画面が古い組を出したままでも気付けない。
-    await waitFor(() =>
-      expect(calls().filter((c) => c.path.startsWith("/merge-groups?limit=")).length).toBeGreaterThan(
-        1,
-      ),
-    );
-  });
 
   it("「構成を変える」は、チェックを外した member を除いて regroup する", async () => {
     const target = {
@@ -897,117 +748,6 @@ describe("つなぐ", () => {
   });
 });
 
-// 画面は実際の応答（`passed` と `checks[]`）を読む。`core/merge/verify.py` の
-// `to_json` はトップレベルに `verdict` も `reason` も書かない。**`passed` が偽の
-// ときに「中身を見て、これを使う」を出す**のがここの要（§10 の `adopted_derived`。
-// これが無いと、検証に落ちた出力を送る手段が画面から消える）。
-describe("検証の結果", () => {
-  function renderWith(group: unknown) {
-    stubApi({ ...ROUTES, "/merge-groups": { groups: [group] } });
-    return render(
-      <MemoryRouter>
-        <MergeScreen />
-      </MemoryRouter>,
-    );
-  }
-
-  const MERGED = {
-    ...GROUP,
-    id: "gv",
-    status: "merged",
-    adopted_at: null,
-    output: {
-      media_file_id: "mo1",
-      rel_path: "library/OUT.MP4",
-      size_bytes: 2147483648,
-      missing: false,
-    },
-  };
-
-  it("不合格のときは、どの検査が合わなかったかを出す", async () => {
-    renderWith({
-      ...MERGED,
-      verification: verification(false, ["pass", "fail", "inconclusive", "fail"]),
-    });
-    await waitFor(() => expect(screen.getByText(/検証: 不合格/)).toBeInTheDocument());
-    expect(screen.getByText("長さ: 合っています")).toBeInTheDocument();
-    expect(screen.getByText("中身の構成: 合いません")).toBeInTheDocument();
-    expect(screen.getByText("コマ数: 確かめられませんでした")).toBeInTheDocument();
-    expect(screen.getByText("ファイルの大きさ: 合いません")).toBeInTheDocument();
-  });
-
-  it("`passed` が偽なら、採用の操作を出す（`verdict` という欄は無い）", async () => {
-    renderWith({
-      ...MERGED,
-      verification: verification(false, ["fail", "pass", "pass", "pass"]),
-    });
-    expect(
-      await screen.findByRole("button", { name: "中身を見て、これを使う" }),
-    ).toBeInTheDocument();
-  });
-
-  it("採用済みの組には、もう採用の操作を出さない", async () => {
-    renderWith({
-      ...MERGED,
-      adopted_at: "2026-08-20T00:00:00Z",
-      verification: verification(false, ["fail", "pass", "pass", "pass"]),
-    });
-    await waitFor(() => expect(screen.getByText(/検証: 不合格/)).toBeInTheDocument());
-    expect(screen.queryByRole("button", { name: "中身を見て、これを使う" })).toBeNull();
-    expect(screen.getByText(/中身を見て採用しました/)).toBeInTheDocument();
-  });
-
-  it("組み直された組には、採用の操作を出さない（API が 409 で断る）", async () => {
-    renderWith({
-      ...MERGED,
-      superseded_by_id: "g99",
-      verification: verification(false, ["fail", "pass", "pass", "pass"]),
-    });
-    await waitFor(() => expect(screen.getByText(/検証: 不合格/)).toBeInTheDocument());
-    expect(screen.queryByRole("button", { name: "中身を見て、これを使う" })).toBeNull();
-  });
-
-  it("経路の都合で運べなかったものがあれば、件数を出す", async () => {
-    renderWith({
-      ...MERGED,
-      verification: verification(false, ["pass", "fail", "pass", "pass"], [
-        { codec_type: "data", codec_name: "none" },
-      ]),
-    });
-    await waitFor(() =>
-      expect(
-        screen.getByText(/つなぎ方の都合で運べなかったものが 1 件あります/),
-      ).toBeInTheDocument(),
-    );
-  });
-
-  it("知らない検査が増えても、内部の名前は出さない", async () => {
-    // `verify.py` に検査が足されたときの受け口。**名前をそのまま出さない**（§13）。
-    renderWith({
-      ...MERGED,
-      verification: {
-        passed: true,
-        route: "concat",
-        pipeline_version: 1,
-        checks: [{ name: "container_overhead", verdict: "pass", detail: {} }],
-        dropped_streams: [],
-        route_dropped_streams: [],
-        seam_offsets: [],
-      },
-    });
-    await waitFor(() =>
-      expect(screen.getByText("そのほかの検査: 合っています")).toBeInTheDocument(),
-    );
-    expect(screen.queryByText(/container_overhead/)).toBeNull();
-  });
-
-  it("検証の記録が無い組には、検証の行を出さない", async () => {
-    renderWith({ ...MERGED, verification: null });
-    await waitFor(() => expect(screen.getByText(/library\/OUT\.MP4/)).toBeInTheDocument());
-    expect(screen.queryByText(/検証:/)).toBeNull();
-  });
-});
-
 describe("不合格の理由の 1 文", () => {
   it("合わなかった検査を並べる", () => {
     expect(
@@ -1060,25 +800,11 @@ describe("飛んでいる間と、失敗したとき", () => {
     return release;
   }
 
-  const MERGED_FAILING = {
-    ...GROUP,
-    id: "g30",
-    status: "merged",
-    adopted_at: null,
-    output: {
-      media_file_id: "mo30",
-      rel_path: "library/OUT30.MP4",
-      size_bytes: 2147483648,
-      missing: false,
-    },
-    verification: verification(false, ["fail", "pass", "pass", "pass"]),
-  };
-
   it("1 つの操作が飛んでいる間は、どの操作も押せない", async () => {
     const release = heldFetch("/merge-groups/detect", {
       ...ROUTES,
       "/merge-groups": {
-        groups: [GROUP, { ...GROUP, id: "g31", status: "failed" }, MERGED_FAILING],
+        groups: [GROUP, { ...GROUP, id: "g31", status: "failed" }],
       },
     });
     render(
@@ -1086,14 +812,8 @@ describe("飛んでいる間と、失敗したとき", () => {
         <MergeScreen />
       </MemoryRouter>,
     );
-    const names = [
-      "つなぐ",
-      "再試行する",
-      "個別に送る",
-      "中身を見て、これを使う",
-      "同じ構成でやり直す",
-      "分かれた動画を探す",
-    ];
+    // **結合済みの操作はこの画面に無い**（くわしくへ移した。Phase 11）。
+    const names = ["つなぐ", "再試行する", "個別に送る", "分かれた動画を探す"];
     for (const name of names) {
       expect(await screen.findByRole("button", { name })).toBeEnabled();
     }
@@ -1160,5 +880,51 @@ describe("飛んでいる間と、失敗したとき", () => {
     );
     await userEvent.click(await screen.findByRole("button", { name: "分かれた動画を探す" }));
     expect(await screen.findByRole("alert")).toBeInTheDocument();
+  });
+});
+
+// つないだ動画への操作は、その 1 本を見ている画面（`/photos/:id`）にある（Phase 11）。
+// つなぐ画面が結合済みも並べると、つなぎ目の空白の判定は結合の前後を区別しないので
+// **もう決めた後のものに「確かめてから決めてください」が出る**。
+describe("まだつないでいないものだけを出す", () => {
+  it("結合済みを混ぜないよう、絞り込んで問い合わせる", async () => {
+    const { calls } = stubApi({ ...ROUTES, "/merge-groups": { groups: [] } });
+    render(
+      <MemoryRouter>
+        <MergeScreen />
+      </MemoryRouter>,
+    );
+    await waitFor(() =>
+      expect(screen.getByRole("heading", { name: "つなぐものはありません" })).toBeInTheDocument(),
+    );
+    const listed = calls().filter(
+      (call) => call.method === "GET" && call.path.startsWith("/merge-groups?"),
+    );
+    expect(listed.length).toBeGreaterThan(0);
+    expect(listed.every((call) => call.path.includes("pending=true"))).toBe(true);
+  });
+
+  it("行き止まりにしない —— つないだ動画がどこにあるかを書く", async () => {
+    stubApi({ ...ROUTES, "/merge-groups": { groups: [] } });
+    render(
+      <MemoryRouter>
+        <MergeScreen />
+      </MemoryRouter>,
+    );
+    const link = await screen.findByRole("link", { name: /つないだ動画/ });
+    expect(link).toHaveAttribute("href", expect.stringContaining("role=derived"));
+  });
+
+  it("パートのファイル名は、狭い画面でも箱に収まる形で置く", async () => {
+    // `/` も `_` も折り返しの機会にならないので、`.ident` が無いと本文の欄から
+    // 流れ出る（実機の 390px で 30px はみ出していた）。
+    stubApi({ ...ROUTES, "/merge-groups": { groups: [GROUP] } });
+    render(
+      <MemoryRouter>
+        <MergeScreen />
+      </MemoryRouter>,
+    );
+    const name = await screen.findByText("library/DJI_0001.MP4");
+    expect(name).toHaveClass("ident");
   });
 });

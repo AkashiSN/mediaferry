@@ -30,6 +30,10 @@ export type Job = {
   // どのカードの作業か。カードに紐づかない作業（送信など）では null。
   volume_instance_id?: string | null;
   progress?: JobProgressValue | null;
+  /** 最後に出した 1 文。**終わった作業の要約**で、一覧（`GET /jobs`）だけが持つ。
+   * 進捗の知らせは画面を開いた後のぶんしか来ないので、これが無いと開く前に
+   * 終わった作業は「完了」としか出せない（Phase 11 の N4）。 */
+  last_message?: string | null;
 };
 
 // サーバが返す phase を §13 の言葉に写す（`merge` → **つなぐ**）。**内部の名前を

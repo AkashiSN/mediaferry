@@ -98,6 +98,32 @@ export function summarise(
   return parts.join("");
 }
 
+/**
+ * 対象の撮影日の幅（確認に出す）。読める値が 1 つも無ければ `null`。
+ *
+ * **日付の文字列で比べる。** `captured_at` は現地の時差付きなので、実際の瞬間の
+ * 前後と文字の前後は一致しない。ここで欲しいのは**画面に出す日付のラベル**で、
+ * 写真タブの日付の見出しも同じ切り出し方をしている —— 揃えておかないと、
+ * 「8月17日」と束ねて見せたものが確認では別の日として出る。
+ */
+export function capturedRange(media: Media[]): { from: string; to: string } | null {
+  const readable = media.filter((item) => item.captured_at.slice(0, 10).length === 10);
+  if (readable.length === 0) {
+    return null;
+  }
+  let from = readable[0];
+  let to = readable[0];
+  for (const item of readable) {
+    if (item.captured_at.slice(0, 10) < from.captured_at.slice(0, 10)) {
+      from = item;
+    }
+    if (item.captured_at.slice(0, 10) > to.captured_at.slice(0, 10)) {
+      to = item;
+    }
+  }
+  return { from: from.captured_at, to: to.captured_at };
+}
+
 export function SendScreen() {
   const location = useLocation();
   const navigate = useNavigate();
@@ -370,10 +396,14 @@ export function SendScreen() {
 
   return (
     <section aria-label="送る" className="wrap">
-      <button type="button" className="btn sm quiet" onClick={() => navigate("/")}>
-        <Icon name="back" size={16} />
-        やめる
-      </button>
+      {/* **行に包む。** `.wrap` は縦並びなので、直下に置いたボタンは
+          `align-items: stretch` で幅いっぱいに伸びる（§13 の他の画面と同じ形）。 */}
+      <div className="row">
+        <button type="button" className="btn sm quiet" onClick={() => navigate("/")}>
+          <Icon name="back" size={16} />
+          やめる
+        </button>
+      </div>
       <h1 className="page">Immich へ送る</h1>
 
       <ErrorBanner error={sending.error ?? destinationsQuery.error} onDismiss={sending.clear} />
@@ -393,8 +423,7 @@ export function SendScreen() {
               <button
                 key={destination.id}
                 type="button"
-                className="chip"
-                style={{ height: 56, padding: "0 18px" }}
+                className="chip stacked"
                 aria-pressed={on}
                 disabled={!destination.enabled}
                 onClick={() => toggleTarget(destination.id)}
@@ -416,17 +445,20 @@ export function SendScreen() {
         <div
           style={{
             display: "grid",
-            gridTemplateColumns: "repeat(auto-fit, minmax(230px, 1fr))",
+            gridTemplateColumns: "repeat(auto-fit, minmax(200px, 1fr))",
             gap: 10,
           }}
         >
           {presets.map((option) => (
+            // **すぐ下の「送るもの」と釣り合う重さにする。** 選ぶだけの段が送る
+            // 中身より大きい面積を占めると、目が先にこちらへ行く（`.pad` は使わない）。
             <label
               key={option.key}
-              className="card pad"
+              className="card"
               style={{
                 display: "flex",
-                gap: 11,
+                gap: 10,
+                padding: "11px 13px",
                 alignItems: "flex-start",
                 cursor: "pointer",
                 borderColor: preset === option.key ? "var(--accent)" : undefined,
@@ -442,7 +474,7 @@ export function SendScreen() {
                 style={{ marginTop: 2 }}
               />
               <span>
-                <b style={{ display: "block", fontSize: 14 }}>{option.title}</b>
+                <b style={{ display: "block", fontSize: "13.5px" }}>{option.title}</b>
                 <span className="small">{option.sub}</span>
               </span>
             </label>
@@ -474,7 +506,9 @@ export function SendScreen() {
         <span style={{ color: "var(--ink-2)", flex: "0 0 auto" }}>
           <Icon name="info" />
         </span>
-        <p className="muted">
+        {/* **`.grow` を外さない。** `.rowtop` は行に詰めるかを flex-basis で決めるので、
+            basis が max-content のままだと縮む前にアイコンと別の行へ落ちる。 */}
+        <p className="muted grow">
           Immich にすでにある写真は、自動でとばします（同じ写真が二重に並びません）。Immich の
           ゴミ箱に入っているものも「ある」と数えるので、勝手に戻すことはありません。
         </p>
@@ -516,6 +550,11 @@ export function SendScreen() {
             count: targetMedia.length,
             totalBytes,
             destinationNames: chosen.map((d) => d.name),
+            // **つないだ動画は元のファイルとは別物**なので、内訳を出す。
+            derivedCount: targetMedia.filter((media) => media.role === "derived").length,
+            capturedRange: capturedRange(targetMedia),
+            // 帯と同じことを、押す直前の 1 枚にも出す（裁定 20）。
+            truncated: targetTruncated,
           }}
           busy={sending.busy}
           onCancel={() => setConfirmingFor(null)}

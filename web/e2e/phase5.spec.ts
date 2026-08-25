@@ -96,7 +96,7 @@ test("汎用化の受け入れが画面から通る", async ({ page }) => {
   // 撮影日時は公開済みファイルの EXIF から来る（`timezone_policy: none` で +00:00）。
   await page.goto(app.url + "/card");
   await page.getByRole("button", { name: "EOS_DIGITAL を取り込む" }).click();
-  await page.getByRole("button", { name: "ホームへ" }).click();
+  await page.getByRole("link", { name: "ホームへ" }).click();
   await expect(page.getByText(/^IMG_0001\.JPG（/)).toBeVisible({ timeout: 90_000 });
   // `timezone_policy: none` なので、EXIF の壁時計がそのまま出る。
   await expect(page.getByText(/^IMG_0001\.JPG（2026年2月3日 04:05）$/)).toBeVisible();

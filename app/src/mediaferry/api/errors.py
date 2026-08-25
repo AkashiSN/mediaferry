@@ -58,6 +58,7 @@ class ErrorCode(StrEnum):
     APPROVAL_ALREADY_QUEUED = "approval_already_queued"
     SETTING_LOCKED = "setting_locked"
     SAME_LIBRARY_UNDECIDED = "same_library_undecided"
+    JOB_IN_FLIGHT = "job_in_flight"
     # 502
     DESTINATION_UNREACHABLE = "destination_unreachable"
     # 500

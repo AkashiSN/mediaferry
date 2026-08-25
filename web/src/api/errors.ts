@@ -24,6 +24,8 @@ const MESSAGES: Record<string, string> = {
   not_awaiting_approval: "確認を待っている記録ではありません。画面を再読み込みしてください。",
   already_invalidated: "この記録は無効になっています。",
   approval_already_queued: "この承認はもう実行待ちです。",
+  job_in_flight:
+    "走っている作業があります。終わってからもう一度試してください（設定 › 記録 › 作業の履歴で見られます）。",
   setting_locked: "この設定は環境変数で固定されています。TrueNAS のアプリ設定で変更してください。",
   same_library_undecided: "同じライブラリを指しているかどうかを選んでください。",
   destination_unreachable: "送り先に接続できません。URL と API キーを確認してください。",
