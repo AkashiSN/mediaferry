@@ -52,10 +52,26 @@ def test_collapsing_hides_the_raw_and_names_it_on_the_jpeg(client, canon_pair):
 
 
 def test_collapsing_counts_only_what_it_shows(client, canon_pair):
-    """`total` が見える件数と食い違うと、ページ送りが空のページを作る."""
-    body = client.get("/api/media?collapse=stack").json()
+    """`total` が見える件数と食い違うと、ページ送りが空のページを作る.
 
-    assert body["total"] == len(body["media"])
+    1 ページに全件収まる規模だと、`total` が実体より大きくても
+    `len(body["media"])` がページ内で頭打ちになるだけで気づけない。
+    `page_size=1` で全ページを実際にたどり、返した件数の合計が `total` と
+    一致することを確かめる —— 食い違えば、最後に必ず「空のページ」が現れる。
+    """
+    total = client.get("/api/media?collapse=stack&page_size=1&page=1").json()["total"]
+
+    seen = 0
+    page = 1
+    while True:
+        body = client.get(f"/api/media?collapse=stack&page_size=1&page={page}").json()
+        if not body["media"]:
+            break
+        seen += len(body["media"])
+        page += 1
+        assert page <= total + 1, "ページ送りが終わらない"
+
+    assert seen == total
 
 
 def test_without_collapsing_both_files_are_listed(client, canon_pair):
@@ -84,11 +100,17 @@ def test_members_follow_the_current_rule(client, canon_pair, narrowed_stack_rule
 
     `copresent_key` は残り続けるので、絞らないと `identity_partners`（現行規則で
     CR2 を外す）と食い違い、「同じ関数が決める」という設計の要が崩れる。
+    JPG も CR2 も一覧には出るが（隠すほどの根拠がもう無い）、どちらにも
+    `stack` は付かない（`all(...)` / `not any(...)` は一覧が空でも通ってしまうので、
+    実際に両方の行が出ることを先に固定する）。
     """
     body = client.get("/api/media?collapse=stack").json()
 
-    assert all("stack" not in m or len(m["stack"]["members"]) >= 2 for m in body["media"])
-    assert not any(m["rel_path"].endswith(".CR2") for m in body["media"] if m.get("stack"))
+    by_path = {m["rel_path"]: m for m in body["media"]}
+    jpeg = next(m for path, m in by_path.items() if path.endswith(".JPG"))
+    cr2 = next(m for path, m in by_path.items() if path.endswith(".CR2"))
+    assert "stack" not in jpeg
+    assert "stack" not in cr2
 
 
 def test_an_unknown_collapse_value_is_a_bad_request(client):
@@ -110,3 +132,37 @@ def test_the_ambiguous_pair_is_not_collapsed(client, canon_pair, ambiguous_sibli
     paths = [m["rel_path"] for m in body["media"]]
     assert len([p for p in paths if p.endswith(".CR2")]) == 1
     assert body["total"] == len(body["media"])
+
+
+def test_the_ambiguous_pair_gets_no_stack_members(client, canon_pair, ambiguous_sibling):
+    """曖昧なグループの 3 行は、どれも `stack` を持たない.
+
+    `identity_partners` は同じ状況を `ambiguous=True` と判定し、`resolve_group`
+    は組を作らない（`Refusal("同じ拡張子の相方が複数ある。自動では決められない")`）。
+    一覧が `stack.members` を宣言すると、Immich には作られない組を画面が語ることに
+    なる（`docs/history/phase10-design.md` の「画面に出す組と Immich が作る組は、
+    同じ関数が決める」）。3 行とも見えたまま、誰も `stack` を持たないのが正しい。
+    """
+    body = client.get("/api/media?collapse=stack").json()
+
+    assert len(body["media"]) == 3
+    assert not any("stack" in m for m in body["media"])
+
+
+def test_a_sibling_under_a_different_profile_is_not_wrongly_hidden(
+    client, canon_pair, cross_profile_rank_collision
+):
+    """`theirs.rank < mine.rank` は**厳密**でなければならない.
+
+    順位の単射性（同じ順位 ⟺ 同じ拡張子）が効くのは 1 つのプロファイルの中だけ。
+    同じ同席グループに、順位表の異なる別プロファイルの `media_file` が混ざると、
+    **拡張子が違うのに順位の値が一致しうる**。ここでは CR2 を「逆順」プロファイル
+    （`extensions=["CR2","JPG"]`）へ付け替えたので、JPG（canon-eos, 順位 0）と
+    CR2（逆順, 順位 0）が同じ順位になる。拡張子が違うので `_AMBIGUOUS_EXISTS` は
+    反応せず守ってくれない。`<=` に緩めると JPG・CR2 の両方が一覧から消える。
+    """
+    body = client.get("/api/media?collapse=stack").json()
+
+    paths = [m["rel_path"] for m in body["media"]]
+    assert any(p.endswith(".JPG") for p in paths)
+    assert any(p.endswith(".CR2") for p in paths)

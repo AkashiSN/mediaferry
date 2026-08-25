@@ -354,3 +354,41 @@ def narrowed_stack_rule(db, canon_pair):
     narrowed = replace(old, stack=replace(old.stack, extensions=("JPG", "MOV")))
     registry._upsert_revision("canon-eos", definition_to_json(narrowed))  # noqa: SLF001
     db.commit()
+
+
+@pytest.fixture
+def cross_profile_rank_collision(db, canon_pair):
+    """`canon_pair` の CR2 を、`extensions` を逆順にした別プロファイルへ付け替える.
+
+    **同席グループの中身が同じプロファイルとは限らない。** `media_file.profile_id`
+    は取り込み時のまま不変で、`source_entry.copresent_key` はボリューム単位で
+    採番されるだけなので、同じ同席グループに別プロファイルの `media_file` が
+    混ざりうる（スキーマはこれを禁じない）。ここでは `canon-eos` を複製し
+    `stack.extensions` を `["CR2", "JPG"]`（逆順）にした別プロファイルへ、
+    既存の CR2 を付け替える。JPG（`canon-eos`, 順位 0）と CR2
+    （複製先, 順位 0）は**拡張子が違う**ので `_AMBIGUOUS_EXISTS`
+    （`b.extension = a.extension`）は反応しない —— `theirs.rank < mine.rank` の
+    **厳密さ**だけが両者を隠さずに済ませる砦になる。
+    """
+    registry = ProfileRegistry(db)
+    reversed_ref = registry.duplicate("canon-eos", "canon-eos-reversed", "Canon EOS (reversed)")
+    narrowed = replace(
+        reversed_ref.definition,
+        stack=replace(reversed_ref.definition.stack, extensions=("CR2", "JPG")),
+    )
+    updated = registry.update("canon-eos-reversed", narrowed)
+    # **`media_file_captured_revision_update` トリガの契約を守る。** `profile_id` を
+    # 変えるときは、同じ UPDATE で `captured_at_revision_id` も新しいプロファイルの
+    # リビジョンに揃える（複合 FK が「同じプロファイルの版であること」を求める）。
+    db.execute(
+        "UPDATE media_file SET profile_id = ?, profile_revision_id = ?,"
+        " captured_at_revision_id = ? WHERE id = ?",
+        (
+            updated.profile_id,
+            updated.revision_id,
+            updated.revision_id,
+            canon_pair.media_ids["CR2"],
+        ),
+    )
+    db.commit()
+    return updated

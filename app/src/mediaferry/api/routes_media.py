@@ -47,9 +47,16 @@ EXISTS (
 )
 """
 
+
 # **曖昧な組は畳まない**（`identity_partners` の `ambiguous` と同じ判断）。
 # 同じ順位の兄弟が 2 つあると、どちらが主か決まらない。畳むと片方が消える。
-_AMBIGUOUS_EXISTS = """
+#
+# **主語（`m.id` か `?`）だけを差し替えられる形にする。** 一覧の除外節（相関、
+# `m.id`）と `_members_of`（束縛変数、`?`）の両方が、同じ判断を同じ SQL から
+# 作る —— 曖昧さの定義を 2 か所に書くと、`_members_of` だけが曖昧な組にも
+# `stack.members` を付けてしまう（Task 6 レビューで実際に見つかった穴）。
+def _ambiguous_exists_sql(media_ref: str) -> str:
+    sql = f"""
 EXISTS (
   SELECT 1
     FROM source_entry me
@@ -63,11 +70,15 @@ EXISTS (
      AND b.media_file_id IS NOT NULL AND b.state = 'published'
      AND b.media_file_id <> a.media_file_id
      AND b.extension = a.extension
-   WHERE me.media_file_id = m.id
+   WHERE me.media_file_id = {media_ref}
      AND me.state = 'published'
      AND me.copresent_key IS NOT NULL
 )
-"""
+"""  # noqa: S608 - media_ref は呼び出し側の定数（"m.id" か "?"）のみ
+    return sql
+
+
+_AMBIGUOUS_EXISTS = _ambiguous_exists_sql("m.id")
 
 _KNOWN_COLLAPSE_VALUES = frozenset({"stack"})
 
@@ -176,7 +187,13 @@ def _members_of(
     **現行の `stack` 規則で絞る。** `copresent_key` は残り続けるのに順位は現行版
     なので、絞らないと `extensions` を変えた後に `identity_partners` と食い違う
     （「同じ関数が決める」が崩れ、順位の dict 引きも KeyError になる）。
+
+    **曖昧なら None を返す。** `identity_partners` は同じ状況を `ambiguous=True`
+    と判定し、`resolve_group` は組を作らない（`Refusal`）。ここで揃えないと、
+    画面が Immich には作らない組を宣言してしまう（`docs/history/phase10-design.md`
+    の「画面に出す組と Immich が作る組は、同じ関数が決める」）。
     """
+    ambiguous = _ambiguous_exists_sql("?")
     rows = conn.execute(
         f"WITH rank(profile_id, extension, rank) AS (VALUES {ranks_sql})"  # noqa: S608
         " SELECT DISTINCT sm.id AS id, sm.rel_path AS rel_path,"
@@ -190,8 +207,9 @@ def _members_of(
         "   JOIN rank r ON r.profile_id = sm.profile_id AND r.extension = sib.extension"
         "  WHERE me.media_file_id = ? AND me.state = 'published'"
         "    AND me.copresent_key IS NOT NULL"
+        f"    AND NOT ({ambiguous})"  # noqa: S608 - `ambiguous` は定数から組む static な文字列
         "  ORDER BY r.rank",
-        (*ranks_params, media_id),
+        (*ranks_params, media_id, media_id),
     ).fetchall()
     if len(rows) < 2:  # noqa: PLR2004 - 1 つでは組にならない
         return None
