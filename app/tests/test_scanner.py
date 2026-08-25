@@ -380,3 +380,188 @@ def test_a_cancelled_scan_of_an_empty_card_does_not_claim_to_have_counted(scanni
     scanner.scan(ctx, fd, volume_id, profile)
 
     assert _scanned_at(db, volume_id) is None
+
+
+@pytest.fixture
+def canon_scanning(db, tmp_path):
+    """`stack` が有効なプロファイルと、RAW+JPEG が並ぶカード."""
+    ProfileRegistry(db).sync_builtins()
+    profile = ProfileRegistry(db).current("canon-eos")
+    store = JobStore(db)
+    store.enqueue("scan", {})
+    ctx = store.claim_next()
+    card = tmp_path / "canon"
+    (card / "DCIM" / "100CANON").mkdir(parents=True)
+    (card / "DCIM" / "100CANON" / "IMG_0001.JPG").write_bytes(b"j" * 100)
+    (card / "DCIM" / "100CANON" / "IMG_0001.CR2").write_bytes(b"r" * 200)
+    fd = os.open(card, os.O_RDONLY | os.O_DIRECTORY)
+    volume_id = a_volume(db, profile=(profile.profile_id, profile.revision_id))
+    yield Scanner(db), ctx, fd, volume_id, profile, card
+    os.close(fd)
+
+
+def _keys(db) -> dict[str, str | None]:
+    return {
+        r["rel_path"]: r["copresent_key"]
+        for r in db.execute("SELECT rel_path, copresent_key FROM source_entry")
+    }
+
+
+def test_two_files_seen_together_get_the_same_mark(canon_scanning, db):
+    """**同席の証拠。** 同じスキャンで、同じ stem の下に 2 つ見えたときだけ書く."""
+    scanner, ctx, fd, volume_id, profile, _ = canon_scanning
+
+    scanner.scan(ctx, fd, volume_id, profile)
+
+    keys = _keys(db)
+    expected = f"{ctx.job_id}:DCIM/100CANON/IMG_0001."
+    assert keys["DCIM/100CANON/IMG_0001.JPG"] == expected
+    assert keys["DCIM/100CANON/IMG_0001.CR2"] == expected
+
+
+def test_a_lone_file_gets_no_mark(canon_scanning, db):
+    """相方が居なければ同席していない。**印を書かない。**"""
+    scanner, ctx, fd, volume_id, profile, card = canon_scanning
+    (card / "DCIM" / "100CANON" / "IMG_0001.CR2").unlink()
+
+    scanner.scan(ctx, fd, volume_id, profile)
+
+    assert _keys(db)["DCIM/100CANON/IMG_0001.JPG"] is None
+
+
+def test_two_files_with_the_same_extension_get_no_mark(canon_scanning, db):
+    """**「2 件」ではなく「2 種類」。** 拡張子の大小文字違いだけで並んだ 2 件は組ではない.
+
+    `IMG_0001.JPG` と `IMG_0001.jpg`（大小文字だけ違う）は、ケースセンシティブな
+    FS では別ファイルとして列挙されるが、`extension_of` は両方とも `JPG` に
+    正規化するので、これは RAW+JPEG の組ではなく `identity_partners` が
+    `ambiguous` とする曖昧な重複（`core/uploads/stacking.py`）。件数ではなく
+    **拡張子の種類数**で判定しないと、無関係な重複が組として印を持ってしまう。
+    """
+    scanner, ctx, fd, volume_id, profile, card = canon_scanning
+    (card / "DCIM" / "100CANON" / "IMG_0001.CR2").unlink()
+    (card / "DCIM" / "100CANON" / "IMG_0001.jpg").write_bytes(b"k" * 100)
+
+    scanner.scan(ctx, fd, volume_id, profile)
+
+    keys = _keys(db)
+    assert keys["DCIM/100CANON/IMG_0001.JPG"] is None
+    assert keys["DCIM/100CANON/IMG_0001.jpg"] is None
+
+
+def test_different_stems_do_not_share_a_mark(canon_scanning, db):
+    """**印はスキャンごとではなく組ごと。**
+
+    スキャンの id だけにすると、1 回のスキャンが書いた別々の組が同じ印になり、
+    一覧が無関係な写真を 1 タイルに畳む。
+    """
+    scanner, ctx, fd, volume_id, profile, card = canon_scanning
+    (card / "DCIM" / "100CANON" / "IMG_0002.JPG").write_bytes(b"a" * 100)
+    (card / "DCIM" / "100CANON" / "IMG_0002.CR2").write_bytes(b"b" * 200)
+
+    scanner.scan(ctx, fd, volume_id, profile)
+
+    keys = _keys(db)
+    assert keys["DCIM/100CANON/IMG_0001.JPG"] != keys["DCIM/100CANON/IMG_0002.JPG"]
+
+
+def test_a_mark_survives_the_partner_leaving_the_card(canon_scanning, db):
+    """**一度証明された同席は消えない。** 送信は取り込みよりずっと後になりうる."""
+    scanner, ctx, fd, volume_id, profile, card = canon_scanning
+    scanner.scan(ctx, fd, volume_id, profile)
+    before = _keys(db)["DCIM/100CANON/IMG_0001.JPG"]
+    db.execute("UPDATE source_entry SET state = 'published'")
+    (card / "DCIM" / "100CANON" / "IMG_0001.CR2").unlink()
+
+    scanner.scan(ctx, fd, volume_id, profile)
+
+    assert _keys(db)["DCIM/100CANON/IMG_0001.JPG"] == before
+
+
+def test_a_mark_on_an_unpublished_row_does_not_survive_the_partner_leaving(canon_scanning, db):
+    """`published` だけの特例ではない。**印を消す引き金は `media_file_id` を外すこと**.
+
+    公開前（`seen`）の行でも、中身は変わっていない（`same`）のに相方が消えたら
+    印は消える。引き金を `same` にすると、公開前のまま中身が変わっていない行が
+    この経路を素通りしてしまい、消えたはずの相方との印を残す。
+    """
+    scanner, ctx, fd, volume_id, profile, card = canon_scanning
+    scanner.scan(ctx, fd, volume_id, profile)  # 両方 'seen' のまま、印が付く
+    assert _keys(db)["DCIM/100CANON/IMG_0001.JPG"] is not None
+    (card / "DCIM" / "100CANON" / "IMG_0001.CR2").unlink()
+
+    scanner.scan(ctx, fd, volume_id, profile)
+
+    assert _keys(db)["DCIM/100CANON/IMG_0001.JPG"] is None
+
+
+def test_a_changed_file_loses_its_mark(canon_scanning, db):
+    """中身が変わった行は、前の中身での同席を引き継がない.
+
+    引き継ぐと、撮り直した JPG が**無関係な古い RAW と組む**
+    （`docs/history/phase10-design.md` の 3）。
+    """
+    scanner, ctx, fd, volume_id, profile, card = canon_scanning
+    scanner.scan(ctx, fd, volume_id, profile)
+    db.execute("UPDATE source_entry SET state = 'published'")
+    (card / "DCIM" / "100CANON" / "IMG_0001.CR2").unlink()
+    (card / "DCIM" / "100CANON" / "IMG_0001.JPG").write_bytes(b"z" * 100)
+
+    scanner.scan(ctx, fd, volume_id, profile)
+
+    assert _keys(db)["DCIM/100CANON/IMG_0001.JPG"] is None
+
+
+def test_the_touch_path_still_fills_in_extension(canon_scanning, db):
+    """`_touch`（`published` のまま内容も mtime も変わっていない）でも `extension` を埋める.
+
+    埋めないと、**移行対象そのもの**（既存の `published` で内容も mtime も
+    変わっていない行）が NULL のままになり、一覧の `rank` への join が外れて
+    従判定されない（`docs/history/phase10-design.md`）。
+    """
+    scanner, ctx, fd, volume_id, profile, _ = canon_scanning
+    scanner.scan(ctx, fd, volume_id, profile)
+    db.execute("UPDATE source_entry SET state = 'published', extension = NULL")
+
+    outcome = scanner.scan(ctx, fd, volume_id, profile)
+
+    assert outcome.already_imported == 2
+    rows = db.execute("SELECT rel_path, extension FROM source_entry").fetchall()
+    exts = {r["rel_path"]: r["extension"] for r in rows}
+    assert exts["DCIM/100CANON/IMG_0001.JPG"] == "JPG"
+    assert exts["DCIM/100CANON/IMG_0001.CR2"] == "CR2"
+
+
+def test_a_cancelled_scan_writes_no_mark(canon_scanning, db):
+    """途中で降りたスキャンは、見ていないだけの相方を「居なかった」と読む."""
+    scanner, ctx, fd, volume_id, profile, _ = canon_scanning
+    JobStore(db).request_cancel(ctx.job_id)
+
+    scanner.scan(ctx, fd, volume_id, profile)
+
+    assert all(v is None for v in _keys(db).values())
+
+
+def test_a_scan_cancelled_right_after_seeing_the_pair_still_writes_no_mark(canon_scanning, db):
+    """両方を集め終えていても、**数え終えたことにはならない**なら印は書かない.
+
+    最初のファイルで降りるケース（`eligible` が空のまま）だけだと、印を書く
+    処理そのものを丸ごと `counted` の外に出す変異を見逃す —— `eligible` が
+    空なら、门の有無に関わらず書くものが無い。ここでは両方を列挙し終えた
+    直後に降りることで、`eligible` が揃っていることと「数え終えた」ことを
+    区別する。
+    """
+    scanner, ctx, fd, volume_id, profile, _ = canon_scanning
+    calls = 0
+
+    def fake_cancelled() -> bool:
+        nonlocal calls
+        calls += 1
+        # 2 ファイル分の列挙（各 1 回ずつ判定される）は通し、その後で降りる。
+        return calls > 2
+
+    ctx.cancelled = fake_cancelled
+
+    scanner.scan(ctx, fd, volume_id, profile)
+
+    assert all(v is None for v in _keys(db).values())
