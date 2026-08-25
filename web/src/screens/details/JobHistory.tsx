@@ -51,9 +51,13 @@ export function JobHistoryScreen() {
       notes.push(`終わった日時: ${formatSystemDateTime(job.finished_at)}`);
     }
     // 進捗が無い（終わった）ジョブには、届いた最後のイベントの文言を添える。
+    // **開いている間に届いた知らせを優先し、無ければサーバが添えた 1 文を使う。**
+    // 進捗の知らせは開いた後のぶんしか来ないので、これが無いと**画面を開く前に
+    // 終わった作業は「完了」としか出せない**（Phase 11 の N4）。
     const latest = job.progress ? undefined : latestByJob.get(job.id);
-    if (latest) {
-      notes.push(latest.message);
+    const summary = latest?.message ?? (job.progress ? undefined : job.last_message);
+    if (summary) {
+      notes.push(summary);
     }
     return notes;
   }

@@ -393,7 +393,7 @@ def try_profile(
 
 @router.get("/jobs")
 def list_jobs(conn=Depends(get_conn)) -> dict[str, Any]:  # noqa: ANN001, B008
-    return {"jobs": [_job(row) for row in JobStore(conn).list_jobs()]}
+    return {"jobs": [_job(row, with_last_message=True) for row in JobStore(conn).list_jobs()]}
 
 
 @router.get("/jobs/{job_id}")
@@ -421,8 +421,13 @@ def cancel_job(job_id: str, conn=Depends(get_conn)) -> dict[str, str]:  # noqa: 
     return {"status": "cancelling"}
 
 
-def _job(row) -> dict[str, Any]:  # noqa: ANN001
-    return {
+def _job(row, with_last_message: bool = False) -> dict[str, Any]:  # noqa: ANN001
+    """ジョブ 1 行の表現.
+
+    `with_last_message` は一覧だけ（`list_jobs` の問い合わせがその欄を持つ）。
+    1 件を引く経路は `/jobs/{id}/events` で全文が読めるので、要約は要らない。
+    """
+    view = {
         "id": row["id"],
         "type": row["type"],
         "status": row["status"],
@@ -439,6 +444,11 @@ def _job(row) -> dict[str, Any]:  # noqa: ANN001
         # 永続化することになる。
         "progress": _progress(row),
     }
+    if with_last_message:
+        # **終わった作業の要約。** 画面が開く前に届いた知らせは持っていないので、
+        # ここで添えないと「完了」としか出せない（Phase 11 の N4）。
+        view["last_message"] = row["last_message"]
+    return view
 
 
 # 進捗を持ちうる状態。**終わった行に「いま何をしているか」は無い。**
