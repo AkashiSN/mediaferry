@@ -57,6 +57,21 @@ class Candidate:
 
 
 @dataclass(frozen=True)
+class Identity:
+    """身元だけで決まる組。**曖昧さを潰さずに返す。**
+
+    一覧（送る前）と第 2 パス（送った後）の両方が `identity_partners` を通して
+    これを得る。**予測と事実を別の関数で決めない**（`docs/history/phase10-design.md`）。
+    """
+
+    partners: tuple[Candidate, ...]
+    # 同じ鍵に**同じ正規化拡張子**が 2 つ以上ある。`iter_media_files` は
+    # `{ext.upper()}` で突き合わせるので、case-sensitive な FS では
+    # `IMG_0001.JPG` と `IMG_0001.jpg` がこれになる。**自動では決められない。**
+    ambiguous: bool
+
+
+@dataclass(frozen=True)
 class Group:
     """成立した組。**先頭が primary**（`extensions` の順）."""
 
@@ -80,31 +95,57 @@ def extension_of(rel_path: str) -> str:
     return splitext(rel_path)[1].lstrip(".").upper()
 
 
+def identity_partners(
+    primary: Candidate, candidates: Sequence[Candidate], rule: StackRule
+) -> Identity:
+    """**身元だけ**で相方を返す（カード上の事実。宛先を見ない）.
+
+    一覧（送る前）と第 2 パス（送った後）の両方がこれを呼ぶ。**予測と事実を
+    別の関数で決めない**（`docs/history/phase10-design.md`）。
+    """
+    if not rule.enabled:
+        return Identity(partners=(), ambiguous=False)
+    if extension_of(primary.rel_path) not in rule.extensions:
+        return Identity(partners=(), ambiguous=False)
+    keys = {c.source_key for c in candidates if c.media_file_id == primary.media_file_id}
+    partners: list[Candidate] = []
+    seen: set[str] = set()
+    by_extension: dict[str, set[str]] = {}
+    for candidate in candidates:
+        if candidate.media_file_id == primary.media_file_id:
+            continue
+        # **鍵は組で比べる**（同じカードの、同じディレクトリの、同じ stem）。
+        if candidate.source_key not in keys:
+            continue
+        extension = extension_of(candidate.rel_path)
+        if extension not in rule.extensions:
+            continue
+        # **同じ資産を 2 回送らない。** 1 つの media_file が複数の観測で候補に入る。
+        if candidate.media_file_id in seen:
+            continue
+        seen.add(candidate.media_file_id)
+        by_extension.setdefault(extension, set()).add(candidate.media_file_id)
+        partners.append(candidate)
+    # **1 つの拡張子に 2 つ以上の media_file が来たら曖昧。** 自分の拡張子も数える
+    # （自分と同じ拡張子の別ファイルが相方に来る場合がある）。
+    by_extension.setdefault(extension_of(primary.rel_path), set()).add(primary.media_file_id)
+    ambiguous = any(len(ids) > 1 for ids in by_extension.values())
+    return Identity(partners=tuple(partners), ambiguous=ambiguous)
+
+
 def resolve_group(
     primary: Candidate, candidates: Sequence[Candidate], rule: StackRule
 ) -> Group | Refusal:
-    """§6 の規則で組を決める. 同じ組はどの member から呼んでも同じになる."""
+    """身元で相方を決め、**資格**を確かめる. 同じ組はどの member から呼んでも同じ."""
     if not rule.enabled:
         return Refusal("カメラの種類がスタックを使わない")
     if extension_of(primary.rel_path) not in rule.extensions:
         return Refusal("この拡張子は組の対象ではない")
-    keys = {c.source_key for c in candidates if c.media_file_id == primary.media_file_id}
-    matched = [
-        c
-        for c in candidates
-        if c.media_file_id != primary.media_file_id
-        # **鍵は組で比べる**（同じカードの、同じディレクトリの、同じ stem）。
-        and c.source_key in keys
-        and extension_of(c.rel_path) in rule.extensions
-    ]
-    # **同じ資産を 2 回送らない。** 1 つの media_file が複数の観測で候補に入る。
-    # 集合を 1 つだけ持って O(n) にする（観測の数に上限は無い）。
-    partners: list[Candidate] = []
-    seen: set[str] = set()
-    for candidate in matched:
-        if candidate.media_file_id not in seen:
-            seen.add(candidate.media_file_id)
-            partners.append(candidate)
+    identity = identity_partners(primary, candidates, rule)
+    if identity.ambiguous:
+        # **「どちらかを選ぶ」を機械にやらせない。** 送信は止めず、理由を出す。
+        return Refusal("同じ拡張子の相方が複数ある。自動では決められない")
+    partners = list(identity.partners)
     if not partners:
         return Refusal("相方が見つからない")
     refusal = _refused(primary, partners)

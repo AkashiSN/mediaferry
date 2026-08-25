@@ -1,6 +1,6 @@
 """組を決める規則（§6・§9.11）.
 
-**判断だけを持つ純関数**なので、4 条件を 1 つずつ壊す筋書きが書ける。
+**判断だけを持つ純関数**なので、条件を 1 つずつ壊す筋書きが書ける。
 """
 
 from dataclasses import replace
@@ -13,6 +13,7 @@ from mediaferry.core.uploads.stacking import (
     Group,
     Refusal,
     extension_of,
+    identity_partners,
     resolve_group,
     stem_prefix,
 )
@@ -268,3 +269,51 @@ def test_two_missing_asset_ids_are_not_reported_as_a_duplicate():
     gone = [a_jpg(remote_asset_id=None), a_cr2(remote_asset_id=None)]
     refusal = resolve_group(gone[0], gone, RULE)
     assert "資産 ID が分からない" in refusal.reason
+
+
+def test_the_identity_does_not_look_at_the_time():
+    """**組の身元は時刻で決まらない。**
+
+    一括で日時を入れ直すと JPG だけ書き換わって CR2 が元のままになりうる
+    （RAW に書ける道具の方が少ない）。時刻で切ると 1 組も組めなくなる。
+    """
+    late = replace(a_cr2(), captured_at="2026-08-17T14:31:00+00:00")
+
+    identity = identity_partners(a_jpg(), [a_jpg(), late], RULE)
+
+    assert [c.rel_path for c in identity.partners] == [late.rel_path]
+
+
+def test_the_identity_does_not_look_at_where_the_time_came_from():
+    """`exifread` が JPG は読めて CR2 は読めなくても、組は同じ 1 枚である."""
+    by_mtime = replace(a_cr2(), captured_at_source="mtime")
+
+    identity = identity_partners(a_jpg(), [a_jpg(), by_mtime], RULE)
+
+    assert [c.rel_path for c in identity.partners] == [by_mtime.rel_path]
+
+
+def test_the_identity_needs_the_same_card_and_stem():
+    """別のカードの同じ名前は相方ではない（連番は一周する）."""
+    other_card = replace(a_cr2(), volume_instance_id="another")
+
+    assert identity_partners(a_jpg(), [a_jpg(), other_card], RULE).partners == ()
+
+
+def test_two_partners_with_the_same_extension_are_ambiguous():
+    """`iter_media_files` は拡張子を大文字化して突き合わせるので、
+    case-sensitive な FS では `IMG_1234.JPG` と `IMG_1234.jpg` が同じ拡張子になる。
+    **どちらが相方かは機械には決められない。**
+    """
+    lower = replace(a_jpg(), media_file_id="other", rel_path="DCIM/100CANON/IMG_1234.jpg")
+
+    assert identity_partners(a_cr2(), [a_cr2(), a_jpg(), lower], RULE).ambiguous
+
+
+def test_ambiguous_identity_refuses_the_group():
+    """組の判定側も曖昧さを潰さない。**利用者の判断に回す。**"""
+    lower = replace(a_jpg(), media_file_id="other", rel_path="DCIM/100CANON/IMG_1234.jpg")
+
+    refusal = resolve_group(a_cr2(), [a_cr2(), a_jpg(), lower], RULE)
+
+    assert "自動では決められない" in refusal.reason
