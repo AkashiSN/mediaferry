@@ -352,9 +352,11 @@ class Recomputer:
     def _reopen_stack(self, row: sqlite3.Row) -> int:
         """スタックの見送りを未評価へ戻す（§6）.
 
-        時刻が動くと、成立していなかった組が成立しうる。抽出は未評価しか拾わない
-        ので、戻さないと二度と再評価されない。**`stacked` は戻さない**
-        （相手側に既にあるものを作り直さない）。
+        抽出は未評価しか拾わないので、戻さないと二度と再評価されない。
+        **`stacked` は戻さない**（相手側に既にあるものを作り直さない）。
+
+        **組の判定は撮影時刻を見ない**（§6）ので、この戻しで結論が変わることは無い。
+        見送りを未評価へ戻すのが `captured_at` を動かす側の責任だ、という形だけを残す。
         """
         return self._conn.execute(
             "UPDATE upload_record SET stack_state = NULL, stack_reason = NULL, updated_at = ?"

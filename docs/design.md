@@ -402,9 +402,11 @@ stem が一致するだけの組が通る。鍵は必ず組にして持つ。
 案は採らない** —— 追加する表と provenance の維持コストが、閉じるリスクに見合わない。
 
 `recompute_timestamps` は、`captured_at` を動かしたレコードの見送り（`skipped`）を
-未評価へ戻す（`stacked` は戻さない）。**時刻を組の条件から外した後も、この戻しは
-意味を持つ** —— 戻せば、旧規則で時刻が食い違って見送られた組が、新しい規則と同席の
-印のもとで改めて評価され、`stacked` になり得る。**消してはならない。**
+未評価へ戻す（`stacked` は戻さない）。**時刻を組の条件から外したので、この戻しで
+結果が変わることはもう無い** —— いま見送りの理由になりうるもの（規則が無効・拡張子が
+対象外・相方が居ない／未完了・無効化済み・同席の証拠が無い・曖昧・`origin`・資産 ID・
+別プロファイル）は、どれも `captured_at` を見ない。無駄な再評価が 1 巡するだけなので
+そのままにしてある。
 
 **規則の読み方が変わったときは、定義 JSON の比較では戻せない。** `_publish_revision` が
 見ているのは**パース後の `StackRule`** どうしなので、`stack.tolerance_seconds` のように
@@ -1343,7 +1345,7 @@ RAW+JPEG の組（§6 の `stack`）を、アップロードの後に Immich の
 
 **身元の規則は 1 つだが、実装は 2 つある。** 第 2 パスは `identity_partners`
 （Python）で判定し、一覧の `collapse=stack`（§12）は**同じ規則を SQL で書き直した**
-`_SECONDARY_EXISTS` / `_ambiguous_exists_sql` / `_members_of` で判定する。一覧は
+`_secondary_exists_sql` / `_ambiguous_exists_sql` / `_members_of` で判定する。一覧は
 `identity_partners` を呼ばない —— 一覧は「畳むかどうか」を 1 本のクエリで決める必要が
 あり、行ごとに Python の判定を呼ぶと組がページの境目をまたぐため（§6 の「難所」）。
 

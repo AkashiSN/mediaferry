@@ -60,15 +60,17 @@
 
 | 変異 | 判定 |
 | --- | --- |
-| `_SECONDARY_EXISTS` の `sib.media_file_id <> m.id` | **等価**（下に証明） |
+| `_secondary_exists_sql` の `sib.media_file_id <> m.id` | **等価**（下に証明） |
 | `identity_partners` の `if candidate.source_key not in keys: continue` | **等価**。`proofs` の鍵集合は `keys` と同一に構築されるので、`source_key not in keys` ⟺ `proofs.get(...) is None` となり、次行の証拠の門が必ず落とす。**いま鍵の門は完全に冗長**だが、読み手への明示として残す |
-| `_SECONDARY_EXISTS` の `me.copresent_key IS NOT NULL` | **等価**。SQL の `NULL = NULL` は真にならないので、`sib.copresent_key = me.copresent_key` の JOIN 条件が既に 0 行しか通さない |
-| `_SECONDARY_EXISTS` の `sib.state = 'published'` | **実質到達不能**。`sib.media_file_id IS NOT NULL` がほぼ含意する保険 |
+| `_secondary_exists_sql` の `me.copresent_key IS NOT NULL` | **等価**。SQL の `NULL = NULL` は真にならないので、`sib.copresent_key = me.copresent_key` の JOIN 条件が既に 0 行しか通さない |
+| `_secondary_exists_sql` の `sib.state = 'published'` | **実質到達不能**。`sib.media_file_id IS NOT NULL` がほぼ含意する保険 |
 | `jobs/scan.py` の `stack.enabled` / `extensions` の絞り | **本物の穴**。`stack` 対象外の拡張子や `enabled: false` のプロファイルに印を書かないことを、誰も見ていなかった。テストを足した |
+| `_ambiguous_exists_sql` の `meb.copresent_key IS NOT NULL` と `b.state = 'published'` | **等価・実質到達不能**（全体レビューの修正で新しく入った保険。既存の 2 件と同じ型） |
+| `_reconcile_entry` の CASE を「`same` が偽のときだけ消す」に変える | **本物の穴**（絞ったレビューが発見）。既存テストの書き換えで「引き金は `media_file_id` であって `quick_fingerprint` ではない」を守るテストが 1 本も残っていなかった。テストを足した |
 
 ### 等価の証明（`sib.media_file_id <> m.id`）
 
-**`_SECONDARY_EXISTS` の `sib.media_file_id <> m.id` を外しても、どのテストも落ちない。**
+**`_secondary_exists_sql` の `sib.media_file_id <> m.id` を外しても、どのテストも落ちない。**
 
 `adapters/publisher.py::_commit` が保存先の `rel_path` で既存の `media_file` を
 引き当てる（`existing = media_file WHERE rel_path = final_rel`）ので、**同じ
@@ -193,7 +195,12 @@ dispatch に「既存のテストを書き換えたら、守るものが緩ん�
 - より極端な条件（2,500 組すべてが同じ `copresent_key` 空間に密集する 30,000 行、
   フィルタ無し）では**中央値 144 ms**まで悪化する
 
-`_SECONDARY_EXISTS` / `_AMBIGUOUS_EXISTS` は相関副問い合わせとして現れ、行 1 つあたりは
+**上の値は、全体レビューの修正を入れる前の SQL のものである。** 修正（主の側の絞り込みと
+曖昧さを従外しの中で見る）で相関副問い合わせが増えたぶん、**約 1.5〜1.7 倍**遅くなる ——
+同形の合成データで 4,000 件が 15.2 → 25.5 ms、16,000 件が 95.6 → 142 ms。
+**それでも索引は足していない**（測らずに足さない、という判断は変えていない）。
+
+`_secondary_exists_sql` / `_AMBIGUOUS_EXISTS` は相関副問い合わせとして現れ、行 1 つあたりは
 `source_entry_copresent`（`0024` の部分索引）と `source_entry_by_media` を辿るので索引
 経由になる。ただし **`ORDER BY … USE TEMP B-TREE` と `LIMIT` の組み合わせでは SQLite が
 早期打ち切りをできない**（`collapse` 無しなら `LIMIT` 側で打ち切れていた）。
@@ -272,6 +279,20 @@ SQL の曖昧さ判定は**同席グループ単位**、`identity_partners` は*
 曖昧さの節は**隠される行**に相関しているので、範囲を広げても「CR2 から見た自分」は
 曖昧にならず、RAW 2 つは消えたままだった（作られない 3 枚組の宣言だけが消える）。
 隠してよいのは「**その主が組を宣言するとき**」なので、従外しの中で主の曖昧さも見る。
+
+### 修正のレビューで、統括の訂正が 1 件戻された
+
+全体レビューの指摘を受けて `docs/design.md` を「時刻を外した後も `recompute_timestamps`
+の戻しは意味を持つ。消してはならない」へ書き換えたが、**行き過ぎだった。**
+
+`0025` が既存の見送りを全部戻すので、旧規則由来の見送りは 1 行も残らない。以後の
+見送りの理由（規則無効・拡張子外・相方なし／未完了・無効化・同席の証拠なし・曖昧・
+`origin`・資産 ID・別プロファイル）は**どれも `captured_at` を見ない**ので、`captured_at`
+が動いたことを引き金にする戻しは結果を変えない。**元の記述の方が正確だった。**
+
+**同じ人間（統括）が、同じ段落で 2 回続けて誤った。** 1 回目は「戻さない」と書きかけて
+コードと食い違った。2 回目は全体レビューの指摘を受けて逆へ振り切りすぎた。
+**指摘を受けた直後の訂正こそ、独立に検算させる価値がある。**
 
 ### この 6 件から言えること
 
