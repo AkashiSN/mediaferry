@@ -2122,6 +2122,166 @@ git commit
 
 ---
 
+## Task 10: 状態の印と凡例を外す
+
+**ファイル:**
+- 変更: `web/src/components/MediaTile.tsx`
+- 変更: `web/src/components/MediaTile.test.tsx`
+- 変更: `web/src/screens/Photos.tsx`
+- 変更: `web/src/screens/Photos.test.tsx`
+- 変更: `web/src/styles.css`
+
+**インタフェース:**
+- 消えるもの: `MediaStatus` 型、`Media.status` / `TileMedia` の `status`、
+  `StatusMark`、`Photos.tsx` の `impliedStatus`、`.tile .mark*` と `.legend` の CSS、
+  写真タブの凡例のかたまり
+- 残るもの: 絞り込みのチップ（**同じことを言っている唯一の場所になる**）
+
+**なぜ**（設計 §6.5 の要約。実装者はここだけで判断できる）: 印は行ごとに引いて
+おらず、宛先ごとの絞り込みが効いている間だけ**全行へ同じ印を被せていた**。
+「すべて」では 1 つも出ないのに凡例だけが常に出る。**1 つの画面に 2 種類の印が
+並ぶことがない**ので、印は直前に押したチップの繰り返しにすぎない。
+
+**先に読むもの:** 実測した参照箇所は以下だけ。ここ以外に `status` を
+`MediaTile` へ渡している場所は無い（`work/Send.tsx` も `work/Approve.tsx` も
+渡していない）。
+
+| 場所 | 何がある |
+| --- | --- |
+| `MediaTile.tsx:12` | `export type MediaStatus` |
+| `MediaTile.tsx:24` | `status?: MediaStatus`（`Media`） |
+| `MediaTile.tsx:35-36` | `TileMedia` の `Partial<Pick<…, "status" …>>` |
+| `MediaTile.tsx:85` | `<StatusMark status={media.status ?? null} />` |
+| `MediaTile.tsx:124-142` | `function StatusMark` |
+| `Photos.tsx:13` | `type MediaStatus` の import |
+| `Photos.tsx:166-167` | `impliedStatus`（`!media.stale` の門を含む） |
+| `Photos.tsx:172` | `.map((row) => ({ ...row, status: impliedStatus }))` |
+| `Photos.tsx:382` | `<div className="legend">` のかたまり |
+| `styles.css:295-302` | `.tile .mark` と 4 つの状態 |
+| `styles.css:310-311` | `.legend` と `.legend span` |
+
+**`!media.stale` の門も一緒に消える。** これは「新しい絞り込みの結果が返るまでは
+印を出さない」ための門（被せると送信済みの 200 枚に赤い × が付いた）で、印が
+無くなれば守る対象そのものが無い。`Photos.tsx` に `media.stale` の消費者は他に無い。
+
+- [ ] **Step 1: 消える振る舞いを当てているテストを数える**
+
+```bash
+grep -n "\.mark\|legend\|凡例\|impliedStatus\|MediaStatus" web/src/screens/Photos.test.tsx web/src/components/MediaTile.test.tsx
+```
+
+**実測では `Photos.test.tsx` の 3 か所**（287-290 / 918-961 / 1035-1051）が
+`.tile .mark*` を観測対象にしている。**それぞれ何を守っていたのかを読んでから
+消す。** 特に 918-961 は「絞り込みを変えた瞬間に印だけが変わる」ことを止める門
+（`!media.stale`）を守っていた —— **門ごと消えるので、このテストは移し替えでは
+なく削除**になる。削除する 1 本ずつについて、**守っていた対象が本当に消えるのか**を
+報告に書く。守る対象が残るのに観測手段だけ消すなら、別の観測手段へ移し替える。
+
+- [ ] **Step 2: 失敗するテストを書く**
+
+`Photos.test.tsx` に足す。**「無いこと」も網で押さえる** —— 消しただけでは、
+誰かが親切心で戻したときに誰も気づかない。
+
+```tsx
+it("状態の印を出さない", async () => {
+  // **印は行ごとに引いていなかった。** 宛先ごとの絞り込みが効いている間だけ
+  // 全行へ同じ印を被せるので、直前に押したチップの繰り返しにしかならない。
+  const { container } = renderPhotos({
+    "/media": {
+      media: [media("a", "2026-08-18T15:12:00+09:00")],
+      total: 1,
+      page: 1,
+      page_size: 200,
+    },
+    "/destinations": { destinations: [{ id: "d1", name: "家", enabled: true }] },
+  });
+
+  await userEvent.click(await screen.findByRole("button", { name: /送信済み/ }));
+
+  await waitFor(() => expect(screen.getByRole("img", { name: "a.JPG" })).toBeInTheDocument());
+  expect(container.querySelector(".tile .mark")).toBeNull();
+});
+
+it("凡例を出さない", async () => {
+  renderPhotos({
+    "/media": { media: [], total: 0, page: 1, page_size: 200 },
+    "/destinations": { destinations: [] },
+  });
+
+  await screen.findByRole("heading", { name: "写真" });
+  expect(screen.queryByText("送信済み", { selector: ".legend span" })).toBeNull();
+  expect(document.querySelector(".legend")).toBeNull();
+});
+```
+
+> **`renderPhotos` と `media(...)` は既にこのファイルにある**とは限らない。
+> ファイル冒頭の作り方（`media` ヘルパと `render(<MemoryRouter><PhotosScreen/></MemoryRouter>)`）を
+> 読み、**同じ形に合わせて書く**。ヘルパが無ければ既存のテストと同じ素の
+> `render(...)` で書く。`getByRole("img", …)` は `to` も `onToggle` も無いタイルの
+> 形なので、写真タブのタイル（両方ある）では `link` か `button` で当てる ——
+> **実際の DOM を見てから期待値を決める。**
+
+- [ ] **Step 3: 落ちることを確かめる**
+
+```bash
+npm --prefix web test -- src/screens/Photos.test.tsx
+```
+
+期待: 新しい 2 本が「印がある」「凡例がある」で FAIL。
+
+- [ ] **Step 4: 外す**
+
+上の表の 11 か所を消す。**`Photos.tsx` の冒頭のコメント**（「状態の印には凡例を
+添える（色と形だけで意味を伝えない）」）と **`MediaTile.tsx` の冒頭のコメント**
+（「状態の印は形と文字の両方で伝える」）も、**指している対象が無くなるので消す。**
+経緯は `docs/history/phase12-design.md` §6.5 にあるので、コードには残さない。
+
+`Photos.tsx` の `rows` はこうなる。
+
+```tsx
+  const rows: Media[] = useMemo(() => {
+    if (needsDestination) {
+      return [];
+    }
+    return media.data?.media ?? [];
+  }, [media.data, needsDestination]);
+```
+
+**`Icon` の import が浮かないか確かめる**（凡例が `<Icon name="check" size={8} />` を
+使っている）。日付の丸と「送る」帯がまだ使っているなら残す。lint が教える。
+
+- [ ] **Step 5: 通ることを確かめる**
+
+```bash
+npm --prefix web test
+npm --prefix web run lint && npm --prefix web run typecheck && npm --prefix web run build
+```
+
+**`grep -rn "MediaStatus\|\.mark\|legend" web/src` が、消し残しを 1 つも
+返さないこと。**
+
+- [ ] **Step 6: 変異試験**
+
+| 変異 | 落ちるはずのテスト |
+| --- | --- |
+| `rows` に `status: "sent"` を被せ直す | 「状態の印を出さない」 |
+| 凡例のかたまりを戻す | 「凡例を出さない」 |
+
+- [ ] **Step 7: 受け入れとコミット**
+
+```bash
+npm --prefix web test && npm --prefix web run lint && npm --prefix web run typecheck && npm --prefix web run build
+npm --prefix web run test:e2e ; pkill -f '\.venv/bin/python3 -m mediaferry'
+git add web/src/components/MediaTile.tsx web/src/components/MediaTile.test.tsx web/src/screens/Photos.tsx web/src/screens/Photos.test.tsx web/src/styles.css
+git commit
+```
+
+**E2E は必ず回す。** 凡例は写真タブの縦の高さを持っていたので、消すと
+「狭い画面で、下に貼り付く操作バーが隠れない」や「カードの中身が、カードの箱の
+外に出ていない」の当たり方が変わりうる。
+
+---
+
 ## この計画の自己点検
 
 **設計の網羅（`phase12-design.md` の各節 → タスク）:**
