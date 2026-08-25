@@ -75,4 +75,26 @@ describe("MediaTile", () => {
     const { container } = renderTile({ to: "/photos/m1", onToggle: vi.fn(), selected: false });
     expect(container.querySelector(".pick svg")).toBeNull();
   });
+
+  it("RAW も一緒にあると分かる", () => {
+    renderTile({
+      to: "/photos/m1",
+      onToggle: vi.fn(),
+      media: {
+        ...media,
+        stack: {
+          members: [
+            { id: "m1", rel_path: "library/dji-osmo/DCIM/A.JPG", size_bytes: 100 },
+            { id: "m2", rel_path: "library/dji-osmo/DCIM/A.CR2", size_bytes: 200 },
+          ],
+        },
+      },
+    });
+    expect(screen.getByText("RAW")).toBeInTheDocument();
+  });
+
+  it("組でなければ RAW とは書かない", () => {
+    renderTile({ to: "/photos/m1", onToggle: vi.fn() });
+    expect(screen.queryByText("RAW")).toBeNull();
+  });
 });

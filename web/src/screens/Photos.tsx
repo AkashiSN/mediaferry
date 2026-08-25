@@ -97,6 +97,8 @@ function buildMediaQuery(
   if (page > 1) {
     query.set("page", String(page));
   }
+  // **写真タブは組を畳む。** 畳まないと同じ 1 枚が 2 タイルに割れて並ぶ。
+  query.set("collapse", "stack");
   query.set("page_size", String(PAGE_SIZE));
   return query.toString();
 }

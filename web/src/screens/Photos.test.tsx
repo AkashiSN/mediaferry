@@ -54,7 +54,7 @@ describe("写真の画面", () => {
     await waitFor(() =>
       expect(
         calls().some(
-          (c) => c.path === "/media?status=unsent&destination_id=d1&page_size=200" && c.method === "GET",
+          (c) => c.path === "/media?status=unsent&destination_id=d1&collapse=stack&page_size=200" && c.method === "GET",
         ),
       ).toBe(true),
     );
@@ -144,7 +144,7 @@ describe("写真の画面", () => {
     await waitFor(() =>
       expect(
         calls().some(
-          (c) => c.path === "/media?status=unsent&destination_id=d2&page_size=200" && c.method === "GET",
+          (c) => c.path === "/media?status=unsent&destination_id=d2&collapse=stack&page_size=200" && c.method === "GET",
         ),
       ).toBe(true),
     );
@@ -322,7 +322,7 @@ describe("つないだ動画の絞り込みと、タイルの行き先", () => {
     await waitFor(() =>
       expect(
         calls().some(
-          (c) => c.path === "/media?role=derived&page_size=200" && c.method === "GET",
+          (c) => c.path === "/media?role=derived&collapse=stack&page_size=200" && c.method === "GET",
         ),
       ).toBe(true),
     );
@@ -350,14 +350,14 @@ describe("つないだ動画の絞り込みと、タイルの行き先", () => {
     await waitFor(() => expect(lastMediaCall()?.path).toContain("role=derived"));
 
     await userEvent.click(screen.getByRole("button", { name: "すべて" }));
-    await waitFor(() => expect(lastMediaCall()?.path).toBe("/media?page_size=200"));
+    await waitFor(() => expect(lastMediaCall()?.path).toBe("/media?collapse=stack&page_size=200"));
 
     await userEvent.click(screen.getByRole("button", { name: "つないだ動画" }));
     await waitFor(() => expect(lastMediaCall()?.path).toContain("role=derived"));
 
     await userEvent.click(screen.getByRole("button", { name: "まだ送っていない" }));
     await waitFor(() =>
-      expect(lastMediaCall()?.path).toBe("/media?status=unsent&destination_id=d1&page_size=200"),
+      expect(lastMediaCall()?.path).toBe("/media?status=unsent&destination_id=d1&collapse=stack&page_size=200"),
     );
   });
 
@@ -466,9 +466,33 @@ describe("読み込む件数と、切れていることの表示", () => {
       </MemoryRouter>,
     );
     await waitFor(() =>
-      expect(calls().some((c) => c.path === "/media?page_size=200" && c.method === "GET")).toBe(
+      expect(calls().some((c) => c.path === "/media?collapse=stack&page_size=200" && c.method === "GET")).toBe(
         true,
       ),
+    );
+  });
+
+  // **写真タブは組を畳んで取りに行く。** 入れ忘れると、RAW+JPEG の組が同じ 1 枚
+  // なのに 2 タイルに割れて並ぶ（Task 6 の `GET /media?collapse=stack`）。
+  // **絞り込みを変えても付く**ことを見るため、他の path 断定と重ならない
+  // 「動画」の絞り込みで確かめる。
+  it("写真タブは組を畳んで取りに行く", async () => {
+    const { calls } = stubApi({
+      "/media": { media: [], total: 0, page: 1, page_size: 200 },
+      "/destinations": { destinations: [] },
+    });
+    render(
+      <MemoryRouter>
+        <PhotosScreen />
+      </MemoryRouter>,
+    );
+    await userEvent.click(await screen.findByRole("button", { name: "動画" }));
+    await waitFor(() =>
+      expect(
+        calls().some(
+          (c) => c.path === "/media?kind=video&collapse=stack&page_size=200" && c.method === "GET",
+        ),
+      ).toBe(true),
     );
   });
 
@@ -774,7 +798,7 @@ describe("送れなかったものの絞り込み", () => {
     await waitFor(() =>
       expect(
         calls().some(
-          (c) => c.path === "/media?status=failed&destination_id=d1&page_size=200" && c.method === "GET",
+          (c) => c.path === "/media?status=failed&destination_id=d1&collapse=stack&page_size=200" && c.method === "GET",
         ),
       ).toBe(true),
     );
