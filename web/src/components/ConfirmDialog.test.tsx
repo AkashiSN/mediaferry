@@ -7,23 +7,76 @@ import type { Confirmation } from "./ConfirmDialog";
 import { FORBIDDEN } from "../test/vocabulary";
 
 describe("不可逆な操作の確認", () => {
+  /** 送信の確認は欄が多いので、既定を 1 か所に置いて差分だけ渡す。 */
+  function anUpload(overrides: Record<string, unknown> = {}): Confirmation {
+    return {
+      kind: "upload",
+      count: 12,
+      totalBytes: 3 * 1024 * 1024 * 1024,
+      destinationNames: ["home", "backup"],
+      derivedCount: 0,
+      capturedRange: null,
+      truncated: false,
+      ...overrides,
+    } as Confirmation;
+  }
+
   it("送信は件数・合計サイズ・宛先名を出す（§13）", () => {
+    render(<ConfirmDialog confirmation={anUpload()} onConfirm={() => {}} onCancel={() => {}} />);
+
+    expect(screen.getByText("12 件")).toBeInTheDocument();
+    expect(screen.getByText(/合計 3 GiB/)).toBeInTheDocument();
+    expect(screen.getByText(/home \/ backup/)).toBeInTheDocument();
+  });
+
+  it("送信は、つないだ動画の内訳と撮影日の範囲も出す", () => {
+    // **件数・サイズ・宛先の 3 行では、何を送るのかが読めない。** つないだ動画は
+    // 元のファイルと別物なので内訳を出し、いつ撮ったぶんなのかを日付で出す。
     render(
       <ConfirmDialog
-        confirmation={{
-          kind: "upload",
-          count: 12,
-          totalBytes: 3 * 1024 * 1024 * 1024,
-          destinationNames: ["home", "backup"],
-        }}
+        confirmation={anUpload({
+          count: 6,
+          derivedCount: 2,
+          capturedRange: { from: "2026-02-05T10:00:00+09:00", to: "2026-08-17T14:31:00+09:00" },
+        })}
         onConfirm={() => {}}
         onCancel={() => {}}
       />,
     );
 
-    expect(screen.getByText("12 件")).toBeInTheDocument();
-    expect(screen.getByText(/合計 3 GiB/)).toBeInTheDocument();
-    expect(screen.getByText(/home \/ backup/)).toBeInTheDocument();
+    expect(screen.getByText(/つないだ動画が 2 件/)).toBeInTheDocument();
+    expect(screen.getByText(/2026年2月5日 〜 2026年8月17日/)).toBeInTheDocument();
+  });
+
+  it("つないだ動画が無ければ、内訳は書かない（0 件と書かない）", () => {
+    render(<ConfirmDialog confirmation={anUpload()} onConfirm={() => {}} onCancel={() => {}} />);
+    expect(screen.queryByText(/つないだ動画/)).toBeNull();
+  });
+
+  it("撮影日が 1 日に収まるなら、範囲ではなくその日を書く", () => {
+    render(
+      <ConfirmDialog
+        confirmation={anUpload({
+          capturedRange: { from: "2026-08-17T09:00:00+09:00", to: "2026-08-17T14:31:00+09:00" },
+        })}
+        onConfirm={() => {}}
+        onCancel={() => {}}
+      />,
+    );
+    expect(screen.getByText(/撮影日: 2026年8月17日$/)).toBeInTheDocument();
+  });
+
+  it("1 度に送れる分を超えているなら、確認にもそう書く", () => {
+    // **「すべて」と名乗る対象が上限で切れていること**（裁定 20）は、送る直前の
+    // この 1 枚にも出す —— 押した後に「全部送った」と誤解させない。
+    render(
+      <ConfirmDialog
+        confirmation={anUpload({ truncated: true })}
+        onConfirm={() => {}}
+        onCancel={() => {}}
+      />,
+    );
+    expect(screen.getByText(/これで全部ではありません/)).toBeInTheDocument();
   });
 
   it("宛先の退役では、件数やサイズを求めない（意味が無い）", () => {
@@ -144,7 +197,15 @@ describe("不可逆な操作の確認", () => {
  * ここが型エラーになる**（一覧だと黙って抜ける）。
  */
 const BY_KIND: Record<Confirmation["kind"], Confirmation> = {
-  upload: { kind: "upload", count: 1, totalBytes: 1, destinationNames: ["a"] },
+  upload: {
+    kind: "upload",
+    count: 1,
+    totalBytes: 1,
+    destinationNames: ["a"],
+    derivedCount: 0,
+    capturedRange: null,
+    truncated: false,
+  },
   archive_destination: { kind: "archive_destination", name: "a" },
   discard_merge_group: { kind: "discard_merge_group", groupLabel: "a", publishedCount: 1 },
   delete_merged_video: { kind: "delete_merged_video", name: "a.MP4", sourceCount: 2, freesSources: true },
@@ -164,6 +225,17 @@ const EVERY_KIND: Confirmation[] = [
   { kind: "trust_volume", label: "a", state: "pending", reason: "確かめられた場合" },
   { kind: "trust_volume", label: "a", state: "blocked", reason: "設定が off な" },
   { kind: "delete_merged_video", name: "a.MP4", sourceCount: 2, freesSources: false },
+  // 送信の確認は、内訳・撮影日・打ち切りの 3 つで本文が伸びる。**伸びた側も巡る**
+  // —— 禁止語と Markdown の記号の網は、出た文字しか見られない。
+  {
+    kind: "upload",
+    count: 3,
+    totalBytes: 1,
+    destinationNames: ["a"],
+    derivedCount: 1,
+    capturedRange: { from: "2026-02-05T10:00:00+09:00", to: "2026-08-17T14:31:00+09:00" },
+    truncated: true,
+  },
 ];
 
 
@@ -176,6 +248,9 @@ describe("キーボードだけで扱える", () => {
     count: 1,
     totalBytes: 1024,
     destinationNames: ["home"],
+    derivedCount: 0,
+    capturedRange: null,
+    truncated: false,
   };
 
   it("Escape で閉じる", async () => {

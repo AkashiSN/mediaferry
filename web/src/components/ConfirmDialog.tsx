@@ -8,10 +8,22 @@ import { useRef } from "react";
 import type { ReactNode } from "react";
 
 import { formatBytes } from "../utils/formatBytes";
+import { formatDate } from "../utils/formatDateTime";
 import { useDialogFocus } from "./useDialogFocus";
 
 export type Confirmation =
-  | { kind: "upload"; count: number; totalBytes: number; destinationNames: string[] }
+  | {
+      kind: "upload";
+      count: number;
+      totalBytes: number;
+      destinationNames: string[];
+      /** つないだ動画の数。**元のファイルとは別物**なので、内訳を出す。 */
+      derivedCount: number;
+      /** 撮影日の幅。読める値が 1 つも無ければ `null`。 */
+      capturedRange: { from: string; to: string } | null;
+      /** 対象が 1 度に読める上限で切れているか（裁定 20）。 */
+      truncated: boolean;
+    }
   | { kind: "archive_destination"; name: string }
   | { kind: "discard_merge_group"; groupLabel: string; publishedCount: number }
   | { kind: "delete_merged_video"; name: string; sourceCount: number; freesSources: boolean }
@@ -23,17 +35,43 @@ export type Confirmation =
   | { kind: "archive_profile"; slug: string }
   | { kind: "trust_volume"; label: string; state: "starts" | "pending" | "blocked"; reason: string | null };
 
+/** 撮影日の幅を 1 行にする。**同じ日なら範囲にしない**（「A 〜 A」は読みにくい）。 */
+function describeRange(range: { from: string; to: string }): string {
+  const from = formatDate(range.from);
+  const to = formatDate(range.to);
+  return from === to ? from : `${from} 〜 ${to}`;
+}
+
 export function describe(confirmation: Confirmation): { title: string; body: ReactNode } {
   switch (confirmation.kind) {
     case "upload":
       return {
         title: "この内容で送りますか",
         body: (
-          <ul>
-            <li>{confirmation.count} 件</li>
-            <li>合計 {formatBytes(confirmation.totalBytes)}</li>
-            <li>宛先: {confirmation.destinationNames.join(" / ")}</li>
-          </ul>
+          <>
+            <ul>
+              <li>{confirmation.count} 件</li>
+              {/* **0 件のときは書かない。** 「つないだ動画が 0 件」は、無い話を
+                  1 行使って言うだけで、読む側の負担にしかならない。 */}
+              {confirmation.derivedCount > 0 && (
+                <li>うち、つないだ動画が {confirmation.derivedCount} 件</li>
+              )}
+              <li>合計 {formatBytes(confirmation.totalBytes)}</li>
+              {confirmation.capturedRange !== null && (
+                <li>撮影日: {describeRange(confirmation.capturedRange)}</li>
+              )}
+              <li>宛先: {confirmation.destinationNames.join(" / ")}</li>
+            </ul>
+            {/* **押した後に「全部送った」と誤解させない**（裁定 20）。送る画面の
+                帯にも同じことが出ているが、**確認は押す直前の最後の 1 枚**なので、
+                ここでも言う。 */}
+            {confirmation.truncated && (
+              <p>
+                <strong>これで全部ではありません。</strong>
+                1 度に送れる分を超えているので、送り終えたらもう一度送ってください。
+              </p>
+            )}
+          </>
         ),
       };
     case "archive_destination":
@@ -144,7 +182,7 @@ export function describe(confirmation: Confirmation): { title: string; body: Rea
                 <strong>
                   いま入っている中身も含めて、以後このカードを挿すだけで NAS へコピーされます
                 </strong>
-                （画面の操作は要りません）。取り込みは承認の数秒後に始まります。
+                （画面の操作は要りません）。取り込みは信頼した数秒後に始まります。
               </p>
             )}
             {/* **条件は文全体に掛ける。** 約束を先に無条件で置いてから限定を

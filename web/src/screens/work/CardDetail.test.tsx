@@ -524,7 +524,21 @@ describe("カードの信頼登録", () => {
     expect(calls.some((call) => call.path.includes("trust"))).toBe(false);
   });
 
-  it("未承認のカードには、いま挿してある中身も対象だと書く", async () => {
+  it("カードの文脈では「承認」を使わない（操作の名前は「信頼」1 つ）", async () => {
+    // **同じ操作を 2 つの名前で呼ばない。** 本文が「承認」、ボタンとダイアログが
+    // 「信頼」だと、押す前に読む文と押すボタンが別の話に見える。
+    //
+    // **「承認」は日時の確認（`/approve`）の語**として残す —— そちらは
+    // 「承認する／却下する」で 1 つの意味に閉じている。
+    stubDevices([{ ...base, trusted: false }]);
+    renderCardDetail();
+
+    expect(await screen.findByText(/まだ信頼していません/)).toBeInTheDocument();
+    const main = document.querySelector("section[aria-label='カードの中身']");
+    expect(main?.textContent ?? "").not.toMatch(/承認/);
+  });
+
+  it("信頼していないカードには、いま挿してある中身も対象だと書く", async () => {
     // **承認すると、いま挿してあるこのカードの中身が次の監視周期で取り込まれる。**
     // watcher は毎 tick、現在 live な presence を候補に組み直すため（§12.1）。
     // 「次に挿したときから」と書くと、同意の対象を取り違えさせる。
@@ -559,7 +573,7 @@ describe("カードの信頼登録", () => {
     expect(screen.queryByText(/確かめられしだい/)).toBeNull();
   });
 
-  it("確度が低い未承認カードの確認は、同意の対象を示したまま条件を添える", async () => {
+  it("確度が低い、まだ信頼していないカードの確認は、同意の対象を示したまま条件を添える", async () => {
     stubDevices([{ ...base, trusted: false, identity_confidence: "low" }]);
     renderCardDetail();
 
@@ -572,7 +586,7 @@ describe("カードの信頼登録", () => {
     expect(dialog).toHaveTextContent(/確かめられた場合に限り/);
     expect(dialog).toHaveTextContent(/いま入っている中身も含めて/);
     expect(dialog).toHaveTextContent(/取り違え/);
-    expect(dialog).not.toHaveTextContent(/承認の数秒後に始まります/);
+    expect(dialog).not.toHaveTextContent(/信頼した数秒後に始まります/);
   });
 
   it("確度が高いカードの確認だけが、条件なしで約束する", async () => {
@@ -582,7 +596,7 @@ describe("カードの信頼登録", () => {
     await userEvent.click(await screen.findByRole("button", { name: "SD_Card を信頼する" }));
 
     const dialog = await screen.findByRole("dialog");
-    expect(dialog).toHaveTextContent(/承認の数秒後に始まります/);
+    expect(dialog).toHaveTextContent(/信頼した数秒後に始まります/);
     expect(dialog).not.toHaveTextContent(/確かめられた場合に限り/);
   });
 

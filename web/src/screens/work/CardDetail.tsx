@@ -144,18 +144,20 @@ export function autoImportOutlook(volume: Volume, autoImport: string | null): Ou
 /** そのカードで自動取り込みがどうなるか（§12.1）。 */
 export function autoImportState(volume: Volume, autoImport: string | null): string {
   const outlook = autoImportOutlook(volume, autoImport);
-  // **承認すると、いま挿してあるこのカードの中身が対象になる。** watcher は
+  // **信頼すると、いま挿してあるこのカードの中身が対象になる。** watcher は
+  // **操作の名前は「信頼」1 つに揃える** —— 「承認」は日時の確認（`/approve`）の
+  // 語で、そちらは「承認する／却下する」で閉じている（§13）。
   // 毎 tick、現在 live な presence から候補を組み直すので、条件が揃っていれば
-  // 承認の数秒後に取り込みが始まる。「次に挿したときから」と書くと、同意の
+  // 信頼した数秒後に取り込みが始まる。「次に挿したときから」と書くと、同意の
   // 対象を取り違えさせる。**逆に、条件が揃っていないのに断言もしない。**
   if (!volume.trusted) {
     switch (outlook.state) {
       case "starts":
-        return "未承認です。承認すると、いま入っている中身も含めて、数秒後から自動で取り込みます。";
+        return "まだ信頼していません。信頼すると、いま入っている中身も含めて、数秒後から自動で取り込みます。";
       case "pending":
-        return `未承認です。承認すると、${outlook.reason}に、いま入っている中身も含めて自動で取り込みます。`;
+        return `まだ信頼していません。信頼すると、${outlook.reason}に、いま入っている中身も含めて自動で取り込みます。`;
       case "blocked":
-        return `未承認です。承認しても、${outlook.reason}ので、いまは自動取り込みは始まりません。`;
+        return `まだ信頼していません。信頼しても、${outlook.reason}ので、いまは自動取り込みは始まりません。`;
     }
   }
   switch (outlook.state) {

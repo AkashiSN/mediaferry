@@ -98,6 +98,32 @@ export function summarise(
   return parts.join("");
 }
 
+/**
+ * 対象の撮影日の幅（確認に出す）。読める値が 1 つも無ければ `null`。
+ *
+ * **日付の文字列で比べる。** `captured_at` は現地の時差付きなので、実際の瞬間の
+ * 前後と文字の前後は一致しない。ここで欲しいのは**画面に出す日付のラベル**で、
+ * 写真タブの日付の見出しも同じ切り出し方をしている —— 揃えておかないと、
+ * 「8月17日」と束ねて見せたものが確認では別の日として出る。
+ */
+export function capturedRange(media: Media[]): { from: string; to: string } | null {
+  const readable = media.filter((item) => item.captured_at.slice(0, 10).length === 10);
+  if (readable.length === 0) {
+    return null;
+  }
+  let from = readable[0];
+  let to = readable[0];
+  for (const item of readable) {
+    if (item.captured_at.slice(0, 10) < from.captured_at.slice(0, 10)) {
+      from = item;
+    }
+    if (item.captured_at.slice(0, 10) > to.captured_at.slice(0, 10)) {
+      to = item;
+    }
+  }
+  return { from: from.captured_at, to: to.captured_at };
+}
+
 export function SendScreen() {
   const location = useLocation();
   const navigate = useNavigate();
@@ -524,6 +550,11 @@ export function SendScreen() {
             count: targetMedia.length,
             totalBytes,
             destinationNames: chosen.map((d) => d.name),
+            // **つないだ動画は元のファイルとは別物**なので、内訳を出す。
+            derivedCount: targetMedia.filter((media) => media.role === "derived").length,
+            capturedRange: capturedRange(targetMedia),
+            // 帯と同じことを、押す直前の 1 枚にも出す（裁定 20）。
+            truncated: targetTruncated,
           }}
           busy={sending.busy}
           onCancel={() => setConfirmingFor(null)}
