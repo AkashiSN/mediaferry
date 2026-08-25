@@ -3,7 +3,52 @@ import sqlite3
 import pytest
 
 from mediaferry.clock import now_iso
+from mediaferry.core.profiles.model import (
+    STACK_DISABLED,
+    Hints,
+    ImmichRule,
+    KeepStreams,
+    MergeRule,
+    ProfileDefinition,
+    Require,
+    ScanRule,
+    TimestampRule,
+    definition_to_json,
+)
 from mediaferry.ids import new_id
+
+# **中身を気にしないテストのための、パース可能な最小の定義。** `{}` だと
+# `parse_definition` が `slug` を要求して落ちる —— `GET /media/{id}` は
+# 1 件ごとに `ProfileRegistry(conn).all()` で **DB の全プロファイル**を読むので
+# （`api/routes_media.py` の `_ranks`）、この定義が壊れていると無関係な
+# テストの詳細取得までまとめて落ちる。
+_PLACEHOLDER_DEFINITION_JSON = definition_to_json(
+    ProfileDefinition(
+        slug="placeholder",
+        name="Placeholder",
+        hints=Hints(usb_ids=(), volume_labels=()),
+        require=Require(roots=(), filename_pattern=".*", min_matching_files=0),
+        scan=ScanRule(roots=(), extensions=()),
+        timestamp=TimestampRule(
+            source="mtime",
+            pattern=None,
+            format=None,
+            fallback="mtime",
+            timezone_policy="none",
+            timezone=None,
+        ),
+        merge=MergeRule(
+            enabled=False,
+            tolerance_seconds=0,
+            min_part_size_gib=0,
+            sequence_pattern="",
+            output_name="",
+            keep_streams=KeepStreams(video="primary", audio="none", timecode=False, data=False),
+        ),
+        stack=STACK_DISABLED,
+        immich=ImmichRule(tags=(), tag_pre_existing=False, fix_datetime_after_upload=False),
+    )
+)
 
 
 def a_profile(db, slug="dji-osmo"):
@@ -16,8 +61,8 @@ def a_profile(db, slug="dji-osmo"):
     db.execute(
         "INSERT INTO profile_revision"
         " (id, profile_id, revision, definition_json, schema_version, created_at)"
-        " VALUES (?, ?, 1, '{}', 1, ?)",
-        (revision_id, profile_id, now_iso()),
+        " VALUES (?, ?, 1, ?, 1, ?)",
+        (revision_id, profile_id, _PLACEHOLDER_DEFINITION_JSON, now_iso()),
     )
     db.execute(
         "UPDATE device_profile SET current_revision_id = ? WHERE id = ?",

@@ -486,6 +486,12 @@ export interface paths {
          *
          *     `status` は**宛先ごとの状態**なので、`destination_id` と併せて指定する。
          *     `role=derived` で写真タブの「つないだ動画」だけに絞れる。
+         *
+         *     `collapse=stack` で、組の従（`stack.extensions` で後ろの拡張子）を一覧から
+         *     外す。**組は束ねない。** 束ねるとページの境目を組がまたぐので、行は増減
+         *     させず、従の行だけを隠す。主の行には `stack.members` が付く。**既定は
+         *     畳まない** —— ホームの「さっき取り込んだもの」と選んで送る画面が同じ
+         *     この API を使うので、`collapse` を指定しない限り契約を変えない。
          */
         get: operations["list_media_api_media_get"];
         put?: never;
@@ -1806,6 +1812,7 @@ export interface operations {
                 q?: string | null;
                 destination_id?: string | null;
                 status?: string | null;
+                collapse?: string | null;
             };
             header?: never;
             path?: never;

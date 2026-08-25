@@ -380,3 +380,68 @@ def test_the_listing_collapses_exactly_when_a_group_can_be_made(
     # 実在するファイルが画面から黙って消える。
     every = {row["id"] for row in db.execute("SELECT id FROM media_file")}
     assert every - {m["id"] for m in body["media"]} <= declared
+
+
+def test_the_detail_names_the_members_of_the_pair(client, canon_pair):
+    """**詳細も組を知る。** 一覧でだけ組が見えると、押した先で消える."""
+    jpeg = canon_pair.media_ids["JPG"]
+
+    body = client.get(f"/api/media/{jpeg}").json()
+
+    assert [m["rel_path"].split("/")[-1] for m in body["stack"]["members"]] == [
+        "IMG_0001.JPG",
+        "IMG_0001.CR2",
+    ]
+    assert [m["size_bytes"] for m in body["stack"]["members"]] == [
+        body["size_bytes"],
+        client.get(f"/api/media/{canon_pair.media_ids['CR2']}").json()["size_bytes"],
+    ]
+
+
+def test_the_secondary_sees_the_same_pair_with_the_primary_first(client, canon_pair):
+    """**従から開いても並びは同じ**（主が先頭）. どちらから見ても同じ組."""
+    raw = canon_pair.media_ids["CR2"]
+
+    body = client.get(f"/api/media/{raw}").json()
+
+    assert [m["rel_path"].split("/")[-1] for m in body["stack"]["members"]] == [
+        "IMG_0001.JPG",
+        "IMG_0001.CR2",
+    ]
+
+
+def test_the_order_is_by_rank_not_by_insertion(client, canon_pair_inserted_in_reverse):
+    """**並びは `rank` が決める. 挿入順ではない.**
+
+    CR2 を JPG より先に `media_file` へ入れても、`stack.extensions` の順位は
+    変わらない（JPG が primary）ので、`members` は依然として JPG が先頭。
+    `ORDER BY r.rank` を消しても、挿入順とたまたま同じ順で返ると気付けない
+    （`canon_pair` は常に JPG を先に入れるので、そちらだけでは見抜けない）。
+    """
+    jpeg = canon_pair_inserted_in_reverse.media_ids["JPG"]
+
+    body = client.get(f"/api/media/{jpeg}").json()
+
+    assert [m["rel_path"].split("/")[-1] for m in body["stack"]["members"]] == [
+        "IMG_0001.JPG",
+        "IMG_0001.CR2",
+    ]
+
+
+def test_a_lone_file_has_no_stack(client, canon_pair_without_proof):
+    """同席の証拠が無ければ組ではない. **`None` を返す**（空の組を作らない）."""
+    jpeg = canon_pair_without_proof.media_ids["JPG"]
+
+    assert client.get(f"/api/media/{jpeg}").json()["stack"] is None
+
+
+def test_an_ambiguous_pair_has_no_stack_in_the_detail(client, canon_pair, ambiguous_sibling):
+    """**曖昧な組は詳細でも組にしない.**
+
+    `identity_partners` は同じ状況を `ambiguous=True` と判定し、`resolve_group` は
+    組を作らない。一覧と同じ `_members_of` を通すので、判断は自動でそろう ——
+    ここが割れると、画面が Immich には作らない組を宣言する。
+    """
+    jpeg = canon_pair.media_ids["JPG"]
+
+    assert client.get(f"/api/media/{jpeg}").json()["stack"] is None

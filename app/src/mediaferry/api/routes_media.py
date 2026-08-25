@@ -153,10 +153,8 @@ def list_media(  # noqa: PLR0913
     ranks_params: tuple[Any, ...] = ()
     prefix = ""
     if collapse == "stack":
-        ranks = stack_extension_ranks(ProfileRegistry(conn).all())
-        if ranks:
-            ranks_sql = ", ".join(["(?, ?, ?)"] * len(ranks))
-            ranks_params = tuple(value for row in ranks for value in row)
+        ranks_sql, ranks_params = _ranks(conn)
+        if ranks_sql:
             prefix = f"WITH rank(profile_id, extension, rank) AS (VALUES {ranks_sql}) "
             # **`_AMBIGUOUS_EXISTS` は従外しを打ち消す保護であって、独立の除外
             # 条件ではない。** 「従に見える行」でも、その身元が曖昧（同じ順位の
@@ -194,16 +192,7 @@ def list_media(  # noqa: PLR0913
             # 組の中身は、主の行 1 つにつき 1 回だけ引く。
             member_rows = _members_of(conn, row["id"], ranks_sql, ranks_params)
             if member_rows is not None:
-                item["stack"] = {
-                    "members": [
-                        {
-                            "id": member["id"],
-                            "rel_path": member["rel_path"],
-                            "size_bytes": member["size_bytes"],
-                        }
-                        for member in member_rows
-                    ]
-                }
+                item["stack"] = _stack_json(member_rows)
         media.append(item)
     return {
         "media": media,
@@ -251,6 +240,47 @@ def _members_of(
     if len(rows) < 2:  # noqa: PLR2004 - 1 つでは組にならない
         return None
     return rows
+
+
+def _ranks(conn) -> tuple[str, tuple[Any, ...]]:  # noqa: ANN001
+    """順位表を `VALUES` の並びにする. **空なら `("", ())`**（`VALUES` は 0 行を書けない）.
+
+    一覧と詳細が同じ表を作る。**2 か所で組み立てると、片方だけが古い規則を読む。**
+    """
+    ranks = stack_extension_ranks(ProfileRegistry(conn).all())
+    if not ranks:
+        return "", ()
+    return ", ".join(["(?, ?, ?)"] * len(ranks)), tuple(value for row in ranks for value in row)
+
+
+def _stack_json(member_rows: list[Any]) -> dict[str, Any]:
+    """組を API の形にする（一覧と詳細で同じ形）."""
+    return {
+        "members": [
+            {
+                "id": member["id"],
+                "rel_path": member["rel_path"],
+                "size_bytes": member["size_bytes"],
+            }
+            for member in member_rows
+        ]
+    }
+
+
+def _stack_of(conn, media_id: str) -> dict[str, Any] | None:  # noqa: ANN001
+    """1 件から見た組（**主が先頭**）. 組でなければ None.
+
+    **一覧と同じ `_members_of` を通す。** 曖昧な組を組にしない判断を 2 か所に
+    書かない（`docs/history/phase10-design.md` の「画面に出す組と Immich が作る組は、
+    同じ関数が決める」）。
+    """
+    ranks_sql, ranks_params = _ranks(conn)
+    if not ranks_sql:
+        return None
+    member_rows = _members_of(conn, media_id, ranks_sql, ranks_params)
+    if member_rows is None:
+        return None
+    return _stack_json(member_rows)
 
 
 def _filters(  # noqa: PLR0913
@@ -378,6 +408,9 @@ def get_media(  # noqa: ANN201
     blocker = repo.deletion_blocker(media_id)
     return {
         **_media(row),
+        # **この 1 件が属する組**（RAW+JPEG。組でなければ `None`）。画面は
+        # 送るものをここから選ぶので、**一覧と同じ判断で返す**。
+        "stack": _stack_of(conn, media_id),
         "sources": _sources(conn, media_id),
         "destinations": _destinations(conn, media_id),
         "deletable": blocker is None,
