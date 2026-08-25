@@ -39,9 +39,25 @@ const SCREENS = [
   "/settings/merge-history",
   "/settings/general",
   "/settings/reset",
-  // Phase 11: 1 件のくわしくも巡る。**ここだけ巡っていなかった**ので、
-  // ファイル名が箱から出る壊れ方をどの網も見ていなかった。
 ];
+
+/**
+ * 巡る画面の一覧に、**1 件のくわしく**を足して返す。
+ *
+ * **住所が動的なので、静的な一覧には書けない。** そのぶんここだけ巡回から
+ * 漏れていて、`_` しか持たないファイル名が箱の外へ出る壊れ方を**どの網も
+ * 見ていなかった**（Phase 11 で実機で見つかった）。
+ */
+async function screensWithDetail(page: Page): Promise<string[]> {
+  await page.goto(app.url + "/photos");
+  await settled(page);
+  const first = page.locator("main .tilehit").first();
+  if ((await first.count()) === 0) {
+    return [...SCREENS];
+  }
+  const href = await first.getAttribute("href");
+  return href === null ? [...SCREENS] : [...SCREENS, href];
+}
 
 test.beforeAll(async () => {
   app = await start(PASSWORD);
@@ -624,6 +640,45 @@ async function spilling(page: Page): Promise<string[]> {
   });
 }
 
+/**
+ * **子が親の箱を超えていないか。**
+ *
+ * `spilling` は `scrollWidth > clientWidth`、つまり**その要素が自分の箱に収まって
+ * いるか**しか見ない。要素そのものが親より広い幅を取ってしまう壊れ方（親の欄が
+ * 狭く、子が折り返せない 1 語を抱えている）は、子の中では収まっているので
+ * 素通りする。**Phase 11 で実機で見つかった形はこれ。**
+ */
+async function outgrowingParents(page: Page): Promise<string[]> {
+  return page.evaluate(() => {
+    const problems: string[] = [];
+    for (const element of document.querySelectorAll<HTMLElement>("main *")) {
+      const parent = element.parentElement;
+      if (parent === null || parent.tagName === "MAIN") {
+        continue;
+      }
+      const box = element.getBoundingClientRect();
+      const around = parent.getBoundingClientRect();
+      if (box.width === 0 || around.width === 0) {
+        continue;
+      }
+      // 親が自分で横スクロールする箱なら、はみ出して当たり前。
+      if (getComputedStyle(parent).overflowX !== "visible") {
+        continue;
+      }
+      // 1px は端数の丸め。
+      if (box.right > around.right + 1 || box.left < around.left - 1) {
+        const label = (element.textContent ?? "").trim().replace(/\s+/g, " ").slice(0, 24);
+        problems.push(
+          `<${element.tagName.toLowerCase()} class="${element.className}">「${label}」` +
+            `が親の箱（右端 ${Math.round(around.right)}）を ` +
+            `${Math.round(box.right - around.right)}px 超えている`,
+        );
+      }
+    }
+    return problems;
+  });
+}
+
 // **狭いところと、柱が出たばかりのところの両方で測る。** 390px は帯のとき、
 // 900px は左の柱が出て本文の幅がいちばん狭くなるとき、1280px はふだんの幅。
 for (const width of [390, 900, 1280]) {
@@ -632,16 +687,52 @@ for (const width of [390, 900, 1280]) {
     await signIn(page);
     // 44px の検査と同じく、**最初の 1 件で止めない**。全画面ぶんを集めて見せる。
     const spills: string[] = [];
-    for (const path of SCREENS) {
+    for (const path of await screensWithDetail(page)) {
       await page.goto(app.url + path);
       await settled(page);
       for (const spill of await spilling(page)) {
         spills.push(`${path} の ${spill}`);
       }
+      // **自分の箱に収まっていても、親の箱を超えていることがある。**
+      for (const outgrown of await outgrowingParents(page)) {
+        spills.push(`${path} の ${outgrown}`);
+      }
     }
     expect(spills, spills.join("\n")).toEqual([]);
   });
 }
+
+// **見出しの階層がつぶれていないか**（Phase 11 の R5）。`.sechead h2` は
+// `.sechead` の子にしか効かないので、素の `<h2>` を書くとブラウザ既定の大きさで
+// 描かれ、画面の見出し（`h1.page`）とほとんど変わらなくなる。**クラスの付け忘れは
+// 単体では見えない**ので、実ブラウザでここだけ測る。
+test("節の見出しが、画面の見出しと同じ大きさにならない", async ({ page }) => {
+  await signIn(page);
+  const problems: string[] = [];
+  for (const path of await screensWithDetail(page)) {
+    await page.goto(app.url + path);
+    await settled(page);
+    problems.push(
+      ...(await page.evaluate(() => {
+        const found: string[] = [];
+        const h1 = document.querySelector("main h1");
+        const top = h1 === null ? 24 : parseFloat(getComputedStyle(h1).fontSize);
+        for (const heading of document.querySelectorAll<HTMLElement>("main h2, main h3")) {
+          const size = parseFloat(getComputedStyle(heading).fontSize);
+          // 画面の見出しの 8 割を超えたら、階層が読めない。
+          if (size > top * 0.8) {
+            found.push(
+              `<${heading.tagName.toLowerCase()}>「${(heading.textContent ?? "").trim().slice(0, 16)}」` +
+                `が ${size}px（画面の見出しは ${top}px）`,
+            );
+          }
+        }
+        return found;
+      })),
+    );
+  }
+  expect(problems, problems.join("\n")).toEqual([]);
+});
 
 /**
  * **箱の中身のはずのものが、箱の外に出ていないか。**
@@ -667,7 +758,9 @@ async function crossingCardEdges(page: Page): Promise<string[]> {
       return position === "static" || position === "relative";
     };
     let cards = 0;
-    for (const card of document.querySelectorAll("main section.card")) {
+    // **`article.card` も見る。** つなぐ画面のグループはこちらで、**Phase 11 まで
+    // この画面では何も主張していなかった**（`cards === 0` で素通りしていた）。
+    for (const card of document.querySelectorAll("main section.card, main article.card")) {
       const rect = card.getBoundingClientRect();
       if (rect.width === 0 || rect.height === 0 || card.parentElement === null) {
         continue;
@@ -701,6 +794,54 @@ async function crossingCardEdges(page: Page): Promise<string[]> {
     return cards === 0 ? [] : problems;
   });
 }
+
+/**
+ * **つなぐ画面にグループが並んだ状態を測る**（Phase 11）。
+ *
+ * 幅の検査は `SCREENS` を巡るが、そのとき `/merge` は空のことが多い —— 検出は
+ * 合成カードでは候補を作れず、上の動線が手で組んだ組はその場で「これは別々」に
+ * 戻すため。**つまり、グループが並んだつなぐ画面をどの網も一度も見ていなかった。**
+ * 実機で 30px はみ出していたのはこの画面である。
+ *
+ * **状態を作ってから測り、作ったものは片付ける**（後のテストが同じ 2 件を組む）。
+ */
+test("つなぐ画面にグループが並んでいても、箱からはみ出さない", async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 844 });
+  await signIn(page);
+
+  // 破棄の記録は `input_digest` の番人を塞いだままなので、先に片付ける。
+  await page.goto(app.url + "/settings/merge-history");
+  await settled(page);
+  for (const discard of await page.getByRole("button", { name: /^消す：/ }).all()) {
+    await discard.click();
+    await page.getByRole("button", { name: "実行する" }).click();
+  }
+
+  await page.goto(app.url + "/merge");
+  await settled(page);
+  await page.getByRole("group").first().click(); // 「手でグループを作る」を開く
+  const parts = page.getByRole("checkbox");
+  await expect(parts.first()).toBeVisible({ timeout: 60_000 });
+  await parts.nth(0).check();
+  await parts.nth(1).check();
+  await page.getByRole("button", { name: /選んだ 2 件でグループを作る/ }).click();
+  await expect(page.getByText(/つに分かれています/)).toBeVisible({ timeout: 60_000 });
+
+  const problems = [
+    ...(await spilling(page)),
+    ...(await outgrowingParents(page)),
+    ...(await crossingCardEdges(page)),
+  ];
+
+  // 片付けてから確かめる（失敗しても後のテストの足元を残す）。
+  await page.getByRole("button", { name: "これは別々" }).click();
+  await page.getByRole("button", { name: "実行する" }).click();
+  await expect(page.getByRole("heading", { name: "つなぐものはありません" })).toBeVisible({
+    timeout: 60_000,
+  });
+
+  expect(problems, problems.join("\n")).toEqual([]);
+});
 
 // **狭い画面で測る。** 390px はカードの中身が 1 行に収まらなくなる幅で、縁を跨ぐ
 // 行がいちばん目立つ。
