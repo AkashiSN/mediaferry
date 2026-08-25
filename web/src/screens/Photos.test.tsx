@@ -720,6 +720,113 @@ describe("Shift+クリックで範囲を選ぶ", () => {
     expect(await screen.findByText("2 件を選択中")).toBeInTheDocument();
   });
 
+  // **アンカーを捨てる引き金は 4 つある**（ページ送り・絞り込み・探している言葉・
+  // 宛先）。実装は `mediaQuery` 全体を鍵にしているので 4 つとも一度に満たすが、
+  // `filter` だけを鍵にした実装も絞り込みのテストだけなら通ってしまう。残りの
+  // 3 つも別々に固定する。
+  it("ページを送ったらアンカーを捨てる", async () => {
+    const { calls } = stubApi({
+      "/media": {
+        media: [
+          media("a", "2026-08-18T15:12:00+09:00"),
+          media("b", "2026-08-18T14:03:00+09:00"),
+          media("c", "2026-08-18T13:03:00+09:00"),
+        ],
+        // 上限で切れているときだけページ送りが出る。
+        total: 3421,
+        page: 1,
+        page_size: 200,
+      },
+      "/destinations": { destinations: [] },
+    });
+    render(
+      <MemoryRouter>
+        <PhotosScreen />
+      </MemoryRouter>,
+    );
+
+    const user = userEvent.setup();
+    await user.click(await screen.findByRole("button", { name: "選ぶ：a.JPG" }));
+    await user.click(screen.getByRole("button", { name: "次の 200 件" }));
+    await waitFor(() => expect(calls().some((c) => c.path.includes("page=2"))).toBe(true));
+    await user.keyboard("{Shift>}");
+    await user.click(await screen.findByRole("button", { name: "選ぶ：c.JPG" }));
+    await user.keyboard("{/Shift}");
+
+    // アンカーが残っていれば a〜c の 3 件。捨てていれば a と c の 2 件。
+    expect(await screen.findByText("2 件を選択中")).toBeInTheDocument();
+  });
+
+  it("さがす言葉を変えたらアンカーを捨てる", async () => {
+    const { calls } = stubApi({
+      "/media": {
+        media: [
+          media("a", "2026-08-18T15:12:00+09:00"),
+          media("b", "2026-08-18T14:03:00+09:00"),
+          media("c", "2026-08-18T13:03:00+09:00"),
+        ],
+        total: 3,
+        page: 1,
+        page_size: 200,
+      },
+      "/destinations": { destinations: [] },
+    });
+    render(
+      <MemoryRouter>
+        <PhotosScreen />
+      </MemoryRouter>,
+    );
+
+    const user = userEvent.setup();
+    await user.click(await screen.findByRole("button", { name: "選ぶ：a.JPG" }));
+    await user.type(screen.getByLabelText("ファイル名でさがす"), "IMG");
+    await user.click(screen.getByRole("button", { name: "さがす" }));
+    await waitFor(() => expect(calls().some((c) => c.path.includes("q=IMG"))).toBe(true));
+    await user.keyboard("{Shift>}");
+    await user.click(await screen.findByRole("button", { name: "選ぶ：c.JPG" }));
+    await user.keyboard("{/Shift}");
+
+    expect(await screen.findByText("2 件を選択中")).toBeInTheDocument();
+  });
+
+  it("宛先を変えたらアンカーを捨てる", async () => {
+    const { calls } = stubApi({
+      "/media": {
+        media: [
+          media("a", "2026-08-18T15:12:00+09:00"),
+          media("b", "2026-08-18T14:03:00+09:00"),
+          media("c", "2026-08-18T13:03:00+09:00"),
+        ],
+        total: 3,
+        page: 1,
+        page_size: 200,
+      },
+      "/destinations": {
+        destinations: [
+          { id: "d1", name: "家", enabled: true },
+          { id: "d2", name: "職場", enabled: true },
+        ],
+      },
+    });
+    render(
+      // 宛先ごとの絞り込みに入った状態から始める（宛先の選択肢はここでしか出ない）。
+      <MemoryRouter initialEntries={["/photos?status=unsent&destination_id=d1"]}>
+        <PhotosScreen />
+      </MemoryRouter>,
+    );
+
+    const user = userEvent.setup();
+    await user.click(await screen.findByRole("button", { name: "選ぶ：a.JPG" }));
+    await user.click(screen.getByRole("button", { name: "職場" }));
+    await waitFor(() => expect(calls().some((c) => c.path.includes("destination_id=d2"))).toBe(true));
+    await user.keyboard("{Shift>}");
+    await user.click(await screen.findByRole("button", { name: "選ぶ：c.JPG" }));
+    await user.keyboard("{/Shift}");
+
+    // **絞り込みは `unsent` のまま。** `filter` だけを鍵にした実装はここで落ちる。
+    expect(await screen.findByText("2 件を選択中")).toBeInTheDocument();
+  });
+
   it("Shift を続けて 2 回押すと、2 回目のアンカーは直前に押したものから始まる", async () => {
     // **単なる件数の比較では区別が付かない。** `selectRange` は足すだけ（外さない）
     // ので、アンカーを起点のまま固定しても直前のものへ更新しても、選んだ範囲が

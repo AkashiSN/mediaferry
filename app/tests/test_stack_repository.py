@@ -16,7 +16,7 @@ from mediaferry.db.uploads import StackGroupChanged, UploadRepository
 from mediaferry.ids import new_id
 
 from .test_schema_artifacts import a_media_file
-from .test_schema_sources import a_volume
+from .test_schema_sources import PLACEHOLDER_DEFINITION_JSON, a_volume
 from .test_schema_uploads import a_destination, an_upload
 
 EPOCH = 1
@@ -363,8 +363,8 @@ def _advance_profile(db, revision_id):
     new_revision = new_id()
     db.execute(
         "INSERT INTO profile_revision (id, profile_id, revision, definition_json, schema_version,"
-        " created_at) VALUES (?, ?, 99, '{}', 1, ?)",
-        (new_revision, profile_id, now_iso()),
+        " created_at) VALUES (?, ?, 99, ?, 1, ?)",
+        (new_revision, profile_id, PLACEHOLDER_DEFINITION_JSON, now_iso()),
     )
     db.execute(
         "UPDATE device_profile SET current_revision_id = ? WHERE id = ?",

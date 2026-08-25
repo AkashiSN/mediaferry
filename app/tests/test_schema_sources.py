@@ -22,7 +22,11 @@ from mediaferry.ids import new_id
 # 1 件ごとに `ProfileRegistry(conn).all()` で **DB の全プロファイル**を読むので
 # （`api/routes_media.py` の `_ranks`）、この定義が壊れていると無関係な
 # テストの詳細取得までまとめて落ちる。
-_PLACEHOLDER_DEFINITION_JSON = definition_to_json(
+#
+# **`profile_revision` を直に INSERT するテストは、どれもここを使う。** 各所で
+# `'{}'` を書くと、その DB に詳細取得を 1 行足した誰かが理由の分からない 500 に
+# 当たる（本番は編集の経路が必ず検証済みの JSON を書くので影響を受けない）。
+PLACEHOLDER_DEFINITION_JSON = definition_to_json(
     ProfileDefinition(
         slug="placeholder",
         name="Placeholder",
@@ -62,7 +66,7 @@ def a_profile(db, slug="dji-osmo"):
         "INSERT INTO profile_revision"
         " (id, profile_id, revision, definition_json, schema_version, created_at)"
         " VALUES (?, ?, 1, ?, 1, ?)",
-        (revision_id, profile_id, _PLACEHOLDER_DEFINITION_JSON, now_iso()),
+        (revision_id, profile_id, PLACEHOLDER_DEFINITION_JSON, now_iso()),
     )
     db.execute(
         "UPDATE device_profile SET current_revision_id = ? WHERE id = ?",

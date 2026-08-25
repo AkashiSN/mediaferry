@@ -244,6 +244,51 @@ describe("組（RAW+JPEG）をタイルにまとめる", () => {
       expect(asked.every((c) => !c.path.includes("collapse="))).toBe(true);
     });
   });
+
+  // **下見に並べる上限は 16「タイル」で、16「ファイル」ではない。** 組を 1 つに
+  // まとめたので、1 タイルが 2 ファイルを表しうる —— 上限いっぱいの 16 タイルは
+  // 最大 32 ファイルになる。この単位を取り違えると、下見が減った（あるいは倍に
+  // 増えた）ことに誰も気付かない。
+  it("下見に並べるのは、はじめの 16 タイル（ファイルではない）", async () => {
+    // 17 組 34 ファイル。上限を超える 1 組を用意して、切れる位置を見る。
+    const pairs = Array.from({ length: 17 }, (_, index) => [
+      { id: `j${index}`, rel_path: `x/IMG_${index}.JPG`, size_bytes: 1024 },
+      { id: `r${index}`, rel_path: `x/IMG_${index}.CR2`, size_bytes: 1024 },
+    ]);
+    stubApi({
+      "/destinations": { destinations: [{ id: "d1", name: "家", enabled: true }] },
+      "/media": {
+        // **組ごとに撮影時刻をずらす。** 並びは `captured_at DESC, id DESC` なので、
+        // 全部同じ時刻だと組の順が id の文字列比較で決まり、どれが上限の外かが
+        // 読みにくくなる。ここでは組 0 がいちばん新しい。
+        media: pairs.flatMap((pair, index) =>
+          pair.map((row) => ({
+            ...row,
+            kind: "photo",
+            captured_at: `2026-08-18T10:${String(59 - index).padStart(2, "0")}:00+09:00`,
+            stack: { members: pair },
+          })),
+        ),
+        total: 34,
+        page: 1,
+        page_size: 200,
+      },
+    });
+    render(
+      <MemoryRouter initialEntries={[{ pathname: "/send", state: null }]}>
+        <Routes>
+          <Route path="/send" element={<SendScreen />} />
+        </Routes>
+      </MemoryRouter>,
+    );
+
+    // タイルは 16 個。**ファイル数で切っていれば 8 タイル（16 ファイル）になる。**
+    await waitFor(() => expect(screen.getAllByRole("img", { name: /IMG_/ })).toHaveLength(16));
+    // 並べた 16 タイルが表すファイルは 32 枚（34 枚のうち）。
+    expect(screen.getByText(/34 件のうち、はじめの 32 件/)).toBeInTheDocument();
+    // 17 組目は上限の外。
+    expect(screen.queryByRole("img", { name: "IMG_16.JPG" })).toBeNull();
+  });
 });
 
 describe("送った結果の 1 文", () => {
