@@ -9,7 +9,7 @@ from fastapi.responses import FileResponse
 
 from ..adapters.thumbnails import ThumbnailFailed, quantise
 from ..core.listing import DEFAULT_PAGE_SIZE, escape_like, page_bounds
-from ..db.media import MediaRepository
+from ..db.media import IN_FLIGHT_STATES, MediaRepository
 from ..db.merges import GroupNotEditable
 from ..db.selection import SENDABLE_CLAUSE
 from .deps import conn as get_conn
@@ -160,11 +160,91 @@ def list_stale_derived(
 
 
 @router.get("/media/{media_id}")
-def get_media(media_id: str, conn=Depends(get_conn)) -> dict[str, Any]:  # noqa: ANN001, B008
+def get_media(  # noqa: ANN201
+    media_id: str,
+    conn=Depends(get_conn),  # noqa: ANN001, B008
+    state=Depends(get_state),  # noqa: ANN001, B008
+):
+    """1 件のくわしく（§13 の「くわしく」画面）.
+
+    **画面が要るものを 1 本で返す。** 複数の API を継ぎ足すと、片方だけ古い状態が出る。
+    """
     row = conn.execute("SELECT * FROM media_file WHERE id = ?", (media_id,)).fetchone()
     if row is None:
         raise ApiError(404, ErrorCode.NOT_FOUND, "そのメディアは無い")
-    return _media(row)
+    repo = MediaRepository(conn, state.settings.data_root)
+    blocker = repo.deletion_blocker(media_id)
+    return {
+        **_media(row),
+        "sources": _sources(conn, media_id),
+        "destinations": _destinations(conn, media_id),
+        "deletable": blocker is None,
+        "delete_blocked_reason": blocker,
+    }
+
+
+def _sources(conn, media_id: str) -> list[dict[str, Any]]:  # noqa: ANN001
+    """この 1 件の元になったファイル. **`position` 順**（つないだ順）."""
+    rows = conn.execute(
+        "SELECT mm.position, m.id, m.rel_path, m.missing_at"
+        " FROM merge_group g JOIN merge_member mm ON mm.merge_group_id = g.id"
+        " JOIN media_file m ON m.id = mm.media_file_id"
+        " WHERE g.output_media_file_id = ? ORDER BY mm.position",
+        (media_id,),
+    )
+    return [
+        {
+            "media_file_id": row["id"],
+            "rel_path": row["rel_path"],
+            "position": row["position"],
+            "missing": row["missing_at"] is not None,
+        }
+        for row in rows
+    ]
+
+
+def _destinations(conn, media_id: str) -> list[dict[str, Any]]:  # noqa: ANN001
+    """宛先ごとの状況. **日本語にはしない** —— 画面が §13 の語彙で訳す.
+
+    **退役した宛先（`archived_at` あり）は、記録が無ければ出さない。** もう
+    送り先ではないので「まだ送っていません」を並べても押しようが無い。ただし
+    過去に送った（無効化されていない）記録が残っているなら、履歴として出す。
+    """
+    rows = conn.execute(
+        "SELECT d.id, d.name, u.state, u.remote_asset_id, u.remote_is_trashed,"
+        "       u.remote_checked_at"
+        " FROM upload_destination d"
+        " LEFT JOIN upload_record u ON u.destination_id = d.id"
+        "   AND u.media_file_id = ? AND u.invalidated_at IS NULL"
+        " WHERE d.archived_at IS NULL OR u.id IS NOT NULL"
+        " ORDER BY d.name",
+        (media_id,),
+    )
+    return [
+        {
+            "destination_id": row["id"],
+            "name": row["name"],
+            "state": row["state"],
+            "presence": _presence(row),
+        }
+        for row in rows
+    ]
+
+
+def _presence(row) -> str:  # noqa: ANN001
+    """`deletion_blocker` と同じ判断を、1 行ぶんの語彙にほどく.
+
+    片方を変えたらもう片方も変える（`deletion_blocker` が正）。
+    """
+    if row["state"] is None:
+        return "not_sent"
+    if row["state"] in IN_FLIGHT_STATES:
+        return "sending"
+    if row["remote_asset_id"] is not None:
+        return "trashed" if row["remote_is_trashed"] else "present"
+    if row["state"] == "complete":
+        return "gone" if row["remote_checked_at"] is not None else "unknown"
+    return "failed"
 
 
 @router.delete("/media/{media_id}")

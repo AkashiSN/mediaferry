@@ -8,11 +8,18 @@ from __future__ import annotations
 
 import pytest
 
+from mediaferry.clock import now_iso
 from mediaferry.core.listing import escape_like, page_bounds
 
 from .test_schema_artifacts import a_media_file, a_merge_group
 from .test_schema_sources import a_profile
 from .test_schema_uploads import a_destination, an_upload
+
+
+@pytest.fixture
+def ref(db):
+    """くわしくのテスト用に、使い回すプロファイル 1 つ."""
+    return a_profile(db, slug="media-detail-test")
 
 
 @pytest.fixture
@@ -452,3 +459,184 @@ def test_unsent_excludes_a_missing_original(client, db):
 
     body = client.get(f"/api/media?destination_id={destination[0]}&status=unsent").json()
     assert body["total"] == 0
+
+
+# ---------------------------------------------------------------- くわしく（`GET /media/{id}`）
+def test_media_detail_lists_the_files_it_was_made_from(client, db, data_root, ref):
+    """くわしく画面は、元になったファイルを **`position` 順** に出す."""
+    first = a_media_file(db, ref, rel_path="library/dji-osmo/DCIM/A.MP4")
+    second = a_media_file(db, ref, rel_path="library/dji-osmo/DCIM/B.MP4")
+    output = a_media_file(db, ref, role="derived", rel_path="derived/dji-osmo/DCIM/OUT.MP4")
+    group = a_merge_group(db, ref, "digest-1", status="merged")
+    db.execute("UPDATE merge_group SET output_media_file_id = ? WHERE id = ?", (output, group))
+    # **わざと逆順に入れる** —— 挿入順で通ってしまう試験にしない。
+    db.execute("INSERT INTO merge_member VALUES (?, ?, 1, 1)", (group, second))
+    db.execute("INSERT INTO merge_member VALUES (?, ?, 0, 1)", (group, first))
+
+    body = client.get(f"/api/media/{output}").json()
+
+    assert [s["rel_path"] for s in body["sources"]] == [
+        "library/dji-osmo/DCIM/A.MP4",
+        "library/dji-osmo/DCIM/B.MP4",
+    ]
+
+
+def test_media_detail_says_whether_it_can_be_deleted(client, db, data_root, ref):
+    """**押しても 409 で断られるボタンを並べない.** 判定はサーバが返す."""
+    output = a_media_file(db, ref, role="derived", rel_path="derived/dji-osmo/DCIM/OUT.MP4")
+    group = a_merge_group(db, ref, "digest-1", status="merged")
+    db.execute("UPDATE merge_group SET output_media_file_id = ? WHERE id = ?", (output, group))
+    dest = a_destination(db)
+    an_upload(
+        db,
+        dest,
+        output,
+        state="complete",
+        destination_revision_id=dest[1],
+        remote_asset_id="asset-1",
+        remote_is_trashed=0,
+        remote_checked_at=now_iso(),
+    )
+
+    body = client.get(f"/api/media/{output}").json()
+
+    assert body["deletable"] is False
+    assert body["delete_blocked_reason"] == "Immich に入っている"
+    assert [d["presence"] for d in body["destinations"]] == ["present"]
+
+
+def test_media_detail_marks_a_trashed_asset(client, db, ref):
+    output = a_media_file(db, ref, role="derived")
+    dest = a_destination(db)
+    an_upload(
+        db,
+        dest,
+        output,
+        state="complete",
+        destination_revision_id=dest[1],
+        remote_asset_id="asset-1",
+        remote_is_trashed=1,
+        remote_checked_at=now_iso(),
+    )
+
+    body = client.get(f"/api/media/{output}").json()
+
+    assert [d["presence"] for d in body["destinations"]] == ["trashed"]
+    assert body["deletable"] is True
+
+
+def test_media_detail_marks_a_record_still_in_flight(client, db, ref):
+    """送信中・確認待ちの記録は `sending`（`pending` は既定値そのもの）."""
+    output = a_media_file(db, ref, role="derived")
+    an_upload(db, a_destination(db), output)
+
+    body = client.get(f"/api/media/{output}").json()
+
+    assert [d["presence"] for d in body["destinations"]] == ["sending"]
+
+
+def test_media_detail_marks_a_failed_upload(client, db, ref):
+    output = a_media_file(db, ref, role="derived")
+    an_upload(db, a_destination(db), output, state="failed")
+
+    body = client.get(f"/api/media/{output}").json()
+
+    assert [d["presence"] for d in body["destinations"]] == ["failed"]
+
+
+def test_media_detail_marks_an_unswept_complete_record_as_unknown(client, db, ref):
+    """`0007` で洗った、識別子も確認時刻も無い `complete` は `unknown`."""
+    output = a_media_file(db, ref, role="derived")
+    dest = a_destination(db)
+    an_upload(
+        db,
+        dest,
+        output,
+        state="complete",
+        destination_revision_id=dest[1],
+        remote_asset_id=None,
+        remote_checked_at=None,
+    )
+
+    body = client.get(f"/api/media/{output}").json()
+
+    assert [d["presence"] for d in body["destinations"]] == ["unknown"]
+
+
+def test_media_detail_marks_a_reverified_absence_as_gone(client, db, ref):
+    """再確認で識別子が外れ、確認時刻はある `complete` は `gone`."""
+    output = a_media_file(db, ref, role="derived")
+    dest = a_destination(db)
+    an_upload(
+        db,
+        dest,
+        output,
+        state="complete",
+        destination_revision_id=dest[1],
+        remote_asset_id=None,
+        remote_checked_at=now_iso(),
+    )
+
+    body = client.get(f"/api/media/{output}").json()
+
+    assert [d["presence"] for d in body["destinations"]] == ["gone"]
+
+
+def test_media_detail_of_an_original_has_no_sources(client, db, ref):
+    """元ファイルは何からも作られていない."""
+    body = client.get(f"/api/media/{a_media_file(db, ref)}").json()
+    assert body["sources"] == []
+    assert body["deletable"] is False
+
+
+def test_media_detail_does_not_show_an_invalidated_record(client, db, ref):
+    """無効化された記録は状況として出さない（§10）."""
+    output = a_media_file(db, ref, role="derived")
+    dest = a_destination(db)
+    an_upload(
+        db,
+        dest,
+        output,
+        state="complete",
+        destination_revision_id=dest[1],
+        remote_asset_id="asset-1",
+        remote_is_trashed=0,
+        remote_checked_at=now_iso(),
+        invalidated_at=now_iso(),
+    )
+
+    body = client.get(f"/api/media/{output}").json()
+
+    assert [d["presence"] for d in body["destinations"]] == ["not_sent"]
+
+
+def test_media_detail_hides_an_archived_destination_with_no_record(client, db, ref):
+    """**退役した宛先は出さない** —— 押しようのない「まだ送っていません」を並べない."""
+    output = a_media_file(db, ref, role="derived")
+    dest = a_destination(db, name="retiring")
+    db.execute("UPDATE upload_destination SET archived_at = ? WHERE id = ?", (now_iso(), dest[0]))
+
+    body = client.get(f"/api/media/{output}").json()
+
+    assert body["destinations"] == []
+
+
+def test_media_detail_still_shows_an_archived_destination_with_a_record(client, db, ref):
+    """**記録があるなら履歴として出す.** 退役したことと、送った事実は別."""
+    output = a_media_file(db, ref, role="derived")
+    dest = a_destination(db, name="retired-with-history")
+    an_upload(
+        db,
+        dest,
+        output,
+        state="complete",
+        destination_revision_id=dest[1],
+        remote_asset_id="asset-1",
+        remote_is_trashed=0,
+        remote_checked_at=now_iso(),
+    )
+    db.execute("UPDATE upload_destination SET archived_at = ? WHERE id = ?", (now_iso(), dest[0]))
+
+    body = client.get(f"/api/media/{output}").json()
+
+    assert [d["presence"] for d in body["destinations"]] == ["present"]
