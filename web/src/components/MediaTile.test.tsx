@@ -97,4 +97,27 @@ describe("MediaTile", () => {
     renderTile({ to: "/photos/m1", onToggle: vi.fn() });
     expect(screen.queryByText("RAW")).toBeNull();
   });
+
+  // **「つないだ」と `RAW` は独立に立つ。** どちらを出すかは `role` と `stack` が
+  // 別々に決めるので、両方立った行がありうる。同じ座標へ重ねると片方が読めなく
+  // なるため、1 つの入れ物へ横に並べる（`styles.css` の `.madeofs`）。
+  it("つないだ動画が組でもあれば、札を 2 つとも並べる", () => {
+    const { container } = renderTile({
+      to: "/photos/m1",
+      onToggle: vi.fn(),
+      media: {
+        ...media,
+        role: "derived",
+        stack: {
+          members: [
+            { id: "m1", rel_path: "library/dji-osmo/DCIM/A.JPG", size_bytes: 100 },
+            { id: "m2", rel_path: "library/dji-osmo/DCIM/A.CR2", size_bytes: 200 },
+          ],
+        },
+      },
+    });
+    // **同じ入れ物の兄弟として並ぶ**ことを見る。別々に絶対配置すると重なる。
+    const badges = [...container.querySelectorAll(".madeofs > .madeof")];
+    expect(badges.map((badge) => badge.textContent)).toEqual(["つないだ", "RAW"]);
+  });
 });

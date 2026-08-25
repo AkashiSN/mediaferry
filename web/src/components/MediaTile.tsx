@@ -65,8 +65,17 @@ export function MediaTile({
   const inside = (
     <>
       <img src={`/api/media/${media.id}/thumbnail`} alt="" loading="lazy" className="tileimg" />
-      {media.role === "derived" && <span className="madeof">つないだ</span>}
-      {media.stack && <span className="madeof raw">RAW</span>}
+      {/* **「つないだ」と `RAW` は独立に立つ。** 出す条件が `role` と `stack` で
+          別々なので、両方立つ行がありうる。同じ座標へ重ねると片方が読めなくなる
+          ため、1 つの入れ物へ入れて横に並べる（`styles.css` の `.madeofs`）。
+          **どちらかを捨てない** —— 「つないだ動画」と「組の主」は別の事実で、
+          片方を隠すとタイルがその行を名乗り損ねる。 */}
+      {(media.role === "derived" || media.stack) && (
+        <span className="madeofs">
+          {media.role === "derived" && <span className="madeof">つないだ</span>}
+          {media.stack && <span className="madeof raw">RAW</span>}
+        </span>
+      )}
       <StatusMark status={media.status ?? null} />
       {hasDuration && (
         <span className="dur">{formatClipLength(media.duration_seconds as number)}</span>

@@ -6,6 +6,7 @@ import { MemoryRouter, Route, Routes, useLocation } from "react-router-dom";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { stubApi } from "../test/api";
+import { emitJob } from "../test/setup";
 import { PhotosScreen, groupByDate } from "./Photos";
 
 const media = (id: string, captured_at: string, extra = {}) => ({
@@ -123,6 +124,77 @@ describe("写真の画面", () => {
     // もう一度押すと、両方まとめて選択から外れる（片方だけ残らない）。
     await userEvent.click(screen.getByRole("button", { name: /IMG_0001\.JPG/ }));
     expect(screen.queryByText(/件を選択中/)).toBeNull();
+  });
+
+  // **片方だけが選択に入っている状態から押したら、組ごと選ぶ（外さない）。**
+  // 畳めるかどうかはデータ側の事情で変わる（曖昧な組は畳まない）ので、相方だけを
+  // 選んだ後に畳んだタイルが現れることがある。ここで「全員外す」に倒すと、押した
+  // 人には何も選ばれていないタイルを押しただけに見えて、選択が黙って消える。
+  it("片方だけ選ばれた組のタイルを押すと、残りを足して組ごと選ぶ", async () => {
+    // 曖昧な間は畳めないので、主と相方が別々のタイルとして並ぶ（`stack` は付かない）。
+    const routes: Record<string, unknown> = {
+      "/media": {
+        media: [
+          media("a", "2026-08-18T14:03:00+09:00", {
+            rel_path: "library/x/IMG_0001.JPG",
+            size_bytes: 100,
+          }),
+          media("raw", "2026-08-18T14:03:00+09:00", {
+            rel_path: "library/x/IMG_0001.CR2",
+            size_bytes: 900,
+          }),
+        ],
+        total: 2,
+        page: 1,
+        page_size: 200,
+      },
+      "/destinations": { destinations: [{ id: "d1", name: "家", enabled: true }] },
+    };
+    const { calls } = stubApi(routes);
+    render(
+      <MemoryRouter>
+        <PhotosScreen />
+      </MemoryRouter>,
+    );
+    // 相方（CR2）だけを選ぶ。
+    await userEvent.click(await screen.findByRole("button", { name: /IMG_0001\.CR2/ }));
+    expect(screen.getByText(/1 件を選択中/)).toBeInTheDocument();
+
+    // 曖昧さが解けて、取り直したときには 1 タイルに畳まれている。
+    routes["/media"] = {
+      media: [
+        media("a", "2026-08-18T14:03:00+09:00", {
+          rel_path: "library/x/IMG_0001.JPG",
+          size_bytes: 100,
+          stack: {
+            members: [
+              { id: "a", rel_path: "library/x/IMG_0001.JPG", size_bytes: 100 },
+              { id: "raw", rel_path: "library/x/IMG_0001.CR2", size_bytes: 900 },
+            ],
+          },
+        }),
+      ],
+      total: 1,
+      page: 1,
+      page_size: 200,
+    };
+    const before = calls().filter((c) => c.path.startsWith("/media?")).length;
+    emitJob({ job_id: "j1", seq: 1, level: "info", message: "組み直した", data: null, at: "" });
+    await waitFor(
+      () => expect(calls().filter((c) => c.path.startsWith("/media?")).length).toBeGreaterThan(before),
+      { timeout: 2000 },
+    );
+    await waitFor(() =>
+      expect(screen.queryByRole("button", { name: /IMG_0001\.CR2/ })).toBeNull(),
+    );
+    // 選択は残っている（相方の 900 B だけが入っている）。
+    expect(screen.getByText(/1 件を選択中/)).toBeInTheDocument();
+
+    // 畳んだタイルを押す。**足りない主を足す**ので 2 件・1000 B になる。
+    // 全員外す実装なら、ここで操作バーごと消える。
+    await userEvent.click(screen.getByRole("button", { name: /IMG_0001\.JPG/ }));
+    expect(screen.getByText(/2 件を選択中/)).toBeInTheDocument();
+    expect(screen.getByText(/1000 B/)).toBeInTheDocument();
   });
 
   it("当てはまるものが無ければ、そう書く", async () => {
