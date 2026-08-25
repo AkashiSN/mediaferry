@@ -40,6 +40,11 @@ class Candidate:
     profile_id: str
     volume_instance_id: str
     rel_path: str  # **カード上の原名**
+    # **同席の証拠**（`source_entry.copresent_key`）。同じ鍵で 2 つ以上の
+    # 拡張子が同時に見えたときだけ、スキャンがここへ `<job_id>:<stem prefix>`
+    # を書く。`None` は「まだ分からない」であって「同席していない」ではないが、
+    # 組の判定では確かめられない相手として扱う（見つからない分は組まない）。
+    copresent_key: str | None
     # `captured_at` / `captured_at_source` は組の判定には使わない（撮影時刻は
     # 同じ 1 枚であることを弱めこそすれ強めない）。値そのものは呼び出し側が
     # 日時の突き合わせに使うので、観測として持ち続ける。
@@ -108,6 +113,14 @@ def identity_partners(
     if extension_of(primary.rel_path) not in rule.extensions:
         return Identity(partners=(), ambiguous=False)
     keys = {c.source_key for c in candidates if c.media_file_id == primary.media_file_id}
+    # **鍵ごとの同席の証拠。** 1 つの鍵の下に自分の行は 1 つしか無い
+    # （UNIQUE (volume_instance_id, rel_path)）ので、対応は一意に決まる。
+    # 集合に潰すと、別々の観測でそれぞれが一致するだけの組が通ってしまう。
+    proofs = {
+        c.source_key: c.copresent_key
+        for c in candidates
+        if c.media_file_id == primary.media_file_id
+    }
     partners: list[Candidate] = []
     seen: set[str] = set()
     by_extension: dict[str, set[str]] = {}
@@ -119,6 +132,12 @@ def identity_partners(
             continue
         extension = extension_of(candidate.rel_path)
         if extension not in rule.extensions:
+            continue
+        proof = proofs.get(candidate.source_key)
+        # **「同じ時点でカードに在った」を要求する。** 鍵だけでは、片方だけ
+        # 撮り直したときに古い published な行と組む。**曖昧さの数え上げより
+        # 前で落とす** —— 証拠の無い相手は相方候補ですらない。
+        if proof is None or candidate.copresent_key != proof:
             continue
         # **同じ資産を 2 回送らない。** 1 つの media_file が複数の観測で候補に入る。
         if candidate.media_file_id in seen:

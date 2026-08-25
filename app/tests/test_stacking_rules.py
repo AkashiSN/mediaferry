@@ -38,6 +38,10 @@ def a_candidate(rel_path, **over):
         "state": "complete",
         "remote_asset_id": f"asset-{rel_path}",
         "invalidated": False,
+        # **既定は「同じ機会に同席していた」。** 同じディレクトリ・同じ stem の
+        # 観測どうしは、明示的に `copresent_key` を渡さない限り自動で一致する
+        # （実物のスキャンが同じ stem の下へ同じ印を書くのと同じ形）。
+        "copresent_key": f"job1:{stem_prefix(rel_path)}",
     }
     base.update(over)
     return Candidate(**base)
@@ -343,3 +347,87 @@ def test_a_partner_sharing_the_primarys_own_extension_is_ambiguous():
     twin = replace(a_jpg(), media_file_id="other", rel_path="DCIM/100CANON/IMG_1234.jpg")
 
     assert identity_partners(a_jpg(), [a_jpg(), twin], RULE).ambiguous
+
+
+def test_a_partner_without_proof_of_copresence_is_not_a_partner():
+    """**同席の証拠が無ければ組まない。**
+
+    片方だけ撮り直すと、古い published な行が相方として残る。鍵だけで組むと
+    新しい JPG が無関係な古い RAW と組む（`phase10-design.md` の 3）。
+    """
+    stale = replace(a_cr2(), copresent_key=None)
+
+    assert identity_partners(a_jpg(), [a_jpg(), stale], RULE).partners == ()
+
+
+def test_a_partner_from_another_copresence_is_not_a_partner():
+    """別の機会に同席した相手とは組まない."""
+    other = replace(a_cr2(), copresent_key="job2:DCIM/100CANON/IMG_1234.")
+
+    assert identity_partners(a_jpg(), [a_jpg(), other], RULE).partners == ()
+
+
+def test_the_primary_without_proof_has_no_partner():
+    """自分の側に証拠が無ければ、相方が持っていても組まない."""
+    mine = replace(a_jpg(), copresent_key=None)
+
+    assert identity_partners(mine, [mine, a_cr2()], RULE).partners == ()
+
+
+def test_two_partners_both_missing_proof_are_not_partners():
+    """**両方とも証拠が無ければ、なおさら組まない。**
+
+    自分側も相手側も `copresent_key` が `None` だと、`!=` の比較だけでは
+    `None != None` が偽になり通ってしまう。「分からない」どうしを
+    「同席していた」と読まない。
+    """
+    mine = replace(a_jpg(), copresent_key=None)
+    unproven = replace(a_cr2(), copresent_key=None)
+
+    assert identity_partners(mine, [mine, unproven], RULE).partners == ()
+
+
+def test_a_partner_matching_a_different_observations_proof_is_not_a_partner():
+    """**証拠は鍵ごとに突き合わせる。** 別の観測の印と一致するだけでは組まない.
+
+    自分に 2 つの観測（別々のカード）があるとき、片方の鍵で来た相方候補の印が
+    *もう片方*の観測の印とたまたま一致しても、束ねてはいけない。`proofs` を
+    1 つの集合に潰すと、この組が通ってしまう。
+    """
+    mine = [
+        a_candidate(
+            "DCIM/100CANON/A.JPG",
+            media_file_id="m-jpg",
+            volume_instance_id="volume-1",
+            copresent_key="job1:DCIM/100CANON/A.",
+        ),
+        a_candidate(
+            "DCIM/100CANON/B.JPG",
+            media_file_id="m-jpg",
+            volume_instance_id="volume-2",
+            copresent_key="job2:DCIM/100CANON/B.",
+        ),
+    ]
+    # 鍵は mine[0]（volume-1, A.）と一致するが、印は mine[1] のものと一致する。
+    mismatched = a_candidate(
+        "DCIM/100CANON/A.CR2",
+        media_file_id="m-cr2",
+        volume_instance_id="volume-1",
+        copresent_key="job2:DCIM/100CANON/B.",
+    )
+
+    assert identity_partners(mine[0], [*mine, mismatched], RULE).partners == ()
+
+
+def test_an_unproven_candidate_does_not_count_toward_ambiguity():
+    """**曖昧さの数え上げは、証拠を通った相手だけを数える。**
+
+    証拠の門を `seen` の重複除けより後ろへ動かすと、組めなかった（証拠の無い）
+    相手の拡張子まで曖昧さの集計に混ざってしまう。
+    """
+    unproven = replace(a_cr2(), media_file_id="other-cr2", copresent_key=None)
+
+    identity = identity_partners(a_jpg(), [a_jpg(), a_cr2(), unproven], RULE)
+
+    assert identity.partners == (a_cr2(),)
+    assert not identity.ambiguous
