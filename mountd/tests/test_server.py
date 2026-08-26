@@ -385,3 +385,76 @@ def test_disconnect_releases_handles(tmp_path):
     client.close()
     thread.join(timeout=5)
     assert len(mgr.released) == 1
+
+
+def _crash_recorder():
+    """スレッドの未処理例外を捕まえる差し替え. 戻り値の list に溜まる."""
+    crashes: list = []
+    return crashes, lambda args: crashes.append(args)
+
+
+def test_a_client_that_leaves_before_the_reply_does_not_crash_the_thread(tmp_path):
+    """**返事を書く前に相手が切れても、スレッドは未処理例外で落ちない。**
+
+    切断は異常ではなく普通のこと（app の再起動、kill）。受信側は
+    `ConnectionClosed` を静かに `return` で扱っているので、送信側も揃える。
+    トレースバックを吐くと、本番のログで**本物の障害と見分けが付かなくなる**。
+
+    列挙を待たせてから切ることで、「相手が居なくなってから書き始める」順序を
+    固定する。素直に送って閉じるだけだと、返事が先に届いて再現しない。
+    """
+    gone = threading.Event()
+    server, _mgr, _ = make_server(tmp_path, lister=lambda: (gone.wait(5), [a_volume()])[1])
+    client, thread = start(server)
+
+    crashes, hook = _crash_recorder()
+    original = threading.excepthook
+    threading.excepthook = hook
+    try:
+        send_message(client, {"type": REQ_LIST_VOLUMES})
+        client.close()
+        gone.set()
+        thread.join(timeout=5)
+    finally:
+        threading.excepthook = original
+
+    assert not thread.is_alive(), "接続のスレッドが終わっていない"
+    assert crashes == [], f"未処理の例外でスレッドが落ちた: {crashes[0].exc_value!r}"
+
+
+def test_a_client_that_leaves_before_the_dirfd_arrives_still_releases_the_handle(tmp_path):
+    """**fd を渡し損ねても、マウントを握ったままにしない。**
+
+    `_do_open` は送信に失敗したら解放してから送出し直す。ここが崩れると、
+    切った相手のぶんのマウントが残る（`finally` の解放は保険で、二重解放に
+    ならないことも併せて見る）。
+    """
+    gone = threading.Event()
+    server, mgr, _ = make_server(tmp_path)
+    client, thread = start(server)
+
+    send_message(client, {"type": REQ_LIST_VOLUMES})
+    volume = recv_message(client)[0]["volumes"][0]
+    # 列挙が済んでから待たせる —— open の中の verify() で止める。
+    server.lister = lambda: (gone.wait(5), [a_volume()])[1]
+
+    crashes, hook = _crash_recorder()
+    original = threading.excepthook
+    threading.excepthook = hook
+    try:
+        send_message(
+            client,
+            {
+                "type": REQ_OPEN_VOLUME,
+                "volume_key": volume["volume_key"],
+                "expect": expect_from_listed(volume),
+            },
+        )
+        client.close()
+        gone.set()
+        thread.join(timeout=5)
+    finally:
+        threading.excepthook = original
+
+    assert crashes == [], f"未処理の例外でスレッドが落ちた: {crashes[0].exc_value!r}"
+    assert mgr.released == ["h1"], "fd を渡せなかったハンドルが解放されていない"

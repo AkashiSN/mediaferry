@@ -139,6 +139,18 @@ class BrokerServer:
                     send_message(conn, _error("bad_request", "requests must not carry fds"))
                     continue
                 self._dispatch(conn, request, handles)
+        except OSError as exc:
+            # **返事を書けない＝相手が居ない。** 受信側の `ConnectionClosed` と
+            # 同じ扱いにして、静かにこの接続を畳む。切断は異常ではなく普通のこと
+            # （app の再起動、kill）で、スレッドの外まで送出するとトレースバックが
+            # 本番のログに並び、**本物の障害と見分けが付かなくなる**。
+            #
+            # **ここに来る OSError は送信のものだけ。** マウントの失敗は
+            # `_do_open` が、解放の失敗は `_do_close` が、要求の受信は上の
+            # `except` が、それぞれ自分で受けて応答に変えている。
+            #
+            # ハンドルの解放は下の `finally` が引き受ける。
+            logger.debug("client went away: %s", exc)
         finally:
             for handle in list(handles):
                 try:
