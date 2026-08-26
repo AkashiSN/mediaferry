@@ -2,7 +2,7 @@
 #
 # **`latest` は `main` の先頭を指す。** まだリリースを出していないので、
 # `compose.yaml` に `latest` を書いた利用者が掴むのは main の最新になる。
-# 版を固定したいときは `:sha-1234567` を書く（タグを押せば版のタグも付く）。
+# 版を固定したいときは `:sha-1234567` を書く（タグを打てば版のタグも付く）。
 #
 # amd64 だけを作る。TrueNAS SCALE は x86_64 が前提で、arm64 を足すと
 # QEMU エミュレーションで ffmpeg の導入が数倍遅くなる。
@@ -17,13 +17,13 @@ on:
 
 # 同じ ref の run を 1 本に絞る。
 #
-# **公開する run は取り消さない。** app と mountd は matrix で並行に押すので、
-# 途中で取り消すと**片方だけが押された状態**（`:main` が app と mountd で別の
+# **公開する run は取り消さない。** app と mountd は matrix で並行に公開するので、
+# 途中で取り消すと**片方だけが公開された状態**（`:main` が app と mountd で別の
 # コミットを指す）になりうる。2 つは `protocol/` を共有していて、版が食い違うと
 # ソケットの契約が合わない。取り消す代わりに**順番待ちにする** —— 後から来た
-# コミットが最後に押すので、待たせても最終状態は正しい。
+# コミットが最後に公開するので、待たせても最終状態は正しい。
 #
-# 押さない run（`workflow_dispatch`）は取り消してよい。
+# 公開しない run（`workflow_dispatch`）は取り消してよい。
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: ${{ github.event_name == 'workflow_dispatch' }}
@@ -32,7 +32,7 @@ env:
   REGISTRY: ghcr.io
 
 jobs:
-  # **イメージを押す前にテストを通す。** 通らないものを配らない。
+  # **イメージを公開する前にテストを通す。** 通らないものを配らない。
   test:
     runs-on: ubuntu-latest
     steps:
@@ -61,7 +61,7 @@ jobs:
           cache: npm
           cache-dependency-path: web/package-lock.json
 
-      - name: 画面のテストとビルド
+      - name: 画面をテストしてビルドする
         run: |
           npm --prefix web ci
           npm --prefix web run lint
@@ -88,7 +88,7 @@ jobs:
 
       - uses: docker/setup-buildx-action@v4
 
-      - name: ghcr へログインする
+      - name: ghcr にログインする
         uses: docker/login-action@v4
         with:
           registry: ${{ env.REGISTRY }}
@@ -108,14 +108,14 @@ jobs:
             # **`latest` は main の先頭。**
             type=raw,value=latest,enable={{is_default_branch}}
 
-      - name: ビルドして押す
+      - name: ビルドして公開する
         uses: docker/build-push-action@v7
         with:
           # ビルド文脈はリポジトリの根。app のイメージは protocol/ と web/ も要る。
           context: .
           file: ${{ matrix.dockerfile }}
           platforms: linux/amd64
-          # `workflow_dispatch` では押さない（ビルドが通ることの確認だけ）。
+          # `workflow_dispatch` では公開しない（ビルドが通ることの確認だけ）。
           push: ${{ github.event_name != 'workflow_dispatch' }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
