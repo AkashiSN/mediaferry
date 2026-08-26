@@ -29,8 +29,9 @@ TAG = "EXIF DateTimeOriginal"
 FORMAT = "%Y:%m:%d %H:%M:%S"
 
 # **認識できない入力に対して exifread は例外ではなく WARNING を出す。**
-# Canon は MOV も source: exif のプロファイルを通るので、黙らせないと動画
-# 1 本ごとに警告が並ぶ。呼ぶ側の振り分け（画像だけ渡す）と二重の保険。
+# Canon は MOV も timestamp.source に exif を含むプロファイルを通るので、
+# 黙らせないと動画 1 本ごとに警告が並ぶ。呼ぶ側の振り分け（画像だけ渡す）
+# と二重の保険。
 logging.getLogger("exifread").setLevel(logging.ERROR)
 
 

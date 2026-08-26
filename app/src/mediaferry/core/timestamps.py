@@ -112,8 +112,7 @@ def _wall_clock(
         # プロファイルに値が渡っても無視する（宣言と実際の解釈をずらさない）。
         elif src == "exif" and exif_wall is not None:
             return exif_wall, "exif"
-        # container はまだ値を受け取らない（Task 4 で対応）。当たらないので
-        # 連鎖の次へそのまま進む。
+        # container は値を渡されないので当たらず、連鎖の次へそのまま進む。
     # 連鎖の終端は必ず mtime。EXIF を持たないファイル（Canon の MOV、
     # タグの無い JPEG）や、ファイル名が pattern に当たらないファイルはここへ落ちる。
     return mtime_wall_clock(mtime_ns, zone, defn.timestamp.mtime_semantics), "mtime"

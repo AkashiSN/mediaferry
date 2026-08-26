@@ -176,9 +176,9 @@ class Importer:
         """値か、ステージ済みファイルから決める読み方か、どちらか一方を返す.
 
         **画像以外では EXIF を読まない。** `exifread` は認識できない入力に対して
-        例外ではなく警告を出すので、Canon の MOV のように `source: exif` の
-        プロファイルを通る動画で呼ぶと、1 本ごとに警告が並ぶ。振り分けは
-        `MediaProbe` と同じ拡張子の規則で行う（判定が 2 箇所に散らない）。
+        例外ではなく警告を出すので、Canon の MOV のように `timestamp.source` に
+        `exif` を含むプロファイルを通る動画で呼ぶと、1 本ごとに警告が並ぶ。
+        振り分けは `MediaProbe` と同じ拡張子の規則で行う（判定が 2 箇所に散らない）。
         """
         extension = PurePosixPath(row["rel_path"]).suffix.lstrip(".").upper()
         if "exif" not in profile.definition.timestamp.source or extension not in PHOTO_EXTENSIONS:
