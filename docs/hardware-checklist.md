@@ -314,6 +314,35 @@ uv run python -c "import exifread,sys; f=open(sys.argv[1],'rb'); print(exifread.
 > 散ったことで切り分いた）。**それでも 34 組すべてが組として成立していた** ——
 > Phase 10 で**組の身元から時刻を外した**判断が、実データで報われた形になる。
 
+## Phase 13 の実機確認（18〜24 番）
+
+**17 番までは全部閉じた**（2026-08-26）。ここからは Phase 13
+（[`history/phase13-design.md`](history/phase13-design.md)）が入れた直しを実機で確かめる。
+
+**先に決めること**: **DB を作り直す**（利用者の判断、2026-08-26）。
+`library/` を残したまま DB だけ消すと、起動時の reconciliation が既存の
+206 GB を孤立ファイルとして `/orphans` に並べる（アプリは動く）。
+両方消すかは好みで決めてよい。
+
+**取り込みの前に必ず**: `MEDIAFERRY_DEFAULT_TIMEZONE`（またはプロファイルの
+`timezone`）を入れる。`canon-eos` が `force_offset` になったので、
+**未設定だと Canon の取り込みが 1 件も通らない**（`importer.run` の前検査が
+1 バイトも copy する前に落とす。§12.2）。
+
+| # | 見ること | 落ちたときに疑うもの |
+| --- | --- | --- |
+| 18 | **`MVI_0007` と `MVI_0008` が 1 組として検出される**。つなぐ画面で候補に出るか | `min_part_size_gib: 3` / `_RESOLUTION_SECONDS` の `container: 1.0` |
+| 19 | **結合が通り、出力の音声が `pcm_s16le` のまま残る**。`route` が `concat` か（`ts` に落ちていないか）。進捗が 0 のまま止まらないか | TS 経路の門（`pcm_*` で塞ぐ）／`MERGE_ARTIFACT_SUFFIXES` に `.mov` が入っているか |
+| 20 | **Immich で動画が 12 時台（JST）に並ぶ**。9 時間ずれていないか | `timezone_policy: force_offset` と `fix_datetime_after_upload: true` の組。**片方だけでは効かない** |
+| 21 | **写真 5 組の壁時計が変わらない**。`datetime_plan` は kind を見ないので、EXIF 由来の写真にも `+09:00` 付きで `dateTimeOriginal` が送られる | 写真がずれたら `force_offset` の適用範囲を kind で切る判断が要る |
+| 22 | **写真タブで `MVI_0008` が `MVI_0007` より左上に来る**。RAW+JPEG の組は主（JPG）が先か。**画面から見ること**（API を直に叩くと題材が消える） | `ORDER BY` と索引（`0026`）の噛み合わせ |
+| 23 | **`0026` の適用が通る**。適用後に `PRAGMA foreign_key_check` が空か | DB を作り直すなら一瞬で済む。時間と WAL の膨らみは、既存 DB を残した場合だけ見る |
+| 24 | **`_requeue`（Immich への `needs_recheck` 差し戻し）と stack の再オープンが起動する**か。`recompute` を押して確かめる | 差分だけでは確認できなかった箇所 |
+
+**既存の動画は `recompute` では直らない。** `container_wall` は NULL のままで、
+再計算は ffprobe を呼ばない（呼ぶと再計算がカードの有無に依存する）。
+器の時刻を使いたければ**取り込み直し**が要る。
+
 ## 関連
 
 - [`backup.md`](backup.md)（バックアップとリストア）
