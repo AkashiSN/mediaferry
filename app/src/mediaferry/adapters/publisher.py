@@ -98,9 +98,9 @@ class ArtifactRequest:
     extension: str
     # **どちらか一方を必ず与える。** `captured` は呼び出し側が先に決めた値、
     # `resolve_captured` は**ステージ済みのファイルと、その probe の結果から**
-    # 決める遅延解決（`source: exif` / `container`）。呼び出し側は publish の
-    # 前に staging を持っていないので、ファイルを見て決める種類の値はここでしか
-    # 解決できない（§9.3 手順 5）。
+    # 決める遅延解決（`source` の連鎖が `exif` や `container` を含むとき）。
+    # 呼び出し側は publish の前に staging を持っていないので、ファイルを見て
+    # 決める種類の値はここでしか解決できない（§9.3 手順 5）。
     captured: CapturedAt | None
     mtime_ns: int
     # mtime が瞬間か壁時計か（`timestamp.mtime_semantics`）。衝突接尾辞の桁は
@@ -518,7 +518,9 @@ class ArtifactPublisher:
                         metadata["captured_at_source"],
                         metadata["captured_at_tz"],
                         metadata["captured_at_note"],
-                        metadata["container_wall"],
+                        # 器の時刻を持たない版が書いた行を回収できるよう、
+                        # 無いキーは `None` として読む（I2）。
+                        metadata.get("container_wall"),
                         metadata["duration_seconds"],
                         metadata["probe_state"],
                         # 取り込みでは「算出に使った版」＝「取り込みに使った版」。

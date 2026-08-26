@@ -274,6 +274,35 @@ def test_resume_after_the_staging_file_is_gone(setup, db, data_root):
     assert db.execute("SELECT state FROM artifact_staging").fetchone()["state"] == "published"
 
 
+def test_resume_reads_a_staged_row_that_predates_container_wall(setup, db, data_root):
+    """旧版が書いた `staged` 行には `container_wall` キーが無い（I2）.
+
+    旧版の publish が staged 以降で中断すると、その行の `metadata_json` は
+    キーごと欠く。新版の `resume` は `KeyError` を起こさず回収できる —— 器の
+    時刻を持たない版が書いた行なのだから、`None` が意味の上でも正しい値。
+    """
+    publisher, ctx, profile, volume_id = setup
+    entry_id = a_source_entry(db, volume_id)
+    publisher._checkpoint = _die_after(8)  # STEP_LINKED. staged のまま止める  # noqa: SLF001
+    with pytest.raises(PublishInterrupted):
+        publisher.publish(ctx, a_request(profile, entry_id), write_payload(b"payload"))
+    publisher._checkpoint = lambda step: None  # noqa: SLF001
+
+    row = db.execute("SELECT id, metadata_json FROM artifact_staging").fetchone()
+    metadata = json.loads(row["metadata_json"])
+    del metadata["container_wall"]
+    db.execute(
+        "UPDATE artifact_staging SET metadata_json = ? WHERE id = ?",
+        (json.dumps(metadata, ensure_ascii=False), row["id"]),
+    )
+
+    got = publisher.resume(row["id"])
+    media = db.execute(
+        "SELECT container_wall FROM media_file WHERE id = ?", (got.media_file_id,)
+    ).fetchone()
+    assert media["container_wall"] is None
+
+
 def test_resume_does_not_retry_names_it_already_rejected(setup, db, data_root, monkeypatch):
     """再開は現在の final_rel_path から続ける.
 
@@ -358,6 +387,20 @@ def test_the_staged_row_carries_everything_needed_to_resume(setup, db, data_root
     assert row["expected_size"] == 7
     assert row["content_sha1"]
     assert json.loads(row["metadata_json"])["kind"] == "video"
+
+
+def test_the_staged_row_carries_the_container_wall_key(setup, db, data_root):
+    """`_commit` は `metadata.get("container_wall")` で読む（I2）.
+
+    `.get` はキー名を間違えても永久に `None` のまま気づけない。stage した
+    直後の `metadata_json` にキー自体があることを固定し、書く側を締める。
+    """
+    publisher, ctx, profile, volume_id = setup
+    entry_id = a_source_entry(db, volume_id)
+    publisher.publish(ctx, a_request(profile, entry_id), write_payload(b"payload"))
+
+    row = db.execute("SELECT metadata_json FROM artifact_staging").fetchone()
+    assert "container_wall" in json.loads(row["metadata_json"])
 
 
 def test_the_published_file_keeps_the_source_mtime(setup, db, data_root):
