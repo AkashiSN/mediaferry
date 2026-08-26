@@ -454,3 +454,34 @@ def test_the_merge_reports_how_far_it_has_written(world, db, monkeypatch):
     assert merging[0]["parts"] == 2
     assert merging[0]["bytes_total"] > 0
     assert json.dumps(merging[0])
+
+
+def test_the_progress_counts_a_quicktime_output(tmp_path):
+    """**出力の器はプロファイルが決める.**
+
+    `.mp4` と `.ts` しか数えないと、Canon の結合中は 4 GB のあいだ
+    進捗が 0 のままになる。
+    """
+    from mediaferry.jobs.merger import MERGE_ARTIFACT_SUFFIXES, merge_bytes_written
+
+    (tmp_path / "MVI_20260826123713_0007-0008_MERGED.MOV").write_bytes(b"x" * 300)
+    (tmp_path / "concat.log").write_bytes(b"y" * 999)
+    assert ".mov" in MERGE_ARTIFACT_SUFFIXES
+    assert merge_bytes_written(tmp_path) == 300
+
+
+def test_the_progress_ignores_case_in_the_suffix(tmp_path):
+    """カメラは大文字の拡張子を書く. `.MOV` も数える."""
+    from mediaferry.jobs.merger import merge_bytes_written
+
+    (tmp_path / "A.MOV").write_bytes(b"x" * 10)
+    assert merge_bytes_written(tmp_path) == 10
+
+
+def test_the_progress_counts_the_ts_parts_too(tmp_path):
+    """TS 経路は各パートの .ts と出力を両方置く. 分母が倍になる前提を壊さない."""
+    from mediaferry.jobs.merger import merge_bytes_written
+
+    (tmp_path / "0.ts").write_bytes(b"x" * 5)
+    (tmp_path / "out.mp4").write_bytes(b"y" * 7)
+    assert merge_bytes_written(tmp_path) == 12
