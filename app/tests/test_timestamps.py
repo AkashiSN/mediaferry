@@ -336,6 +336,28 @@ def test_the_chain_falls_through_to_mtime_when_the_container_has_no_time():
     assert got.source == "mtime"
 
 
+def test_a_naive_container_time_falls_through_when_declared_as_an_instant():
+    """`instant` を宣言していても、naive な値（オフセット無しの `creation_time`）
+    が来る筋書きにテストが無かった（繰り越し 5）.
+
+    この分岐は `None` を返して連鎖が次（`mtime`）へ落ちる。
+    """
+    got = resolve_captured_at(
+        defn(
+            source=["container", "mtime"],
+            pattern=None,
+            format=None,
+            timezone_policy="none",
+            container_semantics="instant",
+        ),
+        "a.MOV",
+        1_787_747_586_000_000_000,
+        None,
+        container_wall="2026-08-26T12:35:08.000000",
+    )
+    assert got.source == "mtime"
+
+
 def test_a_container_time_is_ignored_when_the_chain_does_not_declare_it():
     """**宣言と実際の解釈をずらさない.** 連鎖に無い出所の値が来ても使わない."""
     got = resolve_captured_at(
@@ -405,6 +427,27 @@ def test_container_wall_clock_returns_a_naive_value_for_wall_clock_semantics():
     """
     got = container_wall_clock("2026-08-26T12:35:08.000000Z", UTC, "wall_clock")
     assert got.tzinfo is None
+
+
+def test_wall_clock_ignores_an_explicit_offset_that_is_not_z():
+    """`wall_clock` は桁だけを採る. `Z` 以外の明示オフセットでも変わらない.
+
+    実装は `.replace(tzinfo=None)` で桁だけを落とすので、`+09:00` が付いて
+    いても `Z` と同じ挙動になる（実装の穴ではなくテストの空白）。
+    """
+    got = container_wall_clock("2026-08-26T12:35:08+09:00", UTC, "wall_clock")
+    assert got.tzinfo is None
+    assert got.isoformat() == "2026-08-26T12:35:08"
+
+
+def test_instant_with_a_naive_value_falls_through_to_the_next_source():
+    """`instant` を宣言していても、naive な値（オフセット無し）は使わない.
+
+    `container_wall_clock` はここで `None` を返し、連鎖が次（`mtime`）へ
+    落ちる。**結果が変わる分岐なので固定する.**
+    """
+    got = container_wall_clock("2026-08-26T12:35:08", UTC, "instant")
+    assert got is None
 
 
 def test_a_pathological_timestamp_pattern_falls_back_instead_of_hanging():
