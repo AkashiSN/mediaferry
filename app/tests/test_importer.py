@@ -348,9 +348,11 @@ def test_a_video_takes_its_time_from_the_container_when_the_profile_declares_it(
 ):
     """**`container_wall=probe.container_wall` を渡し忘れると気づけない.**
 
-    `canon-eos` の連鎖に `container` が入るのは Task 11 なので、ここでは合成
-    プロファイル（`an_exif_profile` の `source` を差し替えたもの）で確かめる。
-    拡張子は MP4（動画）にして EXIF の経路とは別であることもはっきりさせる。
+    `canon-eos` は `exif` が先に当たるので、渡し忘れがあっても EXIF に
+    隠れて見えない。渡し忘れを直接見るため、`source` を `container` 始まりに
+    絞った合成プロファイル（`an_exif_profile` の `source` を差し替えたもの）
+    で確かめる。拡張子は MP4（動画）にして EXIF の経路とは別であることも
+    はっきりさせる。
     """
     from mediaferry.adapters.ffprobe import ProbeResult
 

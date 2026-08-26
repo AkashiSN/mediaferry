@@ -4,7 +4,7 @@ import pytest
 
 from mediaferry.core.merge.grouping import GIB, MergePart
 from mediaferry.core.merge.output import MergeOutputUndefined, merged_rel_path
-from mediaferry.core.profiles.model import KeepStreams, MergeRule
+from mediaferry.core.profiles.model import KeepStreams, MergeRule, load_builtin_definitions
 
 
 def a_rule(**overrides):
@@ -119,22 +119,17 @@ def test_a_rendered_backslash_is_refused():
 # canon-eos（Task 11）
 
 
-def a_canon_rule(**overrides):
-    values = {
-        "enabled": True,
-        "tolerance_seconds": 5,
-        "min_part_size_gib": 3,
-        "sequence_pattern": r"^MVI_(?P<seq>\d{4})$",
-        "output_name": "MVI_{ts}_{first_seq}-{last_seq}_MERGED.MOV",
-        "keep_streams": KeepStreams(video="primary", audio="all", timecode=False, data=False),
-    }
-    values.update(overrides)
-    return MergeRule(**values)
+def canon_rule():
+    """出荷する `canon-eos.yaml` の結合規則をそのまま読む.
+
+    合成した `MergeRule` を使うと、YAML の値を変えてもこのテストは落ちない。
+    """
+    return {d.slug: d for d in load_builtin_definitions()}["canon-eos"].merge
 
 
 def test_the_canon_output_name_carries_the_sequence_range():
     """`MVI_0007` と `MVI_0008` から `0007-0008` を組む."""
-    rule = a_canon_rule()
+    rule = canon_rule()
     name = merged_rel_path(
         "canon-eos",
         rule,

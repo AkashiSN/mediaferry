@@ -273,7 +273,7 @@ def test_generic_does_not_merge():
     assert by_slug["generic-dcim"].merge.enabled is False
 
 
-def test_canon_merges_the_four_gibibyte_split():
+def test_the_merging_builtins_are_canon_and_dji():
     """canon-eos は実カードで確かめた 4GB 分割の規則を持つ（Task 11）."""
     by_slug = {d.slug: d for d in builtins()}
     assert by_slug["canon-eos"].merge.enabled is True
@@ -330,7 +330,7 @@ def test_canon_writes_the_datetime_back_to_immich(db):
     assert defn.immich.fix_datetime_after_upload is True
 
 
-def test_canon_merges_four_gibibyte_splits(db):
+def test_canon_merges_at_the_four_gibibyte_split_size(db):
     registry = ProfileRegistry(db)
     registry.sync_builtins()
     defn = registry.current("canon-eos").definition
@@ -338,29 +338,18 @@ def test_canon_merges_four_gibibyte_splits(db):
     assert defn.merge.min_part_size_gib == 3
 
 
-def test_canon_merge_output_stays_in_the_quicktime_container():
-    """**器は QuickTime のまま。** 音声が PCM なので、MP4 は ffmpeg の版に
-    よって弾かれる（ipcm を持つのは新しい版だけ）。
-
-    `test_merge_output.py` の `test_the_canon_output_name_carries_the_sequence_range`
-    は `a_canon_rule()`（テスト内の合成 `MergeRule`）を使うので、
-    `canon-eos.yaml` の `output_name` を実際には読まない。ここで拡張子を
-    直接確かめる。
-    """
-    by_slug = {d.slug: d for d in builtins()}
-    assert by_slug["canon-eos"].merge.output_name.endswith(".MOV")
-
-
 def test_canon_sequence_pattern_does_not_match_a_different_prefix():
     """`sequence_pattern` の錨（`^` と `$`）を落とさない.
 
     `IMG_0007.JPG` は元々 `MVI_` を含まないので、`^` を落としても単独では
-    当たらない。**錨の必要性を実際に示すのは埋め込まれた一致**
-    （例: `SUBMVI_0007`）——`^` を落とすとこちらは当たってしまう。
+    当たらない。`^` の必要性を実際に示すのは埋め込まれた一致
+    （例: `SUBMVI_0007`）。`$` の必要性を示すのは末尾に別の桁が続く一致
+    （例: `MVI_00071`）——`\\d{4}` が先頭 4 桁を拾ってしまう。
     """
     from mediaferry.core.profiles.patterns import search
 
     pattern = {d.slug: d for d in builtins()}["canon-eos"].merge.sequence_pattern
     assert search(pattern, "IMG_0007") is None
     assert search(pattern, "SUBMVI_0007") is None
+    assert search(pattern, "MVI_00071") is None
     assert search(pattern, "MVI_0007").group("seq") == "0007"

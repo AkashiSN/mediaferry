@@ -25,7 +25,7 @@ def test_detecting_enqueues_one_job_per_profile(client):
     response = client.post("/api/merge-groups/detect")
     assert response.status_code == 200
     jobs = response.json()["jobs"]
-    assert sorted(entry["profile_slug"] for entry in jobs) == ["canon-eos", "dji-osmo"]
+    assert [entry["profile_slug"] for entry in jobs] == ["canon-eos", "dji-osmo"]
 
 
 def test_detecting_an_unknown_profile_is_a_404(client):
@@ -196,7 +196,7 @@ def test_profiles_that_do_not_merge_are_not_detected(client, api_db):
     jobs = client.post("/api/merge-groups/detect").json()["jobs"]
     # `no-merge`（merge.enabled = false）は入らない。canon-eos と dji-osmo は
     # どちらも merge.enabled = true なので両方入る。
-    assert sorted(entry["profile_slug"] for entry in jobs) == ["canon-eos", "dji-osmo"]
+    assert [entry["profile_slug"] for entry in jobs] == ["canon-eos", "dji-osmo"]
 
 
 def test_a_group_can_be_regrouped_by_hand(client, api_db):
