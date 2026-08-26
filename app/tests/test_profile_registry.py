@@ -1,3 +1,5 @@
+import json
+
 import pytest
 
 from mediaferry.core.profiles.model import definition_to_json, load_builtin_definitions
@@ -37,6 +39,47 @@ def test_a_changed_builtin_creates_a_new_revision_and_keeps_the_old_one(db):
     assert new.revision == 2
     assert new.definition.merge.tolerance_seconds == 9
     assert registry.definition_of(old.revision_id).merge.tolerance_seconds == 5
+
+
+def test_sync_builtins_survives_a_pre_phase13_current_revision(db):
+    """実機の DB には旧版が書いた旧形（`source` が文字列 + `fallback`）の
+    `definition_json` が現行リビジョンとして入っている。ここで `ProfileInvalid`
+    を上げて止まると、起動そのものがクラッシュループになる。
+
+    `profile_revision` は immutable（UPDATE/DELETE を拒む）なので、
+    `sync_builtins` を先に走らせてから書き換えることはできない。旧版が実際に
+    書いたのと同じ形で、最初から旧形のリビジョンを持つ DB を組み立てる。
+    """
+    from mediaferry.clock import now_iso
+    from mediaferry.core.profiles.model import PROFILE_SCHEMA_VERSION
+    from mediaferry.ids import new_id
+
+    definitions = {d.slug: d for d in load_builtin_definitions()}
+    old = json.loads(definition_to_json(definitions["dji-osmo"]))
+    old["timestamp"]["source"] = "filename"
+    old["timestamp"]["fallback"] = "mtime"
+    old_json = json.dumps(old, sort_keys=True, ensure_ascii=False, separators=(",", ":"))
+
+    profile_id, revision_id = new_id(), new_id()
+    db.execute(
+        "INSERT INTO device_profile (id, slug, name, builtin, created_at)"
+        " VALUES (?, 'dji-osmo', 'DJI Osmo Pocket', 1, ?)",
+        (profile_id, now_iso()),
+    )
+    db.execute(
+        "INSERT INTO profile_revision"
+        " (id, profile_id, revision, definition_json, schema_version, created_at)"
+        " VALUES (?, ?, 1, ?, ?, ?)",
+        (revision_id, profile_id, old_json, PROFILE_SCHEMA_VERSION, now_iso()),
+    )
+    db.execute(
+        "UPDATE device_profile SET current_revision_id = ? WHERE id = ?",
+        (revision_id, profile_id),
+    )
+
+    registry = ProfileRegistry(db)
+    assert "dji-osmo" in registry.sync_builtins()
+    assert registry.current("dji-osmo").definition.timestamp.source == ("filename", "mtime")
 
 
 def test_current_points_at_the_latest_revision(db):
