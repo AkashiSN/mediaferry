@@ -82,18 +82,24 @@ def apply_migrations(conn: sqlite3.Connection) -> list[int]:
     return done
 
 
-def _apply_one(conn: sqlite3.Connection, version: int, name: str, body: str, checksum: str) -> None:
-    """DDL と版の記録を 1 つのトランザクションで適用する.
+def _record_statement(version: int, name: str, checksum: str) -> str:
+    """版の記録を 1 文の SQL にする.
 
     `executescript` はプレースホルダを受け取らないので、版の記録もリテラルで
     組み立てる。version は int、checksum は hex、name はファイル名なので、
-    いずれも SQL の構造を壊す文字を含まない。
+    いずれも SQL の構造を壊す文字を含まない。`_apply_one` と
+    `_apply_with_foreign_keys_off` の両方がここを通ることで、記録の作り方が
+    2 か所に分かれない。
     """
-    record = (
-        # executescript にプレースホルダは渡せないのでリテラルで組み立てる。
+    return (
         "INSERT INTO schema_migration (version, name, checksum, applied_at)"  # noqa: S608
         f" VALUES ({version}, '{name}', '{checksum}', datetime('now'));"
     )
+
+
+def _apply_one(conn: sqlite3.Connection, version: int, name: str, body: str, checksum: str) -> None:
+    """DDL と版の記録を 1 つのトランザクションで適用する."""
+    record = _record_statement(version, name, checksum)
     try:
         conn.executescript(f"BEGIN IMMEDIATE;\n{body}\n{record}\nCOMMIT;")
     except Exception:
@@ -114,16 +120,26 @@ def _apply_with_foreign_keys_off(
     代わりにならない（前者は DROP の暗黙 DELETE で立った違反が COMMIT まで残り、
     後者はトランザクション内では効かず RENAME が子の参照先を書き換える）。
 
-    外すことを許す代わりに、**適用後に `PRAGMA foreign_key_check` を必ず確かめる**。
-    SQLite 公式の 12 手順が最後に求めている手当てで、これが無いと壊れた参照を
-    黙って残せる。
+    外すことを許す代わりに、**`PRAGMA foreign_key_check` を COMMIT より前に
+    確かめる**（SQLite 公式の 12 手順の 10 番目が 11 番目の COMMIT より前に
+    ある順序と同じ）。ここで COMMIT してしまうと、DDL もデータ変更も版の記録も
+    確定済みになり、壊れた参照を見つけても ROLLBACK で消せない。
     """
     conn.execute("PRAGMA foreign_keys = OFF")
+    record = _record_statement(version, name, checksum)
     try:
-        _apply_one(conn, version, name, body, checksum)
+        conn.executescript(f"BEGIN IMMEDIATE;\n{body}\n{record}")
         broken = conn.execute("PRAGMA foreign_key_check").fetchall()
         if broken:
+            conn.execute("ROLLBACK")
             raise MigrationError(f"{name} の適用後に参照が壊れている（{len(broken)} 件）")
+        conn.execute("COMMIT")
+    except Exception:
+        # 検査で見つけた ROLLBACK 済みの場合も含め、開いたままのトランザクションを
+        # 残さない。
+        if conn.in_transaction:
+            conn.execute("ROLLBACK")
+        raise
     finally:
         conn.execute("PRAGMA foreign_keys = ON")
 

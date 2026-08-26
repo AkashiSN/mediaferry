@@ -965,6 +965,14 @@ def test_a_migration_that_leaves_dangling_references_is_refused(tmp_path, monkey
     with pytest.raises(MigrationError, match="参照が壊れている"):
         apply_migrations(conn)
     assert conn.execute("PRAGMA foreign_keys").fetchone()[0] == 1
+    # **失敗した版は「適用済み」として記録されていない。**
+    # 検査が COMMIT より後だと、版の記録だけが確定済みで残ってしまう。
+    assert (
+        conn.execute("SELECT count(*) FROM schema_migration WHERE version = 2").fetchone()[0] == 0
+    )
+    # 記録が残っていないので、もう一度呼んでも黙って通らず、同じ失敗になる。
+    with pytest.raises(MigrationError, match="参照が壊れている"):
+        apply_migrations(conn)
     conn.close()
 
 
