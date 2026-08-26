@@ -120,11 +120,20 @@ def test_a_verified_derived_output_is_selectable(db, profile):
 def test_derived_outputs_are_ordered_by_name_within_the_same_time(db, profile):
     """`_DERIVED` の tie-break も `rel_path`（`limit` で切れるので境界が揺れる）.
 
-    `id` と `rel_path` の大小をわざと逆にする —— `id` で比べる実装が残っていたら
-    この期待値では落ちる。
+    タイの中の並びは `input_digest` の実行計画に引きずられる。`digest` は
+    member の乱数 `id` と乱数の `profile_revision_id` から決まるので、2 件では
+    偶然の一致を消せない。8 グループ分を全部返させ、`rel_path` の降順**全体**を
+    断言する。挿入順は名前の大小と無関係に混ぜてあるので、tie-break が無いと
+    rowid の並びに引きずられて 8 行がたまたま一致する確率も低い。`id` は
+    `rel_path` の大小と逆順に固定し、`id DESC` への先祖返りも検出する。
     """
     same = "2026-08-26T12:44:45+00:00"
-    for name, media_id in (("A_LOW", "0" * 32), ("B_HIGH", "f" * 32)):
+    names = [f"NAME_{index:02d}" for index in range(8)]
+    id_by_name = {name: f"{rank:x}".rjust(32, "0") for rank, name in enumerate(reversed(names))}
+    # **挿入順は名前の大小と無関係に混ぜる。** 順序どおりに入れると、tie-break の
+    # 無いクエリが rowid 由来の並びで偶然「全順序」と一致してしまう。
+    insertion_order = [names[i] for i in (4, 1, 7, 0, 5, 2, 6, 3)]
+    for name in insertion_order:
         members = a_pair(db, profile, prefix=name)
         output_id = a_media_file(
             db,
@@ -132,11 +141,13 @@ def test_derived_outputs_are_ordered_by_name_within_the_same_time(db, profile):
             role="derived",
             rel_path=f"derived/dji-osmo/DCIM/{name}.MP4",
             captured_at=same,
-            id=media_id,
+            id=id_by_name[name],
         )
         a_group(db, profile, members, output_id=output_id, adopted_at=same)
-    result = SelectionService(db, ProfileRegistry(db)).selectable(limit=1)
-    assert [item.rel_path for item in result] == ["derived/dji-osmo/DCIM/B_HIGH.MP4"]
+    result = SelectionService(db, ProfileRegistry(db)).selectable(limit=len(names))
+    assert [item.rel_path for item in result] == [
+        f"derived/dji-osmo/DCIM/{name}.MP4" for name in sorted(names, reverse=True)
+    ]
 
 
 def test_an_unadopted_failed_verification_is_not_selectable_by_default(db, profile):

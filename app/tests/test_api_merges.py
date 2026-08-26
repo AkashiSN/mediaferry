@@ -168,29 +168,28 @@ def test_selectable_orders_by_name_within_the_same_time(client, api_db):
     """`GET /uploads/selectable` は `limit` で切るので、境界が揺れると候補が
     出たり出なかったりする（`db/selection.py` の `_ORIGINALS` の tie-break）.
 
-    `id` と `rel_path` の大小をわざと逆にする —— `id` で比べる実装が残っていたら
-    この期待値では落ちる。
+    8 行を全部返させ、`rel_path` の降順**全体**を断言する —— 挿入順を名前と
+    無関係に混ぜてあるので、tie-break が無いと rowid の並びに引きずられて
+    8 行がたまたま一致する確率は 1/8!（= 1/40320）以下になる。`id` は
+    `rel_path` の大小と逆順に固定し、`id DESC` への先祖返りも検出する。
     """
     profile = ProfileRegistry(api_db).current("dji-osmo")
     same = "2026-08-26T12:44:45+00:00"
-    # **挿入順もわざと期待値と逆にする。** tie-break が無いと rowid（挿入順）に
-    # 引きずられがちなので、期待する並び（0008 が先）とは逆の順で入れる。
-    a_media_file(
-        api_db,
-        (profile.profile_id, profile.revision_id),
-        rel_path="library/dji-osmo/DCIM/MVI_0008.MOV",
-        captured_at=same,
-        id="0" * 32,
-    )
-    a_media_file(
-        api_db,
-        (profile.profile_id, profile.revision_id),
-        rel_path="library/dji-osmo/DCIM/MVI_0007.MOV",
-        captured_at=same,
-        id="f" * 32,
-    )
-    got = client.get("/api/uploads/selectable?limit=1").json()["selectable"]
-    assert [item["rel_path"].rsplit("/", 1)[-1] for item in got] == ["MVI_0008.MOV"]
+    names = [f"MVI_{index:04d}.MOV" for index in range(1, 9)]
+    id_by_name = {name: f"{rank:x}".rjust(32, "0") for rank, name in enumerate(reversed(names))}
+    # **挿入順は名前の大小と無関係に混ぜる。** 昇順や降順のまま入れると、
+    # tie-break の無いクエリが rowid 由来の並びで偶然「全順序」と一致してしまう。
+    insertion_order = [names[i] for i in (4, 1, 7, 0, 5, 2, 6, 3)]
+    for name in insertion_order:
+        a_media_file(
+            api_db,
+            (profile.profile_id, profile.revision_id),
+            rel_path=f"library/dji-osmo/DCIM/{name}",
+            captured_at=same,
+            id=id_by_name[name],
+        )
+    got = client.get(f"/api/uploads/selectable?limit={len(names)}").json()["selectable"]
+    assert [item["rel_path"].rsplit("/", 1)[-1] for item in got] == sorted(names, reverse=True)
 
 
 def test_profiles_that_do_not_merge_are_not_detected(client, api_db):

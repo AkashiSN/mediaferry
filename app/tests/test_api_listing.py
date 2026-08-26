@@ -25,10 +25,16 @@ def ref(db):
 
 @pytest.fixture
 def library(db):
-    """撮影日時が同じ行を含むライブラリ."""
+    """撮影日時が同じ行を含むライブラリ.
+
+    同じ撮影日時になる先頭 3 行（index 0-2）は `id` を `rel_path` の大小と
+    逆順に固定する。`id` を `new_id()` の乱数任せにすると、`id DESC` への
+    先祖返りを 1/6 の確率で見逃す。
+    """
     profile = a_profile(db, slug="listing-test")
     ids = []
     for index in range(5):
+        over = {"id": f"{2 - index:x}".rjust(32, "0")} if index < 3 else {}
         ids.append(
             a_media_file(
                 db,
@@ -39,6 +45,7 @@ def library(db):
                 ),
                 kind="video" if index % 2 == 0 else "photo",
                 duration_seconds=1.5,
+                **over,
             )
         )
     return ids
@@ -117,8 +124,9 @@ def _rows(db, names, captured_at=SAME):
 def test_rows_with_the_same_time_are_ordered_by_name(client, db):
     """**同じ撮影日時の並びは、乱数ではなく名前で決まる.**
 
-    実機で `MVI_0007` が `MVI_0008` より左上に来た。tie-break が 32 桁の乱数 hex
-    だったので、id の出方が逆なら順序も逆になっていた。
+    同じ撮影日時の行は現実に発生する（カメラの時計が止まっていれば連続して
+    起きる）。tie-break が決まっていないと、並びが実行ごとに変わってページの
+    境目で重複・欠落する。
     """
     _rows(db, ["MVI_0007.MOV", "MVI_0008.MOV"])
     got = client.get("/api/media?page_size=10").json()["media"]
