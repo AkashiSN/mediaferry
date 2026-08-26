@@ -28,6 +28,10 @@ class ProbeResult:
     duration_seconds: float | None
     probe_state: str  # ok / failed / not_applicable
     streams: list[dict[str, Any]] = field(default_factory=list)
+    # 器が申告した撮影時刻（`format.tags.creation_time`）。**解釈しない。**
+    # 現地の壁時計に `Z` を付ける機種があるので、ここで UTC として読むと
+    # ずれが固定される。意味は `core/timestamps.py` が決める。
+    container_wall: str | None = None
 
 
 class MediaProbe:
@@ -65,4 +69,11 @@ class MediaProbe:
             duration_seconds=duration,
             probe_state="ok",
             streams=payload.get("streams", []),
+            container_wall=_container_wall(payload),
         )
+
+
+def _container_wall(payload: dict[str, Any]) -> str | None:
+    """`format.tags.creation_time` を文字列のまま返す. 無ければ `None`."""
+    raw = payload.get("format", {}).get("tags", {}).get("creation_time")
+    return raw if isinstance(raw, str) else None
