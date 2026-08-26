@@ -332,6 +332,32 @@ def test_a_topology_mismatch_with_pcm_also_refuses(tmp_path):
         )
 
 
+def test_a_topology_mismatch_with_pcm_only_in_a_later_part_also_refuses(tmp_path):
+    """先頭パートに PCM が無く、後続にだけある構成でも塞がれる（M4）.
+
+    **この枝は「パートごとにストリームの並びが違う」ことが前提の場所。**
+    先頭だけを見ると、先頭が AAC で後続が PCM という構成（並びが違うので
+    concat demuxer は使えない）で運べないと分からず、TS 経路が黙って音を
+    落とす。
+    """
+    if shutil.which("ffmpeg") is None:
+        pytest.skip("ffmpeg が無い")
+    probe = MediaProbe()
+    first = make_clip(tmp_path / "a.mov")
+    second = make_pcm_clip(tmp_path / "b.mov")
+    streams = [probe.describe(path, "MOV").streams for path in (first, second)]
+    with pytest.raises(MergeFailed, match="pcm_s16le"):
+        MergeRunner().merge(
+            [first, second],
+            streams,
+            KEEP,
+            tmp_path,
+            "out.mov",
+            lambda: None,
+            lambda: False,
+        )
+
+
 def test_aac_still_falls_back_to_the_ts_route(tmp_path):
     """**塞ぐのは PCM だけ.** 運べるものまで諦めない."""
     if shutil.which("ffmpeg") is None:

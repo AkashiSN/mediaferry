@@ -135,7 +135,12 @@ class MergeRunner:
                 _refuse_ts_if_lossy(part_streams[0], keep)
                 note(f"concat demuxer に失敗した。TS 経由へ落とす: {exc}")
         else:
-            _refuse_ts_if_lossy(part_streams[0], keep)
+            # **この枝は「パートごとにストリームの並びが違う」ことが前提。**
+            # 先頭だけを見ると、先頭に無く後続にだけある構成（例: 先頭が
+            # AAC、後続だけ PCM）で運べないと分からず、TS 経路が黙って
+            # 音を落とす。全パートを見る。
+            for streams in part_streams:
+                _refuse_ts_if_lossy(streams, keep)
             note("パート間でストリームの並びが違うので concat demuxer を使わない")
         output.unlink(missing_ok=True)
         dropped = self._ts_merge(
