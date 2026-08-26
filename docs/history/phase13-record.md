@@ -258,6 +258,71 @@ M4（`_refuse_ts_if_lossy` が先頭パートしか見ない）を直すとき�
 ブリーフの形にすると、その整形を呼び出し側へ複製することになる。既存関数をループで
 全パートに適用する形へ変えた（再レビュアーが追認）。
 
+## 外部レビュー（codex）が、直したばかりの穴の隣を突いた
+
+ブランチ全体の最終レビューが通った後、**別の視点**を入れるために codex へレビューを頼んだ
+（依頼では「すでに済んでいること」を明示して、同じ穴を掘り直させない形にした）。
+返ってきたのは **Critical 0 / Important 2 / Minor 0**。どちらも codex が自分で再現している。
+
+### Important 1 —— 拒否リストは、1 つ潰しても隣に同じ穴がある
+
+**TS 経路の事前拒否が `pcm_` だけなので、ALAC でも同じ「音声が黙って消える」が起きる。**
+
+codex は h264+alac の MOV 2 本で再現した —— `ts_route_blockers` は空を返し、mpegts は
+`codec alac, is muxed as a private data stream` と警告するだけで **exit 0**、
+入力の `audio/alac` が出力では `data/bin_data` になった。
+**Phase 13 が PCM を塞いだ理由と完全に同型**である。
+
+**拒否リストから許可リスト（「TS を往復させて音声が残ると実測できた codec だけ」）へ反転した。**
+実装者が 11 の codec を実測した結果:
+
+| TS 往復後も `audio` のまま | `data`（`bin_data`）へ化ける |
+| --- | --- |
+| `aac` / `mp3` / `ac3` / `eac3` / `opus` | `pcm_s16le` / `pcm_s24le` / **`alac`** / **`vorbis`** / **`flac`** / **`amr_nb`** |
+
+**codex が再現したのは `alac` だけだったが、実際には `vorbis` / `flac` / `amr_nb` も
+同じ穴を持っていた。** 拒否リストのままなら 1 つずつ潰す羽目になっていたことが、数字で裏付いた。
+（再レビュアーが 4 つを独立に往復させ、実装者の表と 4/4 一致することを確認した。）
+
+**許可リストは `aac` のみ**にした。`mp3` / `ac3` / `eac3` / `opus` は往復で生き残るが、
+実在するカメラが SD カードに書く音声 codec ではない。**狭すぎた場合の失敗は「明示的な結合失敗」**
+（利用者に見えるので、報告されたら実測して足せばよい。1 行）で、広すぎた場合は
+「再生できるが妙な出力」になりうる。この案件の「黙って劣化させない」方針では狭い方が正しい。
+
+あわせて、実装者が**潜在的な誤りを 1 つ**見つけた —— 旧コードは `codec_name` の前方一致だけを見て
+`codec_type == "audio"` を確かめていなかった。`pcm_` がたまたま音声にしか出ない codec だったので
+事故が起きていない。新しい判定では `codec_type == "audio"` を明示した
+（**data に二重に効かせると、data track を持つ機種の経路が壊れる**）。
+
+### Important 2 —— 記録して、直さなかった
+
+**同じ `DATA_ROOT` で起動インスタンスが重なると、生きているリースを起動時 reconciliation が
+中断扱いにする。** codex は有効期限内の running な結合ジョブを作って再現し、
+`running/lease あり → interrupted/lease NULL`、作業ディレクトリも消えることを確認した。
+あわせて `db/migrate.py:57` が適用済み一覧を `BEGIN IMMEDIATE` の**前**に読むので、
+2 接続で同時に migration を走らせると片方が `UNIQUE constraint failed`（DB と FK は無傷）。
+
+**直さないと決めた。** 理由は 3 つ ——
+(1) **Phase 13 の退行ではない**（前からこの形）
+(2) **実運用では起きない**（単一コンテナを stop-first で restart する形。codex も同意）
+(3) 正しい直し（起動の所有権を排他する fence）は**それ自体が設計の判断**で、
+ロックをどこに置くか・握られていたらどう振る舞うか・特権分離とどう噛むかを決める必要がある。
+
+**`migrate.py:57` だけ直す部分対応も採らなかった** —— fence が無いままだと reconciliation の
+側が残るので、「直った」という誤った安心を作る。`docs/development.md` の持ち越しに記録した。
+
+### codex が確かめて、問題が無かったもの
+
+- `container_wall` は original の生値保存と recompute の読み出しが一致し、
+  derived は member 継承なので **mux 時刻を撮影時刻に使わない**
+- Canon 写真の `force_offset` は**新規作成資産だけ自動補正し、既存・所有不明は承認待ちになる**
+  （最終レビューが挙げた「写真にも `dateTimeOriginal` が送られる」懸念が、ここで 1 つ減った）
+- 新たな vacuous test も無し
+
+codex の sandbox は Unix socket / loopback の制約で protocol・mountd・Immich・system 系が
+冒頭から落ちるため**全 pytest は完走できない**（対象 420 tests passed）。
+外部レビューに渡すときは、**その環境で何が測れないか**も一緒に読む必要がある。
+
 ## 覆ったこと
 
 - **`canon-eos` の `timezone_policy: none` は「EXIF にローカル時刻を書くので補正が不要」
