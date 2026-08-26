@@ -3,6 +3,7 @@ from mediaferry.core.merge.streams import (
     selected_streams,
     stream_signature,
     stream_summary,
+    ts_route_blockers,
 )
 from mediaferry.core.profiles.model import KeepStreams
 
@@ -160,3 +161,44 @@ def test_the_summary_keeps_what_the_screen_needs():
         "codec_tag_string": "dbgi",
         "bit_rate": "10300000",
     }
+
+
+def test_pcm_audio_blocks_the_ts_route():
+    """**mpegts は PCM を private data として詰め、警告だけ出して成功する.**
+
+    実測: 読み直すと bin_data の data ストリームになり、音声が消える。
+    ffmpeg が失敗しない以上、こちらで運べないと判断するしかない。
+    """
+    streams = [
+        {"index": 0, "codec_type": "video", "codec_name": "h264"},
+        {"index": 1, "codec_type": "audio", "codec_name": "pcm_s16le"},
+    ]
+    blockers = ts_route_blockers(streams, KeepStreams("primary", "all", False, False))
+    assert [b["codec_name"] for b in blockers] == ["pcm_s16le"]
+
+
+def test_a_different_pcm_variant_also_blocks_the_ts_route():
+    """`pcm_s16le` だけでなく `pcm_` で始まる codec 全体を塞ぐ."""
+    streams = [
+        {"index": 0, "codec_type": "video", "codec_name": "h264"},
+        {"index": 1, "codec_type": "audio", "codec_name": "pcm_s24le"},
+    ]
+    blockers = ts_route_blockers(streams, KeepStreams("primary", "all", False, False))
+    assert [b["codec_name"] for b in blockers] == ["pcm_s24le"]
+
+
+def test_aac_audio_does_not_block_the_ts_route():
+    streams = [
+        {"index": 0, "codec_type": "video", "codec_name": "h264"},
+        {"index": 1, "codec_type": "audio", "codec_name": "aac"},
+    ]
+    assert ts_route_blockers(streams, KeepStreams("primary", "all", False, False)) == ()
+
+
+def test_a_dropped_pcm_stream_does_not_block():
+    """**捨てるものは邪魔しない.** keep が落とすストリームは判定に入れない."""
+    streams = [
+        {"index": 0, "codec_type": "video", "codec_name": "h264"},
+        {"index": 1, "codec_type": "audio", "codec_name": "pcm_s16le"},
+    ]
+    assert ts_route_blockers(streams, KeepStreams("primary", "none", False, False)) == ()

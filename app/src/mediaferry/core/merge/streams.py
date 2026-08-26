@@ -14,6 +14,10 @@ from ..profiles.model import KeepStreams
 
 TIMECODE_TAG = "tmcd"
 
+# mpegts が無損失で運べない codec の接頭辞。**種別ではなく codec の軸**なので、
+# `UNSUPPORTED_BY_TS`（data を落とす）とは混ぜない。
+_TS_LOSSY_CODEC_PREFIXES = ("pcm_",)
+
 
 def selected_streams(streams: Sequence[dict[str, Any]], keep: KeepStreams) -> list[dict[str, Any]]:
     """保持対象を、入力のストリーム順で返す."""
@@ -86,3 +90,21 @@ def stream_summary(stream: dict[str, Any]) -> dict[str, Any]:
 def _is_thumbnail(stream: dict[str, Any]) -> bool:
     """埋め込みサムネイル（`attached_pic`）を映像として数えない."""
     return bool(stream.get("disposition", {}).get("attached_pic"))
+
+
+def ts_route_blockers(
+    streams: Sequence[dict[str, Any]], keep: KeepStreams
+) -> tuple[dict[str, Any], ...]:
+    """TS 経路が無損失で運べない、保持対象のストリームを返す.
+
+    mpegts は PCM を private data として詰め、**警告だけ出して終了コード 0 で
+    成功する**。読み直すと `bin_data` の data ストリームになり、音声が消える。
+    ffmpeg が失敗しない以上、こちらで運べないと判断するしかない。
+
+    **捨てるストリームは数えない。** `keep` が落とすものは出力に影響しない。
+    """
+    return tuple(
+        stream_summary(stream)
+        for stream in selected_streams(streams, keep)
+        if str(stream.get("codec_name", "")).startswith(_TS_LOSSY_CODEC_PREFIXES)
+    )
