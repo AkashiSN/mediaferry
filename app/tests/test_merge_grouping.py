@@ -150,3 +150,73 @@ def test_the_coarser_of_the_two_timestamps_decides_the_slack():
         a_part(2, offset_seconds=1499.091, source="mtime"),
     ]
     assert len(detect_groups(parts, a_rule())) == 1
+
+
+# 実機の Canon EOS 70D で測った 3 本（MVI_0006/0007/0008.MOV）の値。
+# 0006 → 0007 は +55.063 秒（別録画）、0007 → 0008 は +0.572 秒（同一録画の継ぎ目）。
+# 0007 は 4,260,142,424 B（3.9675 GiB）で、min_part_size_gib: 4 では弾かれる。
+
+
+def test_a_container_sourced_seam_tolerates_positive_rounding():
+    """`creation_time` は秒までしか持たない.
+
+    実測どおり継ぎ目が +0.572 秒（0007 → 0008）でも、tolerance_seconds の
+    範囲内なので同じ録画としてつながる。
+    """
+    parts = [
+        a_part(1, offset_seconds=0, duration=428.428, size=4_260_142_424, source="container"),
+        a_part(2, offset_seconds=429.0, duration=23.023, size=218_782_864, source="container"),
+    ]
+    groups = detect_groups(parts, a_rule(tolerance_seconds=5, min_part_size_gib=3))
+    assert len(groups) == 1
+    assert [p.media_file_id for p in groups[0].members] == ["id-1", "id-2"]
+    assert groups[0].gaps == (pytest.approx(0.572, abs=0.001),)
+
+
+def test_a_container_sourced_seam_tolerates_one_second_of_negative_rounding():
+    """秒への丸めは正にも負にも振れる.
+
+    duration は小数だが `creation_time` は秒止まりなので、次の開始が本当の
+    終端よりわずかに早い秒に丸まることがある（0007 の終端 12:44:21.428 に対し
+    0008 の `creation_time` が 12:44:21 に丸まった場合を想定）。分解能が 0 の
+    ままだと、この負の差を重なりと読んで同じ録画の継ぎ目が割れる。
+    """
+    parts = [
+        a_part(1, offset_seconds=0, duration=428.428, size=4_260_142_424, source="container"),
+        a_part(2, offset_seconds=428.0, duration=23.023, size=218_782_864, source="container"),
+    ]
+    groups = detect_groups(parts, a_rule(tolerance_seconds=5, min_part_size_gib=3))
+    assert len(groups) == 1
+    assert groups[0].gaps == (pytest.approx(-0.428, abs=0.001),)
+
+
+def test_a_container_sourced_separate_recording_is_not_joined():
+    """55 秒空いた別録画（0006 → 0007）は同じ組にしない."""
+    parts = [
+        a_part(1, offset_seconds=0, duration=69.937, size=618_422_312, source="container"),
+        a_part(2, offset_seconds=125.0, duration=428.428, size=4_260_142_424, source="container"),
+    ]
+    assert detect_groups(parts, a_rule(tolerance_seconds=5, min_part_size_gib=3)) == []
+
+
+def test_the_canon_split_is_below_four_gibibytes():
+    """実測の分割片（0007）は 3.9675 GiB. 下限 4 では弾かれる."""
+    parts = [
+        a_part(1, offset_seconds=0, duration=428.428, size=4_260_142_424, source="container"),
+        a_part(2, offset_seconds=429.0, duration=23.023, size=218_782_864, source="container"),
+    ]
+    assert detect_groups(parts, a_rule(tolerance_seconds=5, min_part_size_gib=4)) == []
+    assert len(detect_groups(parts, a_rule(tolerance_seconds=5, min_part_size_gib=3))) == 1
+
+
+def test_a_container_sourced_overlap_beyond_the_resolution_still_splits():
+    """分解能を超える重なりは、`container` でも本物の重なりとして扱う.
+
+    1.5 秒の重なりは 1 秒の丸め誤差では説明できないので、同じ録画の継ぎ目
+    ではなく別録画と判定する。
+    """
+    parts = [
+        a_part(1, offset_seconds=0, duration=100.0, size=4_260_142_424, source="container"),
+        a_part(2, offset_seconds=98.5, duration=23.023, size=218_782_864, source="container"),
+    ]
+    assert detect_groups(parts, a_rule(tolerance_seconds=5, min_part_size_gib=3)) == []

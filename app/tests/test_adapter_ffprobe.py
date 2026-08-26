@@ -110,3 +110,48 @@ def test_subprocess_failures_are_reported_as_failed(monkeypatch, tmp_path, error
     got = MediaProbe().describe(path, "MP4")
     assert got.probe_state == "failed"
     assert got.duration_seconds is None
+
+
+def _probe_returning(monkeypatch, payload):
+    """ffprobe を呼ばずに、決めた JSON を返させる."""
+
+    def fake_run(args, **kwargs):
+        return subprocess.CompletedProcess(args, 0, json.dumps(payload), "")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    return MediaProbe()
+
+
+def test_the_container_creation_time_is_carried_verbatim(tmp_path, monkeypatch):
+    """**器が申告した撮影時刻は、解釈せずそのまま運ぶ.**
+
+    Canon は現地の壁時計を書きながら `Z` を付ける。ここで UTC として読むと
+    9 時間ずれた値が固定されてしまう。意味の解釈は `core/timestamps.py` の
+    1 か所に置く。
+    """
+    payload = {
+        "format": {"duration": "12.5", "tags": {"creation_time": "2026-08-26T12:35:08.000000Z"}},
+        "streams": [{"index": 0, "codec_type": "video", "codec_name": "h264"}],
+    }
+    probe = _probe_returning(monkeypatch, payload)
+    result = probe.describe(tmp_path / "MVI_0006.MOV", "MOV")
+    assert result.container_wall == "2026-08-26T12:35:08.000000Z"
+
+
+def test_a_container_without_a_creation_time_reports_none(tmp_path, monkeypatch):
+    """タグを持たない器もある. 欠けていることと 0 を混ぜない."""
+    payload = {"format": {"duration": "12.5"}, "streams": []}
+    probe = _probe_returning(monkeypatch, payload)
+    assert probe.describe(tmp_path / "a.MOV", "MOV").container_wall is None
+
+
+def test_a_photo_reports_no_container_time(tmp_path):
+    """写真では ffprobe を走らせない. 値も持たない."""
+    assert MediaProbe().describe(tmp_path / "IMG_0001.JPG", "JPG").container_wall is None
+
+
+def test_a_non_string_creation_time_reports_none(tmp_path, monkeypatch):
+    """`creation_time` が文字列でない値（数値等）で来た場合は取り込まない."""
+    payload = {"format": {"duration": "12.5", "tags": {"creation_time": 0}}, "streams": []}
+    probe = _probe_returning(monkeypatch, payload)
+    assert probe.describe(tmp_path / "a.MOV", "MOV").container_wall is None

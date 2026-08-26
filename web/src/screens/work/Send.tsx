@@ -39,7 +39,7 @@ const PAGE_SIZE = 200;
 /**
  * 宛先ごとの未送信を 1 つの並びにまとめる。**同じ写真を二重に数えない。**
  *
- * 並びは API と同じ `captured_at DESC, id DESC`（SQL も文字列として比べるので、
+ * 並びは API と同じ `captured_at DESC, rel_path DESC`（SQL も文字列として比べるので、
  * オフセット付きの値をそのまま比べれば同じ順になる）。
  */
 export function mergeMedia(pages: { media: Media[] }[]): Media[] {
@@ -53,7 +53,7 @@ export function mergeMedia(pages: { media: Media[] }[]): Media[] {
     if (left.captured_at !== right.captured_at) {
       return left.captured_at < right.captured_at ? 1 : -1;
     }
-    return left.id < right.id ? 1 : -1;
+    return left.rel_path < right.rel_path ? 1 : -1;
   });
 }
 

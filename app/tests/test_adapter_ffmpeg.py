@@ -42,6 +42,52 @@ def make_clip(path, seconds=2, *, timecode=False, audio_first=False):
     return path
 
 
+def make_pcm_clip(path, seconds=2, *, audio_first=False):
+    """音声が PCM のクリップ. Canon の MOV と同じ形（器も QuickTime）."""
+    command = [
+        "ffmpeg",
+        "-nostdin",
+        "-v",
+        "error",
+        "-f",
+        "lavfi",
+        "-i",
+        f"testsrc=duration={seconds}:size=64x64:rate=10",
+        "-f",
+        "lavfi",
+        "-i",
+        f"sine=frequency=440:duration={seconds}",
+    ]
+    command += ["-map", "1:a", "-map", "0:v"] if audio_first else ["-map", "0:v", "-map", "1:a"]
+    command += ["-c:v", "libx264", "-pix_fmt", "yuv420p", "-c:a", "pcm_s16le"]
+    command += ["-y", str(path)]
+    subprocess.run(command, check=True, capture_output=True)  # noqa: S603
+    return path
+
+
+def make_alac_clip(path, seconds=2, *, audio_first=False):
+    """音声が ALAC のクリップ. h264+alac の MOV（codex の再現と同じ形）."""
+    command = [
+        "ffmpeg",
+        "-nostdin",
+        "-v",
+        "error",
+        "-f",
+        "lavfi",
+        "-i",
+        f"testsrc=duration={seconds}:size=64x64:rate=10",
+        "-f",
+        "lavfi",
+        "-i",
+        f"sine=frequency=440:duration={seconds}",
+    ]
+    command += ["-map", "1:a", "-map", "0:v"] if audio_first else ["-map", "0:v", "-map", "1:a"]
+    command += ["-c:v", "libx264", "-pix_fmt", "yuv420p", "-c:a", "alac"]
+    command += ["-y", str(path)]
+    subprocess.run(command, check=True, capture_output=True)  # noqa: S603
+    return path
+
+
 @pytest.fixture
 def clips(tmp_path):
     if shutil.which("ffmpeg") is None:
@@ -265,3 +311,103 @@ def test_the_concat_route_does_not_map_streams_it_cannot_carry(tmp_path, work_di
     assert outcome.route == "concat"
     assert [s["codec_tag_string"] for s in outcome.dropped_by_route] == ["tmcd"]
     assert MediaProbe().describe(outcome.output_path, "MP4").probe_state == "ok"
+
+
+def test_the_merge_refuses_the_ts_route_when_it_would_lose_audio(tmp_path, work_dir):
+    """**4 GB を再 mux してから駄目だと分かる経路を残さない.**
+
+    concat が失敗しても、運べないと分かっているなら TS を試さない。
+
+    concat demuxer にファイル一覧の中で存在しないパートを混ぜても、
+    `mpegts` と同じ「読めるところまでで終了コード 0」を返すことがあり、
+    狙った失敗を再現しない（実測: 2 パートのみの `concat` 成功として通る）。
+    確実に concat を失敗させるには、`FailingConcat`（既存のテストが使う形）
+    のように concat コマンドそのものを不正な入力に差し替える。
+    """
+    if shutil.which("ffmpeg") is None:
+        pytest.skip("ffmpeg が無い")
+    probe = MediaProbe()
+    parts = [make_pcm_clip(tmp_path / f"{i}.mov") for i in range(2)]
+    streams = [probe.describe(path, "MOV").streams for path in parts]
+    with pytest.raises(MergeFailed, match="pcm_s16le"):
+        FailingConcat().merge(
+            parts, streams, KEEP, work_dir, "out.mov", lambda: None, lambda: False
+        )
+
+
+def test_a_topology_mismatch_with_pcm_also_refuses(tmp_path):
+    """並びが違うときも同じ. **TS へ落ちる道は 2 つある.**"""
+    if shutil.which("ffmpeg") is None:
+        pytest.skip("ffmpeg が無い")
+    probe = MediaProbe()
+    first = make_pcm_clip(tmp_path / "a.mov")
+    second = make_pcm_clip(tmp_path / "b.mov", audio_first=True)
+    streams = [probe.describe(path, "MOV").streams for path in (first, second)]
+    with pytest.raises(MergeFailed, match="pcm_s16le"):
+        MergeRunner().merge(
+            [first, second],
+            streams,
+            KEEP,
+            tmp_path,
+            "out.mov",
+            lambda: None,
+            lambda: False,
+        )
+
+
+def test_a_topology_mismatch_with_pcm_only_in_a_later_part_also_refuses(tmp_path):
+    """先頭パートに PCM が無く、後続にだけある構成でも塞がれる（M4）.
+
+    **この枝は「パートごとにストリームの並びが違う」ことが前提の場所。**
+    先頭だけを見ると、先頭が AAC で後続が PCM という構成（並びが違うので
+    concat demuxer は使えない）で運べないと分からず、TS 経路が黙って音を
+    落とす。
+    """
+    if shutil.which("ffmpeg") is None:
+        pytest.skip("ffmpeg が無い")
+    probe = MediaProbe()
+    first = make_clip(tmp_path / "a.mov")
+    second = make_pcm_clip(tmp_path / "b.mov")
+    streams = [probe.describe(path, "MOV").streams for path in (first, second)]
+    with pytest.raises(MergeFailed, match="pcm_s16le"):
+        MergeRunner().merge(
+            [first, second],
+            streams,
+            KEEP,
+            tmp_path,
+            "out.mov",
+            lambda: None,
+            lambda: False,
+        )
+
+
+def test_aac_still_falls_back_to_the_ts_route(tmp_path):
+    """**塞ぐのは、TS を往復させると消えると分かっている音声だけ.** 運べるものまで諦めない."""
+    if shutil.which("ffmpeg") is None:
+        pytest.skip("ffmpeg が無い")
+    probe = MediaProbe()
+    first = make_clip(tmp_path / "a.mp4")
+    second = make_clip(tmp_path / "b.mp4", audio_first=True)
+    streams = [probe.describe(path, "MP4").streams for path in (first, second)]
+    outcome = MergeRunner().merge(
+        [first, second], streams, KEEP, tmp_path, "out.mp4", lambda: None, lambda: False
+    )
+    assert outcome.route == "ts"
+
+
+def test_the_merge_refuses_the_ts_route_when_alac_would_be_lost(tmp_path, work_dir):
+    """codex の再現と同じ形: h264+alac の MOV 2 本を結合しようとすると塞がれる.
+
+    実測: mpegts は ALAC を private data として詰め、警告だけ出して終了コード 0 で
+    成功する。読み直すと data ストリームになり、音声が消える。PCM と同じ穴が
+    ALAC にも開いているので、concat が失敗して TS 経由へ落ちる前に拒む。
+    """
+    if shutil.which("ffmpeg") is None:
+        pytest.skip("ffmpeg が無い")
+    probe = MediaProbe()
+    parts = [make_alac_clip(tmp_path / f"{i}.mov") for i in range(2)]
+    streams = [probe.describe(path, "MOV").streams for path in parts]
+    with pytest.raises(MergeFailed, match="alac"):
+        FailingConcat().merge(
+            parts, streams, KEEP, work_dir, "out.mov", lambda: None, lambda: False
+        )

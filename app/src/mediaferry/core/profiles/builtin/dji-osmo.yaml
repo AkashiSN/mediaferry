@@ -14,11 +14,10 @@ scan:
   # .LRF はここに無いので取り込まれない。
   extensions: ["MP4", "JPG"]
 timestamp:
-  source: filename
+  # PANO_0001.JPG のように pattern に当たらないファイルは mtime へ落ちる。
+  source: [filename, mtime]
   pattern: '^DJI_(?P<ts>\d{14})_'
   format: "%Y%m%d%H%M%S"
-  # PANO_0001.JPG のように pattern に当たらないファイルがある。
-  fallback: mtime
   # DJI は creation_time を UTC で書きつつオフセットも GPS も書かないので、
   # Immich が撮影地の TZ を判定できない。壁時計にオフセットを付けて書き戻す。
   timezone_policy: force_offset

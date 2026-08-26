@@ -41,6 +41,21 @@ from ..db.profiles import ProfileRef
 FREE_SPACE_MARGIN = 512 * 1024 * 1024
 # TS フォールバックのピーク。全パートの .ts と結合後の出力が同時に置かれる。
 TS_PEAK_FACTOR = 2
+# 結合の途中に work/ へ置かれる器。出力の拡張子はプロファイルが決めるので、
+# ここに無い器を選ぶと進捗が 0 のままになる。
+MERGE_ARTIFACT_SUFFIXES = (".mp4", ".mov", ".ts")
+
+
+def merge_bytes_written(work: Path) -> int:
+    """`work/` に書けた量. **ffmpeg は別プロセスなので育ち方でしか測れない.**
+
+    TS 経路は「各パートの `.ts`」と「結合後の出力」を両方置くので、両方数える。
+    """
+    return sum(
+        path.stat().st_size
+        for path in work.glob("*")
+        if path.suffix.lower() in MERGE_ARTIFACT_SUFFIXES
+    )
 
 
 class MergeInputsChanged(RuntimeError):
@@ -132,21 +147,13 @@ class Merger:
         total_bytes = sum(row["size_bytes"] for row in members)
 
         def beat() -> None:
-            # **書けた量は work/ を見る。** ffmpeg は別プロセスなので、
-            # 進捗はファイルの育ち方でしか測れない。TS 経路は「各パートの .ts」と
-            # 「結合後の出力」を両方置くので、分母が倍になる。
-            written = sum(
-                path.stat().st_size
-                for path in work.glob("*")
-                if path.suffix.lower() in (".mp4", ".ts")
-            )
             ctx.heartbeat(
                 {
                     "phase": "merge",
                     "rel_path": desired,
                     "route": "ts" if fell_back else "concat",
                     "parts": len(parts),
-                    "bytes_done": written,
+                    "bytes_done": merge_bytes_written(work),
                     "bytes_total": total_bytes * (2 if fell_back else 1),
                 }
             )

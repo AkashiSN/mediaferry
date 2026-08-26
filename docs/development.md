@@ -491,13 +491,14 @@ TrueNAS ホストで。手順は [`history/phase0-findings.md`](history/phase0-f
 挿さっている状態**で、取り込みはまだ 1 件も走っていない（起点の詳細は同じ記録の
 「リセットで `setup.md` を踏み直した」）。以下は**まだ残っているもの**。
 
-1. **Immich への送信（Phase 3・6）。いちばん大きい未検証。** 転送先の登録、
-   `origin` の判別、タグ、日時の書き戻し、RAW/JPEG のスタッキングまで、
-   **一度も動かしていない**。ライブラリに実データが揃っている状態でやる方が
-   安い（取り込みに 30 分かかる）。
+1. ~~**Immich への送信（Phase 3・6）。**~~ **動いた（2026-08-23〜26）。** 転送先の
+   登録、`origin` の判別、タグ、日時の書き戻し、RAW/JPEG のスタッキングまで
+   実データで通した。**残っているのは日時の 1 点だけ** —— Canon の動画が Immich で
+   9 時間ずれる（下の持ち越し）。
 2. ~~**チェックリストの残り。**~~ **DJI のカードでは全項目が終わった（2026-08-23）。**
    5 番（抜く）・8 番（キャンセル）・10 番（取り外し）が合格し、11 番の設計変更も
-   実データで確かめた。**残るのは Canon の実カード（13〜17 番）だけ。**
+   実データで確かめた。**Canon の実カード（13〜17 番）も 2026-08-26 に全部終わった**
+   ので、**チェックリストは 17 項目すべてが閉じた**。
 3. ~~**`mtime` fallback の実データ確認。**~~ **済んだ（2026-08-23）。** パノラマ 8 枚が
    `captured_at_source = mtime` で入り、**同じ瞬間に撮られた `filename` 由来の写真と
    同じ現地の壁時計に着地した**（0.85 秒差）。`mtime_semantics = instant` が正しい
@@ -512,47 +513,19 @@ TrueNAS ホストで。手順は [`history/phase0-findings.md`](history/phase0-f
    題材は結合 → 組み直し → もう一度結合で作れる（`b1a6971` で
    `GET /media/stale-derived` と「もう使われていない出力」の節を足した。いまは
    **設定 › 記録 › 使っていないファイル**にある）。
-5. **Canon EOS 70D の実カード（13〜17 番）。** プロファイルは仕様と知識から
-   書いており、**実データを一度も見ていない**。**17 番は Phase 6 で増えた項目**
-   （RAW+JPEG の組が実カードで成立するか。`exifread` が実機の CR2 から
-   `DateTimeOriginal` を読めるかが要）。
-6. **自動取り込み（§12.1）は、いま成立していない。** Task 13 の E2E で見つけ、
-   **2026-08-23 に実機でも確かめた** —— 承認した直後に watcher が積んだ `import` が
-   「取り込み完了: 0 件」で**成功して終わる**（記録は
+5. ~~**Canon EOS 70D の実カード（13〜17 番）。**~~ **全部終わった（2026-08-26）。**
+   13・14 番は 08-25 に、15〜17 番は 08-26 にカメラで初期化したカードで決着した。
+   **16・17 番は合格**（CR2 は Immich に入り、`exifread` は実機の CR2 から
+   `DateTimeOriginal` を読める）。**14・15 番は「現状では成立しない」という決着**で、
+   直し方まで実測で出ている（下の持ち越しと
    [`history/hardware-verification.md`](history/hardware-verification.md)）。
-
-   **watcher が積むのは `import` だけで、`scan` を積まない**
-   （`jobs/watcher.py` の `_enqueue_ready`）。取り込みのジョブは前のスキャンが
-   残した `source_entry` を公開するだけなので、**ジョブは成功のまま 1 件も
-   取り込まない**。
-
-   **一度取り込んだカードでも直らない。** 根拠は 3 つ:
-
-   - `source_entry` の行を作るのは `jobs/scan.py` の `_reconcile_entry` **だけ**
-   - `volume_instance` は `(fs_uuid, fs_type, size_bytes)` の一意索引を持つ
-     **同一性**のテーブルなので（`0002_profiles_and_sources.sql`）、
-     `source_entry` はカードを挿し直しても残る
-   - `watcher` の `CANDIDATES` が見るのは `volume_presence.auto_import_at IS NULL`
-     ＝**接続ごと**で、**未取り込みの行があるかは条件に入っていない**
-
-   つまり、**信頼したカードに新しく撮った写真を足して挿し直しても、`import` は
-   走るが `source_entry` に行が無いので 0 件で成功する。** §12.1 の「以後そのカードは
-   挿すだけで取り込まれる」は満たされていない。
-
-   **直していない。** 判断が要るため:
-   信頼の確認ダイアログの文面は「**いま入っている中身も含めて**、以後このカードを
-   挿すだけで NAS へコピーされます」なので、**むしろ `scan` を積む方が文面どおり**。
-   ただし watcher に `scan` を足すと、同意の対象（「いま入っている中身」）と実際に
-   歩く範囲の対応が変わるので、§12.1 の意味づけを決め直したうえで、専用の試験と
-   一緒に入れる。**画面側の応急処置は入れてある** —— ホームの「いま取り込む」は
-   数えてからコピーする（`web/src/screens/Home.tsx` の `importNow`）ので、
-   **挿し直すたびにこれを押せば取り込める**。
-
-   **2026-08-23 に切り分けが付いた。** スキャン済みの行がある状態で挿し直すと、
-   watcher が積んだ `import` は**残り 38 件を実際にコピーした**。壊れているのは
-   「`scan` を積まないこと」だけで、コピーの経路は健全。**ただし自動の経路は結合の
-   検出も積まない**（取り込み後の `merge_candidates` が 0 のまま）ので、直すときは
-   両方を見る。
+6. ~~**自動取り込み（§12.1）は、いま成立していない。**~~ **塞いだ（Phase 8）。**
+   watcher が `import` しか積まず「取り込み完了: 0 件」で成功して終わる、という
+   不具合だった。`0020_auto_scan.sql` で `volume_presence.auto_scan_at` を足し、
+   **`scan` は対象と判定できた接続すべてに積む**（信頼の有無にも `AUTO_IMPORT` にも
+   よらない）形にしたうえで、続けて `import` と `detect_groups` を積む
+   （`jobs/watcher.py` の `_enqueue_in_one_transaction`）。印付けと enqueue は
+   同じトランザクションに入れてあるので、積めなかったときに印だけが残ることは無い。
 
 **バックアップとリストアは 2026-08-21 に実測して閉じた**（`backup.md` に反映済み）。
 
@@ -572,15 +545,23 @@ TrueNAS ホストで。手順は [`history/phase0-findings.md`](history/phase0-f
 | **`mtime_semantics` を足したので `dji-osmo` の版が進む** | ビルトインの定義 JSON が変わるため、次の起動の `sync_builtins` が新しいリビジョンを作る。既存行の `captured_at_revision_id` は前の版を指したままなので、画面が再計算の手がかりを出す。**既存 DB の `captured_at` は自動では直らない**（手で `POST /profiles/{slug}/recompute`）。確定済みの公開名と派生物の実体 mtime は再計算でも直らない |
 | ~~取り込み側のリースの穴~~ | **塞いだ**（Phase 2 の Task 7）。`_with_lease_pulse` が共通の `_publish` に入ったので、16 GiB のコピー後の `os.fsync` と ffprobe も守られる。回帰テストは `test_publisher.py::test_a_slow_fsync_does_not_lose_the_lease` |
 | `_publish` の外の `fsync_dir` | ジョブ用ディレクトリを作った直後の `fsync_dir` は `_with_lease_pulse` の外にある。ディレクトリの fsync はメタデータだけなので実運用では一瞬で終わるが、極端に遅い環境では守られていない |
-| `disposition.attached_pic` | 結合の「最初の映像ストリームのみ」の判定が、埋め込みサムネイルをこれで見分ける。実機の DJI ファイルで立っているかは未確認（`keep_streams.video` が `primary` の間は影響しない）。チェックリスト 12 番で見る |
+| ~~`disposition.attached_pic`~~ | **確かめた（12 番、合格）。** 実機の DJI ファイルで `attached_pic=1` が立つのは mjpeg の埋め込みサムネイルだけで、`streams._is_thumbnail` の判別は実データで正しく効いている |
 | TS フォールバックの実運用 | Phase 0 の実測では DJI は concat 経路で通っており、TS 経路は**まだ実データで走っていない**。テストは lavfi のクリップで両経路を通す（`tmcd` の脱落まで再現している） |
 | サイズ検査の許容誤差と合成クリップ | 2% は 16 GiB 級の実ファイルが前提（オーバーヘッド 0.002%）。数百 KB の合成クリップでは 7〜8% ずれるので、e2e は「不合格でも公開され、採用すれば選択肢に出る」経路で通している |
 | 5 パート連続録画（70 GiB 級）のアップロード | 28.36 GiB は完走した。同じ経路で扱える見込みだが未実測。タイムアウトは比例して伸びる |
-| Canon EOS 70D のプロファイル | **書いたが実データを一度も見ていない**（Task 4）。E2E で通しているのは `require` から組み立てた合成カードまで。`merge` は無効、`hints.usb_ids` は空。実カードでの確認は `phase1-manual-checklist.md` の 13〜16 番 |
+| ~~Canon EOS 70D のプロファイル~~ | **実データで確かめた（2026-08-25〜26）。** `canon-eos` は実カードで `high` / `provisional: false` に確定し、`hints.volume_labels` は**カメラで初期化したカードなら当たる**（PC で焼くとラベルが付かない）。`hints.usb_ids: []` はリーダー経由では正しい。**`merge` と時刻の扱いは Phase 13 で直した**（下の 4 行）。記録は [`history/hardware-verification.md`](history/hardware-verification.md) |
+| ~~**Canon の動画が Immich で 9 時間ずれる**~~（2026-08-26 に実機で確認） | **塞いだ（Phase 13）。** `canon-eos` を `timezone_policy: force_offset` + `fix_datetime_after_upload: true` へ倒した（`dji-osmo` と同じ形）。**`fix_datetime_after_upload` だけでは効かない** —— `core/uploads/decisions.py` の `datetime_plan` が `policy == "none"` を先に見て降りる。記録は [`history/phase13-record.md`](history/phase13-record.md) |
+| ~~**`creation_time` を読む出所（`container`）が無い**~~ | **塞いだ（Phase 13）。** `timestamp.source` を連鎖（配列）にして `container` を足し、`fallback` を廃止した。**器が申告した文字列は解釈せず `media_file.container_wall` に生で持ち**、意味は `container_semantics` が決めるので再計算で読み直せる。`captured_at_source` の CHECK を広げるためにテーブルを作り直したので、**移行 runner に「FK を外して走らせる」経路も足した**（`0026`）|
+| ~~**`min_part_size_gib: 4` が Canon の分割片を弾く**~~ | **塞いだ（Phase 13）。** `3` へ下げ、`merge` を有効にし、`_RESOLUTION_SECONDS` に `container: 1.0` を足した。出力の器は `.MOV` のまま（音声が PCM なので MP4 は ffmpeg の版によって弾かれる）。**PCM があるときは TS 経路へ落とさない**門も足した —— mpegts は PCM を private data として詰めて **exit 0** で終わり、音声が消える |
+| ~~**一覧の tie-break が乱数**~~（2026-08-26 に利用者が発見） | **塞いだ（Phase 13）。** 索引（`0026`）と `ORDER BY` を同時に `rel_path DESC` へ揃え、`db/selection.py` の 3 つの断片にも入れた。**索引だけ張り替えるとタイの中の並びが一時 B-tree に落ちる**（`role=derived` で実測）。副産物として RAW+JPEG の並びも決定的になった |
 | **`0011`（`captured_at_revision_id`）** | **入れた**（Task 6）。既存 DB へは `profile_revision_id` の写しで埋め戻る。trigger 2 本が「必ず値を持つ」「同じプロファイルの版である」を守る |
-| **「取り外す」が、成功したときに何も言わない**（2026-08-23 に実機で発見） | `close` は掴んでいるジョブが無ければ**本当に何もしない**（読み取り専用マウントはジョブの終わりに外れているので、押した時点で既に安全）。**このボタンの値打ちは返ってくる答えそのもの** —— 「いま抜いて大丈夫」か「まだ抜かないで」（`VolumeBusy`）か。ところが画面は成功時に何も言わず一覧を読み直すだけで（`CardDetail.tsx` / `Home.tsx` の `act`）、カードは挿さったままなので**画面に変化が一切ない**。利用者には**どちらだったのか分からない**。「取り外す」という名前も、何かが起きる（アンマウントされる）ように読める。直すなら「抜いて大丈夫です」と出すか、名前を「抜いていいか確かめる」にする |
-| **ホームが、いま起きていることと食い違う（動線ごと見直す）**（2026-08-23 に実機で発見） | 3 つが同時に見えた。**(1) カードの帯と「やること」が矛盾する** —— 「`SD_Card` のカードが挿さっています」の帯が出ているのに、その下に「**いま、やることはありません**」。§13 の「やること」は `dashboard` の 4 つの数（`merge_candidates` / `merge_review_total` / `unsent_total` / `awaiting_total`）だけから導いており、**カードもジョブも入っていない**。**(2) 自動で取り込みが始まっているのに「いま取り込む」が押せる** —— ボタンの `disabled` は `card.busy`（この画面が出した要求の最中）しか見ておらず、**走っているジョブを見ていない**。**下に進捗バーが出ているのに、同じ画面のボタンが有効**という状態になる。**(3) 実行中の作業を集める場所が無い** —— 進行中のジョブは `JobCard` が 1 件出るだけ。**実行中のジョブ一覧＝通知エリア**を置いて取り込みジョブを映し、カードの状態（「初めて見るカードです」「カードが挿さっています」）もそこへ集める —— **それが「やること」そのものかもしれない**。**部品の直しではなく動線の設計から見直す**（写真タブの 4 件と同じ round で扱う） |
-| **送信のジョブが進捗を一度も書かない**（2026-08-23 に実機で発見） | 取り込みと結合は `bytes_done` / `bytes_total` / `file_index` / `file_count` を出すが、**`upload` のジョブは `progress` が最後まで `null`**（実機の `GET /jobs` で確認）。`uploader.py` の `_Progress` は「リモートに触った可能性があるか」を持つ**解放先を決めるための内部フラグ**で、画面に出す進捗ではない。写真や小さい動画では一瞬で終わるので見えなかったが、**71.2 GB は 6 分 4 秒、35 件の送信は 2 分 27 秒** —— その間、画面には**動いているのか止まっているのかが出ない**。心拍（`ctx.heartbeat(progress)`）は進捗を同じ UPDATE に乗せられるので、**書き込みを増やさずに出せる** |
+| **ホームの「さっき取り込んだもの」の並びが乱数**（Phase 13 の最終レビューで発見） | `api/routes_system.py:84` の `recent_imports` が `ORDER BY created_at DESC, id DESC` のまま。一括取り込みでは `created_at` が同じ行が普通に出るので、その中の並びが決まらない。**`id` は乱数なので、現状の tie-break は取り込み順ですらない**。一覧（`rel_path DESC`）と同じ形にするかは別途決める —— 取り込みの一覧は**取り込んだ順そのものに意味がある**画面なので、名前順が正しいとは限らない |
+| **同じ `DATA_ROOT` で起動インスタンスが重なると壊れる**（外部レビュー codex が再現、2026-08-27） | **コード上の単一起動 fence が無い。** 有効期限内の running なジョブがあっても、後から起動した側の reconciliation が `running/lease あり → interrupted/lease NULL` にして作業ディレクトリを消す（旧プロセスは次の heartbeat で `LeaseLost`）。あわせて `db/migrate.py:57` が適用済み一覧を `BEGIN IMMEDIATE` の**前**に固定するので、2 接続で同時に `apply_migrations` すると一方が `UNIQUE constraint failed: schema_migration.version`（DB と FK は無傷）。**Phase 13 の退行ではなく、単一コンテナを stop-first で restart する現行運用では起きない。** 直すなら起動の所有権を排他する fence が要り、**それ自体が設計の判断**（ロックをどこに置くか・握られていたらどう振る舞うか・特権分離とどう噛むか）。**`migrate.py` の読み位置だけ直す部分対応は採らない** —— reconciliation の側が残るので「直った」という誤った安心を作る |
+| **TS 経路の許可リストは音声だけ。映像は見ていない** | `ts_route_blockers` は `codec_type == 'audio'` に限って許可リストを当てる。映像で同じこと（mpegts が運べない codec を private data として詰めて exit 0）が起きるかは**測っていない**。h264 / hevc は問題ないと見ているが、根拠は実測ではない |
+| **結合出力の `container_wall` は「mux した時刻」になりうる**（Phase 13 の最終レビューで発見） | `publisher` は派生物の probe 結果をそのまま入れる。いまは `_recomputed_derived` が先頭 member から継ぐので**誰も読まない**が、将来 derived を器の時刻で再計算すると値が化ける。あわせて `merger._as_merge_parts` は `captured_at_source` を渡さず既定の `"mtime"` を使う（`detect_groups.py:99` は渡している）—— **同じ構造体の埋め方が 2 か所で違う** |
+| ~~**「取り外す」が、成功したときに何も言わない**~~（2026-08-23 に実機で発見） | **塞いだ（Phase 8）。** 「抜いていいか」は押さずに読める形にした —— 出所は `/devices` で、ホームは掴まれていない間は「いま抜いて大丈夫です。」を出す（`web/src/screens/Home.tsx`） |
+| ~~**ホームが、いま起きていることと食い違う（動線ごと見直す）**~~（2026-08-23 に実機で発見） | **塞いだ（Phase 8、PR #17）。** 「やること」を `dashboard` の 4 つの数だけから導くのをやめ、カードとジョブを同じ動線に載せた（`web/src/hooks/homeSections.ts`）。走っているジョブを見てボタンを落とす件も、実行中の作業を集める場所も一緒に入った。設計は [`history/phase8-design.md`](history/phase8-design.md) |
+| ~~**送信のジョブが進捗を一度も書かない**~~（2026-08-23 に実機で発見） | **塞いだ（Phase 8）。** 心拍に相乗りさせて出すようにした（`jobs/uploader.py` の `ctx.heartbeat(reported.snapshot())`）。書き込みは増えていない |
 | **`origin = unknown` を「先に誰かが上げた」と描いている**（2026-08-23 に実機で発見） | `origin` は 3 値（`created_by_us` / `pre_existing` / **`unknown`**）で、`unknown` は「**自作と証明できない**」——`POST /api/assets` が `duplicate` を返し、初回の照合が `accept` だったとき（送信の直後にこちらが落ちると起きる。実機で踏んだ）。ところが画面は `unknown` を `pre_existing` と同じ文言で描く: ホームの「**先に誰かが Immich へ上げていた写真です**」と `work/Approve.tsx` の「下の写真は、先に誰かが Immich へ上げていたものです」。**断定が嘘になる** —— 実際はほぼ確実にこちらが上げたもので、家族には「知らない人が上げた写真がある」と読める。`unknown` は「こちらが送ったものか確かめられませんでした」と書き分ける。**サーバは 2 つを別の状態として持っているのに、画面が 1 つに潰している** |
 | **Immich の説明欄に `default` が出る**（2026-08-23 に実機で発見） | **DJI が EXIF の `ImageDescription` に `default` と書いており**（実機で確認。`Make = DJI` / `Model = OP-041` / `Software = 10.00.03.70`）、Immich がそれを説明として読んでいる。**mediaferry は説明を一度も送っていない**ので送信の経路に不具合は無いが、**DJI で撮る限り毎回付く**。直すなら **プロファイルが宣言する**形（`mtime_semantics` と同じ）—— `immich` の節に「捨てる説明の一覧」を持たせ、`dji-osmo` だけ `["default"]` を宣言し、**こちらが作った資産に限って**、説明がその一覧に載っていれば `PUT /api/assets/{id}` で空にする。**原本の EXIF は書き換えない**（この設計がいちばん避けてきたこと）。**無条件に空にもしない** —— 意味のある説明を書くカメラや人が入れた説明を消してしまう。「`default` という無意味な値だけを捨てる」と宣言すれば、何を捨てたかが後から読める |
 | ~~**写真タブで、選んだ 1 件が何なのかが分からず、消せない**~~（2026-08-23 に実機で発見） | **塞いだ**（Phase 9）。タイルは押すと `/photos/:id`（くわしく）が開き、`role` を読んで「つないだ動画」の印と絞り込みを出す。くわしくは元になったファイル・宛先ごとの状況・消せるか（消せないなら理由）を 1 本の応答で返し、`DELETE /media/{id}` は「Immich に生きていない `derived`」だけを消せる規則に差し替えた。設定側の「つないだ動画の記録」は中身どおり「つないだ後の後片付け」に改名した。記録は [`history/phase9-record.md`](history/phase9-record.md) |

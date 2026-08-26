@@ -314,7 +314,62 @@ def test_an_exif_original_is_read_from_the_published_file(db, data_root):
 
     row = captured(db, media)
     assert row["captured_at_source"] == "exif"
-    assert row["captured_at"] == "2026-02-03T04:05:06+00:00"
+    # canon-eos は timezone_policy: force_offset。壁時計（04:05:06）は変わらず、
+    # 既定 TZ（run() に渡す Asia/Tokyo）のオフセットが付く。
+    assert row["captured_at"] == "2026-02-03T04:05:06+09:00"
+
+
+def test_a_container_original_is_read_from_the_database(db, data_root):
+    """**再 probe しない.** 取り込み時に生の文字列を持っているので読み直せる.
+
+    16 GiB の動画を再計算のたびに ffprobe へ掛けると、リースの心拍では足りない
+    時間がかかる。
+    """
+    profile = a_user_profile(
+        db,
+        "canon-eos",
+        "canon-container",
+        source=["container", "mtime"],
+        container_semantics="wall_clock",
+    )
+    volume = a_volume(db, (profile.profile_id, profile.revision_id))
+    media = an_original(
+        db,
+        profile,
+        volume,
+        source_rel="DCIM/100CANON/MVI_0006.MOV",
+        mtime_ns=ns("2026-08-26T12:36:18"),
+        captured_at="2026-08-26T12:36:18+00:00",
+        captured_at_source="mtime",
+        container_wall="2026-08-26T12:35:08.000000Z",
+    )
+    run(db, data_root, profile)
+
+    row = captured(db, media)
+    assert row["captured_at_source"] == "container"
+    # **録画の終了ではなく開始。** mtime は 12:36:18、器は 12:35:08。
+    # canon-eos は timezone_policy: force_offset なので、壁時計（12:35:08）は
+    # そのまま、既定 TZ（run() に渡す Asia/Tokyo）のオフセットが付く。
+    assert row["captured_at"] == "2026-08-26T12:35:08+09:00"
+
+
+def test_a_row_without_a_container_time_falls_through_to_mtime(db, data_root):
+    """器の時刻を持たない行は mtime へ落ちる（値を捏造しない）."""
+    profile = a_user_profile(db, "canon-eos", "canon-container-2", source=["container", "mtime"])
+    volume = a_volume(db, (profile.profile_id, profile.revision_id))
+    media = an_original(
+        db,
+        profile,
+        volume,
+        source_rel="DCIM/100CANON/MVI_0009.MOV",
+        mtime_ns=ns("2026-08-26T12:36:18"),
+        captured_at="2026-08-26T12:36:18+00:00",
+        captured_at_source="mtime",
+    )
+    run(db, data_root, profile)
+
+    row = captured(db, media)
+    assert row["captured_at_source"] == "mtime"
 
 
 def test_a_derived_inherits_from_the_first_active_member(dji, db, data_root):
@@ -443,8 +498,20 @@ def test_a_sent_record_whose_time_did_not_change_stays_complete(dji, db, data_ro
 
 
 def test_a_profile_that_never_writes_the_remote_datetime_leaves_records_complete(db, data_root):
-    """`fix_datetime_after_upload` が偽なら、リモートに差は生じない."""
+    """`fix_datetime_after_upload` が偽なら、リモートに差は生じない.
+
+    canon-eos は `fix_datetime_after_upload: true` なので、ここでは
+    明示的に偽へ倒したユーザ定義で確かめる（意図を profile の設定で表す）。
+    """
     profile = a_user_profile(db, "canon-eos", "my-canon")
+    registry = ProfileRegistry(db)
+    profile = registry.update(
+        "my-canon",
+        replace(
+            profile.definition,
+            immich=replace(profile.definition.immich, fix_datetime_after_upload=False),
+        ),
+    )
     assert profile.definition.immich.fix_datetime_after_upload is False
     volume = a_volume(db, (profile.profile_id, profile.revision_id))
     rel = "library/my-canon/DCIM/100CANON/IMG_0001.JPG"
@@ -467,7 +534,10 @@ def test_a_profile_that_never_writes_the_remote_datetime_leaves_records_complete
 
     outcome = run(db, data_root, profile)
 
-    assert captured(db, media)["captured_at"] == "2026-02-03T04:05:06+00:00"
+    # timestamp（force_offset）は変えていないので壁時計はそのまま +09:00。
+    # 変えたのは immich.fix_datetime_after_upload だけ —— それでも requeue
+    # されないことを確かめるのがこのテストの主旨。
+    assert captured(db, media)["captured_at"] == "2026-02-03T04:05:06+09:00"
     assert (
         db.execute("SELECT state FROM upload_record WHERE id = ?", (record,)).fetchone()[0]
         == "complete"
@@ -622,7 +692,7 @@ def test_exif_is_not_read_for_a_video(dji, db, data_root, monkeypatch):
         profile.definition.slug,
         replace(
             profile.definition,
-            timestamp=replace(profile.definition.timestamp, source="exif"),
+            timestamp=replace(profile.definition.timestamp, source=("exif", "mtime")),
         ),
     )
     calls = []

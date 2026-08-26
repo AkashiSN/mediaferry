@@ -18,6 +18,7 @@ from ..clock import now_iso
 from ..core.profiles.model import (
     PROFILE_SCHEMA_VERSION,
     ProfileDefinition,
+    ProfileInvalid,
     definition_to_json,
     load_builtin_definitions,
     parse_definition,
@@ -278,6 +279,12 @@ def _to_ref(row: sqlite3.Row) -> ProfileRef:
     )
 
 
+# `_stack_rule_of` が「読めなかった」ことを表す番兵。**`StackRule` とは
+# 絶対に等しくならない。** 旧形の定義は現行スキーマの語彙では規則を復元でき
+# ないので、「読めない」＝「いまの規則と同じとは言えない」＝「変わった」に倒す。
+_UNREADABLE_STACK_RULE = object()
+
+
 def _stack_rule_of(definition_json: str) -> object:
     """定義から `stack` 節を**正規化して**取り出す.
 
@@ -285,5 +292,15 @@ def _stack_rule_of(definition_json: str) -> object:
     `stack` キーが無く（省略時は `STACK_DISABLED` として読む）、新しい JSON は
     正規形で `{"enabled": false, ...}` を持つ。生で比べると**規則が実質変わって
     いないのに全件を戻す**ことになる。
+
+    渡される旧リビジョンの JSON は、現行スキーマでは読めない形（例:
+    `timestamp.source` が配列でなく単一の文字列）を持つことがある。ここは
+    `_publish_revision` が新旧を比べるために呼ぶ経路で、比べられずに
+    `ProfileInvalid` を上へ通すと `sync_builtins` ごと lifespan で止まる。
+    読めない定義は番兵を返し、「規則が変わった」側へ倒す
+    （見送り記録の再評価に戻すだけなので、壊すものはない）。
     """
-    return parse_definition(json.loads(definition_json)).stack
+    try:
+        return parse_definition(json.loads(definition_json)).stack
+    except ProfileInvalid:
+        return _UNREADABLE_STACK_RULE

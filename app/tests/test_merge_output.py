@@ -4,7 +4,7 @@ import pytest
 
 from mediaferry.core.merge.grouping import GIB, MergePart
 from mediaferry.core.merge.output import MergeOutputUndefined, merged_rel_path
-from mediaferry.core.profiles.model import KeepStreams, MergeRule
+from mediaferry.core.profiles.model import KeepStreams, MergeRule, load_builtin_definitions
 
 
 def a_rule(**overrides):
@@ -20,10 +20,10 @@ def a_rule(**overrides):
     return MergeRule(**values)
 
 
-def a_part(name, *, captured_at=None, directory="DCIM/DJI_001"):
+def a_part(name, *, captured_at=None, directory="DCIM/DJI_001", profile="dji-osmo"):
     return MergePart(
         media_file_id="id",
-        rel_path=f"library/dji-osmo/{directory}/{name}",
+        rel_path=f"library/{profile}/{directory}/{name}",
         sha1="sha",
         captured_at=captured_at or datetime(2026, 8, 17, 14, 30, 0, tzinfo=UTC),
         duration_seconds=1500.0,
@@ -113,3 +113,39 @@ def test_a_rendered_backslash_is_refused():
     # 「/」の判定だけをすり抜ける値。UnsafePath ではなく MergeOutputUndefined で返す。
     with pytest.raises(MergeOutputUndefined):
         merged_rel_path("dji-osmo", a_rule(output_name="DJI_{first_seq}\\x.MP4"), MEMBERS)
+
+
+# ----------------------------------------------------------------------
+# canon-eos（Task 11）
+
+
+def canon_rule():
+    """出荷する `canon-eos.yaml` の結合規則をそのまま読む.
+
+    合成した `MergeRule` を使うと、YAML の値を変えてもこのテストは落ちない。
+    """
+    return {d.slug: d for d in load_builtin_definitions()}["canon-eos"].merge
+
+
+def test_the_canon_output_name_carries_the_sequence_range():
+    """`MVI_0007` と `MVI_0008` から `0007-0008` を組む."""
+    rule = canon_rule()
+    name = merged_rel_path(
+        "canon-eos",
+        rule,
+        [
+            a_part(
+                "MVI_0007.MOV",
+                captured_at=datetime(2026, 8, 26, 12, 37, 13, tzinfo=UTC),
+                directory="DCIM/100CANON",
+                profile="canon-eos",
+            ),
+            a_part(
+                "MVI_0008.MOV",
+                captured_at=datetime(2026, 8, 26, 12, 44, 22, tzinfo=UTC),
+                directory="DCIM/100CANON",
+                profile="canon-eos",
+            ),
+        ],
+    )
+    assert name.endswith("MVI_20260826123713_0007-0008_MERGED.MOV")

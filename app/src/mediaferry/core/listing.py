@@ -1,7 +1,7 @@
 """一覧の共通の判断（§11 / §13）.
 
 **ページの境目で行が重複・欠落しないこと**と、**1 回の要求で全件を引かせないこと**を
-ここに閉じる。並びの tie-break は SQL 側（`captured_at DESC, id DESC`）。
+ここに閉じる。並びの tie-break は SQL 側（`captured_at DESC, rel_path DESC`）。
 """
 
 from __future__ import annotations

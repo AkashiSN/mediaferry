@@ -226,13 +226,15 @@ scan:
   roots: ["DCIM", "PANORAMA"]
   extensions: [MP4, JPG]          # .LRF はここに無いので除外される
 timestamp:
-  source: filename                # filename | exif | mtime
+  # 先頭から順に試し、値が出た時点で止まる。**末尾は mtime でなければならない**
+  # （mtime だけが必ず値を返すので、算出が全域関数であり続ける）
+  source: [filename, mtime]       # filename | exif | container | mtime
   pattern: '^DJI_(?P<ts>\d{14})_'
   format: "%Y%m%d%H%M%S"
-  fallback: mtime                 # pattern に当たらないファイル（PANO_0001.JPG 等）
   timezone_policy: force_offset   # none | force_offset
   timezone: null                  # force_offset なら設定必須（§12.2）
   mtime_semantics: instant        # wall_clock（既定）| instant
+  container_semantics: wall_clock # wall_clock（既定）| instant
 merge:
   enabled: true
   tolerance_seconds: 5
@@ -285,11 +287,13 @@ GUI での編集は既存定義を書き換えず、**新しいリビジョン�
 `timezone_policy` は現行スクリプトの `--fix-timezone` を一般化したもの。
 
 - `none`: 撮影日時にアプリは介入しない。EXIF や埋め込みメタデータを Immich に委ねる。
-  Canon はこちら（EXIF にローカル時刻を書くため補正が不要）。
-- `force_offset`: ファイル名または EXIF から得た**壁時計**に `timezone` のオフセットを
-  付与して `dateTimeOriginal` を書き戻す。DJI が MP4 の `creation_time` を UTC で書きつつ
-  オフセットも GPS も書かないため、Immich が撮影地の TZ を判定できず `localDateTime` を
-  UTC の壁時計のまま採用してしまう問題への対処。
+  機種が分からない `generic-dcim` はこちら。
+- `force_offset`: 連鎖から得た**壁時計**に `timezone` のオフセットを付与して
+  `dateTimeOriginal` を書き戻す。DJI も Canon もこちら —— DJI は MP4 の `creation_time` を
+  UTC で書きつつオフセットも GPS も書かず、Canon は**現地の壁時計に `Z` を付けて書く**。
+  どちらも Immich が撮影地の TZ を判定できず、`localDateTime` を UTC の壁時計のまま
+  採用してしまう（Canon は 9 時間ずれるのを実測。
+  [`history/hardware-verification.md`](history/hardware-verification.md)）。
   `none` のときは描画に使う TZ が無いので、UTC 表現の壁時計をそのまま採る。
 
 `mtime_semantics` は **mtime が何を表すか**を宣言する。**媒体の性質であって、値の形からは
@@ -303,7 +307,19 @@ GUI での編集は既存定義を書き換えず、**新しいリビジョン�
   付けた値をそのまま使い、**オフセットを付け直さない**（naive の壁時計へ落とすと DST の
   戻りで 1 時間ずれる）
 
-下の「曖昧・存在しない壁時計」の扱いは、ファイル名と EXIF、それに `wall_clock` の mtime
+`container_semantics` は **器（QuickTime の `format.tags.creation_time`）が何を表すか**を
+同じ形で宣言する。**器が申告した文字列は解釈せずそのまま `media_file.container_wall` に持ち、
+意味はプロファイルが決める** —— そうしておけば、意味を読み違えていても再計算で直せる。
+
+- `wall_clock`（既定）: 現地の壁時計。**`Z` が付いていても信じない。**
+  Canon はこちら（実測）—— 桁だけを壁時計として採る
+- `instant`: 真の瞬間。タイムゾーン付きの値をそのまま使う
+
+**器が指すのは録画の開始時刻**で、mtime（録画の終了時刻）とは別物である。分割された
+片は開始が別々で、mtime は 2 つとも同じになる。QuickTime の epoch
+（`1904-01-01T00:00:00`）は「書かれていない」と同義なので、値が無いものとして次へ落とす。
+
+下の「曖昧・存在しない壁時計」の扱いは、ファイル名と EXIF、それに `wall_clock` の mtime と器
 —— **壁時計から始めた値**だけに当たる。
 
 **この宣言は 3 か所に効き、3 つは連動する**（片方だけ別の意味で読むと、`library/` と
@@ -312,7 +328,10 @@ GUI での編集は既存定義を書き換えず、**新しいリビジョン�
 結合出力の mtime（`merger._recording_end_ns`）。
 
 `force_offset` かつ `timezone` が未解決（プロファイルにも `MEDIAFERRY_DEFAULT_TIMEZONE`
-にも値が無い）の場合は**起動時エラー**とし、取り込みを一切開始しない（§12.2）。
+にも値が無い）の場合は、**取り込みを開始せず設定画面へ誘導する**（§12.2）。判定は
+`importer.run` の前検査で、**1 バイトも copy する前に**ジョブごと失敗させる。
+`canon-eos` も `force_offset` なので、**タイムゾーンが入っていないと Canon の取り込みは
+1 件も通らない**。
 
 DST の境界で壁時計が曖昧（1 時間が 2 回ある）または存在しない場合は、
 それぞれ「先に来る方を採用」「1 時間後ろへずらす」と決め、`captured_at_note` に記録する。
@@ -550,7 +569,7 @@ quick_fingerprint = sha1( b"mfq" ‖ u8(version) ‖ u64le(size) ‖ w[0] ‖ w[
 | テーブル | 主なカラム |
 | --- | --- |
 | `artifact_staging` | `id`, `kind`(import/merge), `job_id`, `lease_token`, `state`, `staging_rel_path`, `final_rel_path`, `expected_size`, `content_sha1`, `metadata_json`, `source_entry_id`, `merge_group_id`, `created_at`, `updated_at` |
-| `media_file` | `id`, `role`(original/derived), `profile_id`, `profile_revision_id`, `rel_path` UNIQUE, `size_bytes`, `mtime_ns`, `sha1`, `kind`(photo/video), `captured_at`, `captured_at_source`, `captured_at_tz`, `captured_at_note`, `duration_seconds`, `probe_state`, `missing_at`, `created_at` |
+| `media_file` | `id`, `role`(original/derived), `profile_id`, `profile_revision_id`, `rel_path` UNIQUE, `size_bytes`, `mtime_ns`, `sha1`, `kind`(photo/video), `captured_at`, `captured_at_source`(filename/exif/**container**/mtime), `captured_at_tz`, `captured_at_note`, **`container_wall`**（ffprobe が返した `creation_time` を**解釈せず生のまま**持つ。意味は `container_semantics` が決めるので、読み違えても再計算で直せる）, `duration_seconds`, `probe_state`, `missing_at`, `captured_at_revision_id`, `created_at` |
 
 `artifact_staging` は **import と merge の両方**が使う。派生物の公開に
 取り込みと同じ crash protocol を適用するためで、これがないと結合物だけが
@@ -1653,7 +1672,7 @@ claim では **(a) を必ず評価し、`selection_rule` に対応する現在�
 | POST | `/volumes/{id}/scan` | スキャン |
 | POST | `/volumes/{id}/import` | 取り込みジョブを開始 |
 | POST | `/volumes/{id}/close` | dirfd を解放しアンマウントする |
-| GET | `/media` | 一覧。`status` / `profile` / `kind` / `from` / `to` / `q` / `page` / `collapse` / `stack`。`collapse=stack` は RAW+JPEG の組を 1 行に畳み、主の行に `stack.members`（`id` / `rel_path` / `size_bytes`）を添える。**曖昧な組は畳まない**（全員が別々の行として残り、`stack` は付かない）。`total` は畳んだ後の件数。**`stack=members` は隠さず、組に属する行すべて（主も従も）に同じ `stack` を添えるだけ** —— 行は減らず `total` も変わらない。**送る画面はこちらを使う**: `collapse=stack` だと未送信の従（CR2）が主の陰に隠れ、返った行をそのまま送る画面では**その 1 枚が送られない**（Immich でスタックも組まれない）。両方来たときは `collapse=stack` が勝つ（隠す）—— 片方だけを 400 にすると既存の呼び出し元が壊れる |
+| GET | `/media` | 一覧。`status` / `profile` / `kind` / `from` / `to` / `q` / `page` / `collapse` / `stack`。**並びは `captured_at DESC, rel_path DESC`** —— 同じ撮影日時の行は現実に起きる（カメラの時計が止まれば連続して起きる）ので、tie-break が決まっていないとページの境目で重複・欠落する。**`rel_path` は `UNIQUE` なので単独で足りる**。`id` は乱数なので、同じ撮影日時の並びに意味が出ない。`db/selection.py` の 3 つの断片（`_ORIGINALS` / `_DERIVED` / `_MEMBERS_OF_UNMERGED`）も同じ並びで揃える —— `limit` で切るので、順序が決まらないとどれが候補に入るかが実行ごとに変わる。`collapse=stack` は RAW+JPEG の組を 1 行に畳み、主の行に `stack.members`（`id` / `rel_path` / `size_bytes`）を添える。**曖昧な組は畳まない**（全員が別々の行として残り、`stack` は付かない）。`total` は畳んだ後の件数。**`stack=members` は隠さず、組に属する行すべて（主も従も）に同じ `stack` を添えるだけ** —— 行は減らず `total` も変わらない。**送る画面はこちらを使う**: `collapse=stack` だと未送信の従（CR2）が主の陰に隠れ、返った行をそのまま送る画面では**その 1 枚が送られない**（Immich でスタックも組まれない）。両方来たときは `collapse=stack` が勝つ（隠す）—— 片方だけを 400 にすると既存の呼び出し元が壊れる |
 | GET | `/media/{id}` | 詳細。**`stack`** も返す（一覧と同じ `_members_of` を通す。組でなければ `null`、曖昧な組でも `null`） |
 | GET | `/media/{id}/thumbnail` | サムネイル（`at` で秒指定。10 秒刻みに丸め、1 本あたり 32 枚まで） |
 | GET | `/merge-groups` | 結合グループ一覧。**既定はいま操作できるものだけ**（`superseded_by_id IS NULL` かつ `status <> 'skipped'`）。履歴は `?status=skipped` で取る。**置き換えられた行は `status` を指定しても出さない**。各行に **`profile_changed`**（作ったときからカメラの種類の版が上がったか）を添える —— 上がっていると `group_is_current` が必ず断るので、画面は採用のボタンを出さない |

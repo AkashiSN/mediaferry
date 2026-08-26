@@ -29,6 +29,7 @@ GIB = 1024**3
 _RESOLUTION_SECONDS = {
     "filename": 1.0,  # プロファイルの format は秒までしか持たない
     "exif": 1.0,  # DateTimeOriginal は秒
+    "container": 1.0,  # QuickTime の creation_time は秒
 }
 # mtime は秒未満まで持つ（`datetime.fromtimestamp(mtime_ns / 1e9)`）。丸めの
 # 逃げ道を与える理由が無いので、既定は 0（負の差はそのまま重なりとして扱う）。

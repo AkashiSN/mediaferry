@@ -21,10 +21,11 @@ def api_db(client, data_root):
 
 
 def test_detecting_enqueues_one_job_per_profile(client):
+    """結合を持つビルトインの数だけジョブが立つ（canon-eos と dji-osmo）."""
     response = client.post("/api/merge-groups/detect")
     assert response.status_code == 200
     jobs = response.json()["jobs"]
-    assert [entry["profile_slug"] for entry in jobs] == ["dji-osmo"]
+    assert [entry["profile_slug"] for entry in jobs] == ["canon-eos", "dji-osmo"]
 
 
 def test_detecting_an_unknown_profile_is_a_404(client):
@@ -163,6 +164,34 @@ def test_the_selectable_list_reports_when_it_was_truncated(client, api_db):
     assert body["truncated"] is True
 
 
+def test_selectable_orders_by_name_within_the_same_time(client, api_db):
+    """`GET /uploads/selectable` は `limit` で切るので、境界が揺れると候補が
+    出たり出なかったりする（`db/selection.py` の `_ORIGINALS` の tie-break）.
+
+    8 行を全部返させ、`rel_path` の降順**全体**を断言する —— 挿入順を名前と
+    無関係に混ぜてあるので、tie-break が無いと rowid の並びに引きずられて
+    8 行がたまたま一致する確率は 1/8!（= 1/40320）以下になる。`id` は
+    `rel_path` の大小と逆順に固定し、`id DESC` への先祖返りも検出する。
+    """
+    profile = ProfileRegistry(api_db).current("dji-osmo")
+    same = "2026-08-26T12:44:45+00:00"
+    names = [f"MVI_{index:04d}.MOV" for index in range(1, 9)]
+    id_by_name = {name: f"{rank:x}".rjust(32, "0") for rank, name in enumerate(reversed(names))}
+    # **挿入順は名前の大小と無関係に混ぜる。** 昇順や降順のまま入れると、
+    # tie-break の無いクエリが rowid 由来の並びで偶然「全順序」と一致してしまう。
+    insertion_order = [names[i] for i in (4, 1, 7, 0, 5, 2, 6, 3)]
+    for name in insertion_order:
+        a_media_file(
+            api_db,
+            (profile.profile_id, profile.revision_id),
+            rel_path=f"library/dji-osmo/DCIM/{name}",
+            captured_at=same,
+            id=id_by_name[name],
+        )
+    got = client.get(f"/api/uploads/selectable?limit={len(names)}").json()["selectable"]
+    assert [item["rel_path"].rsplit("/", 1)[-1] for item in got] == sorted(names, reverse=True)
+
+
 def test_profiles_that_do_not_merge_are_not_detected(client, api_db):
     """`archived` ではなく `merge.enabled = false` で確かめる.
 
@@ -193,7 +222,9 @@ def test_profiles_that_do_not_merge_are_not_detected(client, api_db):
     )
 
     jobs = client.post("/api/merge-groups/detect").json()["jobs"]
-    assert [entry["profile_slug"] for entry in jobs] == ["dji-osmo"]
+    # `no-merge`（merge.enabled = false）は入らない。canon-eos と dji-osmo は
+    # どちらも merge.enabled = true なので両方入る。
+    assert [entry["profile_slug"] for entry in jobs] == ["canon-eos", "dji-osmo"]
 
 
 def test_a_group_can_be_regrouped_by_hand(client, api_db):

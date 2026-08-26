@@ -121,7 +121,7 @@ class Recomputer:
         return list(
             self._conn.execute(
                 "SELECT m.id, m.rel_path, m.mtime_ns, m.captured_at, m.captured_at_source,"
-                " m.captured_at_tz, m.captured_at_note,"
+                " m.captured_at_tz, m.captured_at_note, m.container_wall,"
                 " (SELECT s.rel_path FROM source_entry s"
                 "   WHERE s.media_file_id = m.id AND s.state = 'published'"
                 "   ORDER BY s.observed_at, s.id LIMIT 1) AS source_rel_path"
@@ -170,6 +170,8 @@ class Recomputer:
             row["mtime_ns"],
             self._default_timezone,
             exif_wall=self._exif_wall(ctx, row, source_rel, profile),
+            # **再 probe しない。** 取り込みで生の文字列を持っている。
+            container_wall=row["container_wall"],
         )
 
     def _exif_wall(
@@ -187,7 +189,7 @@ class Recomputer:
         2 つのスレッドが同時に使うことになる。
         """
         extension = PurePosixPath(source_rel).suffix.lstrip(".").upper()
-        if profile.definition.timestamp.source != "exif" or extension not in PHOTO_EXTENSIONS:
+        if "exif" not in profile.definition.timestamp.source or extension not in PHOTO_EXTENSIONS:
             return None
         path = self._data_root / row["rel_path"]
         return with_lease_pulse(ctx, lambda: read_datetime_original(path))

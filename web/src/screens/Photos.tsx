@@ -103,7 +103,7 @@ function buildMediaQuery(
 }
 
 /** `captured_at` の日付部分でまとめる。**並びは API の順を保つ**
- * （`captured_at DESC, id DESC`）。撮影日時が読めない行も、専用のまとまりに残す
+ * （`captured_at DESC, rel_path DESC`）。撮影日時が読めない行も、専用のまとまりに残す
  * —— 落とすと画面の件数と API の `total` が食い違う。 */
 export function groupByDate(media: Media[]): { label: string; items: Media[] }[] {
   const groups: { label: string; items: Media[] }[] = [];
@@ -290,7 +290,7 @@ export function PhotosScreen() {
    * 「シフトで選び、要らないものを個別に外す」の方が手数が少なく、押した
    * 結果が予想しやすい。
    *
-   * **並びは `rows`**（API の `captured_at DESC, id DESC` そのまま）。日付の
+   * **並びは `rows`**（API の `captured_at DESC, rel_path DESC` そのまま）。日付の
    * まとまりはまたぐ —— 利用者が見ている並びは 1 本の流れで、まとまりは
    * 見出しにすぎない。
    */

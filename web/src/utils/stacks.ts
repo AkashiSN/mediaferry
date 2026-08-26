@@ -43,7 +43,7 @@ export function stackLabel(members: { rel_path: string }[]): string | null {
  * ファイルを数え直すことになる（`docs/history/phase12-design.md` の 2）。
  *
  * **並びは入力順を保つ**（最初に現れた行の位置にタイルを置く）。API の並び
- * （`captured_at DESC, id DESC`）を崩すと、日付のまとまりが割れる。
+ * （`captured_at DESC, rel_path DESC`）を崩すと、日付のまとまりが割れる。
  */
 export function groupIntoStacks<T extends StackRow>(rows: T[]): StackTile<T>[] {
   const byId = new Map(rows.map((row) => [row.id, row]));

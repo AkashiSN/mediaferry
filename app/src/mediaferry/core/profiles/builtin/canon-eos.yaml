@@ -19,22 +19,28 @@ scan:
   roots: ["DCIM"]
   extensions: ["JPG", "CR2", "MOV"]
 timestamp:
-  # ファイル名に時刻が無い（IMG_1234 は連番）。JPG は EXIF から、
-  # MOV は EXIF を持たないので mtime へ落ちる。
-  source: exif
+  # 写真は EXIF、動画は器（QuickTime の creation_time）、どちらも無ければ mtime。
+  source: [exif, container, mtime]
   pattern: null
   format: null
-  fallback: mtime
-  # EXIF にローカル時刻が入るので補正しない（§6）。
-  timezone_policy: none
+  # **Canon は creation_time に現地の壁時計を書きながら Z を付ける。**
+  # 真に受けると 9 時間ずれる（実測）。
+  container_semantics: wall_clock
+  # Immich は creation_time の Z を素直に UTC と読むので、撮影地の TZ を
+  # 判定できない。壁時計にオフセットを付けて書き戻す。
+  timezone_policy: force_offset
+  # 地域固定の値は持たない。MEDIAFERRY_DEFAULT_TIMEZONE か画面で与える。
   timezone: null
 merge:
-  # **無効。** 70D の 4GB 分割が連番から判別できるかを実データ無しに確かめ
-  # られない。誤結合は公開済みの media_file を取り残すので高くつく。
-  # 手動結合（Phase 4）に委ねる。実カードで確かめてから有効化する。
-  enabled: false
+  enabled: true
   tolerance_seconds: 5
-  min_part_size_gib: 4
+  # **4GB 分割の実測は 3.9675 GiB。** 4 では弾かれる。別録画は 3 GiB にも
+  # 届かないので、区別は保たれる。
+  min_part_size_gib: 3
+  sequence_pattern: '^MVI_(?P<seq>\d{4})$'
+  # **器は QuickTime のまま。** 音声が PCM なので、MP4 は ffmpeg の版によって
+  # 弾かれる（ipcm を持つのは新しい版だけ）。
+  output_name: "MVI_{ts}_{first_seq}-{last_seq}_MERGED.MOV"
   keep_streams:
     video: primary
     audio: all
@@ -48,5 +54,4 @@ stack:
 immich:
   tags: ["Canon EOS"]
   tag_pre_existing: true
-  # timezone_policy が none なので、補正する対象が無い。
-  fix_datetime_after_upload: false
+  fix_datetime_after_upload: true

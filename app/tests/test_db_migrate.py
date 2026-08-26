@@ -549,10 +549,13 @@ def test_the_recompute_keyset_is_bounded_by_the_profile(tmp_path):
 def test_a_profile_filtered_listing_does_not_sort_the_whole_profile(tmp_path):
     """`0014`。`0013` は一覧の実行計画を退行させる.
 
-    一覧は `captured_at DESC, id DESC` 固定で、ページは 50 件（§11）。
+    一覧は `captured_at DESC, rel_path DESC` 固定で、ページは 50 件（§11）。
     `media_file_captured_at` を辿れば先頭ページで止まれるのに、`0013` の
     `(profile_id, role, rel_path)` が選ばれると**そのプロファイルの全行を拾って
     から並べ替える**。プロファイルが大半を占める通常の構成ほど悪化する。
+
+    **`media_file_listing`（`0026`）は `rel_path DESC` で終わる**ので、`ORDER BY`
+    と索引がちょうど噛み合う。一時ソートは一切要らない。
     """
     # **一覧が実際に組み立てる WHERE を使う。** 問い合わせを手で書き写すと、
     # 絞り込みの形（`IN` か `=` か）を変えても試験が落ちない。
@@ -576,12 +579,17 @@ def test_a_profile_filtered_listing_does_not_sort_the_whole_profile(tmp_path):
         for row in conn.execute(
             "EXPLAIN QUERY PLAN"  # noqa: S608 - 値は params で渡す
             f" SELECT m.* FROM media_file m WHERE {clause}"
-            " ORDER BY m.captured_at DESC, m.id DESC LIMIT ? OFFSET ?",
+            " ORDER BY m.captured_at DESC, m.rel_path DESC LIMIT ? OFFSET ?",
             (*params, 50, 0),
         )
     )
     conn.close()
 
+    assert "media_file_listing" in plan, plan
+    # 索引が `ORDER BY` と同じ並び（`captured_at DESC, rel_path DESC`）で終わるので、
+    # tie-break も含めて一時ソートが一切要らない。全件を拾ってから並べ替える形
+    # （`FOR ORDER BY`）にも、tie-break だけを一時 B-tree に落とす形
+    # （`FOR LAST TERM OF ORDER BY`）にも戻っていないことを見る。
     assert "TEMP B-TREE" not in plan, plan
 
 
@@ -590,16 +598,20 @@ def test_a_role_filtered_listing_does_not_scan_the_capture_time_index(tmp_path):
 
     `derived` は `original` に比べて桁で少ない。`captured_at` 側の索引を辿ると、
     `LIMIT` を満たすまでに何行 `role` を確かめるかが読めない（実測: original
-    60,000 行 / derived 200 行で 55〜66 ms）。`(captured_at DESC, id DESC)
+    60,000 行 / derived 200 行で 55〜66 ms）。`(captured_at DESC, rel_path DESC)
     WHERE role = 'derived'` の部分索引を辿れば `role = 'derived'` の行だけを
     最初から並び順に読める。
 
     **`0022` の全体索引ではなく `0023` の部分索引を見る。** `0022`
-    （`role, captured_at DESC, id DESC`）は role='original' 側にも使える形で、
+    （`role, captured_at DESC, rel_path DESC`）は role='original' 側にも使える形で、
     `db/selection.py` の `SENDABLE_CLAUSE` の OR 節の両方の枝から拾われて
     `MULTI-INDEX OR` に化け、`GET /media?status=unsent&…` を退行させた
     （`test_the_unsent_listing_does_not_multi_index_or`）。`0023` は
     role='derived' だけの部分索引に差し替えることでその退行を塞ぐ。
+
+    **`media_file_derived_listing`（`0026`）は `rel_path DESC` で終わる**ので、
+    `ORDER BY` とちょうど噛み合う。`role = 'derived'` の行だけを `captured_at` の
+    並びで最初から読め、tie-break を含めて一時ソートは一切要らない。
     """
     from mediaferry.api.routes_media import _filters
 
@@ -621,7 +633,7 @@ def test_a_role_filtered_listing_does_not_scan_the_capture_time_index(tmp_path):
         for row in conn.execute(
             "EXPLAIN QUERY PLAN"  # noqa: S608 - 値は params で渡す
             f" SELECT m.* FROM media_file m WHERE {clause}"
-            " ORDER BY m.captured_at DESC, m.id DESC LIMIT ? OFFSET ?",
+            " ORDER BY m.captured_at DESC, m.rel_path DESC LIMIT ? OFFSET ?",
             (*params, 50, 0),
         )
     )
@@ -637,11 +649,11 @@ def test_the_unsent_listing_does_not_multi_index_or(tmp_path):
     `db/selection.py` の `SENDABLE_CLAUSE` は
     `(m.role = 'original' AND ...) OR (m.role = 'derived' AND ...)` という形で、
     **両方の枝が `role` の等値をリテラルで持つ**。`0022`
-    （`role, captured_at DESC, id DESC`）はどちらの枝からも使えたため、SQLite が
-    `MULTI-INDEX OR` を選んでいた。OR の結果は `captured_at` の並び順に出ないので
-    最後に全件ソートが入り、`GET /media?status=unsent&destination_id=…` が
-    退行した（実測: original 60,000 行 / derived 200 行で中央値 0.58 ms → 74 ms。
-    詳細は `.superpowers/sdd/phase9-plan/task-3-report.md`）。
+    （`role, captured_at DESC, rel_path DESC`）はどちらの枝からも使えたため、
+    SQLite が `MULTI-INDEX OR` を選んでいた。OR の結果は `captured_at` の並び順に
+    出ないので最後に全件ソートが入り、`GET /media?status=unsent&destination_id=…`
+    が退行した（実測: original 60,000 行 / derived 200 行で中央値 0.58 ms →
+    74 ms。詳細は `.superpowers/sdd/phase9-plan/task-3-report.md`）。
 
     `0023` は role='derived' だけの部分索引に差し替えたので、role='original' の
     枝には索引が無くなり、`MULTI-INDEX OR` の対象から外れる —— 既存の経路
@@ -669,7 +681,7 @@ def test_the_unsent_listing_does_not_multi_index_or(tmp_path):
         for row in conn.execute(
             "EXPLAIN QUERY PLAN"  # noqa: S608 - 値は params で渡す
             f" SELECT m.* FROM media_file m WHERE {clause}"
-            " ORDER BY m.captured_at DESC, m.id DESC LIMIT ? OFFSET ?",
+            " ORDER BY m.captured_at DESC, m.rel_path DESC LIMIT ? OFFSET ?",
             (*params, 50, 0),
         )
     )
@@ -875,4 +887,195 @@ def test_existing_skips_go_back_to_unevaluated(tmp_path):
     assert rows[stacked]["updated_at"] == before
     # 未評価の行は書き換えない（同じ値を書くだけでも `updated_at` が動く）。
     assert rows[unevaluated]["updated_at"] == before
+    conn.close()
+
+
+def _fk_fixture(folder):
+    """親子 1 組を作る版。子が親を参照している."""
+    (folder / "0001_base.sql").write_text(
+        "CREATE TABLE parent (id TEXT PRIMARY KEY, tag TEXT NOT NULL"
+        "   CHECK (tag IN ('a', 'b')));\n"
+        "CREATE TABLE child (id TEXT PRIMARY KEY,"
+        "   parent_id TEXT NOT NULL REFERENCES parent(id) ON DELETE RESTRICT);\n"
+        "INSERT INTO parent VALUES ('p1', 'a');\n"
+        "INSERT INTO child VALUES ('c1', 'p1');\n",
+        encoding="utf-8",
+    )
+
+
+_REBUILD = (
+    "CREATE TABLE parent_new (id TEXT PRIMARY KEY, tag TEXT NOT NULL"
+    "   CHECK (tag IN ('a', 'b', 'c')));\n"
+    "INSERT INTO parent_new SELECT id, tag FROM parent;\n"
+    "DROP TABLE parent;\n"
+    "ALTER TABLE parent_new RENAME TO parent;\n"
+)
+
+
+def test_rebuilding_a_referenced_table_fails_without_the_marker(tmp_path, monkeypatch):
+    """**目印が無ければ、いままでどおり外部キーが効いている.**
+
+    これが通らないと、次のテストが「目印のおかげ」なのか「もともと通る」のかが
+    分からない。
+    """
+    from mediaferry.db import migrate
+
+    folder = tmp_path / "m"
+    folder.mkdir()
+    _fk_fixture(folder)
+    (folder / "0002_rebuild.sql").write_text(_REBUILD, encoding="utf-8")
+    monkeypatch.setattr(migrate, "MIGRATIONS_DIR", folder)
+    conn = Database(tmp_path / "db.sqlite3").connect()
+    with pytest.raises(sqlite3.IntegrityError):
+        apply_migrations(conn)
+    conn.close()
+
+
+def test_a_migration_can_declare_that_foreign_keys_must_be_off(tmp_path, monkeypatch):
+    """**外部キーを持つ表は、FK を外さないと作り直せない.**
+
+    `PRAGMA foreign_keys` はトランザクションの中では黙って無視されるので、
+    移行ファイルの中からは外せない。runner が外側で切り替える。
+    """
+    from mediaferry.db import migrate
+
+    folder = tmp_path / "m"
+    folder.mkdir()
+    _fk_fixture(folder)
+    (folder / "0002_rebuild.sql").write_text(
+        "-- mediaferry:foreign-keys-off\n" + _REBUILD, encoding="utf-8"
+    )
+    monkeypatch.setattr(migrate, "MIGRATIONS_DIR", folder)
+    conn = Database(tmp_path / "db.sqlite3").connect()
+    assert apply_migrations(conn) == [1, 2]
+    # 子は残り、親は新しい CHECK を持ち、参照は壊れていない。
+    assert conn.execute("SELECT parent_id FROM child").fetchone()[0] == "p1"
+    conn.execute("INSERT INTO parent VALUES ('p2', 'c')")
+    assert conn.execute("PRAGMA foreign_key_check").fetchall() == []
+    # **適用のあと、外部キーは必ず戻っている。**
+    assert conn.execute("PRAGMA foreign_keys").fetchone()[0] == 1
+    conn.close()
+
+
+def test_a_migration_that_leaves_dangling_references_is_refused(tmp_path, monkeypatch):
+    """**外部キーを外すことを許す代わりに、適用後に必ず確かめる.**
+
+    SQLite 公式の 12 手順が最後に `PRAGMA foreign_key_check` を求めているのと
+    同じ手当て。これが無いと、目印を付けた版は壊れた参照を黙って残せる。
+    """
+    from mediaferry.db import migrate
+
+    folder = tmp_path / "m"
+    folder.mkdir()
+    _fk_fixture(folder)
+    (folder / "0002_rebuild.sql").write_text(
+        "-- mediaferry:foreign-keys-off\nDELETE FROM parent;\n",  # 子が孤児になる
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(migrate, "MIGRATIONS_DIR", folder)
+    conn = Database(tmp_path / "db.sqlite3").connect()
+    with pytest.raises(MigrationError, match="参照が壊れている"):
+        apply_migrations(conn)
+    assert conn.execute("PRAGMA foreign_keys").fetchone()[0] == 1
+    # **失敗した版は「適用済み」として記録されていない。**
+    # 検査が COMMIT より後だと、版の記録だけが確定済みで残ってしまう。
+    assert (
+        conn.execute("SELECT count(*) FROM schema_migration WHERE version = 2").fetchone()[0] == 0
+    )
+    # 記録が残っていないので、もう一度呼んでも黙って通らず、同じ失敗になる。
+    with pytest.raises(MigrationError, match="参照が壊れている"):
+        apply_migrations(conn)
+    conn.close()
+
+
+def test_a_marker_that_only_appears_mid_file_does_not_turn_off_foreign_keys(tmp_path, monkeypatch):
+    """**目印は先頭行だけを見る.** 本文の途中に同じ文字列（引用や説明文）が
+    現れても、外部キーは外れない。
+    """
+    from mediaferry.db import migrate
+
+    folder = tmp_path / "m"
+    folder.mkdir()
+    _fk_fixture(folder)
+    (folder / "0002_rebuild.sql").write_text(
+        "-- この版は、かつて -- mediaferry:foreign-keys-off を使っていた\n" + _REBUILD,
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(migrate, "MIGRATIONS_DIR", folder)
+    conn = Database(tmp_path / "db.sqlite3").connect()
+    with pytest.raises(sqlite3.IntegrityError):
+        apply_migrations(conn)
+    conn.close()
+
+
+def test_every_shipped_migration_leaves_the_references_intact(tmp_path):
+    """**外部キーを外して走る版があるので、全部流した後に必ず確かめる.**
+
+    `0026` は media_file を作り直す。子から参照されている表なので、手順を
+    1 つ間違えると参照が壊れたまま通る。
+    """
+    conn = Database(tmp_path / "db.sqlite3").connect()
+    apply_migrations(conn)
+    assert conn.execute("PRAGMA foreign_key_check").fetchall() == []
+    conn.close()
+
+
+def test_rows_survive_the_media_file_rebuild(tmp_path, monkeypatch):
+    """**作り直しは中身を運ぶ.** 列を足すために行を捨てない.
+
+    `missing_at` を持つ行を入れるのは、`INSERT ... SELECT` の列を 1 つでも
+    落としたら落ちるようにするため。
+    """
+    import shutil
+
+    from mediaferry.clock import now_iso
+    from mediaferry.db import migrate
+
+    from .test_schema_artifacts import a_media_file, a_merge_group
+    from .test_schema_sources import a_profile
+
+    original = migrate.MIGRATIONS_DIR
+    folder = tmp_path / "m"
+    folder.mkdir()
+    for path in sorted(original.glob("*.sql")):
+        if not path.name.startswith("0026"):
+            shutil.copy(path, folder / path.name)
+    monkeypatch.setattr(migrate, "MIGRATIONS_DIR", folder)
+
+    conn = Database(tmp_path / "db.sqlite3").connect()
+    apply_migrations(conn)
+    profile = a_profile(conn)
+    media_id = a_media_file(
+        conn,
+        profile,
+        rel_path="library/dji-osmo/DCIM/OLD.MP4",
+        captured_at_source="mtime",
+        missing_at=now_iso(),
+    )
+    # **他表から実際に参照させる。** media_file を参照する行が 1 つも無いと、
+    # 外部キーを外さずに DROP TABLE しても SQLite は文句を言わない
+    # （子に該当する行が無ければ、FK が有効でも DROP は通る）。footgun を
+    # 塞げているかは、この参照が生き残ることでしか確かめられない。
+    group_id = a_merge_group(conn, profile, digest="d1")
+    conn.execute("INSERT INTO merge_member VALUES (?, ?, 0, 1)", (group_id, media_id))
+    conn.commit()
+
+    # ここで初めて 0026 を持ち込み、当てる。
+    shutil.copy(original / "0026_media_file_container.sql", folder)
+    assert apply_migrations(conn) == [26]
+
+    row = conn.execute("SELECT * FROM media_file WHERE id = ?", (media_id,)).fetchone()
+    assert row["rel_path"] == "library/dji-osmo/DCIM/OLD.MP4"
+    assert row["captured_at_source"] == "mtime"
+    assert row["missing_at"] is not None
+    # 新しい列は既存行では空。値を捏造しない。
+    assert row["container_wall"] is None
+    # 参照していた行も、参照したまま生き残る。
+    assert (
+        conn.execute(
+            "SELECT media_file_id FROM merge_member WHERE merge_group_id = ?", (group_id,)
+        ).fetchone()[0]
+        == media_id
+    )
+    assert conn.execute("PRAGMA foreign_key_check").fetchall() == []
     conn.close()

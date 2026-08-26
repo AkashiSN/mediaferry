@@ -35,6 +35,7 @@ from ..core.merge.streams import (
     selected_streams,
     stream_signature,
     stream_summary,
+    ts_route_blockers,
 )
 from ..core.profiles.model import KeepStreams
 
@@ -131,8 +132,15 @@ class MergeRunner:
                 )
                 return MergeOutcome("concat", output, self.tool_version(), dropped)
             except MergeFailed as exc:
+                _refuse_ts_if_lossy(part_streams[0], keep)
                 note(f"concat demuxer に失敗した。TS 経由へ落とす: {exc}")
         else:
+            # **この枝は「パートごとにストリームの並びが違う」ことが前提。**
+            # 先頭だけを見ると、先頭に無く後続にだけある構成（例: 先頭が
+            # AAC、後続だけ PCM）で運べないと分からず、TS 経路が黙って
+            # 音を落とす。全パートを見る。
+            for streams in part_streams:
+                _refuse_ts_if_lossy(streams, keep)
             note("パート間でストリームの並びが違うので concat demuxer を使わない")
         output.unlink(missing_ok=True)
         dropped = self._ts_merge(
@@ -368,3 +376,15 @@ def _audio_bitstream(streams: Sequence[dict[str, Any]]) -> list[str]:
 def _tail(log_path: Path) -> str:
     text = log_path.read_text(encoding="utf-8", errors="replace").strip()
     return text[-LOG_TAIL_CHARS:]
+
+
+def _refuse_ts_if_lossy(streams: Sequence[dict[str, Any]], keep: KeepStreams) -> None:
+    """TS 経路が音を捨てるなら、走らせる前に諦める.
+
+    **運べないと分かっているものを、運べるか試してから諦める理由が無い。**
+    4 GB のパートを mpegts へ書き直すだけで数分かかる。
+    """
+    blockers = ts_route_blockers(streams, keep)
+    if blockers:
+        names = "・".join(str(b["codec_name"]) for b in blockers)
+        raise MergeFailed(f"TS 経路は {names} を運べないので結合できない")

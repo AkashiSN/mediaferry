@@ -274,6 +274,35 @@ def test_resume_after_the_staging_file_is_gone(setup, db, data_root):
     assert db.execute("SELECT state FROM artifact_staging").fetchone()["state"] == "published"
 
 
+def test_resume_reads_a_staged_row_that_predates_container_wall(setup, db, data_root):
+    """旧版が書いた `staged` 行には `container_wall` キーが無い（I2）.
+
+    旧版の publish が staged 以降で中断すると、その行の `metadata_json` は
+    キーごと欠く。新版の `resume` は `KeyError` を起こさず回収できる —— 器の
+    時刻を持たない版が書いた行なのだから、`None` が意味の上でも正しい値。
+    """
+    publisher, ctx, profile, volume_id = setup
+    entry_id = a_source_entry(db, volume_id)
+    publisher._checkpoint = _die_after(8)  # STEP_LINKED. staged のまま止める  # noqa: SLF001
+    with pytest.raises(PublishInterrupted):
+        publisher.publish(ctx, a_request(profile, entry_id), write_payload(b"payload"))
+    publisher._checkpoint = lambda step: None  # noqa: SLF001
+
+    row = db.execute("SELECT id, metadata_json FROM artifact_staging").fetchone()
+    metadata = json.loads(row["metadata_json"])
+    del metadata["container_wall"]
+    db.execute(
+        "UPDATE artifact_staging SET metadata_json = ? WHERE id = ?",
+        (json.dumps(metadata, ensure_ascii=False), row["id"]),
+    )
+
+    got = publisher.resume(row["id"])
+    media = db.execute(
+        "SELECT container_wall FROM media_file WHERE id = ?", (got.media_file_id,)
+    ).fetchone()
+    assert media["container_wall"] is None
+
+
 def test_resume_does_not_retry_names_it_already_rejected(setup, db, data_root, monkeypatch):
     """再開は現在の final_rel_path から続ける.
 
@@ -358,6 +387,20 @@ def test_the_staged_row_carries_everything_needed_to_resume(setup, db, data_root
     assert row["expected_size"] == 7
     assert row["content_sha1"]
     assert json.loads(row["metadata_json"])["kind"] == "video"
+
+
+def test_the_staged_row_carries_the_container_wall_key(setup, db, data_root):
+    """`_commit` は `metadata.get("container_wall")` で読む（I2）.
+
+    `.get` はキー名を間違えても永久に `None` のまま気づけない。stage した
+    直後の `metadata_json` にキー自体があることを固定し、書く側を締める。
+    """
+    publisher, ctx, profile, volume_id = setup
+    entry_id = a_source_entry(db, volume_id)
+    publisher.publish(ctx, a_request(profile, entry_id), write_payload(b"payload"))
+
+    row = db.execute("SELECT metadata_json FROM artifact_staging").fetchone()
+    assert "container_wall" in json.loads(row["metadata_json"])
 
 
 def test_the_published_file_keeps_the_source_mtime(setup, db, data_root):
@@ -733,7 +776,7 @@ def test_a_size_that_disagrees_with_the_disk_is_aborted(setup, data_root, db, mo
 
 
 def a_resolver(recorder, at="2026-01-02T03:04:05+09:00"):
-    def resolve(staging_abs):
+    def resolve(staging_abs, probe):
         recorder.append(staging_abs)
         return CapturedAt(at=datetime.fromisoformat(at), source="exif", tz="Asia/Tokyo", note=None)
 
@@ -794,7 +837,7 @@ def test_the_resolver_runs_between_verification_and_metadata(setup, db, monkeypa
 
     monkeypatch.setattr(ArtifactPublisher, "_checkpoint", recording)
 
-    def resolve(staging_abs):
+    def resolve(staging_abs, probe):
         trace.append("resolve")
         assert staging_abs.stat().st_size == 10, "書き終わる前に読んでいる"
         return CapturedAt(
@@ -837,3 +880,68 @@ def test_the_resolved_value_is_persisted_before_the_file_is_published(setup, db)
     assert metadata["captured_at_source"] == "exif"
     assert metadata["captured_at"].startswith("2026-01-02T03:04:05")
     assert got.media_file_id
+
+
+# ----------------------------------------------------------------------
+# probe が先、captured の解決が後（Task 6）
+#
+# 器の時刻（`container_wall`）は probe の結果にしか無い。captured を先に決める
+# 順序だと、`container` を宣言したプロファイルでも値が間に合わず、黙って
+# mtime へ落ちる。
+
+
+def _container_probe():
+    """器の時刻を持つ probe の結果を返す stub."""
+    return StubProbe(ProbeResult("video", 2.0, "ok", container_wall="2026-08-26T12:35:08.000000Z"))
+
+
+def test_the_probe_runs_before_the_captured_time_is_resolved(setup, db, data_root):
+    """**器の時刻は probe の結果からしか取れない.**
+
+    captured を先に決める順序だと、`container` を宣言したプロファイルで値が
+    間に合わず、黙って mtime へ落ちる。
+    """
+    _, ctx, profile, volume_id = setup
+    entry_id = a_source_entry(db, volume_id)
+    publisher = ArtifactPublisher(db, data_root, _container_probe())
+    seen: list[str | None] = []
+
+    def resolve(staging_abs, probe):
+        seen.append(probe.container_wall)
+        return CapturedAt(
+            at=datetime.fromisoformat("2026-08-26T12:35:08+00:00"),
+            source="container",
+            tz=None,
+            note=None,
+        )
+
+    publisher.publish(
+        ctx,
+        a_request(profile, entry_id, captured=None, resolve_captured=resolve),
+        write_payload(b"payload"),
+    )
+    assert seen == ["2026-08-26T12:35:08.000000Z"]
+
+
+def test_the_container_time_is_stored_verbatim(setup, db, data_root):
+    """再計算が再 probe せずに読み直せるように、生の文字列を持つ."""
+    _, ctx, profile, volume_id = setup
+    entry_id = a_source_entry(db, volume_id)
+    publisher = ArtifactPublisher(db, data_root, _container_probe())
+
+    def resolve(staging_abs, probe):
+        return CapturedAt(
+            at=datetime.fromisoformat("2026-08-26T12:35:08+00:00"),
+            source="container",
+            tz=None,
+            note=None,
+        )
+
+    got = publisher.publish(
+        ctx,
+        a_request(profile, entry_id, captured=None, resolve_captured=resolve),
+        write_payload(b"payload"),
+    )
+    row = db.execute("SELECT * FROM media_file WHERE id = ?", (got.media_file_id,)).fetchone()
+    assert row["container_wall"] == "2026-08-26T12:35:08.000000Z"
+    assert row["captured_at_source"] == "container"

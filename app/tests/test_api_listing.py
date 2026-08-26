@@ -1,7 +1,7 @@
 """一覧の絞り込みとページング（§11 / §13）.
 
 **並びを固定する。** 撮影日時だけで並べると、同じ時刻の行がページの境目で
-重複したり欠けたりする（`id` で tie-break する）。
+重複したり欠けたりする（`rel_path` で tie-break する）。
 """
 
 from __future__ import annotations
@@ -25,10 +25,16 @@ def ref(db):
 
 @pytest.fixture
 def library(db):
-    """撮影日時が同じ行を含むライブラリ."""
+    """撮影日時が同じ行を含むライブラリ.
+
+    同じ撮影日時になる先頭 3 行（index 0-2）は `id` を `rel_path` の大小と
+    逆順に固定する。`id` を `new_id()` の乱数任せにすると、`id DESC` への
+    先祖返りを 1/6 の確率で見逃す。
+    """
     profile = a_profile(db, slug="listing-test")
     ids = []
     for index in range(5):
+        over = {"id": f"{2 - index:x}".rjust(32, "0")} if index < 3 else {}
         ids.append(
             a_media_file(
                 db,
@@ -39,6 +45,7 @@ def library(db):
                 ),
                 kind="video" if index % 2 == 0 else "photo",
                 duration_seconds=1.5,
+                **over,
             )
         )
     return ids
@@ -87,13 +94,65 @@ def test_the_order_is_stable_across_pages(client, library):
 
 def test_rows_with_the_same_time_have_a_defined_order(client, library):
     """**同じ撮影日時の中の並びも決める。** 決めないと、実行計画が変わった日に
-    ページの境目で行が重複・欠落する（`id` の降順を約束する）."""
+    ページの境目で行が重複・欠落する（`rel_path` の降順を約束する）."""
     body = client.get(
         "/api/media?page=1&page_size=5&captured_to=2026-08-17T23:59:59%2B09:00"
     ).json()
 
-    ids = [row["id"] for row in body["media"]]
-    assert ids == sorted(ids, reverse=True)
+    rel_paths = [row["rel_path"] for row in body["media"]]
+    assert rel_paths == sorted(rel_paths, reverse=True)
+
+
+SAME = "2026-08-26T12:44:45+00:00"
+
+
+def _rows(db, names, captured_at=SAME):
+    """同じ撮影日時の行を、名前だけ変えて入れる.
+
+    **`id` と `rel_path` の大小をわざと逆にする。** `id` は `new_id()`（32 桁の
+    乱数 hex）なので、放っておくと `rel_path` を見ていないコードでも 5 割の
+    確率で通ってしまう。名前を昇順で渡すと、`id` は降順になるようにする。
+    """
+    profile = a_profile(db, slug="same-time-test")
+    for index, name in enumerate(names):
+        media_id = f"{len(names) - 1 - index:x}".rjust(32, "0")
+        a_media_file(
+            db, profile, rel_path=f"library/canon-eos/{name}", captured_at=captured_at, id=media_id
+        )
+
+
+def test_rows_with_the_same_time_are_ordered_by_name(client, db):
+    """**同じ撮影日時の並びは、乱数ではなく名前で決まる.**
+
+    同じ撮影日時の行は現実に発生する（カメラの時計が止まっていれば連続して
+    起きる）。tie-break が決まっていないと、並びが実行ごとに変わってページの
+    境目で重複・欠落する。
+    """
+    _rows(db, ["MVI_0007.MOV", "MVI_0008.MOV"])
+    got = client.get("/api/media?page_size=10").json()["media"]
+    assert [m["rel_path"].rsplit("/", 1)[-1] for m in got] == ["MVI_0008.MOV", "MVI_0007.MOV"]
+
+
+def test_the_primary_of_a_stack_comes_before_its_secondary(client, db):
+    """副産物: RAW+JPEG の並びも決定的になる（`"JPG" > "CR2"`）."""
+    _rows(db, ["IMG_0001.CR2", "IMG_0001.JPG"], captured_at="2026-08-26T12:33:05+00:00")
+    got = client.get("/api/media?page_size=10").json()["media"]
+    assert [m["rel_path"][-3:] for m in got] == ["JPG", "CR2"]
+
+
+def test_the_page_boundary_does_not_drop_or_repeat_a_row(client, db):
+    """**切るクエリは順序が決まらないと境界が揺れる.**
+
+    30 行すべてを同じ撮影日時にして、3 ページで舐める。tie-break が無いと、
+    ページごとに並びが変わって重複と欠落が出る。
+    """
+    names = [f"IMG_{index:04d}.JPG" for index in range(30)]
+    _rows(db, names)
+    seen = []
+    for page in (1, 2, 3):
+        got = client.get(f"/api/media?page={page}&page_size=10").json()["media"]
+        seen.extend(m["rel_path"].rsplit("/", 1)[-1] for m in got)
+    assert seen == sorted(names, reverse=True)
 
 
 def test_an_invalidated_record_does_not_count_as_sent(client, db, library):
@@ -229,7 +288,7 @@ def test_media_can_be_filtered_by_profile(client, db, library):
 
     **`IN (SELECT ...)` ではなく `= (SELECT ...)` で書く。** `IN` だと SQLite は
     複数の値を取りうると見て、索引があっても並べ替えを外せない（一覧は
-    `captured_at DESC, id DESC` 固定なので、`0014` の索引が効かなくなる）。
+    `captured_at DESC, rel_path DESC` 固定なので、`0014` の索引が効かなくなる）。
     slug は UNIQUE なので値は高々 1 つで、意味は変わらない。
     """
     other = a_profile(db, slug="another-profile")

@@ -14,6 +14,13 @@ from ..profiles.model import KeepStreams
 
 TIMECODE_TAG = "tmcd"
 
+# mpegts を往復させても音声のまま残ると実測できた codec だけを許す許可リスト。
+# **種別ではなく codec の軸**なので、`UNSUPPORTED_BY_TS`（data を落とす）とは混ぜない。
+# mpegts は運べない音声を private data として詰め、警告だけ出して終了コード 0 で
+# 成功する（読み直すと `bin_data` の data ストリームになり、音声が消える）。ffmpeg が
+# 失敗しない以上、往復させて確かめた codec だけを通し、それ以外は結合そのものを拒む。
+_TS_SAFE_AUDIO_CODECS = frozenset({"aac"})
+
 
 def selected_streams(streams: Sequence[dict[str, Any]], keep: KeepStreams) -> list[dict[str, Any]]:
     """保持対象を、入力のストリーム順で返す."""
@@ -86,3 +93,24 @@ def stream_summary(stream: dict[str, Any]) -> dict[str, Any]:
 def _is_thumbnail(stream: dict[str, Any]) -> bool:
     """埋め込みサムネイル（`attached_pic`）を映像として数えない."""
     return bool(stream.get("disposition", {}).get("attached_pic"))
+
+
+def ts_route_blockers(
+    streams: Sequence[dict[str, Any]], keep: KeepStreams
+) -> tuple[dict[str, Any], ...]:
+    """TS 経路が無損失で運べない、保持対象の音声ストリームを返す.
+
+    **許可リスト方式。** 音声は `_TS_SAFE_AUDIO_CODECS` に無いものをすべて塞ぐ。
+    「運べないと分かっている codec を 1 つずつ足す」拒否リストだと、実測していない
+    codec が同じ穴を素通りする。往復させて音声のまま残ると確かめたものだけを通す。
+
+    映像と data の扱いはここでは変えない（data は `UNSUPPORTED_BY_TS` が別の軸で見る）。
+
+    **捨てるストリームは数えない。** `keep` が落とすものは出力に影響しない。
+    """
+    return tuple(
+        stream_summary(stream)
+        for stream in selected_streams(streams, keep)
+        if stream.get("codec_type") == "audio"
+        and stream.get("codec_name") not in _TS_SAFE_AUDIO_CODECS
+    )

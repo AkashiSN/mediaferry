@@ -46,7 +46,7 @@ class CrashingPublisher(ArtifactPublisher):
             os._exit(9)  # noqa: SLF001
 
 
-def _resolve_from_exif(staging_abs):  # noqa: ANN001, ANN202
+def _resolve_from_exif(staging_abs, probe):  # noqa: ANN001, ANN202, ARG001
     """ステージ済みのファイルから決める（§9.3 手順 5）."""
     from mediaferry.adapters.exif import read_datetime_original
 
