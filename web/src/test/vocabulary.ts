@@ -19,7 +19,7 @@
 //
 // **「結合」も入れていない。** 画面の文言としては直してあり、進捗の phase `merge`
 // も `components/JobProgress.tsx` が「つないでいます」に写すが、**サーバがそのまま
-// 返す文字列がまだ残る**（`send` の案内に出る、送れない組の理由。1 語ではなく、
+// 返す文字列がまだ残る**（`send` の案内に出る、送れない写真の理由。1 語ではなく、
 // 生の英語ステータス付きの一群 —— `app/src/mediaferry/db/uploads.py` の
 // `_choose_original` / `_choose_derived` を見よ）。範囲が Python 側に及ぶので、
 // いまは網の外に置く。

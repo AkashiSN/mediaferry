@@ -60,7 +60,7 @@ export function SendingScreen() {
       </div>
 
       <ErrorBanner error={cancelling.error ?? jobsQuery.error} onDismiss={cancelling.clear} />
-      {/* **断られた組と、開始に失敗した宛先を隠さない**（`Send.tsx` の `summarise`）。 */}
+      {/* **断られた写真と、開始に失敗した宛先を隠さない**（`Send.tsx` の `summarise`）。 */}
       {note && <p role="status">{note}</p>}
 
       {jobs.length === 0 ? (

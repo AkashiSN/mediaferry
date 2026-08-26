@@ -74,22 +74,32 @@ function newest(media: Media[]): Media | undefined {
 }
 
 /**
- * 送信の結果を 1 文にする（**断られた組と、開始に失敗した宛先を隠さない**）。
+ * 送信の結果を 1 文にする（**断られた写真と、開始に失敗した宛先を隠さない**）。
  *
- * `started` は**実際に送信が始まった宛先の数**。組が受け付けられただけの数を
+ * **数えるのはファイルと宛先で、pair ではない。** `POST /uploads` が返す pair は
+ * media × destination の直積なので、その数をそのまま報告すると、組（RAW+JPEG）を
+ * 1 つ送っただけで「2」と出るし、同じ 1 枚を 2 宛先へ送っても「2」と出る。画面は
+ * どこも「件」で数え、「組」は RAW+JPEG のスタックを指す語なので、pair の数に
+ * 「組」と付けると利用者の見ているものと合わない。**媒体の id で重複を落とす。**
+ *
+ * `started` は**実際に送信が始まった宛先の数**。pair が受け付けられただけの数を
  * 渡すと、同じ 1 文で「2 宛先で始めた」と「1 宛先は始められなかった」を並べる
  * ことになる（取り消せない操作の報告としては嘘になる）。
  */
 export function summarise(
-  total: number,
-  rejected: { reason: string | null }[],
+  pairs: { media_file_id: string; result: string; reason: string | null }[],
   failures: string[],
   started: number,
 ): string {
-  const parts = [`${total - rejected.length} 組を作り、${started} 宛先で送信を始めました。`];
-  if (rejected.length > 0) {
+  const rejected = pairs.filter((pair) => pair.result === "rejected");
+  const accepted = new Set(
+    pairs.filter((pair) => pair.result !== "rejected").map((pair) => pair.media_file_id),
+  );
+  const refused = new Set(rejected.map((pair) => pair.media_file_id));
+  const parts = [`${accepted.size} 件を、${started} 宛先へ送り始めました。`];
+  if (refused.size > 0) {
     const reasons = [...new Set(rejected.map((pair) => pair.reason ?? "理由不明"))];
-    parts.push(`送れない組が ${rejected.length} 件ありました（${reasons.join(" / ")}）。`);
+    parts.push(`送れない写真が ${refused.size} 件ありました（${reasons.join(" / ")}）。`);
   }
   if (failures.length > 0) {
     parts.push(
@@ -344,12 +354,12 @@ export function SendScreen() {
         method: "POST",
         body: { media_ids: targetMedia.map((media) => media.id), destination_ids: chosen.map((d) => d.id) },
       })) as PairResult;
-      // **組ごとの結果を読む。** 送れない組（結合中のグループの構成ファイルなど）は
-      // backend が理由付きで断る。**受け付けられた組がある宛先だけ**送信を始める。
+      // **pair ごとの結果を読む。** 送れない pair（結合中のグループの構成ファイル
+      // など）は backend が理由付きで断る。**受け付けられた pair がある宛先だけ**
+      // 送信を始める。
       const accepted = new Set(
         created.pairs.filter((pair) => pair.result !== "rejected").map((pair) => pair.destination_id),
       );
-      const rejected = created.pairs.filter((pair) => pair.result === "rejected");
       const failures: string[] = [];
       const jobIds: string[] = [];
       for (const destination of chosen.filter((one) => accepted.has(one.id))) {
@@ -362,7 +372,7 @@ export function SendScreen() {
           failures.push(destination.name);
         }
       }
-      const note = summarise(created.pairs.length, rejected, failures, jobIds.length);
+      const note = summarise(created.pairs, failures, jobIds.length);
       // **1 本も始まらなかったときのために、ここで直す。** 進捗のイベントが
       // 出ないので、枠の「やること」もホームの件数も送る前のまま残る。
       refreshTasks();

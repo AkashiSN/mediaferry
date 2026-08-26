@@ -292,22 +292,49 @@ describe("組（RAW+JPEG）をタイルにまとめる", () => {
 });
 
 describe("送った結果の 1 文", () => {
-  it("断られた組と、開始に失敗した宛先を隠さない", () => {
-    expect(summarise(3, [{ reason: "結合中" }], ["旅行用"], 1)).toContain("送れない組が 1 件");
-    expect(summarise(3, [{ reason: "結合中" }], ["旅行用"], 1)).toContain("旅行用");
+  /** `POST /uploads` が返す pair 1 つぶん。 */
+  function pair(mediaId: string, destinationId: string, result = "created", reason: string | null = null) {
+    return { media_file_id: mediaId, destination_id: destinationId, result, reason };
+  }
+
+  // **数えるのはファイルと宛先。** 画面のどこも「件」で数えていて、「組」は
+  // RAW+JPEG のスタックを指す語なので、pair の数をそのまま「組」と呼ぶと
+  // 1 組 2 枚を 1 宛先へ送っただけで「2 組を作った」と読める。
+  it("組（RAW+JPEG）を送っても、枚数で数える", () => {
+    const message = summarise([pair("m1", "d1"), pair("m2", "d1")], [], 1);
+    expect(message).toBe("2 件を、1 宛先へ送り始めました。");
+  });
+
+  // **宛先の数だけ pair が増えても、写真は増えない。** 同じ 1 枚を 2 宛先へ
+  // 送ったときに「2 件」と言うと、送った写真の枚数の報告として嘘になる。
+  it("同じ写真を複数の宛先へ送っても、二重に数えない", () => {
+    const message = summarise([pair("m1", "d1"), pair("m1", "d2")], [], 2);
+    expect(message).toBe("1 件を、2 宛先へ送り始めました。");
+  });
+
+  it("断られた写真と、開始に失敗した宛先を隠さない", () => {
+    const pairs = [pair("m1", "d1"), pair("m2", "d1"), pair("m3", "d1", "rejected", "結合中")];
+    expect(summarise(pairs, ["旅行用"], 1)).toContain("送れない写真が 1 件");
+    expect(summarise(pairs, ["旅行用"], 1)).toContain("旅行用");
+  });
+
+  // 断りも宛先の数だけ増える。**理由は同じでも、枚数は 1 枚。**
+  it("断られた写真も、宛先の数で水増ししない", () => {
+    const pairs = [pair("m1", "d1", "rejected", "結合中"), pair("m1", "d2", "rejected", "結合中")];
+    expect(summarise(pairs, [], 0)).toContain("送れない写真が 1 件");
   });
 
   // **案内は実在する導線を指す。** 設定 › 送り先のカードに「送り直す」がある
   // （`settings/Destinations.tsx`）。
   it("開始できなかったときは、実在する導線を案内する", () => {
-    expect(summarise(1, [], ["旅行用"], 0)).toContain("設定 › 送り先の「送り直す」");
+    expect(summarise([pair("m1", "d1")], ["旅行用"], 0)).toContain("設定 › 送り先の「送り直す」");
   });
 
-  // **黙っているのも 1 つの結果。** 断られた組も失敗した宛先も無いときに、
+  // **黙っているのも 1 つの結果。** 断られた写真も失敗した宛先も無いときに、
   // 余計な但し書きを付け足さない。
   it("何も問題が無ければ、余計なことを言わない", () => {
-    const message = summarise(2, [], [], 2);
-    expect(message).toBe("2 組を作り、2 宛先で送信を始めました。");
+    const message = summarise([pair("m1", "d1"), pair("m1", "d2")], [], 2);
+    expect(message).toBe("1 件を、2 宛先へ送り始めました。");
   });
 });
 
@@ -809,7 +836,7 @@ describe("送信そのもの", () => {
       ).toHaveLength(1);
     });
     expect(await screen.findByTestId("sending-note")).toHaveTextContent(
-      "1 組を作り、1 宛先で送信を始めました。",
+      "1 件を、1 宛先へ送り始めました。",
     );
     expect(await screen.findByTestId("sending-jobs")).toHaveTextContent("job-1");
   });
@@ -862,7 +889,7 @@ describe("送信そのもの", () => {
       ).toHaveLength(1);
       expect(calls.some((c) => c.path === "/destinations/d2/upload")).toBe(false);
     });
-    expect(await screen.findByTestId("sending-note")).toHaveTextContent("送れない組が 1 件");
+    expect(await screen.findByTestId("sending-note")).toHaveTextContent("送れない写真が 1 件");
   });
 
   // `stubApi` は応答を常に 200 で返すので、**宛先ごとに成否を変えたいここだけ**
@@ -933,7 +960,7 @@ describe("送信そのもの", () => {
     // **始まった数は、実際に始まった数。** 組が受け付けられただけの宛先を数えると、
     // 同じ 1 文で「2 宛先で始めた」と「1 宛先は始められなかった」を並べることになる。
     expect(await screen.findByTestId("sending-note")).toHaveTextContent(
-      "1 宛先で送信を始めました",
+      "1 宛先へ送り始めました",
     );
   });
 });

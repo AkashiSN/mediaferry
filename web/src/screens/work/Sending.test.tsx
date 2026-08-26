@@ -43,13 +43,13 @@ describe("送信中", () => {
     expect(screen.queryByText(/「やること」から結果/)).toBeNull();
   });
 
-  it("断られた組と、開始に失敗した宛先を隠さない", async () => {
+  it("断られた写真と、開始に失敗した宛先を隠さない", async () => {
     stubApi({ "/jobs": { jobs: [] } });
     renderSending({
       jobIds: ["j1"],
-      note: "1 組を作り、1 宛先で送信を始めました。送れない組が 1 件ありました（結合中）。",
+      note: "1 件を、1 宛先へ送り始めました。送れない写真が 1 件ありました（結合中）。",
     });
-    expect(await screen.findByText(/送れない組が 1 件/)).toBeInTheDocument();
+    expect(await screen.findByText(/送れない写真が 1 件/)).toBeInTheDocument();
   });
 
   it("渡されたジョブだけを追い、状態を出す", async () => {
