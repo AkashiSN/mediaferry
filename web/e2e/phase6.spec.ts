@@ -57,12 +57,34 @@ test("RAW+JPEG が 1 スタックになり、見送りの理由も画面に出�
 
   // 3. 写真に RAW+JPEG が並ぶまで待つ。**写真タブは組を畳むので、選ぶ丸は
   //    IMG_0003 につき 1 つだけ**（CR2 の行は一覧に出ない）。畳まれた行には
-  //    `RAW` の札が付く。
+  //    `JPG+RAW` の札が付く（**2 枚あることが札から読める**）。
   await nav.getByRole("link", { name: "写真" }).click();
   const combined = page.getByRole("button", { name: "選ぶ：IMG_0003.JPG" });
   await expect(combined).toBeVisible({ timeout: 90_000 });
   await expect(page.getByRole("button", { name: /^選ぶ：IMG_0003\.(JPG|CR2)$/ })).toHaveCount(1);
-  await expect(page.locator(".tile", { has: combined }).getByText("RAW")).toBeVisible();
+  // **`exact: true` を外さない。** Playwright の `getByText` は既定が部分一致なので、
+  // `RAW` で当てると `JPG+RAW` にも素通りし、札の中身を何も確かめないテストになる。
+  await expect(
+    page.locator(".tile", { has: combined }).getByText("JPG+RAW", { exact: true }),
+  ).toBeVisible();
+
+  // 3b. **日付の丸で、その日をまとめて選べる。** 押すと組の相方も一緒に入る。
+  const day = page.getByRole("checkbox", { name: /をまとめて選ぶ/ }).first();
+  await day.click();
+  await expect(day).toHaveAttribute("aria-checked", "true");
+  await expect(page.getByText(/件を選択中/)).toBeVisible();
+  await page.getByRole("button", { name: "やめる" }).click();
+
+  // 3c. **詳細でも組が見える。** 一覧で見えたものが、押した先で消えない。
+  await page
+    .locator(".tile", { has: combined })
+    .getByRole("link", { name: "IMG_0003.JPG" })
+    .click();
+  await expect(page.getByRole("heading", { name: "この 1 枚を作っているファイル" })).toBeVisible();
+  await expect(page.getByRole("checkbox", { name: "送る：IMG_0003.JPG" })).toBeChecked();
+  await expect(page.getByRole("checkbox", { name: "送る：IMG_0003.CR2" })).toBeChecked();
+  await expect(page.getByText(/2 枚 ・ .* を送ります/)).toBeVisible();
+  await nav.getByRole("link", { name: "写真" }).click();
 
   // 4. 畳んだタイルは 1 枚で組の両方（JPG+CR2）を表すので、**1 つ選ぶだけで
   //    相方も一緒に選ばれる。** これに、組にならない 1 枚（相方の無い
@@ -71,6 +93,8 @@ test("RAW+JPEG が 1 スタックになり、見送りの理由も画面に出�
   await page.getByRole("button", { name: "選ぶ：IMG_0001.JPG" }).click();
   await page.getByRole("button", { name: "送る", exact: true }).click();
   await expect(page.getByRole("heading", { name: "Immich へ送る" })).toBeVisible();
+  // **送る画面でも 1 タイル・JPG+RAW。** 一覧で 1 枚だったものが割れて戻らない。
+  await expect(page.getByText("JPG+RAW", { exact: true })).toBeVisible();
   // 送り先が 1 つしか無ければ、黙ってそれを使う。
   await expect(page.getByText("送り先：immich-1")).toBeVisible();
   await page.getByRole("button", { name: "内容を確かめる" }).click();

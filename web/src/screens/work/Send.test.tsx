@@ -169,6 +169,128 @@ describe("送る", () => {
   });
 });
 
+// 一覧・詳細では組（RAW+JPEG）が 1 タイルにまとまる。**この画面だけ 2 つに
+// 割れて戻ると**、送るものの見え方が他の画面と食い違う（`utils/stacks.ts`）。
+describe("組（RAW+JPEG）をタイルにまとめる", () => {
+  it("両方が対象なら 1 タイルにまとめ、JPG+RAW と名乗る", async () => {
+    // **一覧で 1 タイルだったものが、送る画面で 2 つに割れて戻らない。**
+    const pair = [
+      { id: "j", rel_path: "x/IMG_1.JPG", size_bytes: 3_000_000 },
+      { id: "r", rel_path: "x/IMG_1.CR2", size_bytes: 22_000_000 },
+    ];
+    stubApi({
+      "/destinations": { destinations: [{ id: "d1", name: "家", enabled: true }] },
+      "/media/j": { ...pair[0], kind: "photo", captured_at: "2026-08-18T10:00:00+09:00", stack: { members: pair } },
+      "/media/r": { ...pair[1], kind: "photo", captured_at: "2026-08-18T10:00:00+09:00", stack: { members: pair } },
+    });
+    render(
+      <MemoryRouter initialEntries={[{ pathname: "/send", state: { ids: ["j", "r"], destinationIds: [] } }]}>
+        <Routes>
+          <Route path="/send" element={<SendScreen />} />
+        </Routes>
+      </MemoryRouter>,
+    );
+
+    expect(await screen.findByText("JPG+RAW")).toBeInTheDocument();
+    expect(screen.getAllByRole("img", { name: /IMG_1/ })).toHaveLength(1);
+    // **件数はファイル数のまま**（利用者の「2 枚カウント」）。
+    expect(screen.getByText(/2 件 ・/)).toBeInTheDocument();
+    // **「はじめの N 件」もタイル数ではなくファイル数で数える。** 1 タイルに
+    // まとめても、表示済みの実ファイル数は 2 のまま。
+    expect(screen.getByText(/2 件のうち、はじめの 2 件/)).toBeInTheDocument();
+  });
+
+  it("相方が対象でなければ、単独のタイルで札も出さない", async () => {
+    // JPG は前回すでに送った。CR2 だけが未送信 —— 送るのは CR2 の 1 枚。
+    const pair = [
+      { id: "j", rel_path: "x/IMG_1.JPG", size_bytes: 3_000_000 },
+      { id: "r", rel_path: "x/IMG_1.CR2", size_bytes: 22_000_000 },
+    ];
+    stubApi({
+      "/destinations": { destinations: [{ id: "d1", name: "家", enabled: true }] },
+      "/media/r": { ...pair[1], kind: "photo", captured_at: "2026-08-18T10:00:00+09:00", stack: { members: pair } },
+    });
+    render(
+      <MemoryRouter initialEntries={[{ pathname: "/send", state: { ids: ["r"], destinationIds: [] } }]}>
+        <Routes>
+          <Route path="/send" element={<SendScreen />} />
+        </Routes>
+      </MemoryRouter>,
+    );
+
+    await screen.findByRole("img", { name: "IMG_1.CR2" });
+    expect(screen.queryByText(/RAW/)).not.toBeInTheDocument();
+    expect(screen.getByText(/1 件 ・/)).toBeInTheDocument();
+  });
+
+  it("「まだ送っていないもの」も組を教えてもらって引く", async () => {
+    // **畳ませない**（`collapse=stack`）。畳むと未送信の RAW が送られなくなる。
+    const { calls } = stubApi({
+      "/destinations": { destinations: [{ id: "d1", name: "家", enabled: true }] },
+      "/media": { media: [], total: 0, page: 1, page_size: 200 },
+    });
+    render(
+      <MemoryRouter initialEntries={[{ pathname: "/send", state: null }]}>
+        <Routes>
+          <Route path="/send" element={<SendScreen />} />
+        </Routes>
+      </MemoryRouter>,
+    );
+
+    await waitFor(() => {
+      const asked = calls().filter((c) => c.path.startsWith("/media?"));
+      expect(asked.length).toBeGreaterThan(0);
+      expect(asked.every((c) => c.path.includes("stack=members"))).toBe(true);
+      expect(asked.every((c) => !c.path.includes("collapse="))).toBe(true);
+    });
+  });
+
+  // **下見に並べる上限は 16「タイル」で、16「ファイル」ではない。** 組を 1 つに
+  // まとめたので、1 タイルが 2 ファイルを表しうる —— 上限いっぱいの 16 タイルは
+  // 最大 32 ファイルになる。この単位を取り違えると、下見が減った（あるいは倍に
+  // 増えた）ことに誰も気付かない。
+  it("下見に並べるのは、はじめの 16 タイル（ファイルではない）", async () => {
+    // 17 組 34 ファイル。上限を超える 1 組を用意して、切れる位置を見る。
+    const pairs = Array.from({ length: 17 }, (_, index) => [
+      { id: `j${index}`, rel_path: `x/IMG_${index}.JPG`, size_bytes: 1024 },
+      { id: `r${index}`, rel_path: `x/IMG_${index}.CR2`, size_bytes: 1024 },
+    ]);
+    stubApi({
+      "/destinations": { destinations: [{ id: "d1", name: "家", enabled: true }] },
+      "/media": {
+        // **組ごとに撮影時刻をずらす。** 並びは `captured_at DESC, id DESC` なので、
+        // 全部同じ時刻だと組の順が id の文字列比較で決まり、どれが上限の外かが
+        // 読みにくくなる。ここでは組 0 がいちばん新しい。
+        media: pairs.flatMap((pair, index) =>
+          pair.map((row) => ({
+            ...row,
+            kind: "photo",
+            captured_at: `2026-08-18T10:${String(59 - index).padStart(2, "0")}:00+09:00`,
+            stack: { members: pair },
+          })),
+        ),
+        total: 34,
+        page: 1,
+        page_size: 200,
+      },
+    });
+    render(
+      <MemoryRouter initialEntries={[{ pathname: "/send", state: null }]}>
+        <Routes>
+          <Route path="/send" element={<SendScreen />} />
+        </Routes>
+      </MemoryRouter>,
+    );
+
+    // タイルは 16 個。**ファイル数で切っていれば 8 タイル（16 ファイル）になる。**
+    await waitFor(() => expect(screen.getAllByRole("img", { name: /IMG_/ })).toHaveLength(16));
+    // 並べた 16 タイルが表すファイルは 32 枚（34 枚のうち）。
+    expect(screen.getByText(/34 件のうち、はじめの 32 件/)).toBeInTheDocument();
+    // 17 組目は上限の外。
+    expect(screen.queryByRole("img", { name: "IMG_16.JPG" })).toBeNull();
+  });
+});
+
 describe("送った結果の 1 文", () => {
   it("断られた組と、開始に失敗した宛先を隠さない", () => {
     expect(summarise(3, [{ reason: "結合中" }], ["旅行用"], 1)).toContain("送れない組が 1 件");
@@ -208,7 +330,9 @@ describe("対象の解決", () => {
     await waitFor(() => expect(screen.getByRole("button", { name: /内容を確かめる/ })).toBeEnabled());
     expect(
       calls().some(
-        (c) => c.path === "/media?destination_id=d1&status=unsent&page_size=200" && c.method === "GET",
+        (c) =>
+          c.path === "/media?destination_id=d1&status=unsent&page_size=200&stack=members" &&
+          c.method === "GET",
       ),
     ).toBe(true);
   });

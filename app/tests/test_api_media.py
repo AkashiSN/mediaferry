@@ -127,6 +127,59 @@ def test_an_unknown_collapse_value_is_a_bad_request(client):
     assert response.status_code == 400
 
 
+def test_stack_members_names_the_pair_without_hiding_the_raw(client, canon_pair):
+    """**隠さない。** 送る画面は返ってきた行を送るので、従を隠すと RAW が送られない."""
+    body = client.get("/api/media?stack=members").json()
+
+    names = [m["rel_path"].split("/")[-1] for m in body["media"]]
+    assert "IMG_0001.CR2" in names
+    assert "IMG_0001.JPG" in names
+    for item in body["media"]:
+        assert [m["rel_path"].split("/")[-1] for m in item["stack"]["members"]] == [
+            "IMG_0001.JPG",
+            "IMG_0001.CR2",
+        ]
+
+
+def test_stack_members_leaves_a_lone_file_without_a_stack(client, canon_pair_without_proof):
+    """組でない行には**キーごと付けない**（空の組を作らない）.
+
+    **一覧は「無いこと」を `null` では言わない。** 既にある 4 本
+    （同ファイルの `assert "stack" not in …`）がそれを仕様として固定している ——
+    行に `null` を足すと `collapse=stack` の契約が変わる。詳細（Task 1）は 1 件の
+    応答で欄が固定なので、そちらだけ `"stack": None` を明示する。
+    """
+    body = client.get("/api/media?stack=members").json()
+
+    assert len(body["media"]) == 2
+    for item in body["media"]:
+        assert "stack" not in item
+
+
+def test_collapse_wins_over_stack_members(client, canon_pair):
+    """**両方来たら `collapse` が勝つ**（隠す）. 新設の 400 にしない —— 既存の
+    呼び出し元が壊れる."""
+    body = client.get("/api/media?collapse=stack&stack=members").json()
+
+    names = [m["rel_path"].split("/")[-1] for m in body["media"]]
+    assert "IMG_0001.CR2" not in names
+
+
+def test_an_unknown_stack_value_is_a_bad_request(client):
+    """`stack` は `members` だけ受け付ける."""
+    response = client.get("/api/media?stack=bogus")
+
+    assert response.status_code == 400
+    assert response.json()["error"]["code"] == "bad_request"
+
+
+def test_stack_members_does_not_change_the_total(client, canon_pair):
+    """**総数は変わらない。** 隠さないのだから、`collapse` 無しと同じ数."""
+    plain = client.get("/api/media").json()["total"]
+
+    assert client.get("/api/media?stack=members").json()["total"] == plain
+
+
 def test_the_ambiguous_pair_is_not_collapsed(client, canon_pair, ambiguous_sibling):
     """同じ順位の兄弟が 2 つあると、どちらが主か決まらない. **CR2 も隠さない。**
 
@@ -151,6 +204,22 @@ def test_the_ambiguous_pair_gets_no_stack_members(client, canon_pair, ambiguous_
     同じ関数が決める」）。3 行とも見えたまま、誰も `stack` を持たないのが正しい。
     """
     body = client.get("/api/media?collapse=stack").json()
+
+    assert len(body["media"]) == 3
+    assert not any("stack" in m for m in body["media"])
+
+
+def test_the_ambiguous_pair_gets_no_stack_members_under_stack_members(
+    client, canon_pair, ambiguous_sibling
+):
+    """`stack=members` でも、曖昧なグループには `stack` を付けない.
+
+    曖昧かどうかの判定（`NOT (ambiguous)`）は `_members_of` の中にあり、
+    `collapse` の値を見ない。上の `test_the_ambiguous_pair_gets_no_stack_members`
+    が固定しているのは `collapse=stack` の経路だけなので、隠さない
+    `stack=members` でも同じ判断が効くことを別に固定する。
+    """
+    body = client.get("/api/media?stack=members").json()
 
     assert len(body["media"]) == 3
     assert not any("stack" in m for m in body["media"])
@@ -199,6 +268,38 @@ def test_a_failed_raw_is_listed_when_its_jpeg_succeeded(client, db, canon_pair):
 
     assert [m["rel_path"].split("/")[-1] for m in body["media"]] == ["IMG_0001.CR2"]
     assert body["total"] == 1
+
+
+def test_stack_members_ignores_the_request_own_filters(client, db, canon_pair):
+    """`stack.members` は、その要求の絞り込みを受けない. **これは仕様であって欠落ではない。**
+
+    送る画面は絞り込みが返した行だけを送り、`stack.members` はその行の集合の中
+    だけで組を突き合わせるために読む（ブリーフの「なぜ要るか」）。ここでは JPG が
+    `complete`・CR2 が `failed` の状態で `status=failed` を掛けるので、一覧に
+    残るのは CR2 の 1 行だけになる。もしこの CR2 の `stack.members` が
+    同じ `status=failed` で絞られると、**既に送り終えた JPG が消えて**、
+    送る画面は「JPG+RAW の組」というラベルと正しい枚数を失う。`collapse=stack`
+    の従外し（`_secondary_exists_sql` に渡す `sibling_where`）と `_members_of` は
+    別物なので、**`_members_of` に同じ絞り込みを「対称だから」と足すと退行する**。
+    """
+    destination = a_destination(db, name="stack-members-filter")
+    an_upload(
+        db,
+        destination,
+        canon_pair.media_ids["JPG"],
+        state="complete",
+        destination_revision_id=destination[1],
+    )
+    an_upload(db, destination, canon_pair.media_ids["CR2"], state="failed")
+    db.commit()
+
+    body = client.get(
+        f"/api/media?stack=members&destination_id={destination[0]}&status=failed"
+    ).json()
+
+    assert [m["rel_path"].split("/")[-1] for m in body["media"]] == ["IMG_0001.CR2"]
+    names = [m["rel_path"].split("/")[-1] for m in body["media"][0]["stack"]["members"]]
+    assert names == ["IMG_0001.JPG", "IMG_0001.CR2"]
 
 
 def test_an_unsendable_jpeg_does_not_hide_its_raw(client, db, canon_pair):
@@ -380,3 +481,68 @@ def test_the_listing_collapses_exactly_when_a_group_can_be_made(
     # 実在するファイルが画面から黙って消える。
     every = {row["id"] for row in db.execute("SELECT id FROM media_file")}
     assert every - {m["id"] for m in body["media"]} <= declared
+
+
+def test_the_detail_names_the_members_of_the_pair(client, canon_pair):
+    """**詳細も組を知る。** 一覧でだけ組が見えると、押した先で消える."""
+    jpeg = canon_pair.media_ids["JPG"]
+
+    body = client.get(f"/api/media/{jpeg}").json()
+
+    assert [m["rel_path"].split("/")[-1] for m in body["stack"]["members"]] == [
+        "IMG_0001.JPG",
+        "IMG_0001.CR2",
+    ]
+    assert [m["size_bytes"] for m in body["stack"]["members"]] == [
+        body["size_bytes"],
+        client.get(f"/api/media/{canon_pair.media_ids['CR2']}").json()["size_bytes"],
+    ]
+
+
+def test_the_secondary_sees_the_same_pair_with_the_primary_first(client, canon_pair):
+    """**従から開いても並びは同じ**（主が先頭）. どちらから見ても同じ組."""
+    raw = canon_pair.media_ids["CR2"]
+
+    body = client.get(f"/api/media/{raw}").json()
+
+    assert [m["rel_path"].split("/")[-1] for m in body["stack"]["members"]] == [
+        "IMG_0001.JPG",
+        "IMG_0001.CR2",
+    ]
+
+
+def test_the_order_is_by_rank_not_by_insertion(client, canon_pair_inserted_in_reverse):
+    """**並びは `rank` が決める. 挿入順ではない.**
+
+    CR2 を JPG より先に `media_file` へ入れても、`stack.extensions` の順位は
+    変わらない（JPG が primary）ので、`members` は依然として JPG が先頭。
+    `ORDER BY r.rank` を消しても、挿入順とたまたま同じ順で返ると気付けない
+    （`canon_pair` は常に JPG を先に入れるので、そちらだけでは見抜けない）。
+    """
+    jpeg = canon_pair_inserted_in_reverse.media_ids["JPG"]
+
+    body = client.get(f"/api/media/{jpeg}").json()
+
+    assert [m["rel_path"].split("/")[-1] for m in body["stack"]["members"]] == [
+        "IMG_0001.JPG",
+        "IMG_0001.CR2",
+    ]
+
+
+def test_a_lone_file_has_no_stack(client, canon_pair_without_proof):
+    """同席の証拠が無ければ組ではない. **`None` を返す**（空の組を作らない）."""
+    jpeg = canon_pair_without_proof.media_ids["JPG"]
+
+    assert client.get(f"/api/media/{jpeg}").json()["stack"] is None
+
+
+def test_an_ambiguous_pair_has_no_stack_in_the_detail(client, canon_pair, ambiguous_sibling):
+    """**曖昧な組は詳細でも組にしない.**
+
+    `identity_partners` は同じ状況を `ambiguous=True` と判定し、`resolve_group` は
+    組を作らない。一覧と同じ `_members_of` を通すので、判断は自動でそろう ——
+    ここが割れると、画面が Immich には作らない組を宣言する。
+    """
+    jpeg = canon_pair.media_ids["JPG"]
+
+    assert client.get(f"/api/media/{jpeg}").json()["stack"] is None

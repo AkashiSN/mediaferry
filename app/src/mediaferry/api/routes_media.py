@@ -109,6 +109,8 @@ _AMBIGUOUS_EXISTS = _ambiguous_exists_sql("m.id")
 
 _KNOWN_COLLAPSE_VALUES = frozenset({"stack"})
 
+_KNOWN_STACK_VALUES = frozenset({"members"})
+
 
 @router.get("/media")
 def list_media(  # noqa: PLR0913
@@ -123,6 +125,7 @@ def list_media(  # noqa: PLR0913
     destination_id: str | None = None,
     status: str | None = None,
     collapse: str | None = None,
+    stack: str | None = None,
     conn=Depends(get_conn),  # noqa: ANN001, B008
 ) -> dict[str, Any]:
     """ライブラリの一覧（§11）.
@@ -138,54 +141,66 @@ def list_media(  # noqa: PLR0913
     させず、従の行だけを隠す。主の行には `stack.members` が付く。**既定は
     畳まない** —— ホームの「さっき取り込んだもの」と選んで送る画面が同じ
     この API を使うので、`collapse` を指定しない限り契約を変えない。
+
+    `stack=members` は**従を隠さずに**、組に属する行すべてへ `stack` を付ける。
+    送る画面が使う —— 送る対象は絞り込みが返した行そのもので、畳むと未送信の
+    RAW が送られなくなる（`docs/history/phase12-design.md` の 2）。**`collapse=stack`
+    と併せて来たら `collapse` が勝つ**（隠す）。片方だけを 400 にすると、既存の
+    呼び出し元が壊れる。
     """
     if collapse is not None and collapse not in _KNOWN_COLLAPSE_VALUES:
         raise ApiError(400, ErrorCode.BAD_REQUEST, "collapse は stack だけ", {"collapse": collapse})
+    if stack is not None and stack not in _KNOWN_STACK_VALUES:
+        raise ApiError(400, ErrorCode.BAD_REQUEST, "stack は members だけ", {"stack": stack})
     clause, params = _filters(
         "m", kind, role, profile, captured_from, captured_to, q, destination_id, status
     )
     where = f"WHERE {clause}" if clause else ""
     limit, offset = page_bounds(page, page_size)
 
-    # **`ranks` が空なら何もしない**（`VALUES` は 0 行を書けない）。`stack` が
-    # 有効なプロファイルが 1 つも無ければ、隠す従も無い。
+    # **組を教えるのと、従を隠すのは別。** 隠すのは写真タブ（`collapse=stack`）
+    # だけで、送る画面は隠されると未送信の RAW を送れなくなる。順位表はどちらでも
+    # 要るので、先に 1 度だけ作る。
     ranks_sql = ""
     ranks_params: tuple[Any, ...] = ()
     prefix = ""
-    if collapse == "stack":
-        ranks = stack_extension_ranks(ProfileRegistry(conn).all())
-        if ranks:
-            ranks_sql = ", ".join(["(?, ?, ?)"] * len(ranks))
-            ranks_params = tuple(value for row in ranks for value in row)
-            prefix = f"WITH rank(profile_id, extension, rank) AS (VALUES {ranks_sql}) "
-            # **`_AMBIGUOUS_EXISTS` は従外しを打ち消す保護であって、独立の除外
-            # 条件ではない。** 「従に見える行」でも、その身元が曖昧（同じ順位の
-            # 別候補がいる）なら、どちらが本当の主か決まらないので隠さない ——
-            # `identity_partners` が曖昧なら組まないのと同じ判断
-            # （`docs/history/phase10-plan.md` の「曖昧なら組まない。…一覧も
-            # 畳まない」）。**隠される側（`m`）と主（`sm`。`_secondary_exists_sql`
-            # の中）の両方で見る** —— 曖昧さは観測ごとに向きが変わるので、片側
-            # からしか見ないと、実在するファイルが名乗り手の無いまま一覧から消える。
-            #
-            # **同じ絞り込みを兄弟（`sm`）にも当てる。** 引数は主の分の後ろに
-            # もう一度、同じ順で積む。
-            sibling_clause, sibling_params = _filters(
-                "sm", kind, role, profile, captured_from, captured_to, q, destination_id, status
-            )
-            secondary = _secondary_exists_sql(sibling_clause or "1")
-            hide_as_secondary = f"({secondary}) AND NOT ({_AMBIGUOUS_EXISTS})"
-            exclude = f"NOT ({hide_as_secondary})"
-            where = f"{where} AND {exclude}" if where else f"WHERE {exclude}"
-            params = (*params, *sibling_params)
+    prefix_params: tuple[Any, ...] = ()
+    if collapse == "stack" or stack == "members":
+        ranks_sql, ranks_params = _ranks(conn)
+    # `and ranks_sql` を落とさない。**`ranks_sql` が空だと `VALUES` は 0 行を
+    # 書けない**（`WITH rank(...) AS (VALUES )` は構文エラー）。stack が有効な
+    # プロファイルが 1 つも無い環境では、`collapse=stack` の要求ごとに毎回ここを通る。
+    if collapse == "stack" and ranks_sql:
+        prefix = f"WITH rank(profile_id, extension, rank) AS (VALUES {ranks_sql}) "
+        prefix_params = ranks_params
+        # **`_AMBIGUOUS_EXISTS` は従外しを打ち消す保護であって、独立の除外
+        # 条件ではない。** 「従に見える行」でも、その身元が曖昧（同じ順位の
+        # 別候補がいる）なら、どちらが本当の主か決まらないので隠さない ——
+        # `identity_partners` が曖昧なら組まないのと同じ判断
+        # （`docs/history/phase10-plan.md` の「曖昧なら組まない。…一覧も
+        # 畳まない」）。**隠される側（`m`）と主（`sm`。`_secondary_exists_sql`
+        # の中）の両方で見る** —— 曖昧さは観測ごとに向きが変わるので、片側
+        # からしか見ないと、実在するファイルが名乗り手の無いまま一覧から消える。
+        #
+        # **同じ絞り込みを兄弟（`sm`）にも当てる。** 引数は主の分の後ろに
+        # もう一度、同じ順で積む。
+        sibling_clause, sibling_params = _filters(
+            "sm", kind, role, profile, captured_from, captured_to, q, destination_id, status
+        )
+        secondary = _secondary_exists_sql(sibling_clause or "1")
+        hide_as_secondary = f"({secondary}) AND NOT ({_AMBIGUOUS_EXISTS})"
+        exclude = f"NOT ({hide_as_secondary})"
+        where = f"{where} AND {exclude}" if where else f"WHERE {exclude}"
+        params = (*params, *sibling_params)
 
     total = conn.execute(
         f"{prefix}SELECT count(*) AS n FROM media_file m {where}",  # noqa: S608
-        (*ranks_params, *params),
+        (*prefix_params, *params),
     ).fetchone()["n"]
     rows = conn.execute(
         f"{prefix}SELECT m.* FROM media_file m {where}"  # noqa: S608
         " ORDER BY m.captured_at DESC, m.id DESC LIMIT ? OFFSET ?",
-        (*ranks_params, *params, limit, offset),
+        (*prefix_params, *params, limit, offset),
     )
     media = []
     for row in rows:
@@ -194,16 +209,7 @@ def list_media(  # noqa: PLR0913
             # 組の中身は、主の行 1 つにつき 1 回だけ引く。
             member_rows = _members_of(conn, row["id"], ranks_sql, ranks_params)
             if member_rows is not None:
-                item["stack"] = {
-                    "members": [
-                        {
-                            "id": member["id"],
-                            "rel_path": member["rel_path"],
-                            "size_bytes": member["size_bytes"],
-                        }
-                        for member in member_rows
-                    ]
-                }
+                item["stack"] = _stack_json(member_rows)
         media.append(item)
     return {
         "media": media,
@@ -251,6 +257,47 @@ def _members_of(
     if len(rows) < 2:  # noqa: PLR2004 - 1 つでは組にならない
         return None
     return rows
+
+
+def _ranks(conn) -> tuple[str, tuple[Any, ...]]:  # noqa: ANN001
+    """順位表を `VALUES` の並びにする. **空なら `("", ())`**（`VALUES` は 0 行を書けない）.
+
+    一覧と詳細が同じ表を作る。**2 か所で組み立てると、片方だけが古い規則を読む。**
+    """
+    ranks = stack_extension_ranks(ProfileRegistry(conn).all())
+    if not ranks:
+        return "", ()
+    return ", ".join(["(?, ?, ?)"] * len(ranks)), tuple(value for row in ranks for value in row)
+
+
+def _stack_json(member_rows: list[Any]) -> dict[str, Any]:
+    """組を API の形にする（一覧と詳細で同じ形）."""
+    return {
+        "members": [
+            {
+                "id": member["id"],
+                "rel_path": member["rel_path"],
+                "size_bytes": member["size_bytes"],
+            }
+            for member in member_rows
+        ]
+    }
+
+
+def _stack_of(conn, media_id: str) -> dict[str, Any] | None:  # noqa: ANN001
+    """1 件から見た組（**主が先頭**）. 組でなければ None.
+
+    **一覧と同じ `_members_of` を通す。** 曖昧な組を組にしない判断を 2 か所に
+    書かない（`docs/history/phase10-design.md` の「画面に出す組と Immich が作る組は、
+    同じ関数が決める」）。
+    """
+    ranks_sql, ranks_params = _ranks(conn)
+    if not ranks_sql:
+        return None
+    member_rows = _members_of(conn, media_id, ranks_sql, ranks_params)
+    if member_rows is None:
+        return None
+    return _stack_json(member_rows)
 
 
 def _filters(  # noqa: PLR0913
@@ -378,6 +425,9 @@ def get_media(  # noqa: ANN201
     blocker = repo.deletion_blocker(media_id)
     return {
         **_media(row),
+        # **この 1 件が属する組**（RAW+JPEG。組でなければ `None`）。画面は
+        # 送るものをここから選ぶので、**一覧と同じ判断で返す**。
+        "stack": _stack_of(conn, media_id),
         "sources": _sources(conn, media_id),
         "destinations": _destinations(conn, media_id),
         "deletable": blocker is None,

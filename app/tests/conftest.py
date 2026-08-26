@@ -266,14 +266,16 @@ def _insert_source_entry(
     )
 
 
-def _make_canon_pair(db, *, proof: str | None) -> CanonPair:
+def _make_canon_pair(
+    db, *, proof: str | None, insertion_order: tuple[str, str] = ("JPG", "CR2")
+) -> CanonPair:
     registry = ProfileRegistry(db)
     profile = registry.current("canon-eos")
     # **`client` fixture が既定の DJI ボリューム（`fs_uuid="26B1-2FD6"`）を持つ。**
     # `a_volume` の既定値のままだと UNIQUE (fs_uuid, fs_type, size_bytes) が衝突する。
     volume_id = a_volume(db, (profile.profile_id, profile.revision_id), fs_uuid="CANON-EOS-0001")
     media_ids = {}
-    for extension in ("JPG", "CR2"):
+    for extension in insertion_order:
         media_id = a_media_file(
             db,
             (profile.profile_id, profile.revision_id),
@@ -314,6 +316,17 @@ def canon_pair(client, db) -> CanonPair:
 def canon_pair_without_proof(client, db) -> CanonPair:
     """`canon_pair` と同じ形だが `copresent_key` が NULL —— 同席の証拠が無い."""
     return _make_canon_pair(db, proof=None)
+
+
+@pytest.fixture
+def canon_pair_inserted_in_reverse(client, db) -> CanonPair:
+    """`canon_pair` と同じ組だが、**CR2 を JPG より先に** `media_file` へ入れる.
+
+    `stack.extensions` の順位（JPG が primary）は変わらない。挿入順と主従の順位を
+    ずらすことで、`_members_of` の `ORDER BY r.rank` を消しても素通りしてしまう
+    テスト（挿入順とたまたま同じ順で返る）を作らない。
+    """
+    return _make_canon_pair(db, proof=_CANON_PROOF, insertion_order=("CR2", "JPG"))
 
 
 @pytest.fixture

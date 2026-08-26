@@ -34,7 +34,18 @@ function detail(overrides: Record<string, unknown> = {}) {
     delete_blocked_reason: null,
     delete_frees_sources: true,
     group: null,
+    stack: null,
     ...overrides,
+  };
+}
+
+/** 組（`GET /media/{id}` の `stack`）。**主が先頭。** */
+function aPair() {
+  return {
+    members: [
+      { id: "m1", rel_path: "library/canon/IMG_1.JPG", size_bytes: 3_000_000 },
+      { id: "m2", rel_path: "library/canon/IMG_1.CR2", size_bytes: 22_000_000 },
+    ],
   };
 }
 
@@ -551,5 +562,146 @@ describe("検証の結果", () => {
     renderWith({ ...MERGED, verification: null });
     await waitFor(() => expect(screen.getByText("つないだ結果")).toBeInTheDocument());
     expect(screen.queryByText(/検証:/)).toBeNull();
+  });
+});
+
+// RAW+JPEG の組（Task 1 の `stack`）。従（CR2）は一覧に出ないので、詳細だけが
+// その 1 件へ辿れる唯一の道になる（§13「行き止まりにしない」）。
+describe("組（RAW+JPEG）", () => {
+  it("組の中身をファイル名と大きさで出す", async () => {
+    renderDetail({ role: "original", rel_path: "library/canon/IMG_1.JPG", stack: aPair() });
+
+    const section = (
+      await screen.findByRole("heading", { name: "この 1 枚を作っているファイル" })
+    ).closest("section") as HTMLElement;
+    expect(within(section).getByText("IMG_1.JPG")).toBeInTheDocument();
+    expect(within(section).getByText("IMG_1.CR2")).toBeInTheDocument();
+    expect(within(section).getByText("21 MiB")).toBeInTheDocument();
+  });
+
+  it("既定では組の全部が選ばれている", async () => {
+    // **一覧の丸が組ごとに選ぶのと揃える。** 外したい人だけが操作する。
+    renderDetail({ role: "original", rel_path: "library/canon/IMG_1.JPG", stack: aPair() });
+
+    expect(await screen.findByRole("checkbox", { name: "送る：IMG_1.JPG" })).toBeChecked();
+    expect(screen.getByRole("checkbox", { name: "送る：IMG_1.CR2" })).toBeChecked();
+    expect(screen.getByText("2 枚 ・ 24 MiB を送ります")).toBeInTheDocument();
+  });
+
+  it("外した 1 枚は送るへ渡らない", async () => {
+    renderDetail({ role: "original", rel_path: "library/canon/IMG_1.JPG", stack: aPair() });
+
+    await userEvent.click(await screen.findByRole("checkbox", { name: "送る：IMG_1.CR2" }));
+    await userEvent.click(screen.getByRole("button", { name: "送る" }));
+
+    const state = await screen.findByTestId("send-state");
+    expect(JSON.parse(state.textContent ?? "null")).toEqual({ ids: ["m1"], destinationIds: [] });
+  });
+
+  it("外したのが写真本体でも、残りの 1 枚だけが送るへ渡る", async () => {
+    // **この仕込みでは `data.id`（`m1`）が組の主にあたる**（`renderDetail` は
+    // `/media/m1` を返し、`aPair` の members は主が先頭）。従だけを外す形だと、
+    // 残るのは常に `data.id` になり、「選んだぶんを渡す」と「いつも `data.id` を
+    // 渡す」のどちらでも同じ結果になって見分けが付かない。ここでは主を外し、
+    // 従だけを残すことで、選んだぶんが渡っていることを確かめる。
+    //
+    // **`data.id` が主だとは限らない** —— 従の `/photos/:id` を直接開けば
+    // `data.id` は従で、`members[0].id` が主になる。
+    renderDetail({ role: "original", rel_path: "library/canon/IMG_1.JPG", stack: aPair() });
+
+    await userEvent.click(await screen.findByRole("checkbox", { name: "送る：IMG_1.JPG" }));
+    await userEvent.click(screen.getByRole("button", { name: "送る" }));
+
+    const state = await screen.findByTestId("send-state");
+    expect(JSON.parse(state.textContent ?? "null")).toEqual({ ids: ["m2"], destinationIds: [] });
+  });
+
+  it("全部外したら送れない", async () => {
+    renderDetail({ role: "original", rel_path: "library/canon/IMG_1.JPG", stack: aPair() });
+
+    await userEvent.click(await screen.findByRole("checkbox", { name: "送る：IMG_1.JPG" }));
+    await userEvent.click(screen.getByRole("checkbox", { name: "送る：IMG_1.CR2" }));
+
+    expect(screen.getByRole("button", { name: "送る" })).toBeDisabled();
+  });
+
+  it("組でない写真には、このセクションを出さない", async () => {
+    renderDetail({ role: "original", stack: null });
+
+    await screen.findByRole("button", { name: "送る" });
+    expect(
+      screen.queryByRole("heading", { name: "この 1 枚を作っているファイル" }),
+    ).not.toBeInTheDocument();
+  });
+
+  it("組でない写真の「送る」は、いままでどおり 1 件を渡す", async () => {
+    renderDetail({ role: "original", stack: null });
+
+    await userEvent.click(await screen.findByRole("button", { name: "送る" }));
+
+    const state = await screen.findByTestId("send-state");
+    expect(JSON.parse(state.textContent ?? "null")).toEqual({ ids: ["m1"], destinationIds: [] });
+  });
+
+  it("相方のファイル名から、その 1 件のくわしくへ行ける", async () => {
+    // **行き止まりにしない**（§13）。従は一覧に出ないので、ここが唯一の道。
+    renderDetail({ role: "original", rel_path: "library/canon/IMG_1.JPG", stack: aPair() });
+
+    expect(await screen.findByRole("link", { name: "IMG_1.CR2" })).toHaveAttribute(
+      "href",
+      "/photos/m2",
+    );
+  });
+
+  it("別の写真へ移ったときは、選択が引き継がれない", async () => {
+    // **同じマウントのまま id だけ変わる。** `/photos/:id` は同じ要素なので、
+    // ページ内のリンク（相方や元になったファイル）で別の写真へ移っても、
+    // 画面は作り直されない。選択の再初期化が `memberKey`（組の中身）ではなく
+    // 「一度でも選ばれていたか」だけを見ていると、ここで前の写真の選択を
+    // 引きずってしまう（前の組の id を、新しい写真の「送る」に渡してしまう）。
+    renderDetail(
+      {
+        role: "original",
+        rel_path: "library/canon/IMG_1.JPG",
+        stack: {
+          members: [
+            { id: "m1", rel_path: "library/canon/IMG_1.JPG", size_bytes: 3_000_000 },
+            { id: "m3", rel_path: "library/canon/IMG_1.CR2", size_bytes: 22_000_000 },
+          ],
+        },
+      },
+      {
+        "/media/m3": detail({
+          id: "m3",
+          role: "original",
+          rel_path: "library/canon/IMG_9.CR2",
+          stack: {
+            members: [
+              { id: "m9", rel_path: "library/canon/IMG_9.JPG", size_bytes: 4_000_000 },
+              { id: "m3", rel_path: "library/canon/IMG_9.CR2", size_bytes: 23_000_000 },
+            ],
+          },
+        }),
+      },
+    );
+
+    expect(await screen.findByRole("checkbox", { name: "送る：IMG_1.JPG" })).toBeChecked();
+    expect(screen.getByRole("checkbox", { name: "送る：IMG_1.CR2" })).toBeChecked();
+
+    // 相方（CR2 = m3）のリンクで、m3 自身のくわしくへ移る（別の組）。
+    await userEvent.click(screen.getByRole("link", { name: "IMG_1.CR2" }));
+
+    // 新しい写真の組が、両方チェックされた既定の状態で出る。
+    expect(await screen.findByRole("checkbox", { name: "送る：IMG_9.JPG" })).toBeChecked();
+    expect(screen.getByRole("checkbox", { name: "送る：IMG_9.CR2" })).toBeChecked();
+    expect(screen.queryByRole("checkbox", { name: "送る：IMG_1.JPG" })).not.toBeInTheDocument();
+
+    await userEvent.click(screen.getByRole("button", { name: "送る" }));
+
+    const state = await screen.findByTestId("send-state");
+    expect(JSON.parse(state.textContent ?? "null")).toEqual({
+      ids: ["m9", "m3"],
+      destinationIds: [],
+    });
   });
 });

@@ -1,4 +1,4 @@
-// 写真（§13）。日付でまとめ、1 枚ごとに状態の印を出す。
+// 写真（§13）。日付でまとめたグリッドで表示する。
 
 import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
@@ -267,13 +267,25 @@ describe("写真の画面", () => {
     expect(calls().some((c) => c.path.includes("destination_id=d1"))).toBe(false);
   });
 
-  it("宛先ごとの絞り込みが効いているときだけ、状態の印を出す", async () => {
-    stubApi({
+  it("宛先ごとの絞り込みが効いていても、状態の印も凡例も出さない", async () => {
+    // **印は行ごとに引いていなかった。** 宛先ごとの絞り込みが効いている間だけ
+    // 全行へ同じ印を被せていたので、直前に押したチップの繰り返しにしかならない。
+    const { calls } = stubApi({
       "/media": {
         media: [media("a", "2026-08-18T14:03:00+09:00")],
         total: 1,
         page: 1,
         page_size: 50,
+      },
+      // クリック後の応答は別のタイル（b）で返す。**a のままでは確かめられない**
+      // —— クリック直後、前の絞り込みの行がまだ並んでいる間に確かめると、
+      // その一瞬だけ緑になってしまう。b が出てから確かめれば、応答が
+      // 実際に画面へ反映されたあとだと分かる。
+      "/media?status=sent&destination_id=d1&collapse=stack&page_size=200": {
+        media: [media("b", "2026-08-18T14:03:00+09:00")],
+        total: 1,
+        page: 1,
+        page_size: 200,
       },
       "/destinations": { destinations: [{ id: "d1", name: "家", enabled: true }] },
     });
@@ -282,12 +294,35 @@ describe("写真の画面", () => {
         <PhotosScreen />
       </MemoryRouter>,
     );
-    await screen.findByRole("button", { name: /a\.JPG/ });
-    // 「すべて」では宛先ごとの状態が定まらないので、印を出さない。
+    await userEvent.click(await screen.findByRole("button", { name: /送信済み/ }));
+    await waitFor(() =>
+      expect(
+        calls().some(
+          (c) =>
+            c.path === "/media?status=sent&destination_id=d1&collapse=stack&page_size=200" &&
+            c.method === "GET",
+        ),
+      ).toBe(true),
+    );
+    await waitFor(() => expect(screen.getByRole("button", { name: /b\.JPG/ })).toBeInTheDocument());
     expect(container.querySelector(".tile .mark")).toBeNull();
+    // **タイルがあり、宛先ごとの絞り込みも効いている状態でも凡例は出さない。**
+    // 「印が出るときだけ凡例を出す」中間形も、印そのものが無い以上は同じく空。
+    expect(document.querySelector(".legend")).toBeNull();
+  });
 
-    await userEvent.click(screen.getByRole("button", { name: /送信済み/ }));
-    await waitFor(() => expect(container.querySelector(".tile .mark.sent")).not.toBeNull());
+  it("凡例を出さない", async () => {
+    stubApi({
+      "/media": { media: [], total: 0, page: 1, page_size: 200 },
+      "/destinations": { destinations: [] },
+    });
+    render(
+      <MemoryRouter>
+        <PhotosScreen />
+      </MemoryRouter>,
+    );
+    await screen.findByRole("heading", { name: "写真" });
+    expect(document.querySelector(".legend")).toBeNull();
   });
 
   it("選ぶ丸の aria-label は rel_path の末尾", async () => {
@@ -359,6 +394,537 @@ describe("写真の画面", () => {
     );
     await screen.findByRole("button", { name: /a\.JPG/ });
     expect(screen.queryByText("2:05")).toBeNull();
+  });
+
+  it("日付の丸で、その日を全部選ぶ", async () => {
+    stubApi({
+      "/media": {
+        media: [
+          media("a", "2026-08-18T15:12:00+09:00", { size_bytes: 100 }),
+          media("b", "2026-08-18T14:03:00+09:00", { size_bytes: 200 }),
+          media("c", "2026-08-17T09:12:00+09:00", { size_bytes: 400 }),
+        ],
+        total: 3,
+        page: 1,
+        page_size: 200,
+      },
+      "/destinations": { destinations: [] },
+    });
+    render(
+      <MemoryRouter>
+        <PhotosScreen />
+      </MemoryRouter>,
+    );
+
+    // `formatDate("2026-08-18…")` は `"2026年8月18日"`（`utils/formatDateTime.ts`）。
+    const day = await screen.findByRole("checkbox", { name: "2026年8月18日 をまとめて選ぶ" });
+    await userEvent.click(day);
+
+    expect(await screen.findByText("2 件を選択中")).toBeInTheDocument();
+    expect(screen.getByText(/合計 300 B/)).toBeInTheDocument();
+  });
+
+  it("全部選ばれている日の丸を押すと、その日を全部外す", async () => {
+    // **押した結果が予想できる**ようにする（全 → 無、それ以外 → 全）。
+    stubApi({
+      "/media": {
+        media: [media("a", "2026-08-18T15:12:00+09:00"), media("b", "2026-08-18T14:03:00+09:00")],
+        total: 2,
+        page: 1,
+        page_size: 200,
+      },
+      "/destinations": { destinations: [] },
+    });
+    render(
+      <MemoryRouter>
+        <PhotosScreen />
+      </MemoryRouter>,
+    );
+
+    const day = await screen.findByRole("checkbox", { name: /をまとめて選ぶ/ });
+    await userEvent.click(day);
+    expect(day).toHaveAttribute("aria-checked", "true");
+    await userEvent.click(day);
+
+    expect(day).toHaveAttribute("aria-checked", "false");
+    expect(screen.queryByText(/件を選択中/)).not.toBeInTheDocument();
+  });
+
+  it("一部だけ選ばれている日の丸は mixed になる", async () => {
+    // **`aria-pressed` のボタンにしない。** 「一部」は押下状態では表せず、
+    // 読み上げで全選択と区別が付かない。
+    stubApi({
+      "/media": {
+        media: [media("a", "2026-08-18T15:12:00+09:00"), media("b", "2026-08-18T14:03:00+09:00")],
+        total: 2,
+        page: 1,
+        page_size: 200,
+      },
+      "/destinations": { destinations: [] },
+    });
+    render(
+      <MemoryRouter>
+        <PhotosScreen />
+      </MemoryRouter>,
+    );
+
+    await userEvent.click(await screen.findByRole("button", { name: "選ぶ：a.JPG" }));
+
+    expect(screen.getByRole("checkbox", { name: /をまとめて選ぶ/ })).toHaveAttribute(
+      "aria-checked",
+      "mixed",
+    );
+  });
+
+  it("日付の丸は、その日の組の相方も一緒に選ぶ", async () => {
+    // **単位はタイル（＝組）。** タイル 1 つで 2 ファイルを表す。
+    stubApi({
+      "/media": {
+        media: [
+          media("j", "2026-08-18T15:12:00+09:00", {
+            size_bytes: 100,
+            stack: {
+              members: [
+                { id: "j", rel_path: "x/IMG_1.JPG", size_bytes: 100 },
+                { id: "r", rel_path: "x/IMG_1.CR2", size_bytes: 900 },
+              ],
+            },
+          }),
+        ],
+        total: 1,
+        page: 1,
+        page_size: 200,
+      },
+      "/destinations": { destinations: [] },
+    });
+    render(
+      <MemoryRouter>
+        <PhotosScreen />
+      </MemoryRouter>,
+    );
+
+    await userEvent.click(await screen.findByRole("checkbox", { name: /をまとめて選ぶ/ }));
+
+    expect(await screen.findByText("2 件を選択中")).toBeInTheDocument();
+    expect(screen.getByText(/合計 1000 B/)).toBeInTheDocument();
+  });
+});
+
+// **Shift+クリックで、直前に押したものから今回のものまでを範囲で選ぶ。**
+// アンカー（起点）は「並び」に属する状態なので、絞り込みが変わったら捨てる。
+describe("Shift+クリックで範囲を選ぶ", () => {
+  beforeEach(() => {
+    document.cookie = "XSRF-TOKEN=token; path=/";
+  });
+  afterEach(() => vi.restoreAllMocks());
+
+  it("Shift で、直前に押したものから範囲を選ぶ", async () => {
+    stubApi({
+      "/media": {
+        media: [
+          media("a", "2026-08-18T15:12:00+09:00"),
+          media("b", "2026-08-18T14:03:00+09:00"),
+          media("c", "2026-08-18T13:03:00+09:00"),
+          media("d", "2026-08-18T12:03:00+09:00"),
+        ],
+        total: 4,
+        page: 1,
+        page_size: 200,
+      },
+      "/destinations": { destinations: [] },
+    });
+    render(
+      <MemoryRouter>
+        <PhotosScreen />
+      </MemoryRouter>,
+    );
+
+    // **同じ `user` を使い続ける。** 直接 `userEvent.click` / `userEvent.keyboard`
+    // を別々に呼ぶと、呼び出しごとに新しい「押している状態」が始まって Shift が
+    // 継続しない —— `setup()` の 1 つのインスタンスだけが状態を共有する。
+    const user = userEvent.setup();
+    await user.click(await screen.findByRole("button", { name: "選ぶ：a.JPG" }));
+    await user.keyboard("{Shift>}");
+    await user.click(screen.getByRole("button", { name: "選ぶ：c.JPG" }));
+    await user.keyboard("{/Shift}");
+
+    expect(await screen.findByText("3 件を選択中")).toBeInTheDocument();
+  });
+
+  // **Phase 10 の事故そのもの。** 範囲の中に組（RAW+JPEG）のタイルが混ざって
+  // いるとき、その相方まで選ばなければ、送るときに主（JPG）しか積まれず
+  // Immich でスタックが組まれない。`membersOf` を通さず `item.id` だけを
+  // 積む変異でもテストが全部通ってしまわないよう、範囲選択のテストの中に
+  // `stack` を持つ行を混ぜて確かめる。
+  //
+  // **組の行はアンカーにしない、範囲の途中に置く。** 組の行をアンカー（最初に
+  // 素のクリックで押す行）にすると、そのクリックは `toggleOne` を通るので
+  // 相方まで選ばれてしまい、`selectRange` 側の集計が壊れていても隠れてしまう
+  // （実際にこの並びで確かめて気付いた）。素のクリックで押すのは組を持たない
+  // b、Shift の範囲の中で初めて j の相方が要る場面を作る。
+  it("Shift の範囲に組のタイルが入っていたら、相方も一緒に選ぶ", async () => {
+    stubApi({
+      "/media": {
+        media: [
+          media("b", "2026-08-18T15:12:00+09:00", { size_bytes: 50 }),
+          media("j", "2026-08-18T14:12:00+09:00", {
+            rel_path: "library/x/IMG_1.JPG",
+            size_bytes: 100,
+            stack: {
+              members: [
+                { id: "j", rel_path: "library/x/IMG_1.JPG", size_bytes: 100 },
+                { id: "r", rel_path: "library/x/IMG_1.CR2", size_bytes: 200 },
+              ],
+            },
+          }),
+          media("c", "2026-08-18T13:12:00+09:00", { size_bytes: 25 }),
+        ],
+        total: 3,
+        page: 1,
+        page_size: 200,
+      },
+      "/destinations": { destinations: [] },
+    });
+    render(
+      <MemoryRouter>
+        <PhotosScreen />
+      </MemoryRouter>,
+    );
+
+    const user = userEvent.setup();
+    await user.click(await screen.findByRole("button", { name: "選ぶ：b.JPG" }));
+    await user.keyboard("{Shift>}");
+    await user.click(await screen.findByRole("button", { name: "選ぶ：c.JPG" }));
+    await user.keyboard("{/Shift}");
+
+    // j の相方 r（200 B）を数え落とすと、3 件・175 B になってしまう。
+    expect(await screen.findByText("4 件を選択中")).toBeInTheDocument();
+    expect(screen.getByText(/合計 375 B/)).toBeInTheDocument();
+  });
+
+  it("Shift の範囲は日付のまとまりをまたぐ", async () => {
+    // **利用者が見ている並びは 1 本の流れ**で、まとまりは見出しにすぎない。
+    stubApi({
+      "/media": {
+        media: [
+          media("a", "2026-08-18T15:12:00+09:00"),
+          media("b", "2026-08-17T14:03:00+09:00"),
+          media("c", "2026-08-16T13:03:00+09:00"),
+        ],
+        total: 3,
+        page: 1,
+        page_size: 200,
+      },
+      "/destinations": { destinations: [] },
+    });
+    render(
+      <MemoryRouter>
+        <PhotosScreen />
+      </MemoryRouter>,
+    );
+
+    const user = userEvent.setup();
+    await user.click(await screen.findByRole("button", { name: "選ぶ：a.JPG" }));
+    await user.keyboard("{Shift>}");
+    await user.click(screen.getByRole("button", { name: "選ぶ：c.JPG" }));
+    await user.keyboard("{/Shift}");
+
+    expect(await screen.findByText("3 件を選択中")).toBeInTheDocument();
+  });
+
+  it("Shift の範囲は選ぶ側に倒す（すでに選ばれているものを外さない）", async () => {
+    stubApi({
+      "/media": {
+        media: [
+          media("a", "2026-08-18T15:12:00+09:00"),
+          media("b", "2026-08-18T14:03:00+09:00"),
+          media("c", "2026-08-18T13:03:00+09:00"),
+        ],
+        total: 3,
+        page: 1,
+        page_size: 200,
+      },
+      "/destinations": { destinations: [] },
+    });
+    render(
+      <MemoryRouter>
+        <PhotosScreen />
+      </MemoryRouter>,
+    );
+
+    const user = userEvent.setup();
+    await user.click(await screen.findByRole("button", { name: "選ぶ：b.JPG" }));
+    await user.click(await screen.findByRole("button", { name: "選ぶ：a.JPG" }));
+    await user.keyboard("{Shift>}");
+    await user.click(screen.getByRole("button", { name: "選ぶ：c.JPG" }));
+    await user.keyboard("{/Shift}");
+
+    expect(await screen.findByText("3 件を選択中")).toBeInTheDocument();
+  });
+
+  it("アンカーが無ければ、Shift は 1 つだけ選ぶ", async () => {
+    stubApi({
+      "/media": {
+        media: [media("a", "2026-08-18T15:12:00+09:00"), media("b", "2026-08-18T14:03:00+09:00")],
+        total: 2,
+        page: 1,
+        page_size: 200,
+      },
+      "/destinations": { destinations: [] },
+    });
+    render(
+      <MemoryRouter>
+        <PhotosScreen />
+      </MemoryRouter>,
+    );
+
+    const user = userEvent.setup();
+    await user.keyboard("{Shift>}");
+    await user.click(await screen.findByRole("button", { name: "選ぶ：b.JPG" }));
+    await user.keyboard("{/Shift}");
+
+    expect(await screen.findByText("1 件を選択中")).toBeInTheDocument();
+  });
+
+  it("絞り込みを変えたらアンカーを捨てる", async () => {
+    // **並びが変わったあとのアンカーは、利用者の見ていたものと違う範囲を指す。**
+    // 選んだものは覚えたまま（Phase 7 の判断）でも、アンカーは並びに属する状態。
+    const { calls } = stubApi({
+      "/media": {
+        media: [
+          media("a", "2026-08-18T15:12:00+09:00"),
+          media("b", "2026-08-18T14:03:00+09:00"),
+          media("c", "2026-08-18T13:03:00+09:00"),
+        ],
+        total: 3,
+        page: 1,
+        page_size: 200,
+      },
+      "/destinations": { destinations: [{ id: "d1", name: "家", enabled: true }] },
+    });
+    render(
+      <MemoryRouter>
+        <PhotosScreen />
+      </MemoryRouter>,
+    );
+
+    const user = userEvent.setup();
+    await user.click(await screen.findByRole("button", { name: "選ぶ：a.JPG" }));
+    await user.click(screen.getByRole("button", { name: /^動画$/ }));
+    await waitFor(() => expect(calls().some((c) => c.path.includes("kind=video"))).toBe(true));
+    await user.keyboard("{Shift>}");
+    await user.click(await screen.findByRole("button", { name: "選ぶ：c.JPG" }));
+    await user.keyboard("{/Shift}");
+
+    // a（絞り込み前に選んだもの）は覚えたまま、c が 1 つ増えるだけ。b は入らない。
+    expect(await screen.findByText("2 件を選択中")).toBeInTheDocument();
+  });
+
+  // **アンカーを捨てる引き金は 4 つある**（ページ送り・絞り込み・探している言葉・
+  // 宛先）。実装は `mediaQuery` 全体を鍵にしているので 4 つとも一度に満たすが、
+  // `filter` だけを鍵にした実装も絞り込みのテストだけなら通ってしまう。残りの
+  // 3 つも別々に固定する。
+  it("ページを送ったらアンカーを捨てる", async () => {
+    const { calls } = stubApi({
+      "/media": {
+        media: [
+          media("a", "2026-08-18T15:12:00+09:00"),
+          media("b", "2026-08-18T14:03:00+09:00"),
+          media("c", "2026-08-18T13:03:00+09:00"),
+        ],
+        // 上限で切れているときだけページ送りが出る。
+        total: 3421,
+        page: 1,
+        page_size: 200,
+      },
+      "/destinations": { destinations: [] },
+    });
+    render(
+      <MemoryRouter>
+        <PhotosScreen />
+      </MemoryRouter>,
+    );
+
+    const user = userEvent.setup();
+    await user.click(await screen.findByRole("button", { name: "選ぶ：a.JPG" }));
+    await user.click(screen.getByRole("button", { name: "次の 200 件" }));
+    await waitFor(() => expect(calls().some((c) => c.path.includes("page=2"))).toBe(true));
+    await user.keyboard("{Shift>}");
+    await user.click(await screen.findByRole("button", { name: "選ぶ：c.JPG" }));
+    await user.keyboard("{/Shift}");
+
+    // アンカーが残っていれば a〜c の 3 件。捨てていれば a と c の 2 件。
+    expect(await screen.findByText("2 件を選択中")).toBeInTheDocument();
+  });
+
+  it("さがす言葉を変えたらアンカーを捨てる", async () => {
+    const { calls } = stubApi({
+      "/media": {
+        media: [
+          media("a", "2026-08-18T15:12:00+09:00"),
+          media("b", "2026-08-18T14:03:00+09:00"),
+          media("c", "2026-08-18T13:03:00+09:00"),
+        ],
+        total: 3,
+        page: 1,
+        page_size: 200,
+      },
+      "/destinations": { destinations: [] },
+    });
+    render(
+      <MemoryRouter>
+        <PhotosScreen />
+      </MemoryRouter>,
+    );
+
+    const user = userEvent.setup();
+    await user.click(await screen.findByRole("button", { name: "選ぶ：a.JPG" }));
+    await user.type(screen.getByLabelText("ファイル名でさがす"), "IMG");
+    await user.click(screen.getByRole("button", { name: "さがす" }));
+    await waitFor(() => expect(calls().some((c) => c.path.includes("q=IMG"))).toBe(true));
+    await user.keyboard("{Shift>}");
+    await user.click(await screen.findByRole("button", { name: "選ぶ：c.JPG" }));
+    await user.keyboard("{/Shift}");
+
+    expect(await screen.findByText("2 件を選択中")).toBeInTheDocument();
+  });
+
+  it("宛先を変えたらアンカーを捨てる", async () => {
+    const { calls } = stubApi({
+      "/media": {
+        media: [
+          media("a", "2026-08-18T15:12:00+09:00"),
+          media("b", "2026-08-18T14:03:00+09:00"),
+          media("c", "2026-08-18T13:03:00+09:00"),
+        ],
+        total: 3,
+        page: 1,
+        page_size: 200,
+      },
+      "/destinations": {
+        destinations: [
+          { id: "d1", name: "家", enabled: true },
+          { id: "d2", name: "職場", enabled: true },
+        ],
+      },
+    });
+    render(
+      // 宛先ごとの絞り込みに入った状態から始める（宛先の選択肢はここでしか出ない）。
+      <MemoryRouter initialEntries={["/photos?status=unsent&destination_id=d1"]}>
+        <PhotosScreen />
+      </MemoryRouter>,
+    );
+
+    const user = userEvent.setup();
+    await user.click(await screen.findByRole("button", { name: "選ぶ：a.JPG" }));
+    await user.click(screen.getByRole("button", { name: "職場" }));
+    await waitFor(() => expect(calls().some((c) => c.path.includes("destination_id=d2"))).toBe(true));
+    await user.keyboard("{Shift>}");
+    await user.click(await screen.findByRole("button", { name: "選ぶ：c.JPG" }));
+    await user.keyboard("{/Shift}");
+
+    // **絞り込みは `unsent` のまま。** `filter` だけを鍵にした実装はここで落ちる。
+    expect(await screen.findByText("2 件を選択中")).toBeInTheDocument();
+  });
+
+  it("Shift を続けて 2 回押すと、2 回目のアンカーは直前に押したものから始まる", async () => {
+    // **単なる件数の比較では区別が付かない。** `selectRange` は足すだけ（外さない）
+    // ので、アンカーを起点のまま固定しても直前のものへ更新しても、選んだ範囲が
+    // すでに選ばれている部分と重なる限り、結果の件数は一致してしまう。ここでは
+    // 日付の丸でいったん選択を空にしてから確かめる —— `toggleDay` はアンカーに
+    // 触らないので、空にした直後の Shift 範囲だけがアンカーの値をそのまま映す。
+    stubApi({
+      "/media": {
+        media: [
+          media("c", "2026-08-18T15:00:00+09:00"),
+          media("d", "2026-08-18T14:00:00+09:00"),
+          media("e", "2026-08-18T13:00:00+09:00"),
+          media("f", "2026-08-18T12:00:00+09:00"),
+          media("a", "2026-08-17T10:00:00+09:00"),
+        ],
+        total: 5,
+        page: 1,
+        page_size: 200,
+      },
+      "/destinations": { destinations: [] },
+    });
+    render(
+      <MemoryRouter>
+        <PhotosScreen />
+      </MemoryRouter>,
+    );
+
+    const user = userEvent.setup();
+    await user.click(await screen.findByRole("button", { name: "選ぶ：c.JPG" }));
+    await user.keyboard("{Shift>}");
+    await user.click(screen.getByRole("button", { name: "選ぶ：f.JPG" }));
+    await user.keyboard("{/Shift}");
+    expect(await screen.findByText("4 件を選択中")).toBeInTheDocument();
+
+    // 8/18 の日付の丸で、選んだ 4 件をいったん空にする。
+    await user.click(screen.getByRole("checkbox", { name: "2026年8月18日 をまとめて選ぶ" }));
+    expect(screen.queryByText(/件を選択中/)).toBeNull();
+
+    await user.keyboard("{Shift>}");
+    await user.click(await screen.findByRole("button", { name: "選ぶ：a.JPG" }));
+    await user.keyboard("{/Shift}");
+
+    // アンカーが直前の f のままなら f〜a の 2 件。もし起点の c に固定された
+    // ままなら c〜a の 5 件になってしまう。
+    expect(await screen.findByText("2 件を選択中")).toBeInTheDocument();
+  });
+
+  it("アンカーが並びから消えていても、押したタイルは選ぶ", async () => {
+    // **SSE の再取得は `mediaQuery` を変えない。** `useReloadOnEvents` が取り込み
+    // や送信の進みで取り直しても、絞り込み・検索・ページ・宛先は変わらないので
+    // アンカーは捨てられない。それでも取り込みで 200 件の外へ押し出されたり、
+    // つなぎ直しで消えたりして、アンカーの行そのものが並びから居なくなることが
+    // ある。そのときの Shift+クリックが黙って何も起きないのは事故——アンカーが
+    // 無いときと同じ「押した 1 枚だけを選ぶ」に倒すべき。
+    const routes: Record<string, unknown> = {
+      "/media": {
+        media: [
+          media("a", "2026-08-18T15:12:00+09:00"),
+          media("b", "2026-08-18T14:03:00+09:00"),
+        ],
+        total: 2,
+        page: 1,
+        page_size: 200,
+      },
+      "/destinations": { destinations: [] },
+    };
+    const { calls } = stubApi(routes);
+    render(
+      <MemoryRouter>
+        <PhotosScreen />
+      </MemoryRouter>,
+    );
+
+    await userEvent.click(await screen.findByRole("button", { name: "選ぶ：a.JPG" }));
+    expect(await screen.findByText("1 件を選択中")).toBeInTheDocument();
+
+    // a が並びから消える（mediaQuery はそのまま）。
+    routes["/media"] = {
+      media: [media("b", "2026-08-18T14:03:00+09:00"), media("c", "2026-08-18T13:03:00+09:00")],
+      total: 2,
+      page: 1,
+      page_size: 200,
+    };
+    const before = calls().filter((c) => c.path.startsWith("/media?")).length;
+    emitJob({ job_id: "j1", seq: 1, level: "info", message: "取り込んだ", data: null, at: "" });
+    await waitFor(() =>
+      expect(calls().filter((c) => c.path.startsWith("/media?")).length).toBeGreaterThan(before),
+    );
+    await waitFor(() => expect(screen.queryByRole("button", { name: "選ぶ：a.JPG" })).toBeNull());
+
+    const user = userEvent.setup();
+    await user.keyboard("{Shift>}");
+    await user.click(await screen.findByRole("button", { name: "選ぶ：c.JPG" }));
+    await user.keyboard("{/Shift}");
+
+    // 何も起きないままなら 1 件（a）のまま。c が新たに選ばれれば 2 件
+    // （a は隠れても選んだままなので、合計に残る）。
+    expect(await screen.findByText("2 件を選択中")).toBeInTheDocument();
   });
 });
 
@@ -802,53 +1368,6 @@ describe("読み込む件数と、切れていることの表示", () => {
     );
   });
 
-  // 絞り込みを変えた瞬間に印だけが変わると、送信済みの 200 枚に赤い × が付く。
-  it("絞り込みを変えて読んでいる間は、前の行に新しい印を付けない", async () => {
-    let release!: () => void;
-    const held = new Promise<void>((resolve) => {
-      release = resolve;
-    });
-    vi.stubGlobal(
-      "fetch",
-      vi.fn(async (input: string) => {
-        const path = input.replace(/^\/api/, "");
-        if (path.includes("status=failed")) {
-          await held;
-          return new Response(
-            JSON.stringify({ media: [], total: 0, page: 1, page_size: 200 }),
-            { status: 200 },
-          );
-        }
-        if (path.startsWith("/media")) {
-          return new Response(
-            JSON.stringify({
-              media: [media("a", "2026-08-18T15:12:00+09:00")],
-              total: 1,
-              page: 1,
-              page_size: 200,
-            }),
-            { status: 200 },
-          );
-        }
-        return new Response(
-          JSON.stringify({ destinations: [{ id: "d1", name: "家", enabled: true }] }),
-          { status: 200 },
-        );
-      }),
-    );
-    const { container } = render(
-      <MemoryRouter initialEntries={["/photos?status=sent&destination_id=d1"]}>
-        <PhotosScreen />
-      </MemoryRouter>,
-    );
-    await waitFor(() => expect(container.querySelector(".tile .mark.sent")).not.toBeNull());
-
-    await userEvent.click(screen.getByRole("button", { name: "送れなかった" }));
-
-    expect(container.querySelector(".tile .mark.failed")).toBeNull();
-    release();
-  });
-
   it("絞り込みを変えたら、1 ページ目に戻す", async () => {
     // 3 ページ目のまま別の絞り込みへ移ると、当てはまるものが 1 ページ分しか
     // 無いときに「ありません」と出る。
@@ -917,25 +1436,6 @@ describe("送れなかったものの絞り込み", () => {
         ),
       ).toBe(true),
     );
-  });
-
-  it("送れなかったものには、その印を出す", async () => {
-    stubApi({
-      "/media": {
-        media: [media("a", "2026-08-18T14:03:00+09:00")],
-        total: 1,
-        page: 1,
-        page_size: 200,
-      },
-      "/destinations": { destinations: [{ id: "d1", name: "家", enabled: true }] },
-    });
-    const { container } = render(
-      <MemoryRouter>
-        <PhotosScreen />
-      </MemoryRouter>,
-    );
-    await userEvent.click(await screen.findByRole("button", { name: "送れなかった" }));
-    await waitFor(() => expect(container.querySelector(".tile .mark.failed")).not.toBeNull());
   });
 
   it("宛先が無ければ、「送れなかった」も選べない", async () => {

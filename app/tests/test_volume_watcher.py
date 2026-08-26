@@ -23,6 +23,8 @@ from mediaferry.db.jobs import JobStore
 from mediaferry.db.profiles import ProfileRegistry
 from mediaferry.jobs.watcher import VolumeWatcher
 
+from .test_schema_sources import PLACEHOLDER_DEFINITION_JSON
+
 
 @pytest.fixture
 def watcher(database, db, broker, monkeypatch):
@@ -439,8 +441,8 @@ def test_a_stale_profile_revision_is_not_imported(watcher, db, volumes):
     db.execute(
         "INSERT INTO profile_revision"
         " (id, profile_id, revision, definition_json, schema_version, created_at)"
-        " VALUES ('rev-2', ?, 50, '{}', 1, '2026-08-19T00:00:00Z')",
-        (profile["id"],),
+        " VALUES ('rev-2', ?, 50, ?, 1, '2026-08-19T00:00:00Z')",
+        (profile["id"], PLACEHOLDER_DEFINITION_JSON),
     )
     db.execute(
         "UPDATE device_profile SET current_revision_id = 'rev-2' WHERE id = ?", (profile["id"],)
@@ -620,8 +622,8 @@ def test_a_stale_profile_revision_is_not_counted(watcher, db):
     db.execute(
         "INSERT INTO profile_revision"
         " (id, profile_id, revision, definition_json, schema_version, created_at)"
-        " VALUES ('rev-counting', ?, 51, '{}', 1, '2026-08-19T00:00:00Z')",
-        (profile["id"],),
+        " VALUES ('rev-counting', ?, 51, ?, 1, '2026-08-19T00:00:00Z')",
+        (profile["id"], PLACEHOLDER_DEFINITION_JSON),
     )
     db.execute(
         "UPDATE device_profile SET current_revision_id = 'rev-counting' WHERE id = ?",

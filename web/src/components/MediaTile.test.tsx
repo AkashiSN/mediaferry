@@ -27,7 +27,8 @@ describe("MediaTile", () => {
 
     // **選ぶのは丸だけ。**
     await userEvent.click(screen.getByRole("button", { name: "選ぶ：A.MP4" }));
-    expect(onToggle).toHaveBeenCalledWith("m1");
+    // **修飾キーは、押していなければ `false` で渡る。** ここでしか固定されない。
+    expect(onToggle).toHaveBeenCalledWith("m1", { shift: false });
   });
 
   it("選ぶ丸は、選んでいるかどうかを名乗る", () => {
@@ -76,7 +77,8 @@ describe("MediaTile", () => {
     expect(container.querySelector(".pick svg")).toBeNull();
   });
 
-  it("RAW も一緒にあると分かる", () => {
+  it("組なら JPG+RAW と名乗る", () => {
+    // **`RAW` の 1 語では 2 枚あることが読めない**（利用者のレビュー）。
     renderTile({
       to: "/photos/m1",
       onToggle: vi.fn(),
@@ -90,12 +92,32 @@ describe("MediaTile", () => {
         },
       },
     });
-    expect(screen.getByText("RAW")).toBeInTheDocument();
+    expect(screen.getByText("JPG+RAW")).toBeInTheDocument();
   });
 
   it("組でなければ RAW とは書かない", () => {
     renderTile({ to: "/photos/m1", onToggle: vi.fn() });
-    expect(screen.queryByText("RAW")).toBeNull();
+    expect(screen.queryByText(/RAW/)).toBeNull();
+  });
+
+  it("タイルが 1 枚しか表さないなら札を出さない", () => {
+    // 送る画面では、相方が送信済みで CR2 だけが対象になることがある。
+    // **`media.stack.members` は「このタイルが表すファイル」**なので、1 つなら
+    // 組ではない。
+    const { container } = renderTile({
+      to: "/photos/m1",
+      onToggle: vi.fn(),
+      media: {
+        ...media,
+        stack: { members: [{ id: "m1", rel_path: "library/x/A.CR2", size_bytes: 200 }] },
+      },
+    });
+    expect(screen.queryByText(/RAW/)).toBeNull();
+    // **文字だけでは見えない崩れ方がある。** `label` の判定元を取り違えると、
+    // 中身が空の `.madeof.raw`（`background` を持つただの色付きの丸）だけが
+    // 残る崩れ方をする。それはテキストの検査には映らないので、入れ物ごと
+    // 無いことを別に見る。
+    expect(container.querySelector(".madeofs")).toBeNull();
   });
 
   // **「つないだ」と `RAW` は独立に立つ。** どちらを出すかは `role` と `stack` が
@@ -118,6 +140,6 @@ describe("MediaTile", () => {
     });
     // **同じ入れ物の兄弟として並ぶ**ことを見る。別々に絶対配置すると重なる。
     const badges = [...container.querySelectorAll(".madeofs > .madeof")];
-    expect(badges.map((badge) => badge.textContent)).toEqual(["つないだ", "RAW"]);
+    expect(badges.map((badge) => badge.textContent)).toEqual(["つないだ", "JPG+RAW"]);
   });
 });

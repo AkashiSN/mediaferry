@@ -1,16 +1,12 @@
 // 写真 1 枚のタイル（§13）。プロトタイプの `tile()` から色・間隔を取る。
-//
-// **状態の印は形と文字の両方で伝える。** 色だけにすると、色覚特性や白黒印刷で
-// 区別が付かない：未送信は白縁の丸、送信済みはチェック、確認が要るは「!」、
-// 送れなかったものは「×」。
 
 import { Link } from "react-router-dom";
 
+import { stackLabel } from "../utils/stacks";
 import { Icon } from "./Icon";
 
-export type MediaStatus = "unsent" | "awaiting" | "sent" | "failed" | null;
-
-/** 組（RAW+JPEG）に含まれる 1 行。`GET /media?collapse=stack` の主の行が持つ。 */
+/** 組（RAW+JPEG）に含まれる 1 行。`GET /media` が `collapse=stack` では主の行に、
+ * `stack=members` では組の行すべてに付ける（`GET /media/{id}` も返す）。 */
 export type StackMember = { id: string; rel_path: string; size_bytes: number };
 
 export type Media = {
@@ -20,19 +16,23 @@ export type Media = {
   captured_at: string;
   size_bytes: number;
   duration_seconds?: number | null;
-  status?: MediaStatus;
   role?: "original" | "derived";
-  /** 組（RAW+JPEG）。`GET /media?collapse=stack` が**組の member の行に付ける**。
-   * ふだん一覧に出るのは主だけだが、絞り込みで主が落ちると従が単独で出る（その
-   * ときも組の中身は付く）。曖昧な組（大小文字違いが混ざる等）は Immich でも
-   * 組まれないので、どの行にも付かない。 */
+  /** 組（RAW+JPEG）。**組の member の行に付く。**
+   *
+   * 出どころは 2 つ。`GET /media?collapse=stack`（写真タブ）は従を隠して主の行に
+   * 付けるが、絞り込みで主が落ちると従が単独で出る（そのときも組の中身は付く）。
+   * `GET /media?stack=members`（送る画面）は隠さず、組の行すべてに付ける ——
+   * 送る対象は絞り込みが返した行そのものなので、隠されると未送信の RAW が送られない。
+   * `GET /media/{id}`（くわしく）も同じものを返す。
+   *
+   * 曖昧な組（大小文字違いが混ざる等）は Immich でも組まれないので、どの行にも付かない。 */
   stack?: { members: StackMember[] } | null;
 };
 
 /** タイルが実際に読む部分だけ。**一覧の 1 行から直に描ける**ようにするため、
  * 撮影時刻や大きさは要求しない（`確認` は `GET /uploads` の行だけで描く）。 */
 export type TileMedia = Pick<Media, "id" | "rel_path"> &
-  Partial<Pick<Media, "kind" | "duration_seconds" | "status" | "role" | "stack">>;
+  Partial<Pick<Media, "kind" | "duration_seconds" | "role" | "stack">>;
 
 /** `rel_path` の末尾（ファイル名）。**内部の相対パスを画面に出さない**（§13）ので、
  * タイルの `aria-label` も、ホームの「さっき取り込んだもの」もここを通す。 */
@@ -58,27 +58,31 @@ export function MediaTile({
 }: {
   media: TileMedia;
   selected: boolean;
-  onToggle?: (id: string) => void;
+  /** 隅の丸を押したとき。**修飾キーは「利用者が何を押したか」だけを渡す**
+   * —— イベントそのものを渡すと、呼ぶ側が `preventDefault` などを触れてしまう。 */
+  onToggle?: (id: string, modifiers: { shift: boolean }) => void;
   /** 押したときに開く先。**選ぶのとは別の的**（隅の丸が選ぶ）。 */
   to?: string;
 }) {
   const name = fileName(media.rel_path);
   const hasDuration = media.kind === "video" && media.duration_seconds != null;
+  // **札は「このタイルが表すファイル」から作る。** 一覧では組の全員、送る画面では
+  // 対象になっているぶんだけ —— `media.stack.members` がその集合そのものである。
+  const label = media.stack ? stackLabel(media.stack.members) : null;
   const inside = (
     <>
       <img src={`/api/media/${media.id}/thumbnail`} alt="" loading="lazy" className="tileimg" />
-      {/* **「つないだ」と `RAW` は独立に立つ。** 出す条件が `role` と `stack` で
+      {/* **「つないだ」と組の札は独立に立つ。** 出す条件が `role` と `stack` で
           別々なので、両方立つ行がありうる。同じ座標へ重ねると片方が読めなくなる
           ため、1 つの入れ物へ入れて横に並べる（`styles.css` の `.madeofs`）。
-          **どちらかを捨てない** —— 「つないだ動画」と「組の主」は別の事実で、
+          **どちらかを捨てない** —— 「つないだ動画」と「組」は別の事実で、
           片方を隠すとタイルがその行を名乗り損ねる。 */}
-      {(media.role === "derived" || media.stack) && (
+      {(media.role === "derived" || label !== null) && (
         <span className="madeofs">
           {media.role === "derived" && <span className="madeof">つないだ</span>}
-          {media.stack && <span className="madeof raw">RAW</span>}
+          {label !== null && <span className="madeof raw">{label}</span>}
         </span>
       )}
-      <StatusMark status={media.status ?? null} />
       {hasDuration && (
         <span className="dur">{formatClipLength(media.duration_seconds as number)}</span>
       )}
@@ -107,32 +111,11 @@ export function MediaTile({
           className={`pick${selected ? " on" : ""}`}
           aria-label={`選ぶ：${name}`}
           aria-pressed={selected}
-          onClick={() => onToggle(media.id)}
+          onClick={(event) => onToggle(media.id, { shift: event.shiftKey })}
         >
           {selected && <Icon name="check" size={12} />}
         </button>
       )}
     </div>
   );
-}
-
-/** 宛先ごとの状態の印。分からないとき（絞り込みが宛先を伴わないとき）は出さない。 */
-function StatusMark({ status }: { status: MediaStatus }) {
-  if (status === "sent") {
-    return (
-      <span className="mark sent">
-        <Icon name="check" size={11} />
-      </span>
-    );
-  }
-  if (status === "awaiting") {
-    return <span className="mark awaiting">!</span>;
-  }
-  if (status === "failed") {
-    return <span className="mark failed">×</span>;
-  }
-  if (status === "unsent") {
-    return <span className="mark unsent" />;
-  }
-  return null;
 }

@@ -6,7 +6,7 @@
 from __future__ import annotations
 
 from .test_schema_artifacts import a_media_file, a_merge_group
-from .test_schema_sources import a_profile
+from .test_schema_sources import PLACEHOLDER_DEFINITION_JSON, a_profile
 from .test_schema_uploads import a_destination, an_upload
 
 
@@ -234,8 +234,8 @@ def test_a_merged_group_from_an_older_profile_revision_is_not_a_task(client, db)
     db.execute(
         "INSERT INTO profile_revision"
         " (id, profile_id, revision, definition_json, schema_version, created_at)"
-        " VALUES (?, ?, 2, '{}', 1, '2026-08-22T00:00:00+00:00')",
-        (newer, profile_id),
+        " VALUES (?, ?, 2, ?, 1, '2026-08-22T00:00:00+00:00')",
+        (newer, profile_id, PLACEHOLDER_DEFINITION_JSON),
     )
     db.execute(
         "UPDATE device_profile SET current_revision_id = ? WHERE id = ?", (newer, profile_id)

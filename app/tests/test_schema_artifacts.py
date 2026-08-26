@@ -6,7 +6,7 @@ from mediaferry.clock import now_iso
 from mediaferry.ids import new_id
 
 from .test_schema_jobs import a_job
-from .test_schema_sources import a_profile, a_volume
+from .test_schema_sources import PLACEHOLDER_DEFINITION_JSON, a_profile, a_volume
 
 
 def a_media_file(db, profile, **over):
@@ -103,8 +103,8 @@ def test_captured_at_revision_can_advance_within_the_same_profile(db):
     db.execute(
         "INSERT INTO profile_revision"
         " (id, profile_id, revision, definition_json, schema_version, created_at)"
-        " VALUES (?, ?, 2, '{}', 1, ?)",
-        (next_revision, profile_id, now_iso()),
+        " VALUES (?, ?, 2, ?, 1, ?)",
+        (next_revision, profile_id, PLACEHOLDER_DEFINITION_JSON, now_iso()),
     )
     db.execute(
         "UPDATE media_file SET captured_at_revision_id = ? WHERE id = ?", (next_revision, media)
