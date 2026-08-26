@@ -187,7 +187,7 @@ class Recomputer:
         2 つのスレッドが同時に使うことになる。
         """
         extension = PurePosixPath(source_rel).suffix.lstrip(".").upper()
-        if profile.definition.timestamp.source != "exif" or extension not in PHOTO_EXTENSIONS:
+        if "exif" not in profile.definition.timestamp.source or extension not in PHOTO_EXTENSIONS:
             return None
         path = self._data_root / row["rel_path"]
         return with_lease_pulse(ctx, lambda: read_datetime_original(path))

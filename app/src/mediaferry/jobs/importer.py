@@ -181,7 +181,7 @@ class Importer:
         `MediaProbe` と同じ拡張子の規則で行う（判定が 2 箇所に散らない）。
         """
         extension = PurePosixPath(row["rel_path"]).suffix.lstrip(".").upper()
-        if profile.definition.timestamp.source != "exif" or extension not in PHOTO_EXTENSIONS:
+        if "exif" not in profile.definition.timestamp.source or extension not in PHOTO_EXTENSIONS:
             return (
                 resolve_captured_at(
                     profile.definition, row["rel_path"], row["mtime_ns"], self._default_timezone

@@ -622,7 +622,7 @@ def test_exif_is_not_read_for_a_video(dji, db, data_root, monkeypatch):
         profile.definition.slug,
         replace(
             profile.definition,
-            timestamp=replace(profile.definition.timestamp, source="exif"),
+            timestamp=replace(profile.definition.timestamp, source=("exif", "mtime")),
         ),
     )
     calls = []

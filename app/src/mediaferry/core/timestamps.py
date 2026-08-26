@@ -90,25 +90,32 @@ def _wall_clock(
 
     **返す値は `source` が `mtime` のときだけ aware。** ファイル名と EXIF は
     壁時計で、オフセットの付与は呼び出し側が行う（`_attach_offset`）。
+
+    `timestamp.source` は出所の連鎖。**先頭から順に試し、当たった時点で返す。**
+    終端は必ず `mtime`（`parse_definition` が保証する）なので、ループを抜けずに
+    必ずどこかで値が決まる。
     """
     rule = defn.timestamp
-    if rule.source == "filename" and rule.pattern is not None and rule.format is not None:
-        try:
-            found = search(rule.pattern, PurePosixPath(rel_path).name)
-        except PatternTimeout:
-            # 悪性の式で取り込み全体を止めない。fallback へ落とす。
-            found = None
-        if found is not None:
+    for src in rule.source[:-1]:
+        if src == "filename" and rule.pattern is not None and rule.format is not None:
             try:
-                return datetime.strptime(found.group("ts"), rule.format), "filename"  # noqa: DTZ007
-            except ValueError:
-                pass
-    # **プロファイルが exif を宣言しているときだけ使う。** 宣言していない
-    # プロファイルに値が渡っても無視する（宣言と実際の解釈をずらさない）。
-    if rule.source == "exif" and exif_wall is not None:
-        return exif_wall, "exif"
-    # fallback は mtime のみを想定する。EXIF を持たないファイル（Canon の MOV、
-    # タグの無い JPEG）はここへ落ちる。
+                found = search(rule.pattern, PurePosixPath(rel_path).name)
+            except PatternTimeout:
+                # 悪性の式で取り込み全体を止めない。連鎖の次へ進む。
+                found = None
+            if found is not None:
+                try:
+                    return datetime.strptime(found.group("ts"), rule.format), "filename"  # noqa: DTZ007
+                except ValueError:
+                    pass
+        # **プロファイルが exif を宣言しているときだけ使う。** 宣言していない
+        # プロファイルに値が渡っても無視する（宣言と実際の解釈をずらさない）。
+        elif src == "exif" and exif_wall is not None:
+            return exif_wall, "exif"
+        # container はまだ値を受け取らない（Task 4 で対応）。当たらないので
+        # 連鎖の次へそのまま進む。
+    # 連鎖の終端は必ず mtime。EXIF を持たないファイル（Canon の MOV、
+    # タグの無い JPEG）や、ファイル名が pattern に当たらないファイルはここへ落ちる。
     return mtime_wall_clock(mtime_ns, zone, defn.timestamp.mtime_semantics), "mtime"
 
 

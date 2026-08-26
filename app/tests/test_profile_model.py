@@ -22,10 +22,9 @@ def a_definition(**over):
         },
         "scan": {"roots": ["DCIM", "PANORAMA"], "extensions": ["MP4", "JPG"]},
         "timestamp": {
-            "source": "filename",
+            "source": ["filename", "mtime"],
             "pattern": r"^DJI_(?P<ts>\d{14})_",
             "format": "%Y%m%d%H%M%S",
-            "fallback": "mtime",
             "timezone_policy": "force_offset",
             "timezone": None,
         },
@@ -331,3 +330,141 @@ def test_an_old_definition_with_a_tolerance_is_still_readable():
     )
     assert defn.stack.extensions == ("JPG", "CR2")
     assert not hasattr(defn.stack, "tolerance_seconds")
+
+
+# --- timestamp.source は連鎖（Task 3） ----------------------------------
+
+
+def test_the_timestamp_source_is_a_chain():
+    """出所は 1 つではなく順に試す列. 写真は EXIF、動画は器、どちらも無ければ mtime."""
+    defn = parse_definition(
+        a_definition(
+            timestamp={
+                "source": ["exif", "container", "mtime"],
+                "timezone_policy": "none",
+                "timezone": None,
+            }
+        )
+    )
+    assert defn.timestamp.source == ("exif", "container", "mtime")
+
+
+def test_a_chain_that_does_not_end_with_mtime_is_refused():
+    """**連鎖の終端は必ず mtime.**
+
+    mtime だけが必ず値を返す。終端に置かないと、どの出所も当たらないファイルで
+    撮影日時が決まらず、解決が全域関数でなくなる。
+    """
+    with pytest.raises(ProfileInvalid, match="mtime で終わる"):
+        parse_definition(
+            a_definition(
+                timestamp={
+                    "source": ["exif", "container"],
+                    "timezone_policy": "none",
+                    "timezone": None,
+                }
+            )
+        )
+
+
+def test_a_chain_that_starts_with_mtime_but_does_not_end_with_it_is_refused():
+    """**見るのは終端であって先頭ではない.**
+
+    先頭が `mtime` でも、終端が `mtime` でなければ拒む。判定を先頭だけで
+    済ませると、この形を素通りさせてしまう。
+    """
+    with pytest.raises(ProfileInvalid, match="mtime で終わる"):
+        parse_definition(
+            a_definition(
+                timestamp={
+                    "source": ["mtime", "exif"],
+                    "timezone_policy": "none",
+                    "timezone": None,
+                }
+            )
+        )
+
+
+def test_an_empty_chain_is_refused():
+    with pytest.raises(ProfileInvalid, match="mtime で終わる"):
+        parse_definition(
+            a_definition(timestamp={"source": [], "timezone_policy": "none", "timezone": None})
+        )
+
+
+def test_an_unknown_source_is_refused():
+    with pytest.raises(ProfileInvalid, match="timestamp.source"):
+        parse_definition(
+            a_definition(
+                timestamp={"source": ["gps", "mtime"], "timezone_policy": "none", "timezone": None}
+            )
+        )
+
+
+def test_the_old_string_form_is_refused():
+    """**旧形は読まない**（リリース前なので、既存リビジョンを守らないと決めた）.
+
+    `fallback` は同時に足さない。**それ自体が未知のキーとして先に弾かれ**、
+    `source` が配列でないことを検出できているかを見損なう。
+    """
+    with pytest.raises(ProfileInvalid, match="timestamp.source は配列"):
+        parse_definition(
+            a_definition(timestamp={"source": "exif", "timezone_policy": "none", "timezone": None})
+        )
+
+
+def test_the_old_fallback_key_is_rejected_as_unknown():
+    """`fallback` はもう読まない。書けば未知のキーとして弾く."""
+    with pytest.raises(ProfileInvalid, match="未知のキー"):
+        parse_definition(
+            a_definition(
+                timestamp={
+                    "source": ["exif", "mtime"],
+                    "fallback": "mtime",
+                    "timezone_policy": "none",
+                    "timezone": None,
+                }
+            )
+        )
+
+
+def test_the_container_semantics_defaults_to_wall_clock():
+    """**宣言の無い定義に「瞬間」を仮定しない.** 媒体の性質は形から見分けられない."""
+    defn = parse_definition(
+        a_definition(
+            timestamp={
+                "source": ["container", "mtime"],
+                "timezone_policy": "none",
+                "timezone": None,
+            }
+        )
+    )
+    assert defn.timestamp.container_semantics == "wall_clock"
+
+
+def test_the_container_semantics_can_be_declared_as_instant():
+    defn = parse_definition(
+        a_definition(
+            timestamp={
+                "source": ["container", "mtime"],
+                "container_semantics": "instant",
+                "timezone_policy": "none",
+                "timezone": None,
+            }
+        )
+    )
+    assert defn.timestamp.container_semantics == "instant"
+
+
+def test_filename_in_the_chain_still_requires_a_pattern():
+    """連鎖のどこにあっても、filename は pattern と format が要る."""
+    with pytest.raises(ProfileInvalid, match="timestamp.pattern"):
+        parse_definition(
+            a_definition(
+                timestamp={
+                    "source": ["exif", "filename", "mtime"],
+                    "timezone_policy": "none",
+                    "timezone": None,
+                }
+            )
+        )

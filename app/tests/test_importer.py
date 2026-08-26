@@ -221,7 +221,7 @@ def test_the_copy_stops_at_a_chunk_boundary_when_cancelled(importing, db, monkey
 # source: exif（Task 3）
 
 
-def an_exif_profile(db, source="exif"):
+def an_exif_profile(db, source=("exif", "mtime")):
     """`canon-eos` 相当（`timezone_policy: none`、EXIF から日時）のプロファイル."""
     from .test_profile_model import a_definition
 
@@ -229,10 +229,9 @@ def an_exif_profile(db, source="exif"):
     defn = a_definition(
         slug="canon-like",
         timestamp={
-            "source": source,
+            "source": list(source),
             "pattern": None,
             "format": None,
-            "fallback": "mtime",
             "timezone_policy": "none",
             "timezone": None,
         },

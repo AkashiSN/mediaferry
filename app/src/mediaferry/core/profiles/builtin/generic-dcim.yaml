@@ -19,10 +19,9 @@ scan:
   # 単体で拾うと分割された動画が個別に取り込まれる。
   extensions: ["JPG", "JPEG", "PNG", "HEIC", "MP4", "MOV", "AVI"]
 timestamp:
-  source: exif
+  source: [exif, mtime]
   pattern: null
   format: null
-  fallback: mtime
   # 機種が分からないので、日時の解釈に介入しない。
   timezone_policy: none
   timezone: null

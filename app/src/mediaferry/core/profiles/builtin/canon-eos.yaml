@@ -21,10 +21,9 @@ scan:
 timestamp:
   # ファイル名に時刻が無い（IMG_1234 は連番）。JPG は EXIF から、
   # MOV は EXIF を持たないので mtime へ落ちる。
-  source: exif
+  source: [exif, mtime]
   pattern: null
   format: null
-  fallback: mtime
   # EXIF にローカル時刻が入るので補正しない（§6）。
   timezone_policy: none
   timezone: null

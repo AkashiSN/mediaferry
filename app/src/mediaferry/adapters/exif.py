@@ -6,7 +6,7 @@
 - **読むのは `EXIF DateTimeOriginal` の 1 タグだけ。** `stop_tag` でそこまでしか
   解析させず、`details=False` でサムネイルと MakerNote を読まない
 - **例外はすべて握る。** 壊れた 1 枚で取り込み全体を止めない。読めなければ
-  `None` を返し、呼び出し側がプロファイルの `fallback` へ落とす
+  `None` を返し、呼び出し側が `timestamp.source` の連鎖を次へ進める
 - **オフセットは読まない。** EOS 70D は EXIF 2.31 の `OffsetTimeOriginal` より前の
   機種で持っていない。付いていると装わず、壁時計として返す。TZ の扱いは
   プロファイルの `timezone_policy` が決める（§6）

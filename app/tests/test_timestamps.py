@@ -192,7 +192,7 @@ def test_an_unparsable_timestamp_in_the_name_falls_back():
 
 def test_exif_source_uses_the_injected_wall_clock():
     got = resolve_captured_at(
-        defn(source="exif", pattern=None, format=None, timezone_policy="none"),
+        defn(source=["exif", "mtime"], pattern=None, format=None, timezone_policy="none"),
         "DCIM/100CANON/IMG_0001.JPG",
         mtime_ns_of("2020-01-01T00:00:00"),
         None,
@@ -205,7 +205,7 @@ def test_exif_source_uses_the_injected_wall_clock():
 def test_exif_source_falls_back_when_the_value_is_missing():
     """EXIF が無いファイル（Canon の MOV、タグの無い JPEG）は fallback へ."""
     got = resolve_captured_at(
-        defn(source="exif", pattern=None, format=None, timezone_policy="none"),
+        defn(source=["exif", "mtime"], pattern=None, format=None, timezone_policy="none"),
         "DCIM/100CANON/MVI_0001.MOV",
         mtime_ns_of("2026-05-05T10:00:00"),
         None,
@@ -251,7 +251,7 @@ def test_a_matching_filename_wins_over_an_injected_value():
 def test_exif_wall_clock_gets_the_configured_offset():
     """`force_offset` のプロファイルなら EXIF の壁時計にもオフセットを付ける."""
     got = resolve_captured_at(
-        defn(source="exif", pattern=None, format=None, timezone="Asia/Tokyo"),
+        defn(source=["exif", "mtime"], pattern=None, format=None, timezone="Asia/Tokyo"),
         "DCIM/100CANON/IMG_0001.JPG",
         0,
         None,
@@ -270,7 +270,7 @@ def test_an_aware_exif_value_is_still_read_as_a_wall_clock():
     経路では起きないが、判別の根拠としては脆い）。
     """
     got = resolve_captured_at(
-        defn(source="exif", pattern=None, format=None, timezone="Asia/Tokyo"),
+        defn(source=["exif", "mtime"], pattern=None, format=None, timezone="Asia/Tokyo"),
         "DCIM/100CANON/IMG_0001.JPG",
         0,
         None,

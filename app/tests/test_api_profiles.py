@@ -39,7 +39,7 @@ def test_a_single_profile_returns_its_definition(client):
     got = client.get("/api/profiles/dji-osmo").json()
     assert got["slug"] == "dji-osmo"
     assert got["revision"] == 1
-    assert got["definition"]["timestamp"]["source"] == "filename"
+    assert got["definition"]["timestamp"]["source"] == ["filename", "mtime"]
 
 
 def test_an_unknown_slug_is_404(client):

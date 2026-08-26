@@ -25,12 +25,15 @@ PROFILE_SCHEMA_VERSION = 1
 BUILTIN_DIR = Path(__file__).parent / "builtin"
 
 _SLUG_RE = re.compile(r"^[a-z0-9][a-z0-9-]*$")
-_TIMESTAMP_SOURCES = ("filename", "exif", "mtime")
+_TIMESTAMP_SOURCES = ("filename", "exif", "container", "mtime")
 _TIMEZONE_POLICIES = ("none", "force_offset")
 # mtime が何を表すか。exFAT の `OffsetFromUtc` を書く媒体なら真の瞬間、
 # 書かない媒体（FAT32、valid bit の立たない exFAT）なら現地の壁時計を UTC と
 # 見なした疑似 epoch になる。**媒体の性質なので、形からは推定できない。**
 _MTIME_SEMANTICS = ("wall_clock", "instant")
+# container（QuickTime の creation_time）が何を表すか。mtime と同じ理由で
+# 媒体ごとに宣言する。**書いていない定義に「瞬間」を仮定しない。**
+_CONTAINER_SEMANTICS = ("wall_clock", "instant")
 _VIDEO_KEEP = ("primary", "all")
 # 正規表現の長さの上限。書き間違いを早く教えるためのもので、
 # catastrophic backtracking はこれでは防げない（patterns.py を見よ）。
@@ -63,14 +66,15 @@ class ScanRule:
 
 @dataclass(frozen=True)
 class TimestampRule:
-    source: str
+    # 出所の連鎖。**先頭から順に試し、最後は必ず `mtime`**（唯一必ず値を返す）。
+    source: tuple[str, ...]
     pattern: str | None
     format: str | None
-    fallback: str
     timezone_policy: str
     timezone: str | None
     # 既定は `wall_clock`。**宣言の無い定義に「瞬間」を仮定しない**（§6）。
     mtime_semantics: str = "wall_clock"
+    container_semantics: str = "wall_clock"
 
 
 @dataclass(frozen=True)
@@ -264,32 +268,38 @@ def _parse_timestamp(data: Mapping[str, Any]) -> TimestampRule:
             "source",
             "pattern",
             "format",
-            "fallback",
             "timezone_policy",
             "timezone",
             "mtime_semantics",
+            "container_semantics",
         },
         "timestamp",
     )
-    source = _string(data, "source")
-    if source not in _TIMESTAMP_SOURCES:
-        raise ProfileInvalid(f"timestamp.source は {_TIMESTAMP_SOURCES} のいずれか")
-    fallback = _string(data, "fallback")
-    if fallback not in _TIMESTAMP_SOURCES:
-        raise ProfileInvalid(f"timestamp.fallback は {_TIMESTAMP_SOURCES} のいずれか")
+    raw = data.get("source")
+    # **旧形（文字列 1 つ）は読まない。** リリース前で守るべき既存リビジョンが
+    # 無く、受け口を残すと連鎖が定義ではなく実装に隠れる。
+    if not isinstance(raw, list):
+        raise ProfileInvalid("timestamp.source は配列")
+    source = tuple(raw)
+    for name in source:
+        if name not in _TIMESTAMP_SOURCES:
+            raise ProfileInvalid(f"timestamp.source は {_TIMESTAMP_SOURCES} のいずれか")
+    # **mtime だけが必ず値を返す。** 終端に置かないと解決が全域関数でなくなる。
+    if not source or source[-1] != "mtime":
+        raise ProfileInvalid("timestamp.source は mtime で終わる")
     policy = _string(data, "timezone_policy")
     if policy not in _TIMEZONE_POLICIES:
         raise ProfileInvalid(f"timestamp.timezone_policy は {_TIMEZONE_POLICIES} のいずれか")
     pattern = data.get("pattern")
     fmt = data.get("format")
-    if source == "filename":
+    if "filename" in source:
         if not isinstance(pattern, str):
-            raise ProfileInvalid("source が filename なら timestamp.pattern が要る")
+            raise ProfileInvalid("source に filename があるなら timestamp.pattern が要る")
         _regex(data, "pattern")
         if "(?P<ts>" not in pattern:
             raise ProfileInvalid("timestamp.pattern は名前付きグループ ts を持つ必要がある")
         if not isinstance(fmt, str):
-            raise ProfileInvalid("source が filename なら timestamp.format が要る")
+            raise ProfileInvalid("source に filename があるなら timestamp.format が要る")
     timezone = data.get("timezone")
     if timezone is not None and not isinstance(timezone, str):
         raise ProfileInvalid("timestamp.timezone は文字列か null")
@@ -298,14 +308,19 @@ def _parse_timestamp(data: Mapping[str, Any]) -> TimestampRule:
     semantics = data.get("mtime_semantics", "wall_clock")
     if semantics not in _MTIME_SEMANTICS:
         raise ProfileInvalid(f"timestamp.mtime_semantics は {_MTIME_SEMANTICS} のいずれか")
+    # **既定は `wall_clock`。** 媒体の性質は形から見分けられないので、
+    # 宣言の無い定義に「瞬間」を仮定しない。
+    container = data.get("container_semantics", "wall_clock")
+    if container not in _CONTAINER_SEMANTICS:
+        raise ProfileInvalid(f"timestamp.container_semantics は {_CONTAINER_SEMANTICS} のいずれか")
     return TimestampRule(
         source=source,
         pattern=pattern if isinstance(pattern, str) else None,
         format=fmt if isinstance(fmt, str) else None,
-        fallback=fallback,
         timezone_policy=policy,
         timezone=timezone,
         mtime_semantics=semantics,
+        container_semantics=container,
     )
 
 

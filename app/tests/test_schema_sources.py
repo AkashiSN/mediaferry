@@ -34,10 +34,9 @@ PLACEHOLDER_DEFINITION_JSON = definition_to_json(
         require=Require(roots=(), filename_pattern=".*", min_matching_files=0),
         scan=ScanRule(roots=(), extensions=()),
         timestamp=TimestampRule(
-            source="mtime",
+            source=("mtime",),
             pattern=None,
             format=None,
-            fallback="mtime",
             timezone_policy="none",
             timezone=None,
         ),
