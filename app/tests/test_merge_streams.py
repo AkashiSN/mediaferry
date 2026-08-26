@@ -195,6 +195,20 @@ def test_aac_audio_does_not_block_the_ts_route():
     assert ts_route_blockers(streams, KeepStreams("primary", "all", False, False)) == ()
 
 
+def test_alac_audio_blocks_the_ts_route():
+    """**PCM だけでなく、TS を往復させると消える音声全般を塞ぐ.**
+
+    実測: mpegts は ALAC も private data として詰め、警告だけ出して成功する。
+    読み直すと bin_data の data ストリームになり、音声が消える。
+    """
+    streams = [
+        {"index": 0, "codec_type": "video", "codec_name": "h264"},
+        {"index": 1, "codec_type": "audio", "codec_name": "alac"},
+    ]
+    blockers = ts_route_blockers(streams, KeepStreams("primary", "all", False, False))
+    assert [b["codec_name"] for b in blockers] == ["alac"]
+
+
 def test_a_dropped_pcm_stream_does_not_block():
     """**捨てるものは邪魔しない.** keep が落とすストリームは判定に入れない."""
     streams = [

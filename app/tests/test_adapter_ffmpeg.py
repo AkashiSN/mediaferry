@@ -65,6 +65,29 @@ def make_pcm_clip(path, seconds=2, *, audio_first=False):
     return path
 
 
+def make_alac_clip(path, seconds=2, *, audio_first=False):
+    """音声が ALAC のクリップ. h264+alac の MOV（codex の再現と同じ形）."""
+    command = [
+        "ffmpeg",
+        "-nostdin",
+        "-v",
+        "error",
+        "-f",
+        "lavfi",
+        "-i",
+        f"testsrc=duration={seconds}:size=64x64:rate=10",
+        "-f",
+        "lavfi",
+        "-i",
+        f"sine=frequency=440:duration={seconds}",
+    ]
+    command += ["-map", "1:a", "-map", "0:v"] if audio_first else ["-map", "0:v", "-map", "1:a"]
+    command += ["-c:v", "libx264", "-pix_fmt", "yuv420p", "-c:a", "alac"]
+    command += ["-y", str(path)]
+    subprocess.run(command, check=True, capture_output=True)  # noqa: S603
+    return path
+
+
 @pytest.fixture
 def clips(tmp_path):
     if shutil.which("ffmpeg") is None:
@@ -359,7 +382,7 @@ def test_a_topology_mismatch_with_pcm_only_in_a_later_part_also_refuses(tmp_path
 
 
 def test_aac_still_falls_back_to_the_ts_route(tmp_path):
-    """**塞ぐのは PCM だけ.** 運べるものまで諦めない."""
+    """**塞ぐのは、TS を往復させると消えると分かっている音声だけ.** 運べるものまで諦めない."""
     if shutil.which("ffmpeg") is None:
         pytest.skip("ffmpeg が無い")
     probe = MediaProbe()
@@ -370,3 +393,21 @@ def test_aac_still_falls_back_to_the_ts_route(tmp_path):
         [first, second], streams, KEEP, tmp_path, "out.mp4", lambda: None, lambda: False
     )
     assert outcome.route == "ts"
+
+
+def test_the_merge_refuses_the_ts_route_when_alac_would_be_lost(tmp_path, work_dir):
+    """codex の再現と同じ形: h264+alac の MOV 2 本を結合しようとすると塞がれる.
+
+    実測: mpegts は ALAC を private data として詰め、警告だけ出して終了コード 0 で
+    成功する。読み直すと data ストリームになり、音声が消える。PCM と同じ穴が
+    ALAC にも開いているので、concat が失敗して TS 経由へ落ちる前に拒む。
+    """
+    if shutil.which("ffmpeg") is None:
+        pytest.skip("ffmpeg が無い")
+    probe = MediaProbe()
+    parts = [make_alac_clip(tmp_path / f"{i}.mov") for i in range(2)]
+    streams = [probe.describe(path, "MOV").streams for path in parts]
+    with pytest.raises(MergeFailed, match="alac"):
+        FailingConcat().merge(
+            parts, streams, KEEP, work_dir, "out.mov", lambda: None, lambda: False
+        )
