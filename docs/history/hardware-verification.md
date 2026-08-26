@@ -1033,9 +1033,11 @@ MVI_0008.MOV  12:44:45  id=7ce62d99…
 成立する**（`id` を足す必要すらない）。副産物として RAW+JPEG の並びも決定的に
 なる（`"JPG" > "CR2"` なので主が必ず先。いまは id の偶然でそう見えている）。
 
-**ただし索引の張り替えが要る。** `id DESC` で終わる索引が `0014` / `0022` /
-`0023` の **3 本**あり（`0013` は `(profile_id, role, rel_path)` なので対象外）、
-並びだけ変えると ORDER BY を索引で満たせなくなって一時 B-tree のソートに落ちる。**Phase 9 の索引の顛末と同じ形なので、張り替えと
+**ただし索引の張り替えが要る。** `sqlite_master` を見て数えると、`id DESC` で
+終わる索引は **2 本**（`media_file_listing` と `media_file_derived_listing`）。
+`0013` の `media_file_by_profile` は `(profile_id, role, rel_path)` なので対象外で、
+`0022` の `media_file_by_role` は **`0023` が DROP している**。並びだけ変えると
+ORDER BY を索引で満たせなくなって一時 B-tree のソートに落ちる。**Phase 9 の索引の顛末と同じ形なので、張り替えと
 実測をセットにする。**
 
 ### 既に送った 81 件の直し方

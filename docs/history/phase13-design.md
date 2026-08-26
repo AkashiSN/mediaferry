@@ -26,7 +26,7 @@
 | テーブル再構築 | **移行 runner に「外部キーを外して走らせる」経路を足す** | runner の穴はスカッシュしても消えない。いま塞げば試験が付く |
 | `merge` | **有効にする。出力は `.MOV`。PCM では TS 経路を選ばない** | PCM は MP4 に版依存で入らず、TS では黙って消える |
 | Immich | `timezone_policy: force_offset` + `fix_datetime_after_upload: true` | `dji-osmo` が同じ形で既に解いている |
-| 並び | `captured_at DESC, rel_path DESC`。索引 3 本を張り替える | `rel_path` は `UNIQUE` なので単独で tie-break になる |
+| 並び | `captured_at DESC, rel_path DESC`。索引 2 本を張り替える | `rel_path` は `UNIQUE` なので単独で tie-break になる |
 
 ## 1. 時刻の出所 `container`
 
@@ -210,21 +210,34 @@ immich:
 
 ### 移行の構成
 
-- **`0026`** —— `media_file` の作り直し。`container_wall` を足し、`captured_at_source`
-  の `CHECK` を `('filename','exif','mtime','container')` へ広げる。索引 2 本
-  （`media_file_sha1` / `media_file_captured_at`）と trigger 2 本（`0011` の
-  `media_file_captured_revision_*`）を作り直す。**FK オフの宣言付き**
-- **`0027`** —— 索引 3 本の張り替え
+**移行は `0026` の 1 本だけ。** `media_file` を作り直し、`container_wall` を足し、
+`captured_at_source` の `CHECK` を `('filename','exif','container','mtime')` へ広げ、
+**索引 5 本と trigger 2 本を作り直す**（`DROP TABLE` で一緒に消えるため）。
+そのうち `media_file_listing` と `media_file_derived_listing` は
+**`rel_path DESC` の形で作り直す**。**FK オフの宣言付き。**
+
+| 作り直すもの | 形 |
+| --- | --- |
+| `media_file_sha1` | `(sha1)` —— そのまま |
+| `media_file_captured_at` | `(captured_at)` —— そのまま |
+| `media_file_by_profile` | `(profile_id, role, rel_path)` —— そのまま |
+| `media_file_listing` | `(profile_id, captured_at DESC, **rel_path DESC**)` |
+| `media_file_derived_listing` | `(captured_at DESC, **rel_path DESC**) WHERE role='derived'` |
+| `media_file_captured_revision_insert` / `_update` | `0011` の本体をそのまま |
 
 ## 5. 一覧の並び
 
-**張り替えるのは 3 本。** `0013` は `(profile_id, role, rel_path)` なので対象外。
+**張り替えるのは 2 本。** `sqlite_master` を見て数えた。`0013` の
+`media_file_by_profile` は `(profile_id, role, rel_path)` なので対象外、
+`0022` の `media_file_by_role` は **`0023` が DROP している**ので存在しない。
 
-| 移行 | いま | 変更後 |
+| 索引 | いま | 変更後 |
 | --- | --- | --- |
-| `0014` | `(profile_id, captured_at DESC, id DESC)` | `(profile_id, captured_at DESC, rel_path DESC)` |
-| `0022` | `(role, captured_at DESC, id DESC)` | `(role, captured_at DESC, rel_path DESC)` |
-| `0023` | `(captured_at DESC, id DESC) WHERE role='derived'` | `(captured_at DESC, rel_path DESC) WHERE role='derived'` |
+| `media_file_listing`（`0014`） | `(profile_id, captured_at DESC, id DESC)` | `(profile_id, captured_at DESC, rel_path DESC)` |
+| `media_file_derived_listing`（`0023`） | `(captured_at DESC, id DESC) WHERE role='derived'` | `(captured_at DESC, rel_path DESC) WHERE role='derived'` |
+
+**張り替え専用の移行は要らない。** `0026` は `media_file` を作り直すので索引を
+全部作り直す。**その場で新しい形にすれば済む。**
 
 並びを直すのは 4 か所。
 
