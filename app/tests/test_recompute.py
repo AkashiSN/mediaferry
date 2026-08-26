@@ -317,6 +317,57 @@ def test_an_exif_original_is_read_from_the_published_file(db, data_root):
     assert row["captured_at"] == "2026-02-03T04:05:06+00:00"
 
 
+def test_a_container_original_is_read_from_the_database(db, data_root):
+    """**再 probe しない.** 取り込み時に生の文字列を持っているので読み直せる.
+
+    16 GiB の動画を再計算のたびに ffprobe へ掛けると、リースの心拍では足りない
+    時間がかかる。
+    """
+    profile = a_user_profile(
+        db,
+        "canon-eos",
+        "canon-container",
+        source=["container", "mtime"],
+        container_semantics="wall_clock",
+    )
+    volume = a_volume(db, (profile.profile_id, profile.revision_id))
+    media = an_original(
+        db,
+        profile,
+        volume,
+        source_rel="DCIM/100CANON/MVI_0006.MOV",
+        mtime_ns=ns("2026-08-26T12:36:18"),
+        captured_at="2026-08-26T12:36:18+00:00",
+        captured_at_source="mtime",
+        container_wall="2026-08-26T12:35:08.000000Z",
+    )
+    run(db, data_root, profile)
+
+    row = captured(db, media)
+    assert row["captured_at_source"] == "container"
+    # **録画の終了ではなく開始。** mtime は 12:36:18、器は 12:35:08。
+    assert row["captured_at"] == "2026-08-26T12:35:08+00:00"
+
+
+def test_a_row_without_a_container_time_falls_through_to_mtime(db, data_root):
+    """器の時刻を持たない行は mtime へ落ちる（値を捏造しない）."""
+    profile = a_user_profile(db, "canon-eos", "canon-container-2", source=["container", "mtime"])
+    volume = a_volume(db, (profile.profile_id, profile.revision_id))
+    media = an_original(
+        db,
+        profile,
+        volume,
+        source_rel="DCIM/100CANON/MVI_0009.MOV",
+        mtime_ns=ns("2026-08-26T12:36:18"),
+        captured_at="2026-08-26T12:36:18+00:00",
+        captured_at_source="mtime",
+    )
+    run(db, data_root, profile)
+
+    row = captured(db, media)
+    assert row["captured_at_source"] == "mtime"
+
+
 def test_a_derived_inherits_from_the_first_active_member(dji, db, data_root):
     """派生物は算出ではなく継承（`Merger._captured_of`）.
 
