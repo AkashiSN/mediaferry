@@ -20,10 +20,10 @@ def a_rule(**overrides):
     return MergeRule(**values)
 
 
-def a_part(name, *, captured_at=None, directory="DCIM/DJI_001"):
+def a_part(name, *, captured_at=None, directory="DCIM/DJI_001", profile="dji-osmo"):
     return MergePart(
         media_file_id="id",
-        rel_path=f"library/dji-osmo/{directory}/{name}",
+        rel_path=f"library/{profile}/{directory}/{name}",
         sha1="sha",
         captured_at=captured_at or datetime(2026, 8, 17, 14, 30, 0, tzinfo=UTC),
         duration_seconds=1500.0,
@@ -113,3 +113,44 @@ def test_a_rendered_backslash_is_refused():
     # 「/」の判定だけをすり抜ける値。UnsafePath ではなく MergeOutputUndefined で返す。
     with pytest.raises(MergeOutputUndefined):
         merged_rel_path("dji-osmo", a_rule(output_name="DJI_{first_seq}\\x.MP4"), MEMBERS)
+
+
+# ----------------------------------------------------------------------
+# canon-eos（Task 11）
+
+
+def a_canon_rule(**overrides):
+    values = {
+        "enabled": True,
+        "tolerance_seconds": 5,
+        "min_part_size_gib": 3,
+        "sequence_pattern": r"^MVI_(?P<seq>\d{4})$",
+        "output_name": "MVI_{ts}_{first_seq}-{last_seq}_MERGED.MOV",
+        "keep_streams": KeepStreams(video="primary", audio="all", timecode=False, data=False),
+    }
+    values.update(overrides)
+    return MergeRule(**values)
+
+
+def test_the_canon_output_name_carries_the_sequence_range():
+    """`MVI_0007` と `MVI_0008` から `0007-0008` を組む."""
+    rule = a_canon_rule()
+    name = merged_rel_path(
+        "canon-eos",
+        rule,
+        [
+            a_part(
+                "MVI_0007.MOV",
+                captured_at=datetime(2026, 8, 26, 12, 37, 13, tzinfo=UTC),
+                directory="DCIM/100CANON",
+                profile="canon-eos",
+            ),
+            a_part(
+                "MVI_0008.MOV",
+                captured_at=datetime(2026, 8, 26, 12, 44, 22, tzinfo=UTC),
+                directory="DCIM/100CANON",
+                profile="canon-eos",
+            ),
+        ],
+    )
+    assert name.endswith("MVI_20260826123713_0007-0008_MERGED.MOV")

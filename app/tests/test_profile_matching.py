@@ -1,5 +1,6 @@
 from mediaferry.core.profiles.matching import VolumeFacts, hint_score, resolve_profile
 from mediaferry.core.profiles.model import parse_definition
+from mediaferry.db.profiles import ProfileRegistry
 
 from .test_profile_model import a_definition
 
@@ -266,20 +267,33 @@ def test_a_canon_card_does_not_fall_into_generic():
     assert outcome.slug == "canon-eos"
 
 
-def test_canon_and_generic_do_not_merge():
-    """実データが無いので、分割の判別根拠が無い。誤結合の方が高くつく."""
+def test_generic_does_not_merge():
+    """機種が分からないので分割の規則も分からない（generic-dcim は不変）."""
     by_slug = {d.slug: d for d in builtins()}
-    assert by_slug["canon-eos"].merge.enabled is False
     assert by_slug["generic-dcim"].merge.enabled is False
+
+
+def test_canon_merges_the_four_gibibyte_split():
+    """canon-eos は実カードで確かめた 4GB 分割の規則を持つ（Task 11）."""
+    by_slug = {d.slug: d for d in builtins()}
+    assert by_slug["canon-eos"].merge.enabled is True
     assert by_slug["dji-osmo"].merge.enabled is True
 
 
-def test_canon_and_generic_do_not_rewrite_the_remote_datetime():
-    """`timezone_policy: none` なので補正する対象が無い（§6）."""
+def test_generic_does_not_rewrite_the_remote_datetime():
+    """機種が分からないので、日時の解釈に介入しない（generic-dcim は不変）."""
     by_slug = {d.slug: d for d in builtins()}
-    for slug in ("canon-eos", "generic-dcim"):
-        assert by_slug[slug].timestamp.timezone_policy == "none"
-        assert by_slug[slug].immich.fix_datetime_after_upload is False
+    assert by_slug["generic-dcim"].timestamp.timezone_policy == "none"
+    assert by_slug["generic-dcim"].immich.fix_datetime_after_upload is False
+
+
+def test_canon_writes_the_remote_datetime_back():
+    """canon-eos は creation_time の Z を Immich が UTC と読むので、壁時計に
+    オフセットを付けて書き戻す（Task 11）。
+    """
+    by_slug = {d.slug: d for d in builtins()}
+    assert by_slug["canon-eos"].timestamp.timezone_policy == "force_offset"
+    assert by_slug["canon-eos"].immich.fix_datetime_after_upload is True
 
 
 def test_generic_dcim_does_not_claim_vendor_raw():
@@ -287,3 +301,66 @@ def test_generic_dcim_does_not_claim_vendor_raw():
     by_slug = {d.slug: d for d in builtins()}
     assert "CR2" not in by_slug["generic-dcim"].scan.extensions
     assert "CR2" in by_slug["canon-eos"].scan.extensions
+
+
+# ----------------------------------------------------------------------
+# canon-eos の仕上げ（Task 11）
+
+
+def test_canon_reads_the_time_from_exif_then_the_container(db):
+    """写真は EXIF、動画は器、どちらも無ければ mtime."""
+    registry = ProfileRegistry(db)
+    registry.sync_builtins()
+    defn = registry.current("canon-eos").definition
+    assert defn.timestamp.source == ("exif", "container", "mtime")
+    assert defn.timestamp.container_semantics == "wall_clock"
+
+
+def test_canon_writes_the_datetime_back_to_immich(db):
+    """**Immich は creation_time の Z を素直に UTC と読む.**
+
+    書き戻さないと動画だけが 9 時間ずれる（実機で確認）。
+    `fix_datetime_after_upload` は `timezone_policy: force_offset` と
+    セットでないと効かない（`datetime_plan` が policy == "none" で降りる）。
+    """
+    registry = ProfileRegistry(db)
+    registry.sync_builtins()
+    defn = registry.current("canon-eos").definition
+    assert defn.timestamp.timezone_policy == "force_offset"
+    assert defn.immich.fix_datetime_after_upload is True
+
+
+def test_canon_merges_four_gibibyte_splits(db):
+    registry = ProfileRegistry(db)
+    registry.sync_builtins()
+    defn = registry.current("canon-eos").definition
+    assert defn.merge.enabled is True
+    assert defn.merge.min_part_size_gib == 3
+
+
+def test_canon_merge_output_stays_in_the_quicktime_container():
+    """**器は QuickTime のまま。** 音声が PCM なので、MP4 は ffmpeg の版に
+    よって弾かれる（ipcm を持つのは新しい版だけ）。
+
+    `test_merge_output.py` の `test_the_canon_output_name_carries_the_sequence_range`
+    は `a_canon_rule()`（テスト内の合成 `MergeRule`）を使うので、
+    `canon-eos.yaml` の `output_name` を実際には読まない。ここで拡張子を
+    直接確かめる。
+    """
+    by_slug = {d.slug: d for d in builtins()}
+    assert by_slug["canon-eos"].merge.output_name.endswith(".MOV")
+
+
+def test_canon_sequence_pattern_does_not_match_a_different_prefix():
+    """`sequence_pattern` の錨（`^` と `$`）を落とさない.
+
+    `IMG_0007.JPG` は元々 `MVI_` を含まないので、`^` を落としても単独では
+    当たらない。**錨の必要性を実際に示すのは埋め込まれた一致**
+    （例: `SUBMVI_0007`）——`^` を落とすとこちらは当たってしまう。
+    """
+    from mediaferry.core.profiles.patterns import search
+
+    pattern = {d.slug: d for d in builtins()}["canon-eos"].merge.sequence_pattern
+    assert search(pattern, "IMG_0007") is None
+    assert search(pattern, "SUBMVI_0007") is None
+    assert search(pattern, "MVI_0007").group("seq") == "0007"

@@ -370,7 +370,6 @@ def test_a_video_takes_its_time_from_the_container_when_the_profile_declares_it(
     assert row["captured_at"].startswith("2026-08-26T12:35:08")
 
 
-@pytest.mark.xfail(reason="canon-eos の連鎖は Task 11 で入る")
 def test_a_video_takes_its_time_from_the_container(db, data_root, tmp_path):
     """**取り込みは常に遅延解決.** 器の時刻はステージ済みのファイルからしか読めない.
 
