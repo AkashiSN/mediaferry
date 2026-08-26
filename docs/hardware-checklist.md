@@ -200,6 +200,10 @@ ls /path/to/mount/DCIM/100CANON | head
 > だけで `LABEL=` を返さない）。**exFAT で焼いた SDXC にはラベルが付かない。**
 > それでも `volume_labels` は残す —— `hint_score` は順位付けにしか効かないので、
 > FAT32 のカードで当たれば得があり、当たらなくても損が無い。
+> **2026-08-26 に追記: ラベルは付く。** 利用者がカメラで初期化したところ、
+> `fs_label` が **`EOS_DIGITAL`** になった。**「exFAT にはラベルが付かない」のは
+> PC で焼いたカードの話**で、`hints.volume_labels` の値は正しい。
+
 > **`hints.usb_ids: []` も裏付けられた** —— `lsusb` に出るのは汎用の USB ストレージ
 > （リーダー）で、Canon のベンダ ID は見えない。**リーダーの ID を足すと、その
 > リーダーに挿したどのカードにも当たる**ので空のままにする。くわしくは
@@ -222,6 +226,19 @@ ls /path/to/mount/DCIM/100CANON | head
 > **連番だけでは区別が付かないという懸念は解消していない**。`merge.enabled` は
 > 無効のまま。4GB を超える録画の入ったカードで踏み直す。
 
+> **2026-08-26 の結果: 決着。現行の規則では検出できない。** 4GB 超の録画を入れた
+> カードで踏み直した。`MVI_0007`（4,260,142,424 B = 3.9675 GiB）と `MVI_0008`
+> （218,782,864 B）が 1 本の分割で、`MVI_0006`（618 MB）が別録画。**現行の 2 条件が
+> どちらも成立しない** —— (1) `min_part_size_gib: 4` ＝ 4,294,967,296 B に対して
+> 実測が **33.2 MiB 足りない**、(2) MOV は EXIF が無く mtime へ落ちるが、
+> **分割の両片は mtime が同一**（カメラが録画停止時刻を全片に書き直す）なので
+> 差が −428 秒になる。
+>
+> **`creation_time`（15 番）を出所にすれば、閾値を触らずに正しく分かれる** ——
+> 0006 → 0007 が **+55.063 秒**（外＝別録画）、0007 → 0008 が **+0.572 秒**
+> （内＝同一録画）。`min_part_size_gib` は **3** へ下げる。くわしくは
+> [`history/hardware-verification.md`](history/hardware-verification.md)。
+
 ### 15. Canon の MOV の `creation_time` が壁時計か UTC か
 
 **第 4 の timestamp source を足すかの判断**。`canon-eos` の MOV は EXIF を持たない
@@ -235,6 +252,24 @@ TZ=UTC stat -c '%y %n' /path/to/MVI_0001.MOV
 - `creation_time` が撮影時の壁時計と一致する → `source: container` を足す余地がある
 - UTC で書かれている → mtime へ落とす現状のままでよい（DJI と同じ罠）
 
+> **2026-08-26 の結果: 壁時計に `Z` が付いていた。しかも録画の開始を指す。**
+>
+> ```
+> MVI_0006  creation_time = 2026-08-26T12:35:08.000000Z   duration  69.937
+> MVI_0007  creation_time = 2026-08-26T12:37:13.000000Z   duration 428.428
+> MVI_0008  creation_time = 2026-08-26T12:44:22.000000Z   duration  23.023
+> ```
+>
+> 撮影は 12 時台の JST なので、**数字は現地の壁時計で `Z` が嘘**。`12:35:08 +
+> 69.937 = 12:36:17.9` が `MVI_0006` の mtime と一致するので、**`creation_time` は
+> 録画の開始、mtime は終了**。**`source: container` を足す価値がある** —— 14 番の
+> 判別にも要り、いまの mtime 由来では動画の時刻が 70 秒遅れる。
+>
+> **Immich では動画だけが 9 時間ずれる**（実物で確認）。Immich が `Z` を素直に
+> UTC と読むため。写真は EXIF にオフセットが無く現地時刻として扱われるので正しい。
+> 直すには `timezone_policy: force_offset` と `fix_datetime_after_upload: true` を
+> **セットで**入れる（`datetime_plan` が `policy == "none"` を先に見て降りる）。
+
 ### 16. CR2 を Immich が受け取るか
 
 `scan.extensions` に `CR2` を入れてあるので、取り込みまでは通る。**送信で弾かれると
@@ -243,6 +278,10 @@ TZ=UTC stat -c '%y %n' /path/to/MVI_0001.MOV
 - 1 枚だけ手で送って、Immich 側で資産として見えるか
 - 見えないなら、`generic-dcim` と同じく `canon-eos` からも CR2 を外すか、
   RAW を送らない選択肢を設定に足す（Phase 6 のスタッキングと合わせて考える）
+
+> **2026-08-26 の結果: 合格。** 実カードの CR2 は Immich に受け取られている。
+> `GET /dashboard` の宛先要約が `complete: 104` / `failed: 0` / `stacked: 34` で、
+> **弾かれた `upload_record` は 1 件も無い**。CR2 を外す必要は無い。
 
 ### 17. RAW+JPEG の組が実カードで成立するか
 
@@ -264,6 +303,16 @@ uv run python -c "import exifread,sys; f=open(sys.argv[1],'rb'); print(exifread.
 - 読めて、同じ stem の JPG と秒まで一致する → 組が成立する
 - 読めない → `stack` は見送りになる。CR2 を送らない選択肢を設定に足すかを、
   16 番（Immich が CR2 を受け取るか）と合わせて判断する
+
+> **2026-08-26 の結果: 合格。** 実カードの CR2 から `DateTimeOriginal` が読めた。
+> 取り込んだ 5 組は CR2 も JPG も `captured_at_source = exif` で、値は
+> 12:33:05 / 12:33:46 / 12:33:59 / 12:34:09 / 12:34:23 と実際の撮影時刻に一致する
+> （mtime より 1 秒早いのは撮影から書き込みまでの差）。**5 組すべてが組として成立。**
+>
+> **前回取り込んだ 68 件は `captured_at` が全部 `2026-08-08T13:00:00` で同一だったが、
+> これはカメラの日時が未設定だったためで実装の問題ではない**（今回の 5 組が正しく
+> 散ったことで切り分いた）。**それでも 34 組すべてが組として成立していた** ——
+> Phase 10 で**組の身元から時刻を外した**判断が、実データで報われた形になる。
 
 ## 関連
 
