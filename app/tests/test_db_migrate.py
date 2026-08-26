@@ -876,3 +876,113 @@ def test_existing_skips_go_back_to_unevaluated(tmp_path):
     # 未評価の行は書き換えない（同じ値を書くだけでも `updated_at` が動く）。
     assert rows[unevaluated]["updated_at"] == before
     conn.close()
+
+
+def _fk_fixture(folder):
+    """親子 1 組を作る版。子が親を参照している."""
+    (folder / "0001_base.sql").write_text(
+        "CREATE TABLE parent (id TEXT PRIMARY KEY, tag TEXT NOT NULL"
+        "   CHECK (tag IN ('a', 'b')));\n"
+        "CREATE TABLE child (id TEXT PRIMARY KEY,"
+        "   parent_id TEXT NOT NULL REFERENCES parent(id) ON DELETE RESTRICT);\n"
+        "INSERT INTO parent VALUES ('p1', 'a');\n"
+        "INSERT INTO child VALUES ('c1', 'p1');\n",
+        encoding="utf-8",
+    )
+
+
+_REBUILD = (
+    "CREATE TABLE parent_new (id TEXT PRIMARY KEY, tag TEXT NOT NULL"
+    "   CHECK (tag IN ('a', 'b', 'c')));\n"
+    "INSERT INTO parent_new SELECT id, tag FROM parent;\n"
+    "DROP TABLE parent;\n"
+    "ALTER TABLE parent_new RENAME TO parent;\n"
+)
+
+
+def test_rebuilding_a_referenced_table_fails_without_the_marker(tmp_path, monkeypatch):
+    """**目印が無ければ、いままでどおり外部キーが効いている.**
+
+    これが通らないと、次のテストが「目印のおかげ」なのか「もともと通る」のかが
+    分からない。
+    """
+    from mediaferry.db import migrate
+
+    folder = tmp_path / "m"
+    folder.mkdir()
+    _fk_fixture(folder)
+    (folder / "0002_rebuild.sql").write_text(_REBUILD, encoding="utf-8")
+    monkeypatch.setattr(migrate, "MIGRATIONS_DIR", folder)
+    conn = Database(tmp_path / "db.sqlite3").connect()
+    with pytest.raises(sqlite3.IntegrityError):
+        apply_migrations(conn)
+    conn.close()
+
+
+def test_a_migration_can_declare_that_foreign_keys_must_be_off(tmp_path, monkeypatch):
+    """**外部キーを持つ表は、FK を外さないと作り直せない.**
+
+    `PRAGMA foreign_keys` はトランザクションの中では黙って無視されるので、
+    移行ファイルの中からは外せない。runner が外側で切り替える。
+    """
+    from mediaferry.db import migrate
+
+    folder = tmp_path / "m"
+    folder.mkdir()
+    _fk_fixture(folder)
+    (folder / "0002_rebuild.sql").write_text(
+        "-- mediaferry:foreign-keys-off\n" + _REBUILD, encoding="utf-8"
+    )
+    monkeypatch.setattr(migrate, "MIGRATIONS_DIR", folder)
+    conn = Database(tmp_path / "db.sqlite3").connect()
+    assert apply_migrations(conn) == [1, 2]
+    # 子は残り、親は新しい CHECK を持ち、参照は壊れていない。
+    assert conn.execute("SELECT parent_id FROM child").fetchone()[0] == "p1"
+    conn.execute("INSERT INTO parent VALUES ('p2', 'c')")
+    assert conn.execute("PRAGMA foreign_key_check").fetchall() == []
+    # **適用のあと、外部キーは必ず戻っている。**
+    assert conn.execute("PRAGMA foreign_keys").fetchone()[0] == 1
+    conn.close()
+
+
+def test_a_migration_that_leaves_dangling_references_is_refused(tmp_path, monkeypatch):
+    """**外部キーを外すことを許す代わりに、適用後に必ず確かめる.**
+
+    SQLite 公式の 12 手順が最後に `PRAGMA foreign_key_check` を求めているのと
+    同じ手当て。これが無いと、目印を付けた版は壊れた参照を黙って残せる。
+    """
+    from mediaferry.db import migrate
+
+    folder = tmp_path / "m"
+    folder.mkdir()
+    _fk_fixture(folder)
+    (folder / "0002_rebuild.sql").write_text(
+        "-- mediaferry:foreign-keys-off\nDELETE FROM parent;\n",  # 子が孤児になる
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(migrate, "MIGRATIONS_DIR", folder)
+    conn = Database(tmp_path / "db.sqlite3").connect()
+    with pytest.raises(MigrationError, match="参照が壊れている"):
+        apply_migrations(conn)
+    assert conn.execute("PRAGMA foreign_keys").fetchone()[0] == 1
+    conn.close()
+
+
+def test_a_marker_that_only_appears_mid_file_does_not_turn_off_foreign_keys(tmp_path, monkeypatch):
+    """**目印は先頭行だけを見る.** 本文の途中に同じ文字列（引用や説明文）が
+    現れても、外部キーは外れない。
+    """
+    from mediaferry.db import migrate
+
+    folder = tmp_path / "m"
+    folder.mkdir()
+    _fk_fixture(folder)
+    (folder / "0002_rebuild.sql").write_text(
+        "-- この版は、かつて -- mediaferry:foreign-keys-off を使っていた\n" + _REBUILD,
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(migrate, "MIGRATIONS_DIR", folder)
+    conn = Database(tmp_path / "db.sqlite3").connect()
+    with pytest.raises(sqlite3.IntegrityError):
+        apply_migrations(conn)
+    conn.close()

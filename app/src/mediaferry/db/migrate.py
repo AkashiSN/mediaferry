@@ -30,6 +30,10 @@ _TRANSACTION_RE = re.compile(
     re.IGNORECASE | re.MULTILINE,
 )
 
+# 外部キーを外して走らせる版の目印。**先頭行だけを見る** —— 本文の途中に現れる
+# 同じ文字列（コメントの引用など）で外れないようにする。
+FK_OFF_MARKER = "-- mediaferry:foreign-keys-off"
+
 
 class MigrationError(RuntimeError):
     pass
@@ -70,7 +74,10 @@ def apply_migrations(conn: sqlite3.Connection) -> list[int]:
             raise MigrationError(
                 f"{path.name} が BEGIN / COMMIT を含んでいる。トランザクションは runner が所有する"
             )
-        _apply_one(conn, version, path.name, body, checksum)
+        if body.split("\n", 1)[0].strip() == FK_OFF_MARKER:
+            _apply_with_foreign_keys_off(conn, version, path.name, body, checksum)
+        else:
+            _apply_one(conn, version, path.name, body, checksum)
         done.append(version)
     return done
 
@@ -95,6 +102,30 @@ def _apply_one(conn: sqlite3.Connection, version: int, name: str, body: str, che
         if conn.in_transaction:
             conn.execute("ROLLBACK")
         raise
+
+
+def _apply_with_foreign_keys_off(
+    conn: sqlite3.Connection, version: int, name: str, body: str, checksum: str
+) -> None:
+    """外部キーを外して 1 本の版を適用する.
+
+    **`PRAGMA foreign_keys` はトランザクションの中では黙って無視される**ので、
+    移行ファイルの中からは外せない。`defer_foreign_keys` も `legacy_alter_table` も
+    代わりにならない（前者は DROP の暗黙 DELETE で立った違反が COMMIT まで残り、
+    後者はトランザクション内では効かず RENAME が子の参照先を書き換える）。
+
+    外すことを許す代わりに、**適用後に `PRAGMA foreign_key_check` を必ず確かめる**。
+    SQLite 公式の 12 手順が最後に求めている手当てで、これが無いと壊れた参照を
+    黙って残せる。
+    """
+    conn.execute("PRAGMA foreign_keys = OFF")
+    try:
+        _apply_one(conn, version, name, body, checksum)
+        broken = conn.execute("PRAGMA foreign_key_check").fetchall()
+        if broken:
+            raise MigrationError(f"{name} の適用後に参照が壊れている（{len(broken)} 件）")
+    finally:
+        conn.execute("PRAGMA foreign_keys = ON")
 
 
 def _version_of(path: Path) -> int:
