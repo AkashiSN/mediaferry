@@ -49,11 +49,12 @@ def resolve_captured_at(
     mtime_ns: int,
     default_timezone: str | None,
     exif_wall: datetime | None = None,
+    container_wall: str | None = None,
 ) -> CapturedAt:
-    """`exif_wall` は呼び出し側が読んだ EXIF の壁時計.
+    """`exif_wall` は呼び出し側が読んだ EXIF の壁時計. `container_wall` は器の申告値.
 
-    **この層はファイルを読まない。** 読むのは `adapters/exif.py` の仕事で、
-    読む対象（ステージ済みのファイル）はここからは見えない（§9.3 手順 5）。
+    **この層はファイルを読まない。** 読むのは `adapters/exif.py`・`adapters/ffprobe.py`
+    の仕事で、読む対象（ステージ済みのファイル）はここからは見えない（§9.3 手順 5）。
     値を注入する形にすることで、判断は純粋関数のままにできる。
     """
     if defn.timestamp.timezone_policy == "none":
@@ -67,11 +68,14 @@ def resolve_captured_at(
             )
         zone = ZoneInfo(name)
 
-    wall, source = _wall_clock(defn, rel_path, mtime_ns, exif_wall, zone)
+    wall, source = _wall_clock(defn, rel_path, mtime_ns, exif_wall, container_wall, zone)
     if source == "mtime" and defn.timestamp.mtime_semantics == "instant":
         # **瞬間から始めた値は fold まで決まっている**ので付け直さない。
         # **見分けるのは source。** 「aware かどうか」で見ると、オフセット付きの
         # EXIF がそのまま通り、`at` と `tz` が食い違う `CapturedAt` ができる。
+        return CapturedAt(at=wall, source=source, tz=name, note=None)
+    if source == "container" and defn.timestamp.container_semantics == "instant":
+        # 瞬間から始めた値は mtime の instant と同じ理由で付け直さない。
         return CapturedAt(at=wall, source=source, tz=name, note=None)
     if name is None:
         return CapturedAt(at=wall.replace(tzinfo=UTC), source=source, tz=None, note=None)
@@ -84,12 +88,13 @@ def _wall_clock(
     rel_path: str,
     mtime_ns: int,
     exif_wall: datetime | None,
+    container_wall: str | None,
     zone: tzinfo,
 ) -> tuple[datetime, str]:
-    """`zone` は mtime の epoch に付ける TZ.
+    """`zone` は mtime・container の epoch に付ける TZ.
 
-    **返す値は `source` が `mtime` のときだけ aware。** ファイル名と EXIF は
-    壁時計で、オフセットの付与は呼び出し側が行う（`_attach_offset`）。
+    **返す値が aware なのは `instant` を宣言した出所のときだけ。** 壁時計から
+    始めた値へのオフセットの付与は呼び出し側が行う（`_attach_offset`）。
 
     `timestamp.source` は出所の連鎖。**先頭から順に試し、当たった時点で返す。**
     終端は必ず `mtime`（`parse_definition` が保証する）なので、ループを抜けずに
@@ -108,13 +113,16 @@ def _wall_clock(
                     return datetime.strptime(found.group("ts"), rule.format), "filename"  # noqa: DTZ007
                 except ValueError:
                     pass
-        # **プロファイルが exif を宣言しているときだけ使う。** 宣言していない
-        # プロファイルに値が渡っても無視する（宣言と実際の解釈をずらさない）。
+        # **プロファイルが exif / container を宣言しているときだけ使う。** 宣言
+        # していないプロファイルに値が渡っても無視する（宣言と実際の解釈をずらさない）。
         elif src == "exif" and exif_wall is not None:
             return exif_wall, "exif"
-        # container は値を渡されないので当たらず、連鎖の次へそのまま進む。
-    # 連鎖の終端は必ず mtime。EXIF を持たないファイル（Canon の MOV、
-    # タグの無い JPEG）や、ファイル名が pattern に当たらないファイルはここへ落ちる。
+        elif src == "container" and container_wall is not None:
+            found_container = container_wall_clock(container_wall, zone, rule.container_semantics)
+            if found_container is not None:
+                return found_container, "container"
+    # 連鎖の終端は必ず mtime。EXIF・器の時刻を持たないファイルや、ファイル名が
+    # pattern に当たらないファイルはここへ落ちる。
     return mtime_wall_clock(mtime_ns, zone, defn.timestamp.mtime_semantics), "mtime"
 
 
@@ -132,6 +140,36 @@ def mtime_wall_clock(mtime_ns: int, zone: tzinfo, semantics: str) -> datetime:
     if semantics == "instant":
         return datetime.fromtimestamp(mtime_ns / 1e9, tz=zone)
     return datetime.fromtimestamp(mtime_ns / 1e9, tz=UTC).replace(tzinfo=None)
+
+
+# 日時を設定していない器が書く値。QuickTime の epoch そのもの。
+_QUICKTIME_EPOCH = "1904-01-01T00:00:00"
+
+
+def container_wall_clock(raw: str, zone: tzinfo, semantics: str) -> datetime | None:
+    """器（QuickTime の `creation_time`）が申告した時刻が指すカード上の時刻.
+
+    **意味の解釈はここ 1 か所に置く.**
+
+    - `wall_clock`: 桁がそのまま壁時計。`Z` が付いていても無視する（Canon は
+      現地の壁時計に `Z` を付ける、実測）。naive で返し、オフセットの付与は
+      呼び出し側に任せる
+    - `instant`: 真の瞬間なので `zone` へ直した aware な値を返す
+
+    読めない値と、**日時未設定の器が書く QuickTime の epoch** は `None` を返し、
+    次の出所へ落とす。1904 年を採ると一覧の並びが端から壊れる。
+    """
+    try:
+        parsed = datetime.fromisoformat(raw)
+    except ValueError:
+        return None
+    if parsed.replace(tzinfo=None).isoformat().startswith(_QUICKTIME_EPOCH):
+        return None
+    if semantics == "instant":
+        if parsed.tzinfo is None:
+            return None
+        return parsed.astimezone(zone)
+    return parsed.replace(tzinfo=None)
 
 
 def mtime_ns_of(at: datetime, semantics: str) -> int:

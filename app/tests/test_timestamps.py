@@ -3,7 +3,11 @@ from datetime import UTC, datetime
 import pytest
 
 from mediaferry.core.profiles.model import parse_definition
-from mediaferry.core.timestamps import TimezoneUnresolved, resolve_captured_at
+from mediaferry.core.timestamps import (
+    TimezoneUnresolved,
+    container_wall_clock,
+    resolve_captured_at,
+)
 
 from .test_profile_model import a_definition
 
@@ -279,6 +283,128 @@ def test_an_aware_exif_value_is_still_read_as_a_wall_clock():
     assert got.source == "exif"
     assert got.at.isoformat() == "2026-08-19T14:30:00+09:00"
     assert got.at.utcoffset() == got.at.tzinfo.utcoffset(got.at), "at と tz が食い違っている"
+
+
+# ----------------------------------------------------------------------
+# source: container（Task 4） —— QuickTime の creation_time
+#
+# Canon は現地の壁時計を書きながら `Z`（UTC）を付ける（実測）。真に受けると
+# 9 時間ずれるので、既定では `Z` を無視して桁をそのまま壁時計として読む。
+
+
+def test_the_container_time_is_read_as_a_wall_clock_by_default():
+    """**`Z` を真に受けない.**"""
+    got = resolve_captured_at(
+        defn(source=["container", "mtime"], pattern=None, format=None, timezone_policy="none"),
+        "DCIM/100CANON/MVI_0006.MOV",
+        0,
+        None,
+        container_wall="2026-08-26T12:35:08.000000Z",
+    )
+    assert got.source == "container"
+    assert got.at.isoformat() == "2026-08-26T12:35:08+00:00"
+
+
+def test_the_container_time_can_be_declared_as_an_instant():
+    """真の UTC を書く器もある. 宣言されたときだけ瞬間として扱う."""
+    got = resolve_captured_at(
+        defn(
+            source=["container", "mtime"],
+            pattern=None,
+            format=None,
+            timezone_policy="force_offset",
+            timezone="Etc/GMT-9",
+            container_semantics="instant",
+        ),
+        "a.MOV",
+        0,
+        None,
+        container_wall="2026-08-26T12:35:08.000000Z",
+    )
+    assert got.source == "container"
+    assert got.at.isoformat() == "2026-08-26T21:35:08+09:00"
+
+
+def test_the_chain_falls_through_to_mtime_when_the_container_has_no_time():
+    """器が時刻を持たないファイルは mtime へ落ちる."""
+    got = resolve_captured_at(
+        defn(source=["container", "mtime"], pattern=None, format=None, timezone_policy="none"),
+        "a.MOV",
+        1_787_747_586_000_000_000,
+        None,
+    )
+    assert got.source == "mtime"
+
+
+def test_a_container_time_is_ignored_when_the_chain_does_not_declare_it():
+    """**宣言と実際の解釈をずらさない.** 連鎖に無い出所の値が来ても使わない."""
+    got = resolve_captured_at(
+        defn(source=["exif", "mtime"], pattern=None, format=None, timezone_policy="none"),
+        "a.MOV",
+        1_787_747_586_000_000_000,
+        None,
+        container_wall="2026-08-26T12:35:08.000000Z",
+    )
+    assert got.source == "mtime"
+
+
+def test_exif_wins_over_the_container_when_it_comes_first():
+    """写真は EXIF、動画は器 —— 1 本の連鎖で両方をまかなう."""
+    got = resolve_captured_at(
+        defn(
+            source=["exif", "container", "mtime"],
+            pattern=None,
+            format=None,
+            timezone_policy="none",
+        ),
+        "IMG_0001.CR2",
+        0,
+        None,
+        exif_wall=datetime(2026, 8, 26, 12, 33, 5),  # noqa: DTZ001
+        container_wall="2026-08-26T12:35:08.000000Z",
+    )
+    assert got.source == "exif"
+
+
+def test_the_quicktime_epoch_is_treated_as_absent():
+    """**日時を設定していない器は 1904-01-01 を書く.**
+
+    そのまま採ると、撮影日時が 1904 年に飛んで一覧の先頭も末尾も壊れる。
+    ちょうどこの値だけを「無い」として扱い、次の出所へ落とす。
+    """
+    got = resolve_captured_at(
+        defn(source=["container", "mtime"], pattern=None, format=None, timezone_policy="none"),
+        "a.MOV",
+        1_787_747_586_000_000_000,
+        None,
+        container_wall="1904-01-01T00:00:00.000000Z",
+    )
+    assert got.source == "mtime"
+
+
+def test_an_unparsable_container_time_falls_through():
+    """読めない値で取り込み全体を止めない."""
+    got = resolve_captured_at(
+        defn(source=["container", "mtime"], pattern=None, format=None, timezone_policy="none"),
+        "a.MOV",
+        1_787_747_586_000_000_000,
+        None,
+        container_wall="なんだこれ",
+    )
+    assert got.source == "mtime"
+
+
+def test_container_wall_clock_returns_a_naive_value_for_wall_clock_semantics():
+    """壁時計として読んだ値は naive で返す契約を直接見る.
+
+    **`resolve_captured_at` 越しでは見えない.** `name is None` の経路も
+    `_attach_offset` の経路も、最後に必ず `wall.replace(tzinfo=...)` を呼んで
+    上書きするため、`container_wall_clock` が aware のまま返しても
+    `resolve_captured_at` の出力（`isoformat()`）は変わらない。この関数を
+    直接呼んで初めて、aware のまま返す変異を検出できる。
+    """
+    got = container_wall_clock("2026-08-26T12:35:08.000000Z", UTC, "wall_clock")
+    assert got.tzinfo is None
 
 
 def test_a_pathological_timestamp_pattern_falls_back_instead_of_hanging():
