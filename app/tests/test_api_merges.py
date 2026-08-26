@@ -164,6 +164,35 @@ def test_the_selectable_list_reports_when_it_was_truncated(client, api_db):
     assert body["truncated"] is True
 
 
+def test_selectable_orders_by_name_within_the_same_time(client, api_db):
+    """`GET /uploads/selectable` は `limit` で切るので、境界が揺れると候補が
+    出たり出なかったりする（`db/selection.py` の `_ORIGINALS` の tie-break）.
+
+    `id` と `rel_path` の大小をわざと逆にする —— `id` で比べる実装が残っていたら
+    この期待値では落ちる。
+    """
+    profile = ProfileRegistry(api_db).current("dji-osmo")
+    same = "2026-08-26T12:44:45+00:00"
+    # **挿入順もわざと期待値と逆にする。** tie-break が無いと rowid（挿入順）に
+    # 引きずられがちなので、期待する並び（0008 が先）とは逆の順で入れる。
+    a_media_file(
+        api_db,
+        (profile.profile_id, profile.revision_id),
+        rel_path="library/dji-osmo/DCIM/MVI_0008.MOV",
+        captured_at=same,
+        id="0" * 32,
+    )
+    a_media_file(
+        api_db,
+        (profile.profile_id, profile.revision_id),
+        rel_path="library/dji-osmo/DCIM/MVI_0007.MOV",
+        captured_at=same,
+        id="f" * 32,
+    )
+    got = client.get("/api/uploads/selectable?limit=1").json()["selectable"]
+    assert [item["rel_path"].rsplit("/", 1)[-1] for item in got] == ["MVI_0008.MOV"]
+
+
 def test_profiles_that_do_not_merge_are_not_detected(client, api_db):
     """`archived` ではなく `merge.enabled = false` で確かめる.
 

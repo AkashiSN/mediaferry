@@ -549,16 +549,13 @@ def test_the_recompute_keyset_is_bounded_by_the_profile(tmp_path):
 def test_a_profile_filtered_listing_does_not_sort_the_whole_profile(tmp_path):
     """`0014`。`0013` は一覧の実行計画を退行させる.
 
-    一覧は `captured_at DESC, id DESC` 固定で、ページは 50 件（§11）。
+    一覧は `captured_at DESC, rel_path DESC` 固定で、ページは 50 件（§11）。
     `media_file_captured_at` を辿れば先頭ページで止まれるのに、`0013` の
     `(profile_id, role, rel_path)` が選ばれると**そのプロファイルの全行を拾って
     から並べ替える**。プロファイルが大半を占める通常の構成ほど悪化する。
 
-    **`media_file_listing`（`0026`）は `rel_path DESC` で終わる**が、`ORDER BY` は
-    まだ `id DESC` で終わる。両者が噛み合わないので、`captured_at` の並びは索引で
-    決まるものの、同じ `captured_at` の中の tie-break だけが一時 B-tree に落ちる
-    （`FOR LAST TERM OF ORDER BY`）。**全件を拾ってから並べ替える形（`FOR ORDER BY`）
-    には戻っていない**ことを見る。
+    **`media_file_listing`（`0026`）は `rel_path DESC` で終わる**ので、`ORDER BY`
+    と索引がちょうど噛み合う。一時ソートは一切要らない。
     """
     # **一覧が実際に組み立てる WHERE を使う。** 問い合わせを手で書き写すと、
     # 絞り込みの形（`IN` か `=` か）を変えても試験が落ちない。
@@ -582,17 +579,18 @@ def test_a_profile_filtered_listing_does_not_sort_the_whole_profile(tmp_path):
         for row in conn.execute(
             "EXPLAIN QUERY PLAN"  # noqa: S608 - 値は params で渡す
             f" SELECT m.* FROM media_file m WHERE {clause}"
-            " ORDER BY m.captured_at DESC, m.id DESC LIMIT ? OFFSET ?",
+            " ORDER BY m.captured_at DESC, m.rel_path DESC LIMIT ? OFFSET ?",
             (*params, 50, 0),
         )
     )
     conn.close()
 
     assert "media_file_listing" in plan, plan
-    assert "USE TEMP B-TREE FOR LAST TERM OF ORDER BY" in plan, plan
-    # 良い計画は tie-break だけの `FOR LAST TERM OF ORDER BY`。全件を拾ってから
-    # 並べ替える形（`FOR ORDER BY`、"LAST TERM OF" を伴わない）には戻っていない。
-    assert "FOR ORDER BY" not in plan, plan
+    # 索引が `ORDER BY` と同じ並び（`captured_at DESC, rel_path DESC`）で終わるので、
+    # tie-break も含めて一時ソートが一切要らない。全件を拾ってから並べ替える形
+    # （`FOR ORDER BY`）にも、tie-break だけを一時 B-tree に落とす形
+    # （`FOR LAST TERM OF ORDER BY`）にも戻っていないことを見る。
+    assert "TEMP B-TREE" not in plan, plan
 
 
 def test_a_role_filtered_listing_does_not_scan_the_capture_time_index(tmp_path):
@@ -600,21 +598,20 @@ def test_a_role_filtered_listing_does_not_scan_the_capture_time_index(tmp_path):
 
     `derived` は `original` に比べて桁で少ない。`captured_at` 側の索引を辿ると、
     `LIMIT` を満たすまでに何行 `role` を確かめるかが読めない（実測: original
-    60,000 行 / derived 200 行で 55〜66 ms）。`(captured_at DESC, id DESC)
+    60,000 行 / derived 200 行で 55〜66 ms）。`(captured_at DESC, rel_path DESC)
     WHERE role = 'derived'` の部分索引を辿れば `role = 'derived'` の行だけを
     最初から並び順に読める。
 
     **`0022` の全体索引ではなく `0023` の部分索引を見る。** `0022`
-    （`role, captured_at DESC, id DESC`）は role='original' 側にも使える形で、
+    （`role, captured_at DESC, rel_path DESC`）は role='original' 側にも使える形で、
     `db/selection.py` の `SENDABLE_CLAUSE` の OR 節の両方の枝から拾われて
     `MULTI-INDEX OR` に化け、`GET /media?status=unsent&…` を退行させた
     （`test_the_unsent_listing_does_not_multi_index_or`）。`0023` は
     role='derived' だけの部分索引に差し替えることでその退行を塞ぐ。
 
-    **`media_file_derived_listing`（`0026`）は `rel_path DESC` で終わる**が、
-    `ORDER BY` はまだ `id DESC` で終わる。索引で `role = 'derived'` の行だけを
-    `captured_at` の並びで読めることは変わらないが、同じ `captured_at` の
-    tie-break だけが一時 B-tree に落ちる（`FOR LAST TERM OF ORDER BY`）。
+    **`media_file_derived_listing`（`0026`）は `rel_path DESC` で終わる**ので、
+    `ORDER BY` とちょうど噛み合う。`role = 'derived'` の行だけを `captured_at` の
+    並びで最初から読め、tie-break を含めて一時ソートは一切要らない。
     """
     from mediaferry.api.routes_media import _filters
 
@@ -636,15 +633,14 @@ def test_a_role_filtered_listing_does_not_scan_the_capture_time_index(tmp_path):
         for row in conn.execute(
             "EXPLAIN QUERY PLAN"  # noqa: S608 - 値は params で渡す
             f" SELECT m.* FROM media_file m WHERE {clause}"
-            " ORDER BY m.captured_at DESC, m.id DESC LIMIT ? OFFSET ?",
+            " ORDER BY m.captured_at DESC, m.rel_path DESC LIMIT ? OFFSET ?",
             (*params, 50, 0),
         )
     )
     conn.close()
 
     assert "media_file_derived_listing" in plan, plan
-    assert "USE TEMP B-TREE FOR LAST TERM OF ORDER BY" in plan, plan
-    assert "FOR ORDER BY" not in plan, plan
+    assert "TEMP B-TREE" not in plan, plan
 
 
 def test_the_unsent_listing_does_not_multi_index_or(tmp_path):
@@ -653,11 +649,11 @@ def test_the_unsent_listing_does_not_multi_index_or(tmp_path):
     `db/selection.py` の `SENDABLE_CLAUSE` は
     `(m.role = 'original' AND ...) OR (m.role = 'derived' AND ...)` という形で、
     **両方の枝が `role` の等値をリテラルで持つ**。`0022`
-    （`role, captured_at DESC, id DESC`）はどちらの枝からも使えたため、SQLite が
-    `MULTI-INDEX OR` を選んでいた。OR の結果は `captured_at` の並び順に出ないので
-    最後に全件ソートが入り、`GET /media?status=unsent&destination_id=…` が
-    退行した（実測: original 60,000 行 / derived 200 行で中央値 0.58 ms → 74 ms。
-    詳細は `.superpowers/sdd/phase9-plan/task-3-report.md`）。
+    （`role, captured_at DESC, rel_path DESC`）はどちらの枝からも使えたため、
+    SQLite が `MULTI-INDEX OR` を選んでいた。OR の結果は `captured_at` の並び順に
+    出ないので最後に全件ソートが入り、`GET /media?status=unsent&destination_id=…`
+    が退行した（実測: original 60,000 行 / derived 200 行で中央値 0.58 ms →
+    74 ms。詳細は `.superpowers/sdd/phase9-plan/task-3-report.md`）。
 
     `0023` は role='derived' だけの部分索引に差し替えたので、role='original' の
     枝には索引が無くなり、`MULTI-INDEX OR` の対象から外れる —— 既存の経路
@@ -685,7 +681,7 @@ def test_the_unsent_listing_does_not_multi_index_or(tmp_path):
         for row in conn.execute(
             "EXPLAIN QUERY PLAN"  # noqa: S608 - 値は params で渡す
             f" SELECT m.* FROM media_file m WHERE {clause}"
-            " ORDER BY m.captured_at DESC, m.id DESC LIMIT ? OFFSET ?",
+            " ORDER BY m.captured_at DESC, m.rel_path DESC LIMIT ? OFFSET ?",
             (*params, 50, 0),
         )
     )

@@ -42,7 +42,7 @@ _ORIGINALS = (
     " WHERE m.missing_at IS NULL AND m.role = 'original'"
     "   AND NOT EXISTS (SELECT 1 FROM merge_member mm"
     "                   WHERE mm.media_file_id = m.id AND mm.active = 1)"
-    " ORDER BY m.captured_at DESC"
+    " ORDER BY m.captured_at DESC, m.rel_path DESC"
 )
 
 _DERIVED = (
@@ -51,7 +51,7 @@ _DERIVED = (
     " FROM media_file m JOIN merge_group g ON g.output_media_file_id = m.id"
     " WHERE m.missing_at IS NULL AND m.role = 'derived'"
     "   AND g.superseded_by_id IS NULL AND g.status = 'merged'"
-    " ORDER BY m.captured_at DESC"
+    " ORDER BY m.captured_at DESC, m.rel_path DESC"
 )
 
 # §10「既定で選択肢に出すもの」を 1 個の SQL の断片にしたもの. **`media_file` の
@@ -111,7 +111,7 @@ _MEMBERS_OF_UNMERGED = (
     " JOIN merge_group g ON g.id = mm.merge_group_id"
     " WHERE m.missing_at IS NULL AND mm.active = 1"
     "   AND g.superseded_by_id IS NULL AND g.status = 'failed'"
-    " ORDER BY m.captured_at DESC"
+    " ORDER BY m.captured_at DESC, m.rel_path DESC"
 )
 
 

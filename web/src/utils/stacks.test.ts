@@ -69,7 +69,7 @@ describe("組にまとめる", () => {
   });
 
   it("**並びは入力順を保つ**（最初に現れた行の位置にタイルを置く）", () => {
-    // API の並び（captured_at DESC, id DESC）を崩すと、日付のまとまりが割れる。
+    // API の並び（captured_at DESC, rel_path DESC）を崩すと、日付のまとまりが割れる。
     const tiles = groupIntoStacks([
       row("a", "x/A.JPG"),
       row("r", "x/IMG_1.CR2", [jpeg, raw]),

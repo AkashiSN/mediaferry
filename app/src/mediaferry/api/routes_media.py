@@ -130,8 +130,10 @@ def list_media(  # noqa: PLR0913
 ) -> dict[str, Any]:
     """ライブラリの一覧（§11）.
 
-    **並びは `captured_at DESC, id DESC` で固定する。** 同じ撮影日時の行があるので、
-    tie-break を入れないとページの境目で重複・欠落する。
+    **並びは `captured_at DESC, rel_path DESC` で固定する。** 同じ撮影日時の行が
+    あるので、tie-break を入れないとページの境目で重複・欠落する。**`rel_path` は
+    `UNIQUE` なので単独で足りる** —— `id` は乱数なので、同じ撮影日時の並びに
+    意味が出ない。
 
     `status` は**宛先ごとの状態**なので、`destination_id` と併せて指定する。
     `role=derived` で写真タブの「つないだ動画」だけに絞れる。
@@ -199,7 +201,7 @@ def list_media(  # noqa: PLR0913
     ).fetchone()["n"]
     rows = conn.execute(
         f"{prefix}SELECT m.* FROM media_file m {where}"  # noqa: S608
-        " ORDER BY m.captured_at DESC, m.id DESC LIMIT ? OFFSET ?",
+        " ORDER BY m.captured_at DESC, m.rel_path DESC LIMIT ? OFFSET ?",
         (*prefix_params, *params, limit, offset),
     )
     media = []

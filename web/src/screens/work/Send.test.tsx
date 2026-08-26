@@ -58,12 +58,19 @@ describe("宛先ごとの未送信をまとめる", () => {
     expect(merged.map((media) => media.id)).toEqual(["m1"]);
   });
 
-  it("並びは API と同じ（新しい撮影日時が先、同じなら id の大きい方が先）", () => {
+  it("並びは API と同じ（新しい撮影日時が先、同じなら rel_path の大きい方が先）", () => {
+    // id と rel_path の大小をわざと逆にする（id: a < b < c、rel_path: c < b < a）。
+    // id で比べる実装が残っていたら、この期待値では落ちる。
     const merged = mergeMedia([
-      { media: [m("a", "2026-08-17T09:00:00+09:00"), m("c", "2026-08-18T10:00:00+09:00")] },
-      { media: [m("b", "2026-08-18T10:00:00+09:00")] },
+      {
+        media: [
+          { ...m("a", "2026-08-17T09:00:00+09:00"), rel_path: "z-a.JPG" },
+          { ...m("c", "2026-08-18T10:00:00+09:00"), rel_path: "x-c.JPG" },
+        ],
+      },
+      { media: [{ ...m("b", "2026-08-18T10:00:00+09:00"), rel_path: "y-b.JPG" }] },
     ]);
-    expect(merged.map((media) => media.id)).toEqual(["c", "b", "a"]);
+    expect(merged.map((media) => media.id)).toEqual(["b", "c", "a"]);
   });
 });
 
@@ -258,8 +265,8 @@ describe("組（RAW+JPEG）をタイルにまとめる", () => {
     stubApi({
       "/destinations": { destinations: [{ id: "d1", name: "家", enabled: true }] },
       "/media": {
-        // **組ごとに撮影時刻をずらす。** 並びは `captured_at DESC, id DESC` なので、
-        // 全部同じ時刻だと組の順が id の文字列比較で決まり、どれが上限の外かが
+        // **組ごとに撮影時刻をずらす。** 並びは `captured_at DESC, rel_path DESC` なので、
+        // 全部同じ時刻だと組の順が rel_path の文字列比較で決まり、どれが上限の外かが
         // 読みにくくなる。ここでは組 0 がいちばん新しい。
         media: pairs.flatMap((pair, index) =>
           pair.map((row) => ({
