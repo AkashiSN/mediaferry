@@ -275,13 +275,28 @@ h1.page.title-lg { font-size: 24px; }
 }
 .pick.on { background-color: var(--accent); }
 .pick svg { position: relative; color: var(--accent-ink); z-index: 1; }
-/* 日付の見出しの丸。タイルの丸（`.pick`）と同じ見た目・同じ 44px の押せる領域で、
-   位置だけタイルの隅から見出しの行の流し込みへ変える。`.sechead` は
-   `align-items: baseline` なので、`align-self: center` を付けないと 44px の丸が
-   見出しの文字より下へずれる。 */
-.pick.day { position: static; flex: 0 0 auto; align-self: center; }
-.pick .dash { width: 8px; height: 2px; background: var(--accent-ink); border-radius: 1px;
-  position: relative; z-index: 1; }
+
+/* 日付の見出し。**丸と日付でひとつの押せるもの**にしてある（`Photos.tsx`）ので、
+   `.sechead` の baseline 揃えでは 44px のボタンと右隣の件数が縦にずれる。この行
+   だけ中央で揃える。 */
+.sechead.dayhead { align-items: center; }
+.daypick {
+  display: inline-flex; align-items: center; gap: 9px;
+  min-height: 44px; padding: 0 14px 0 9px;
+  border: 1px solid var(--line); border-radius: 22px;
+  background: var(--surface); color: var(--ink); font: inherit;
+}
+.daypick.on { border-color: var(--accent-line); background: var(--accent-soft); }
+/* 選ぶ丸。**地は面の色で塗って縁を付ける。** タイルの丸（`.pick`）の半透明の黒は
+   写真の上に載るから見えるのであって、見出しの行では背景に沈む。 */
+.daydot {
+  width: 21px; height: 21px; flex: 0 0 21px; border-radius: 50%;
+  background: var(--surface); border: 1px solid var(--ink-3);
+  display: flex; align-items: center; justify-content: center;
+}
+.daypick.on .daydot { background: var(--accent); border-color: var(--accent); }
+.daydot svg { color: var(--accent-ink); }
+.daydot .dash { width: 8px; height: 2px; background: var(--accent-ink); border-radius: 1px; }
 /* 左上＝つないだ動画・組（RAW+JPEG）の印。**両方立つ行がありうる**ので、座標は
    入れ物が 1 つだけ持ち、札は入れ物の中で横に並べる。 */
 .madeofs { position: absolute; top: 7px; left: 7px; z-index: 1; display: flex; gap: 4px;

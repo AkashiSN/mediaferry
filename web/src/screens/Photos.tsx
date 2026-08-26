@@ -463,22 +463,31 @@ export function PhotosScreen() {
               key={group.label}
               style={{ display: "flex", flexDirection: "column", gap: 10 }}
             >
-              <div className="sechead">
-                {/* **`role="checkbox"` の 3 状態にする。** 「一部選ばれている」は
+              <div className="sechead dayhead">
+                {/* **丸と日付を 1 つのボタンにする。** 21px の丸だけが押せる形だと
+                    狙いにくく、隣の日付が押せそうに見えて押せない。見出しを
+                    `<h2>` のまま残したいので、ボタンを見出しの中に入れる
+                    （見出しの中身は句要素なので `<button>` は置ける）。
+
+                    **`role="checkbox"` の 3 状態にする。** 「一部選ばれている」は
                     押下状態（`aria-pressed`）では表せず、読み上げで全選択と
                     区別が付かない。`mixed` はチェックボックスにしかない。 */}
-                <button
-                  type="button"
-                  role="checkbox"
-                  className={`pick day${state === "none" ? "" : " on"}`}
-                  aria-checked={state === "all" ? "true" : state === "some" ? "mixed" : "false"}
-                  aria-label={`${group.label} をまとめて選ぶ`}
-                  onClick={() => toggleDay(group.items)}
-                >
-                  {state === "all" && <Icon name="check" size={12} />}
-                  {state === "some" && <span className="dash" />}
-                </button>
-                <h2 style={{ fontSize: 14 }}>{group.label}</h2>
+                <h2 style={{ fontSize: 14 }}>
+                  <button
+                    type="button"
+                    role="checkbox"
+                    className={`daypick${state === "none" ? "" : " on"}`}
+                    aria-checked={state === "all" ? "true" : state === "some" ? "mixed" : "false"}
+                    aria-label={`${group.label} をまとめて選ぶ`}
+                    onClick={() => toggleDay(group.items)}
+                  >
+                    <span className="daydot" aria-hidden="true">
+                      {state === "all" && <Icon name="check" size={12} />}
+                      {state === "some" && <span className="dash" />}
+                    </span>
+                    {group.label}
+                  </button>
+                </h2>
                 <span className="small">{group.items.length} 件</span>
               </div>
               <div className="grid">

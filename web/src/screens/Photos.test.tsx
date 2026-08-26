@@ -424,6 +424,32 @@ describe("写真の画面", () => {
     expect(screen.getByText(/合計 300 B/)).toBeInTheDocument();
   });
 
+  it("日付の文字を押しても、その日を全部選ぶ", async () => {
+    // **狙うのは 21px の丸だけではない。** 日付の文字も同じ操作の一部なので、
+    // そこを押しても同じことが起きる（押せる幅が見出しの行いっぱいに広がる）。
+    stubApi({
+      "/media": {
+        media: [
+          media("a", "2026-08-18T15:12:00+09:00", { size_bytes: 100 }),
+          media("b", "2026-08-18T14:03:00+09:00", { size_bytes: 200 }),
+        ],
+        total: 2,
+        page: 1,
+        page_size: 200,
+      },
+      "/destinations": { destinations: [] },
+    });
+    render(
+      <MemoryRouter>
+        <PhotosScreen />
+      </MemoryRouter>,
+    );
+
+    await userEvent.click(await screen.findByText("2026年8月18日"));
+
+    expect(await screen.findByText("2 件を選択中")).toBeInTheDocument();
+  });
+
   it("全部選ばれている日の丸を押すと、その日を全部外す", async () => {
     // **押した結果が予想できる**ようにする（全 → 無、それ以外 → 全）。
     stubApi({
