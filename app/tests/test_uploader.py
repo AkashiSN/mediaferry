@@ -741,7 +741,7 @@ def test_a_slow_target_check_does_not_lose_the_lease(world, db, monkeypatch):
 
     server, uploader, _, _, _, destination_id, _ = world
     monkeypatch.setattr("mediaferry.core.lease_pulse.HEARTBEAT_INTERVAL", 0.05)
-    store = JobStore(db, lease_seconds=1)
+    store = JobStore(db, lease_seconds=3)
     store.enqueue("upload", {"destination_id": destination_id})
     ctx = store.claim_next()
     real_users_me = ImmichClient.users_me
@@ -802,6 +802,20 @@ def test_many_quick_sends_do_not_lose_the_lease(world, db, data_root, monkeypatc
     長かったとき」だけなので、**1 件ずつが速いと一度も打たれない**。ループが
     自分で延ばさないと、写真を何十枚も送る道（いちばん普通の使い方）が
     リース（60 秒）の満期で落ちる。実機で 61 秒で落ちた。
+
+    **数の決め方（2 つの向きに挟まれている）。**
+
+    - *検出できること*: 心拍を外したら落ちなければならない。落ちる条件は
+      「全体の所要 > リース」で、これを**待ちの合計だけで満たす**
+      （7 件 × 0.6 秒 = 4.2 秒 > 3 秒）。待ちは機械の速さに関わらないので、
+      速い機械でも遅い機械でも検出できる
+    - *誤検出しないこと*: 1 周がリースに収まらなければならない。1 周は
+      待ち（0.6 秒）＋ DB 書き込みなどの実処理で、**実処理だけが機械の速さに
+      比例して伸びる**。リース 3 秒はその実処理に 2.4 秒の余地を残す（手元での
+      実測はおよそ 0.2 秒なので、10 倍以上遅い機械まで耐える）
+
+    リースを 1 秒にすると余地が 0.2 秒しか無く、混んだランナーで**実処理が
+    伸びただけで**落ちる。
     """
     import time
 
@@ -811,7 +825,7 @@ def test_many_quick_sends_do_not_lose_the_lease(world, db, data_root, monkeypatc
     profile = ProfileRegistry(db).current("dji-osmo")
     directory = data_root / "library" / "dji-osmo" / "DCIM"
     media_ids = []
-    for index in range(4):
+    for index in range(6):
         payload = f"clip-{index}".encode()
         (directory / f"B{index}.MP4").write_bytes(payload)
         media_ids.append(
@@ -836,15 +850,15 @@ def test_many_quick_sends_do_not_lose_the_lease(world, db, data_root, monkeypatc
         return real_upload(self, *args, **kwargs)
 
     monkeypatch.setattr(ImmichClient, "upload_asset", slow_enough)
-    store = JobStore(db, lease_seconds=1)
+    store = JobStore(db, lease_seconds=3)
     store.enqueue("upload", {"destination_id": destination_id})
     ctx = store.claim_next()
 
     outcome = uploader.run(ctx, destination_id)
 
-    assert outcome.sent == 5
+    assert outcome.sent == 7
     states = [row["state"] for row in db.execute("SELECT state FROM upload_record")]
-    assert states == ["complete"] * 5
+    assert states == ["complete"] * 7
 
 
 def test_the_upload_job_reports_how_far_it_got(world, db):
