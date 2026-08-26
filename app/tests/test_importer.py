@@ -337,3 +337,74 @@ def test_the_copy_reports_where_it_is(importing, db, monkeypatch):
     # 心拍と同じ行に乗っている（別の書き込みではない）。
     stored = json.loads(JobStore(db).get(ctx.job_id)["progress_json"])
     assert stored["phase"] == "copy"
+
+
+# ----------------------------------------------------------------------
+# probe が先、取り込みは常に遅延解決（Task 6）
+
+
+def test_a_video_takes_its_time_from_the_container_when_the_profile_declares_it(
+    importing, db, data_root
+):
+    """**`container_wall=probe.container_wall` を渡し忘れると気づけない.**
+
+    `canon-eos` の連鎖に `container` が入るのは Task 11 なので、ここでは合成
+    プロファイル（`an_exif_profile` の `source` を差し替えたもの）で確かめる。
+    拡張子は MP4（動画）にして EXIF の経路とは別であることもはっきりさせる。
+    """
+    from mediaferry.adapters.ffprobe import ProbeResult
+
+    importer, ctx, fd, volume_id, _ = importing
+    profile = an_exif_profile(db, source=("container", "mtime"))
+    db.execute("DELETE FROM source_entry")
+    Scanner(db).scan(ctx, fd, volume_id, profile)
+
+    probe = StubProbe(ProbeResult("video", 2.0, "ok", container_wall="2026-08-26T12:35:08.000000Z"))
+    importer = Importer(
+        db, ArtifactPublisher(db, data_root, probe), data_root, default_timezone="Asia/Tokyo"
+    )
+    importer.run(ctx, fd, volume_id, profile)
+
+    row = db.execute("SELECT * FROM media_file WHERE rel_path LIKE '%.MP4'").fetchone()
+    assert row["captured_at_source"] == "container"
+    assert row["captured_at"].startswith("2026-08-26T12:35:08")
+
+
+@pytest.mark.xfail(reason="canon-eos の連鎖は Task 11 で入る")
+def test_a_video_takes_its_time_from_the_container(db, data_root, tmp_path):
+    """**取り込みは常に遅延解決.** 器の時刻はステージ済みのファイルからしか読めない.
+
+    `dji-osmo` は名前に時刻を持つので、器を見に行かないプロファイルでは差が出ない。
+    ここでは `canon-eos`（`source: [exif, container, mtime]`）で見る。
+    """
+    from mediaferry.adapters.ffprobe import ProbeResult
+
+    ProfileRegistry(db).sync_builtins()
+    profile = ProfileRegistry(db).current("canon-eos")
+    store = JobStore(db)
+    store.enqueue("import", {})
+    ctx = store.claim_next()
+
+    card = tmp_path / "card"
+    (card / "DCIM" / "100CANON").mkdir(parents=True)
+    (card / "DCIM" / "100CANON" / "MVI_0006.MOV").write_bytes(b"m" * 100)
+    fd = os.open(card, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        volume_id = a_volume(db, profile=(profile.profile_id, profile.revision_id))
+        Scanner(db).scan(ctx, fd, volume_id, profile)
+        probe = StubProbe(
+            ProbeResult("video", 69.937, "ok", container_wall="2026-08-26T12:35:08.000000Z")
+        )
+        importer = Importer(
+            db,
+            ArtifactPublisher(db, data_root, probe),
+            data_root,
+            default_timezone="Asia/Tokyo",
+        )
+        importer.run(ctx, fd, volume_id, profile)
+    finally:
+        os.close(fd)
+
+    row = db.execute("SELECT * FROM media_file WHERE rel_path LIKE '%MVI_0006.MOV'").fetchone()
+    assert row["captured_at_source"] == "container"
+    assert row["captured_at"].startswith("2026-08-26T12:35:08")

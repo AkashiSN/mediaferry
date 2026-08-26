@@ -733,7 +733,7 @@ def test_a_size_that_disagrees_with_the_disk_is_aborted(setup, data_root, db, mo
 
 
 def a_resolver(recorder, at="2026-01-02T03:04:05+09:00"):
-    def resolve(staging_abs):
+    def resolve(staging_abs, probe):
         recorder.append(staging_abs)
         return CapturedAt(at=datetime.fromisoformat(at), source="exif", tz="Asia/Tokyo", note=None)
 
@@ -794,7 +794,7 @@ def test_the_resolver_runs_between_verification_and_metadata(setup, db, monkeypa
 
     monkeypatch.setattr(ArtifactPublisher, "_checkpoint", recording)
 
-    def resolve(staging_abs):
+    def resolve(staging_abs, probe):
         trace.append("resolve")
         assert staging_abs.stat().st_size == 10, "書き終わる前に読んでいる"
         return CapturedAt(
@@ -837,3 +837,68 @@ def test_the_resolved_value_is_persisted_before_the_file_is_published(setup, db)
     assert metadata["captured_at_source"] == "exif"
     assert metadata["captured_at"].startswith("2026-01-02T03:04:05")
     assert got.media_file_id
+
+
+# ----------------------------------------------------------------------
+# probe が先、captured の解決が後（Task 6）
+#
+# 器の時刻（`container_wall`）は probe の結果にしか無い。captured を先に決める
+# 順序だと、`container` を宣言したプロファイルでも値が間に合わず、黙って
+# mtime へ落ちる。
+
+
+def _container_probe():
+    """器の時刻を持つ probe の結果を返す stub."""
+    return StubProbe(ProbeResult("video", 2.0, "ok", container_wall="2026-08-26T12:35:08.000000Z"))
+
+
+def test_the_probe_runs_before_the_captured_time_is_resolved(setup, db, data_root):
+    """**器の時刻は probe の結果からしか取れない.**
+
+    captured を先に決める順序だと、`container` を宣言したプロファイルで値が
+    間に合わず、黙って mtime へ落ちる。
+    """
+    _, ctx, profile, volume_id = setup
+    entry_id = a_source_entry(db, volume_id)
+    publisher = ArtifactPublisher(db, data_root, _container_probe())
+    seen: list[str | None] = []
+
+    def resolve(staging_abs, probe):
+        seen.append(probe.container_wall)
+        return CapturedAt(
+            at=datetime.fromisoformat("2026-08-26T12:35:08+00:00"),
+            source="container",
+            tz=None,
+            note=None,
+        )
+
+    publisher.publish(
+        ctx,
+        a_request(profile, entry_id, captured=None, resolve_captured=resolve),
+        write_payload(b"payload"),
+    )
+    assert seen == ["2026-08-26T12:35:08.000000Z"]
+
+
+def test_the_container_time_is_stored_verbatim(setup, db, data_root):
+    """再計算が再 probe せずに読み直せるように、生の文字列を持つ."""
+    _, ctx, profile, volume_id = setup
+    entry_id = a_source_entry(db, volume_id)
+    publisher = ArtifactPublisher(db, data_root, _container_probe())
+
+    def resolve(staging_abs, probe):
+        return CapturedAt(
+            at=datetime.fromisoformat("2026-08-26T12:35:08+00:00"),
+            source="container",
+            tz=None,
+            note=None,
+        )
+
+    got = publisher.publish(
+        ctx,
+        a_request(profile, entry_id, captured=None, resolve_captured=resolve),
+        write_payload(b"payload"),
+    )
+    row = db.execute("SELECT * FROM media_file WHERE id = ?", (got.media_file_id,)).fetchone()
+    assert row["container_wall"] == "2026-08-26T12:35:08.000000Z"
+    assert row["captured_at_source"] == "container"

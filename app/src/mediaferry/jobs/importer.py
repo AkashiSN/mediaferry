@@ -16,7 +16,7 @@ from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 
 from ..adapters.exif import read_datetime_original
-from ..adapters.ffprobe import PHOTO_EXTENSIONS
+from ..adapters.ffprobe import PHOTO_EXTENSIONS, ProbeResult
 from ..adapters.fs import open_beneath
 from ..adapters.publisher import (
     ArtifactPublisher,
@@ -170,35 +170,32 @@ class Importer:
     def _mark_failed(self, entry_id: str) -> None:
         self._conn.execute("UPDATE source_entry SET state = 'failed' WHERE id = ?", (entry_id,))
 
-    def _captured_for(
+    def _resolver(
         self, row: sqlite3.Row, profile: ProfileRef
-    ) -> tuple[CapturedAt | None, Callable[[Path], CapturedAt] | None]:
-        """値か、ステージ済みファイルから決める読み方か、どちらか一方を返す.
+    ) -> Callable[[Path, ProbeResult], CapturedAt]:
+        """ステージ済みのファイルと probe から撮影日時を決める読み方を返す.
 
         **画像以外では EXIF を読まない。** `exifread` は認識できない入力に対して
-        例外ではなく警告を出すので、Canon の MOV のように `timestamp.source` に
-        `exif` を含むプロファイルを通る動画で呼ぶと、1 本ごとに警告が並ぶ。
-        振り分けは `MediaProbe` と同じ拡張子の規則で行う（判定が 2 箇所に散らない）。
+        例外ではなく警告を出すので、Canon の MOV のように `exif` を宣言した
+        プロファイルを通る動画で呼ぶと、1 本ごとに警告が並ぶ。振り分けは
+        `MediaProbe` と同じ拡張子の規則で行う（判定が 2 箇所に散らない）。
         """
         extension = PurePosixPath(row["rel_path"]).suffix.lstrip(".").upper()
-        if "exif" not in profile.definition.timestamp.source or extension not in PHOTO_EXTENSIONS:
-            return (
-                resolve_captured_at(
-                    profile.definition, row["rel_path"], row["mtime_ns"], self._default_timezone
-                ),
-                None,
-            )
+        reads_exif = "exif" in profile.definition.timestamp.source and (
+            extension in PHOTO_EXTENSIONS
+        )
 
-        def resolve(staging_abs: Path) -> CapturedAt:
+        def resolve(staging_abs: Path, probe: ProbeResult) -> CapturedAt:
             return resolve_captured_at(
                 profile.definition,
                 row["rel_path"],
                 row["mtime_ns"],
                 self._default_timezone,
-                exif_wall=read_datetime_original(staging_abs),
+                exif_wall=read_datetime_original(staging_abs) if reads_exif else None,
+                container_wall=probe.container_wall,
             )
 
-        return None, resolve
+        return resolve
 
     def _publish_one(
         self,
@@ -208,9 +205,8 @@ class Importer:
         profile: ProfileRef,
         progress: dict[str, object] | None = None,
     ) -> None:
-        # **EXIF はステージ済みのファイルから読む**（§9.3 手順 5）。ここでは
-        # まだ staging が無いので、値ではなく「読み方」を渡す。
-        captured, resolver = self._captured_for(row, profile)
+        # **EXIF・器の時刻はステージ済みのファイルと probe の結果からしか読めない**
+        # （§9.3 手順 5）。ここではまだ staging が無いので、値ではなく「読み方」を渡す。
         request = ArtifactRequest(
             kind="import",
             role="original",
@@ -219,12 +215,12 @@ class Importer:
             desired_rel_path=library_rel_path("original", profile.definition.slug, row["rel_path"]),
             source_rel_path=row["rel_path"],
             extension=PurePosixPath(row["rel_path"]).suffix.lstrip(".").upper(),
-            captured=captured,
+            captured=None,
             mtime_ns=row["mtime_ns"],
             mtime_semantics=profile.definition.timestamp.mtime_semantics,
             source_entry_id=row["id"],
             merge_group_id=None,
-            resolve_captured=resolver,
+            resolve_captured=self._resolver(row, profile),
         )
         self._conn.execute(
             "UPDATE source_entry SET state = 'importing', observed_at = ? WHERE id = ?",

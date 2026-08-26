@@ -33,7 +33,7 @@ from ..core.timestamps import CapturedAt, mtime_wall_clock
 from ..db.connection import immediate
 from ..db.jobs import JobContext, LeaseLost
 from ..ids import new_id
-from .ffprobe import MediaProbe
+from .ffprobe import MediaProbe, ProbeResult
 from .fs import fsync_dir
 
 logger = logging.getLogger(__name__)
@@ -97,9 +97,10 @@ class ArtifactRequest:
     source_rel_path: str
     extension: str
     # **どちらか一方を必ず与える。** `captured` は呼び出し側が先に決めた値、
-    # `resolve_captured` は**ステージ済みのファイルから**決める遅延解決
-    # （`source: exif`）。呼び出し側は publish の前に staging を持っていない
-    # ので、ファイルを見て決める種類の値はここでしか解決できない（§9.3 手順 5）。
+    # `resolve_captured` は**ステージ済みのファイルと、その probe の結果から**
+    # 決める遅延解決（`source: exif` / `container`）。呼び出し側は publish の
+    # 前に staging を持っていないので、ファイルを見て決める種類の値はここでしか
+    # 解決できない（§9.3 手順 5）。
     captured: CapturedAt | None
     mtime_ns: int
     # mtime が瞬間か壁時計か（`timestamp.mtime_semantics`）。衝突接尾辞の桁は
@@ -107,7 +108,10 @@ class ArtifactRequest:
     mtime_semantics: str
     source_entry_id: str | None
     merge_group_id: str | None
-    resolve_captured: Callable[[Path], CapturedAt] | None = None
+    # **ステージ済みのファイルと、その probe の結果から決める遅延解決。**
+    # 呼び出し側は publish の前に staging を持っていないので、ファイルを見て
+    # 決める種類の値はここでしか解決できない（§9.3 手順 5）。
+    resolve_captured: Callable[[Path, ProbeResult], CapturedAt] | None = None
 
     def __post_init__(self) -> None:
         # 「どちらか一方」をコメントで書くだけにしない。後から caller を足した
@@ -241,12 +245,14 @@ class ArtifactPublisher:
             #    metadata_json に載らないまま手順 7 で commit される。
             #    リースの心拍で囲むのは ffprobe と同じ理由（相手待ちが長くなりうる）。
             def _read_metadata() -> tuple[CapturedAt, Any]:
+                # **probe が先。** 器が申告した撮影時刻は probe の結果にしか無い。
+                probe = self._probe.describe(staging_abs, request.extension)
                 captured = request.captured
                 if captured is None:
                     # 例外を投げない契約（adapters/exif.py が握る）。投げると、
                     # 検証まで済んだファイルがここで落ちて staging に残る。
-                    captured = request.resolve_captured(staging_abs)
-                return captured, self._probe.describe(staging_abs, request.extension)
+                    captured = request.resolve_captured(staging_abs, probe)
+                return captured, probe
 
             captured, probe = _with_lease_pulse(ctx, _read_metadata)
             metadata = {
@@ -262,6 +268,7 @@ class ArtifactPublisher:
                 "captured_at_source": captured.source,
                 "captured_at_tz": captured.tz,
                 "captured_at_note": captured.note,
+                "container_wall": probe.container_wall,
                 "duration_seconds": probe.duration_seconds,
                 "probe_state": probe.probe_state,
                 "mtime_ns": request.mtime_ns,
@@ -511,7 +518,7 @@ class ArtifactPublisher:
                         metadata["captured_at_source"],
                         metadata["captured_at_tz"],
                         metadata["captured_at_note"],
-                        metadata.get("container_wall"),
+                        metadata["container_wall"],
                         metadata["duration_seconds"],
                         metadata["probe_state"],
                         # 取り込みでは「算出に使った版」＝「取り込みに使った版」。
