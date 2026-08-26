@@ -305,3 +305,50 @@ def test_member_positions_are_unique_within_a_group(db):
         db.execute(
             "INSERT INTO merge_member VALUES (?, ?, 0, 1)", (group, a_media_file(db, profile))
         )
+
+
+def test_media_file_accepts_the_container_source(db):
+    """`container` を出所として保存できる."""
+    media_id = a_media_file(
+        db,
+        a_profile(db),
+        captured_at_source="container",
+        container_wall="2026-08-26T12:35:08.000000Z",
+    )
+    row = db.execute("SELECT * FROM media_file WHERE id = ?", (media_id,)).fetchone()
+    assert row["captured_at_source"] == "container"
+    assert row["container_wall"] == "2026-08-26T12:35:08.000000Z"
+
+
+def test_media_file_still_refuses_an_unknown_source(db):
+    """CHECK を広げても、知らない出所は弾く."""
+    with pytest.raises(sqlite3.IntegrityError):
+        a_media_file(db, a_profile(db), captured_at_source="gps")
+
+
+def test_the_listing_indexes_break_ties_by_rel_path(db):
+    """**同じ撮影日時の並びは、乱数ではなく名前で決まる.**
+
+    索引が `id DESC` で終わっていると、`ORDER BY captured_at DESC, rel_path DESC`
+    を索引で満たせず一時 B-tree のソートに落ちる。
+    """
+    indexes = {
+        row["name"]: row["sql"]
+        for row in db.execute(
+            "SELECT name, sql FROM sqlite_master WHERE type = 'index' AND tbl_name = 'media_file'"
+        )
+        if row["sql"]
+    }
+    assert "rel_path DESC" in indexes["media_file_listing"]
+    assert "rel_path DESC" in indexes["media_file_derived_listing"]
+    assert "id DESC" not in indexes["media_file_listing"]
+    assert "id DESC" not in indexes["media_file_derived_listing"]
+
+
+def test_the_captured_revision_triggers_survive_the_rebuild(db):
+    """**作り直すと trigger も消える.** `0011` が守っていたものを落とさない."""
+    names = {
+        row["name"] for row in db.execute("SELECT name FROM sqlite_master WHERE type = 'trigger'")
+    }
+    assert "media_file_captured_revision_insert" in names
+    assert "media_file_captured_revision_update" in names

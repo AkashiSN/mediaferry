@@ -553,6 +553,12 @@ def test_a_profile_filtered_listing_does_not_sort_the_whole_profile(tmp_path):
     `media_file_captured_at` を辿れば先頭ページで止まれるのに、`0013` の
     `(profile_id, role, rel_path)` が選ばれると**そのプロファイルの全行を拾って
     から並べ替える**。プロファイルが大半を占める通常の構成ほど悪化する。
+
+    **`media_file_listing`（`0026`）は `rel_path DESC` で終わる**が、`ORDER BY` は
+    まだ `id DESC` で終わる。両者が噛み合わないので、`captured_at` の並びは索引で
+    決まるものの、同じ `captured_at` の中の tie-break だけが一時 B-tree に落ちる
+    （`FOR LAST TERM OF ORDER BY`）。**全件を拾ってから並べ替える形（`FOR ORDER BY`）
+    には戻っていない**ことを見る。
     """
     # **一覧が実際に組み立てる WHERE を使う。** 問い合わせを手で書き写すと、
     # 絞り込みの形（`IN` か `=` か）を変えても試験が落ちない。
@@ -582,7 +588,11 @@ def test_a_profile_filtered_listing_does_not_sort_the_whole_profile(tmp_path):
     )
     conn.close()
 
-    assert "TEMP B-TREE" not in plan, plan
+    assert "media_file_listing" in plan, plan
+    assert "USE TEMP B-TREE FOR LAST TERM OF ORDER BY" in plan, plan
+    # 良い計画は tie-break だけの `FOR LAST TERM OF ORDER BY`。全件を拾ってから
+    # 並べ替える形（`FOR ORDER BY`、"LAST TERM OF" を伴わない）には戻っていない。
+    assert "FOR ORDER BY" not in plan, plan
 
 
 def test_a_role_filtered_listing_does_not_scan_the_capture_time_index(tmp_path):
@@ -600,6 +610,11 @@ def test_a_role_filtered_listing_does_not_scan_the_capture_time_index(tmp_path):
     `MULTI-INDEX OR` に化け、`GET /media?status=unsent&…` を退行させた
     （`test_the_unsent_listing_does_not_multi_index_or`）。`0023` は
     role='derived' だけの部分索引に差し替えることでその退行を塞ぐ。
+
+    **`media_file_derived_listing`（`0026`）は `rel_path DESC` で終わる**が、
+    `ORDER BY` はまだ `id DESC` で終わる。索引で `role = 'derived'` の行だけを
+    `captured_at` の並びで読めることは変わらないが、同じ `captured_at` の
+    tie-break だけが一時 B-tree に落ちる（`FOR LAST TERM OF ORDER BY`）。
     """
     from mediaferry.api.routes_media import _filters
 
@@ -628,7 +643,8 @@ def test_a_role_filtered_listing_does_not_scan_the_capture_time_index(tmp_path):
     conn.close()
 
     assert "media_file_derived_listing" in plan, plan
-    assert "TEMP B-TREE" not in plan, plan
+    assert "USE TEMP B-TREE FOR LAST TERM OF ORDER BY" in plan, plan
+    assert "FOR ORDER BY" not in plan, plan
 
 
 def test_the_unsent_listing_does_not_multi_index_or(tmp_path):
@@ -993,4 +1009,77 @@ def test_a_marker_that_only_appears_mid_file_does_not_turn_off_foreign_keys(tmp_
     conn = Database(tmp_path / "db.sqlite3").connect()
     with pytest.raises(sqlite3.IntegrityError):
         apply_migrations(conn)
+    conn.close()
+
+
+def test_every_shipped_migration_leaves_the_references_intact(tmp_path):
+    """**外部キーを外して走る版があるので、全部流した後に必ず確かめる.**
+
+    `0026` は media_file を作り直す。子から参照されている表なので、手順を
+    1 つ間違えると参照が壊れたまま通る。
+    """
+    conn = Database(tmp_path / "db.sqlite3").connect()
+    apply_migrations(conn)
+    assert conn.execute("PRAGMA foreign_key_check").fetchall() == []
+    conn.close()
+
+
+def test_rows_survive_the_media_file_rebuild(tmp_path, monkeypatch):
+    """**作り直しは中身を運ぶ.** 列を足すために行を捨てない.
+
+    `missing_at` を持つ行を入れるのは、`INSERT ... SELECT` の列を 1 つでも
+    落としたら落ちるようにするため。
+    """
+    import shutil
+
+    from mediaferry.clock import now_iso
+    from mediaferry.db import migrate
+
+    from .test_schema_artifacts import a_media_file, a_merge_group
+    from .test_schema_sources import a_profile
+
+    original = migrate.MIGRATIONS_DIR
+    folder = tmp_path / "m"
+    folder.mkdir()
+    for path in sorted(original.glob("*.sql")):
+        if not path.name.startswith("0026"):
+            shutil.copy(path, folder / path.name)
+    monkeypatch.setattr(migrate, "MIGRATIONS_DIR", folder)
+
+    conn = Database(tmp_path / "db.sqlite3").connect()
+    apply_migrations(conn)
+    profile = a_profile(conn)
+    media_id = a_media_file(
+        conn,
+        profile,
+        rel_path="library/dji-osmo/DCIM/OLD.MP4",
+        captured_at_source="mtime",
+        missing_at=now_iso(),
+    )
+    # **他表から実際に参照させる。** media_file を参照する行が 1 つも無いと、
+    # 外部キーを外さずに DROP TABLE しても SQLite は文句を言わない
+    # （子に該当する行が無ければ、FK が有効でも DROP は通る）。footgun を
+    # 塞げているかは、この参照が生き残ることでしか確かめられない。
+    group_id = a_merge_group(conn, profile, digest="d1")
+    conn.execute("INSERT INTO merge_member VALUES (?, ?, 0, 1)", (group_id, media_id))
+    conn.commit()
+
+    # ここで初めて 0026 を持ち込み、当てる。
+    shutil.copy(original / "0026_media_file_container.sql", folder)
+    assert apply_migrations(conn) == [26]
+
+    row = conn.execute("SELECT * FROM media_file WHERE id = ?", (media_id,)).fetchone()
+    assert row["rel_path"] == "library/dji-osmo/DCIM/OLD.MP4"
+    assert row["captured_at_source"] == "mtime"
+    assert row["missing_at"] is not None
+    # 新しい列は既存行では空。値を捏造しない。
+    assert row["container_wall"] is None
+    # 参照していた行も、参照したまま生き残る。
+    assert (
+        conn.execute(
+            "SELECT media_file_id FROM merge_member WHERE merge_group_id = ?", (group_id,)
+        ).fetchone()[0]
+        == media_id
+    )
+    assert conn.execute("PRAGMA foreign_key_check").fetchall() == []
     conn.close()
