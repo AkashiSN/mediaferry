@@ -278,6 +278,8 @@ describe("節の組み立て", () => {
 // リモートで消えた資産を送り直す動線（Phase 14）。`POST /uploads/{id}/requeue`
 // は前からあるが、画面からの呼び出し元がここまで 1 つも無かった。
 describe("送り直す・再確認", () => {
+  // **アクセシブルネームは宛先名を含む**（`送り直す：家` のように）ので、
+  // ここでは前方一致で拾う。member の「送る：${name}」と同じ規約。
   it("リモートから消えた宛先にだけ「送り直す」が出る", async () => {
     renderDetail({
       destinations: [
@@ -285,7 +287,7 @@ describe("送り直す・再確認", () => {
         { destination_id: "d2", name: "外", state: "complete", presence: "present", upload_id: "u2" },
       ],
     });
-    const buttons = await screen.findAllByRole("button", { name: "送り直す" });
+    const buttons = await screen.findAllByRole("button", { name: /^送り直す/ });
     expect(buttons).toHaveLength(1);
   });
 
@@ -298,7 +300,7 @@ describe("送り直す・再確認", () => {
       },
       { "POST /uploads/u1/requeue": { status: "ok" } },
     );
-    await userEvent.click(await screen.findByRole("button", { name: "送り直す" }));
+    await userEvent.click(await screen.findByRole("button", { name: /^送り直す/ }));
     await waitFor(() =>
       expect(calls()).toContainEqual({ method: "POST", path: "/uploads/u1/requeue" }),
     );
@@ -313,7 +315,7 @@ describe("送り直す・再確認", () => {
       },
       { "POST /destinations/d1/recheck": { status: "ok" } },
     );
-    await userEvent.click(await screen.findByRole("button", { name: "サーバを確かめる" }));
+    await userEvent.click(await screen.findByRole("button", { name: /^サーバを確かめる/ }));
     await waitFor(() =>
       expect(calls()).toContainEqual({ method: "POST", path: "/destinations/d1/recheck" }),
     );
@@ -326,8 +328,8 @@ describe("送り直す・再確認", () => {
       ],
     });
     await screen.findByText("家");
-    expect(screen.queryByRole("button", { name: "送り直す" })).not.toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: "サーバを確かめる" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /^送り直す/ })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /^サーバを確かめる/ })).not.toBeInTheDocument();
   });
 
   it("送り直したあとは、くわしくを引き直す（状況の表示が変わる）", async () => {
@@ -339,10 +341,24 @@ describe("送り直す・再確認", () => {
       },
       { "POST /uploads/u1/requeue": { status: "ok" } },
     );
-    await userEvent.click(await screen.findByRole("button", { name: "送り直す" }));
+    await userEvent.click(await screen.findByRole("button", { name: /^送り直す/ }));
     await waitFor(() =>
       expect(calls().filter((call) => call.path === "/media/m1").length).toBeGreaterThan(1),
     );
+  });
+
+  it("宛先が複数「消えた」状態でも、ボタンの名前だけで見分けられる", async () => {
+    // **同じ「送り直す」が 2 つ並ぶと、支援技術の一覧では名前だけでは
+    // どちらがどの宛先向けか分からない。** アクセシブルネームに宛先名を
+    // 足しているので、宛先ごとに違う名前で拾えるはず。
+    renderDetail({
+      destinations: [
+        { destination_id: "d1", name: "家", state: "complete", presence: "gone", upload_id: "u1" },
+        { destination_id: "d2", name: "外", state: "complete", presence: "gone", upload_id: "u2" },
+      ],
+    });
+    expect(await screen.findByRole("button", { name: "送り直す：家" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "送り直す：外" })).toBeInTheDocument();
   });
 });
 

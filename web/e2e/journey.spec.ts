@@ -501,7 +501,7 @@ test("狭い画面のボタンは 44px 以上", async ({ page }) => {
   // **最初の 1 件で止めない。** 落ちるたびに 1 つずつ直すと、次に何が待って
   // いるかが分からないまま何度も回すことになる。全画面ぶんを集めてから見せる。
   const tooSmall: string[] = [];
-  for (const path of SCREENS) {
+  for (const path of await screensWithDetail(page)) {
     await page.goto(app.url + path);
     await settled(page);
     for (const button of await page.locator(TAPPABLE).all()) {

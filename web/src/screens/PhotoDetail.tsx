@@ -107,6 +107,9 @@ export function PhotoDetailScreen() {
   // 宛先ごとの操作（送り直す・サーバを確かめる）。**消す・グループへの操作とは
   // 別の状態で持つ** —— 確認を挟まない即時操作なので、他の busy と混ぜると
   // 無関係な操作までボタンが押せなくなる。
+  // **busy は全宛先で 1 つを共有する。** どれか 1 つを操作している間は、
+  // 他の宛先のボタンも押せなくする（連打で同じ操作が二重に飛ぶのを防ぐのが
+  // 目的で、宛先ごとに分けるほどの重さの操作ではない）。
   const acting = useMutation();
 
   const data = detail.data;
@@ -312,9 +315,13 @@ export function PhotoDetailScreen() {
                           NOT NULL` な `complete`）と同じ判断を、画面は `presence` の
                           語彙だけで見る。組み直さない。 */}
                       {dest.presence === "gone" && uploadId !== null && (
+                        // **`aria-label` に宛先名を足す。** `gone` な宛先が 2 つ以上
+                        // 並ぶと、同じ「送り直す」が名前だけでは見分けられない
+                        // （member の「送る：${name}」と同じ規約）。
                         <button
                           type="button"
                           className="btn sm"
+                          aria-label={`送り直す：${dest.name}`}
                           disabled={acting.busy}
                           onClick={() => void requeue(uploadId)}
                         >
@@ -327,6 +334,7 @@ export function PhotoDetailScreen() {
                         <button
                           type="button"
                           className="btn sm quiet"
+                          aria-label={`サーバを確かめる：${dest.name}`}
                           disabled={acting.busy}
                           onClick={() => void recheck(dest.destination_id)}
                         >
