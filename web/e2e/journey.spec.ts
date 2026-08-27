@@ -333,7 +333,7 @@ test("空の DB から、ホーム起点の主要動線が通る", async ({ page
   //    「失敗した」と読まれる**ので、遷移そのものと、その受け口が見出しを持つ
   //    ことを確かめる。閉じる操作は要らない —— 遷移した先が既にホーム。
   await expect(page.getByRole("heading", { name: "ホーム", exact: true })).toBeVisible();
-  await expect(page.getByRole("heading", { name: "押した操作" })).toBeVisible({ timeout: 60_000 });
+  await expect(page.getByRole("heading", { name: "押した操作" })).toBeVisible();
 
   // 9. 確認。**送信は最後まで進み、結果がホームに出る。**
   //    合成カードの動画は 100 バイトで送信が一瞬で終わるので、「進行中の作業が

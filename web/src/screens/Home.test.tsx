@@ -1184,6 +1184,59 @@ describe("ホーム", () => {
       expect(await screen.findByRole("heading", { name: "押した操作" })).toBeInTheDocument();
     });
 
+    // レビュー指摘（修正巡 2）: `/sending` を消した棚卸しが不完全で、§13 が
+    // 明文で要求する「閉じても送信は続く」の案内と、作業の履歴への導線が
+    // 製品から消えていた。ホームを離れて戻ると `location.state` が無いので
+    // この枠ごと消えるが、**枠が出ている間は** 2 つとも出す。
+    it("閉じても作業は続くと書く（ジョブがあるとき）", async () => {
+      stubHome({
+        "/dashboard": EMPTY_DASHBOARD,
+        "/devices": { volumes: [] },
+        "/jobs": {
+          jobs: [{ id: "j1", type: "upload", status: "running", created_at: "2026-08-26T00:00:00Z" }],
+        },
+      });
+      renderHomeAt({ jobIds: ["j1"] });
+      expect(await screen.findByText(/閉じても.*続きます/)).toBeInTheDocument();
+    });
+
+    it("作業の履歴への導線がある", async () => {
+      stubHome({ "/dashboard": EMPTY_DASHBOARD, "/devices": { volumes: [] }, "/jobs": { jobs: [] } });
+      renderHomeAt({ jobIds: [], note: "2 件は断られました" });
+      expect(await screen.findByRole("link", { name: "作業の履歴を見る" })).toHaveAttribute(
+        "href",
+        "/settings/jobs",
+      );
+    });
+
+    // レビュー指摘（修正巡 2）: `/sending` を消したことで `cancelLabel` を渡す
+    // 呼び出し元が無くなり、送信ジョブの中止ボタンの文言が「送るのをやめる」
+    // から既定の「中止する」へ黙って変わっていた。押した操作と同じ動詞に戻す。
+    it("送信ジョブの中止ボタンは「送るのをやめる」と書く", async () => {
+      stubHome({
+        "/dashboard": EMPTY_DASHBOARD,
+        "/devices": { volumes: [] },
+        "/jobs": {
+          jobs: [{ id: "j1", type: "upload", status: "running", created_at: "2026-08-26T00:00:00Z" }],
+        },
+      });
+      renderHomeAt({ jobIds: ["j1"] });
+      expect(await screen.findByRole("button", { name: "送るのをやめる" })).toBeInTheDocument();
+      expect(screen.queryByRole("button", { name: "中止する" })).toBeNull();
+    });
+
+    it("送信以外のジョブの中止ボタンは、既定の「中止する」のまま", async () => {
+      stubHome({
+        "/dashboard": EMPTY_DASHBOARD,
+        "/devices": { volumes: [] },
+        "/jobs": {
+          jobs: [{ id: "j1", type: "merge", status: "running", created_at: "2026-08-26T00:00:00Z" }],
+        },
+      });
+      renderHomeAt({ jobIds: ["j1"] });
+      expect(await screen.findByRole("button", { name: "中止する" })).toBeInTheDocument();
+    });
+
     it("失敗は消すまで残る。× で消せる", async () => {
       stubHome({
         "/dashboard": EMPTY_DASHBOARD,

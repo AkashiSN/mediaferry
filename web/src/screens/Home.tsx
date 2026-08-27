@@ -261,6 +261,19 @@ export function HomeScreen() {
                 {queuedJobs.note}
               </p>
             )}
+            {/* **閉じても続くことと、結果への道を書く**（§13、`/sending` が持って
+                いた 2 つの案内）。ホームを離れて戻ると `location.state` が
+                無くこの枠ごと消えるので、**枠が出ている間に**両方を出す。 */}
+            {queuedJobs.queued.length > 0 && (
+              <p className="muted small">
+                この画面を閉じても、ここにある作業は続きます。
+              </p>
+            )}
+            <div className="acts">
+              <Link to="/settings/jobs" className="btn sm">
+                作業の履歴を見る
+              </Link>
+            </div>
             {queuedJobs.queued.map((job) => {
               const card = job.volume_instance_id
                 ? (cards.find((candidate) => candidate.volume_instance_id === job.volume_instance_id) ??
@@ -273,6 +286,9 @@ export function HomeScreen() {
                   subject={card?.label ?? null}
                   rate={averageRate(job)}
                   onCancel={isCancellable(job) ? (id) => void cancelJob(id) : undefined}
+                  // **送信だけ「送るのをやめる」と呼ぶ。** 押した操作と同じ動詞に
+                  // 揃える —— 「送る」を押した人には「中止する」より読みが早い。
+                  cancelLabel={job.type === "upload" ? "送るのをやめる" : undefined}
                   cancelBusy={action.busy}
                   footer={
                     <div className="row" style={{ gap: 10 }}>
