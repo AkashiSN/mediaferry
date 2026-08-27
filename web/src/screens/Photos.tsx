@@ -143,7 +143,12 @@ export function PhotosScreen() {
   const destinationRows = destinations.data?.destinations ?? [];
 
   const filter = filterFromParams(params);
-  const chosenDestinationId = params.get("destination_id");
+  // **空文字は「選んでいない」として扱う。** プルダウンの `<option value="">
+  // 送り先を選ぶ</option>` を選び直すと `destination_id=""` が URL に入るが、
+  // `null` でないので `needsDestination`（`=== null` 判定）を素通りし、
+  // `buildMediaQuery` 側だけが falsy 判定で `status` ごと絞り込みを落とす ——
+  // 「送信済み」のチップは押されたままなのに、宛先を伴わない一覧が出てしまう。
+  const chosenDestinationId = params.get("destination_id") || null;
   // 宛先が 1 つしか無ければ、黙ってそれを使う。2 つ以上あるときは選ばせる。
   const effectiveDestinationId =
     destinationRows.length === 1 ? destinationRows[0].id : chosenDestinationId;

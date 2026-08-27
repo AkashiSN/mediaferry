@@ -938,6 +938,46 @@ describe("Shift+クリックで範囲を選ぶ", () => {
     expect(await screen.findByText("2 件を選択中")).toBeInTheDocument();
   });
 
+  it("送り先を「送り先を選ぶ」へ戻すと、絞り込みごと外れる（宛先を伴わない一覧を出さない）", async () => {
+    // レビュアーの実測: 宛先を選んで「送信済み」を見たあと、プルダウンを
+    // 「送り先を選ぶ」（value=""）へ戻すと `destination_id=""` が URL に残り、
+    // `chosenDestinationId` は `null` ではなく `""` になる。`needsDestination` は
+    // `=== null` で見るので false のままなのに、`buildMediaQuery` 側は falsy な
+    // destinationId で `status` ごと落とす —— 「送信済み」のチップが押された
+    // 表示のまま、宛先を伴わない（＝絞り込みの外れた）一覧が下に出てしまう。
+    const { calls } = stubApi({
+      "/media": { media: [], total: 0, page: 1, page_size: 50 },
+      "/media?status=sent&destination_id=d1&collapse=stack&page_size=200": {
+        media: [media("unsent-leak", "2026-08-18T15:12:00+09:00")],
+        total: 1,
+        page: 1,
+        page_size: 200,
+      },
+      "/destinations": {
+        destinations: [
+          { id: "d1", name: "家", enabled: true },
+          { id: "d2", name: "職場", enabled: true },
+        ],
+      },
+    });
+    render(
+      <MemoryRouter initialEntries={["/photos?status=sent&destination_id=d1"]}>
+        <PhotosScreen />
+      </MemoryRouter>,
+    );
+
+    const user = userEvent.setup();
+    await waitFor(() =>
+      expect(calls().some((c) => c.path.includes("status=sent&destination_id=d1"))).toBe(true),
+    );
+
+    await user.selectOptions(await screen.findByRole("combobox", { name: "送り先" }), "");
+
+    expect(screen.getByRole("button", { name: /送信済み/ })).toHaveAttribute("aria-pressed", "true");
+    expect(await screen.findByText("上の送り先を選んでください。")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /unsent-leak\.JPG/ })).not.toBeInTheDocument();
+  });
+
   it("Shift を続けて 2 回押すと、2 回目のアンカーは直前に押したものから始まる", async () => {
     // **単なる件数の比較では区別が付かない。** `selectRange` は足すだけ（外さない）
     // ので、アンカーを起点のまま固定しても直前のものへ更新しても、選んだ範囲が
