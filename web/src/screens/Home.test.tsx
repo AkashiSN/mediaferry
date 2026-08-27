@@ -1157,16 +1157,38 @@ describe("ホーム", () => {
       expect(await screen.findAllByText("つなぐ")).toHaveLength(1);
     });
 
+    // **押した直後の枠だけに残った作業でも拍は回る。** `queuedIds` で除いた分、
+    // `doing` は空になりうる（`type: "upload"` はカードに紐付かないので
+    // `sections.doing` にも入るが、`queuedIds` に含まれると `doing` から
+    // 除かれる）。それでも `queuedJobs.queued` が生きている間は `/jobs` の
+    // 取り直しが続かないと、この枠の進捗だけ固まる。
+    it("押した直後の枠だけに残っていても、走っていれば拍は止まらない", async () => {
+      vi.useFakeTimers();
+      const api = stubHome({
+        "/dashboard": EMPTY_DASHBOARD,
+        "/devices": { volumes: [] },
+        "/jobs": {
+          jobs: [{ id: "j1", type: "upload", status: "running", created_at: "2026-08-26T00:00:00Z" }],
+        },
+      });
+      renderHomeAt({ jobIds: ["j1"] });
+
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(4000);
+      });
+
+      expect(api.calls().filter((call) => call.path === "/jobs").length).toBeGreaterThan(1);
+    });
+
     it("note を出す。1 本も始まらなかった送信でも知らせが要る（§13）", async () => {
       stubHome({ "/dashboard": EMPTY_DASHBOARD, "/devices": { volumes: [] }, "/jobs": { jobs: [] } });
       renderHomeAt({ jobIds: [], note: "2 件は断られました" });
       expect(await screen.findByText("2 件は断られました")).toBeInTheDocument();
     });
 
-    // レビュー指摘（修正巡 1）: 1 本も始まらなかった送信（`jobIds: []`）で、
-    // カードもやることも無いと `nothing` が真になり、`note` の直下に
-    // 「いま、やることはありません」が同時に描かれていた。`note` を落とさない
-    // という目的そのものを、描画の一歩手前で打ち消していた。
+    // 1 本も始まらなかった送信（`jobIds: []`）はカードもやることも無いので
+    // `nothing` が真になる。`note` はその判定より手前で見るので、
+    // 「いま、やることはありません」と同時には出ない。
     it("note があれば、やることはありませんとは出さない", async () => {
       stubHome({ "/dashboard": EMPTY_DASHBOARD, "/devices": { volumes: [] }, "/jobs": { jobs: [] } });
       renderHomeAt({ jobIds: [], note: "2 件は断られました" });
@@ -1174,10 +1196,9 @@ describe("ホーム", () => {
       expect(screen.queryByText("いま、やることはありません")).toBeNull();
     });
 
-    // レビュー指摘（修正巡 1）: 既存の 3 枠（いま動いていること・やること・
-    // いまの様子）はすべて見出しを持つが、この枠だけ無かった。この機能の発端が
-    // 「押しても画面が変わらないので気づけない」だったので、受け口自体が
-    // 見出しから見つからないのは筋が通らない。
+    // 既存の 3 枠（いま動いていること・やること・いまの様子）はすべて見出しを
+    // 持つ。この枠だけ見出しが無いと、「押しても画面が変わらないので気づけない」
+    // を解消する受け口自体が見出しから見つからなくなる。
     it("見出しを持つ（既存の 3 枠と同じ形）", async () => {
       stubHome({ "/dashboard": EMPTY_DASHBOARD, "/devices": { volumes: [] }, "/jobs": { jobs: [] } });
       renderHomeAt({ jobIds: [], note: "2 件は断られました" });

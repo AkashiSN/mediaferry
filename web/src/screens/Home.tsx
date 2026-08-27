@@ -261,9 +261,9 @@ export function HomeScreen() {
                 {queuedJobs.note}
               </p>
             )}
-            {/* **閉じても続くことと、結果への道を書く**（§13、`/sending` が持って
-                いた 2 つの案内）。ホームを離れて戻ると `location.state` が
-                無くこの枠ごと消えるので、**枠が出ている間に**両方を出す。 */}
+            {/* **閉じても続くことと、結果への道を書く**（§13 が求める 2 つの案内）。
+                ホームを離れて戻ると `location.state` が無くこの枠ごと消えるので、
+                **枠が出ている間に**両方を出す。 */}
             {queuedJobs.queued.length > 0 && (
               <p className="muted small">
                 この画面を閉じても、ここにある作業は続きます。
