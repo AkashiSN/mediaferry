@@ -109,11 +109,16 @@ export function HomeScreen() {
   // 除かないと、押した直後の作業だけ題が 2 つ並ぶ。
   const doing = sections.doing.filter(({ job }) => !queuedIds.has(job.id));
 
+  // **`note` があるときは「やることはありません」を出さない。** 1 本も
+  // 始まらなかった送信（`jobIds: []`）では `queued` は空になるが、そのときこそ
+  // 知らせが要る（§13）。`note` を落とさない目的そのものを、`EmptyState` を
+  // 直下に描くことで打ち消してしまわないようにする。
   const nothing =
     doing.length === 0 &&
     sections.todo.length === 0 &&
     sections.standing.length === 0 &&
-    queuedJobs.queued.length === 0;
+    queuedJobs.queued.length === 0 &&
+    queuedJobs.note === null;
   const loading = dashboard.loading || devices.loading || jobs.loading;
   // **読めていないものを「無い」とは言わない。** 3 本のうち 1 本でも値が無ければ
   // （失敗したか、まだ返っていない）、空表示は出さない —— カードが挿さっていても
@@ -238,6 +243,17 @@ export function HomeScreen() {
             `doing` から除いてある。 */}
         {(queuedJobs.note !== null || queuedJobs.queued.length > 0) && (
           <section style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+            {/* **既存の 3 枠（いま動いていること・やること・いまの様子）と同じ形の
+                見出しを持たせる。** ここだけ見出しが無いと、支援技術のヘディング
+                一覧からこの枠だけ見つからない —— この機能の発端そのものが
+                「押しても画面が変わらないので気づけない」だったので、その受け口が
+                見つけにくいのは筋が通らない。 */}
+            <div className="sechead">
+              <h2>押した操作</h2>
+              {queuedJobs.queued.length > 0 && (
+                <span className="small">{queuedJobs.queued.length} 件</span>
+              )}
+            </div>
             {/* **`note` はジョブと独立に出す。** 1 本も始まらなかった送信では
                 `queued` が空になるが、そのときこそ知らせが要る（§13）。 */}
             {queuedJobs.note !== null && (

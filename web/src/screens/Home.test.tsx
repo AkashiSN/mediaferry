@@ -1163,6 +1163,27 @@ describe("ホーム", () => {
       expect(await screen.findByText("2 件は断られました")).toBeInTheDocument();
     });
 
+    // レビュー指摘（修正巡 1）: 1 本も始まらなかった送信（`jobIds: []`）で、
+    // カードもやることも無いと `nothing` が真になり、`note` の直下に
+    // 「いま、やることはありません」が同時に描かれていた。`note` を落とさない
+    // という目的そのものを、描画の一歩手前で打ち消していた。
+    it("note があれば、やることはありませんとは出さない", async () => {
+      stubHome({ "/dashboard": EMPTY_DASHBOARD, "/devices": { volumes: [] }, "/jobs": { jobs: [] } });
+      renderHomeAt({ jobIds: [], note: "2 件は断られました" });
+      await screen.findByText("2 件は断られました");
+      expect(screen.queryByText("いま、やることはありません")).toBeNull();
+    });
+
+    // レビュー指摘（修正巡 1）: 既存の 3 枠（いま動いていること・やること・
+    // いまの様子）はすべて見出しを持つが、この枠だけ無かった。この機能の発端が
+    // 「押しても画面が変わらないので気づけない」だったので、受け口自体が
+    // 見出しから見つからないのは筋が通らない。
+    it("見出しを持つ（既存の 3 枠と同じ形）", async () => {
+      stubHome({ "/dashboard": EMPTY_DASHBOARD, "/devices": { volumes: [] }, "/jobs": { jobs: [] } });
+      renderHomeAt({ jobIds: [], note: "2 件は断られました" });
+      expect(await screen.findByRole("heading", { name: "押した操作" })).toBeInTheDocument();
+    });
+
     it("失敗は消すまで残る。× で消せる", async () => {
       stubHome({
         "/dashboard": EMPTY_DASHBOARD,
