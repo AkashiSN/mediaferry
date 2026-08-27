@@ -29,7 +29,8 @@ import type { Volume } from "./work/CardDetail";
 import { homeSections } from "../hooks/homeSections";
 import type { CardView, Standing, Todo } from "../hooks/homeSections";
 import { useEvents } from "../hooks/useEvents";
-import { isCancellable, useJobPulse } from "../hooks/useJobPulse";
+import { isCancellable, isLive, useJobPulse } from "../hooks/useJobPulse";
+import { useQueuedJobs } from "../hooks/useQueuedJobs";
 import { useReloadOnEvents } from "../hooks/useReloadOnEvents";
 import { useReloadWhenSettled } from "../hooks/useReloadWhenSettled";
 import { formatDateTime } from "../utils/formatDateTime";
@@ -98,8 +99,21 @@ export function HomeScreen() {
   // 直に見ると、`null` チェックの後でも型が絞られず `as` に頼ることになるため。
   const dashboardData = dashboard.data;
   const sections = homeSections({ cards, jobs: jobs.data?.jobs ?? [], counts: dashboardData });
+
+  // **押したジョブを名指しで追う**（`useQueuedJobs`）。検出ジョブは実測 47 ms で
+  // 終わり、遷移した時点でもう `succeeded` のことがある —— `isLive` で絞った
+  // 「いま動いていること」には何も無いので、id で名指しして別に追う。
+  const queuedJobs = useQueuedJobs(jobs.data?.jobs ?? []);
+  const queuedIds = new Set(queuedJobs.queued.map((job) => job.id));
+  // **走っている間は両方の枠の条件に当てはまるので、既存の枠から除く。**
+  // 除かないと、押した直後の作業だけ題が 2 つ並ぶ。
+  const doing = sections.doing.filter(({ job }) => !queuedIds.has(job.id));
+
   const nothing =
-    sections.doing.length === 0 && sections.todo.length === 0 && sections.standing.length === 0;
+    doing.length === 0 &&
+    sections.todo.length === 0 &&
+    sections.standing.length === 0 &&
+    queuedJobs.queued.length === 0;
   const loading = dashboard.loading || devices.loading || jobs.loading;
   // **読めていないものを「無い」とは言わない。** 3 本のうち 1 本でも値が無ければ
   // （失敗したか、まだ返っていない）、空表示は出さない —— カードが挿さっていても
@@ -109,7 +123,9 @@ export function HomeScreen() {
   // **拍が取り直すのは `/jobs` だけ。** 「抜いていいか」の出所は `/devices` の
   // `busy` なので、走っている作業が空になった縁でカードの写しも取り直す
   // （`/devices` はブローカーへの問い合わせを伴うので、拍のたびには叩かない）。
-  const working = sections.doing.length > 0;
+  // **押した直後の枠だけに残っている作業も拍の対象。** `doing` から除いた分、
+  // ここで足し戻さないと押した直後の作業だけ進捗が更新されなくなる。
+  const working = doing.length > 0 || queuedJobs.queued.some(isLive);
   const averageRate = useJobPulse(working, jobs.reload);
   useReloadWhenSettled(working, devices.reload);
 
@@ -216,15 +232,66 @@ export function HomeScreen() {
           <p role="status">進捗の接続が切れています。再接続を待っています…</p>
         )}
 
+        {/* **押したジョブの結果は、ここが唯一の置き場**（§13）。取り込む・つなぐ・
+            送るを押すと、通知の代わりにここへ遷移してくる。「いま動いていること」
+            とは別枠で出す —— 走っている間だけ両方の条件に当てはまるので、その分は
+            `doing` から除いてある。 */}
+        {(queuedJobs.note !== null || queuedJobs.queued.length > 0) && (
+          <section style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+            {/* **`note` はジョブと独立に出す。** 1 本も始まらなかった送信では
+                `queued` が空になるが、そのときこそ知らせが要る（§13）。 */}
+            {queuedJobs.note !== null && (
+              <p role="status" className="card pad small">
+                {queuedJobs.note}
+              </p>
+            )}
+            {queuedJobs.queued.map((job) => {
+              const card = job.volume_instance_id
+                ? (cards.find((candidate) => candidate.volume_instance_id === job.volume_instance_id) ??
+                  null)
+                : null;
+              return (
+                <JobCard
+                  key={job.id}
+                  job={job}
+                  subject={card?.label ?? null}
+                  rate={averageRate(job)}
+                  onCancel={isCancellable(job) ? (id) => void cancelJob(id) : undefined}
+                  cancelBusy={action.busy}
+                  footer={
+                    <div className="row" style={{ gap: 10 }}>
+                      {card !== null && <CardStanding card={card} />}
+                      {/* **走っている間は消せない。** 中止はボタンが別にあり、
+                          結果が出てから読み終えたと分かるように消す操作を出す。
+                          失敗は時間で自動に消さない（見逃した人には「何も
+                          起きなかった」と区別が付かない）ので、ここで消す。 */}
+                      {!isLive(job) && (
+                        <button
+                          type="button"
+                          className="btn sm quiet"
+                          style={{ marginLeft: "auto" }}
+                          onClick={() => queuedJobs.dismiss(job.id)}
+                        >
+                          結果を消す
+                        </button>
+                      )}
+                    </div>
+                  }
+                />
+              );
+            })}
+          </section>
+        )}
+
         {/* **走っている作業は全部出す。**「いま取り込む」は 数える → コピー →
             探す の 3 本を積むので、1 本だけ選ぶと残りが画面から消える。 */}
-        {sections.doing.length > 0 && (
+        {doing.length > 0 && (
           <section style={{ display: "flex", flexDirection: "column", gap: 10 }}>
             <div className="sechead">
               <h2>いま動いていること</h2>
-              <span className="small">{sections.doing.length} 件</span>
+              <span className="small">{doing.length} 件</span>
             </div>
-            {sections.doing.map(({ job, card }) => (
+            {doing.map(({ job, card }) => (
               <JobCard
                 key={job.id}
                 job={job}
