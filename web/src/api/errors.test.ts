@@ -9,6 +9,16 @@ describe("日本語のメッセージ", () => {
     );
   });
 
+  it("staging_pending は job_in_flight と別の文になる", () => {
+    // リセットが断られる理由は 2 つある。走っている作業があるときと、回収待ちの
+    // 取り込みが残っているとき。文面が同じだと、履歴を見ても何も無い後者で
+    // 「何を待てばよいか」が分からない。
+    const staging = new ApiError(409, "staging_pending", "回収待ちの取り込みがある").message;
+    const running = new ApiError(409, "job_in_flight", "走っている作業がある").message;
+    expect(staging).not.toBe(running);
+    expect(staging).toContain("再起動");
+  });
+
   it("知らない code のときだけ detail を添える", () => {
     const error = new ApiError(500, "brand_new_code", "内部の文言");
     expect(error.message).toContain("内部の文言");

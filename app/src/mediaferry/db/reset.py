@@ -26,7 +26,14 @@ SCOPES = ("jobs", "uploads", "library", "all")
 
 
 class ResetNotPossible(RuntimeError):
-    """いま走っている作業があるので、足元を外せない."""
+    """いま走っている作業や、回収待ちの公開があるので足元を外せない.
+
+    `reason` は API の `code` を決めるためのもので、利用者へ出す文ではない。
+    """
+
+    def __init__(self, message: str, reason: str) -> None:
+        super().__init__(message)
+        self.reason = reason
 
 
 class UnknownScope(ValueError):
@@ -57,7 +64,9 @@ def reset(conn: sqlite3.Connection, data_root: Path, scope: str) -> dict[str, in
             "SELECT count(*) AS n FROM job WHERE status IN ('running', 'cancelling')"
         ).fetchone()["n"]
         if live:
-            raise ResetNotPossible("走っている作業があるので、いまはリセットできない")
+            raise ResetNotPossible(
+                "走っている作業があるので、いまはリセットできない", "job_in_flight"
+            )
 
         # **回収待ちの公開は消さない。** `writing` / `staged` の行は中断した
         # 公開の復旧に要る（起動時の reconciliation が拾う）。消すと戻せない。
@@ -65,7 +74,9 @@ def reset(conn: sqlite3.Connection, data_root: Path, scope: str) -> dict[str, in
             "SELECT count(*) AS n FROM artifact_staging WHERE state <> 'published'"
         ).fetchone()["n"]
         if pending:
-            raise ResetNotPossible("回収待ちの取り込みがあるので、いまはリセットできない")
+            raise ResetNotPossible(
+                "回収待ちの取り込みがあるので、いまはリセットできない", "staging_pending"
+            )
 
         # 1. 作業の記録。**作り直せる**（再スキャン・再検出）。
         #    **`published` の staging を先に消す。** `job_id` を

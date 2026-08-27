@@ -233,3 +233,32 @@ def test_a_reset_is_refused_while_a_publish_waits_to_be_recovered(client, api_db
         api_db.execute("SELECT 1 FROM artifact_staging WHERE state = 'staged'").fetchone()
         is not None
     )
+
+
+def test_a_refused_reset_says_which_thing_to_wait_for(client, api_db, ref):
+    """**理由ごとに `code` を分ける.** 画面は `code` で文面を選ぶので、
+    どちらも `job_in_flight` だと「何を待てばよいか」が読めない。
+    """
+    job_id = a_job(api_db)
+    entry = a_source_entry(api_db, a_volume(api_db, ref, fs_uuid="RESET-TEST-CODE-STAGING"))
+    a_staging(
+        api_db,
+        job_id,
+        state="staged",
+        source_entry_id=entry,
+        final_rel_path="library/dji-osmo/DCIM/HALF.MP4",
+        expected_size=1,
+        content_sha1="0" * 40,
+        metadata_json="{}",
+    )
+    api_db.commit()
+    body = client.post("/api/reset", json={"scope": "jobs"}).json()
+    assert body["error"]["code"] == "staging_pending"
+
+
+def test_a_running_job_still_reports_job_in_flight(client, api_db):
+    """走っている作業の側は `job_in_flight` のまま（既存の文言を変えない）."""
+    a_job(api_db, status="running")
+    api_db.commit()
+    body = client.post("/api/reset", json={"scope": "jobs"}).json()
+    assert body["error"]["code"] == "job_in_flight"

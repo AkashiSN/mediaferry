@@ -59,6 +59,7 @@ class ErrorCode(StrEnum):
     SETTING_LOCKED = "setting_locked"
     SAME_LIBRARY_UNDECIDED = "same_library_undecided"
     JOB_IN_FLIGHT = "job_in_flight"
+    STAGING_PENDING = "staging_pending"
     # 502
     DESTINATION_UNREACHABLE = "destination_unreachable"
     # 500
