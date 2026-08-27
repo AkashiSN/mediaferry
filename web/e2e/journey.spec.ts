@@ -32,7 +32,6 @@ const SCREENS = [
   "/merge",
   "/approve",
   "/send",
-  "/sending",
   "/settings/destinations",
   "/settings/profiles",
   "/settings/jobs",
@@ -144,12 +143,11 @@ async function mergeTwoParts(page: Page): Promise<void> {
   }
 
   await mergeButton.click();
-  // **つないだ結果は、つなぐ画面には出ない**（Phase 11）。この画面が出すのは
-  // 「まだつないでいないもの」だけなので、済んだことは**組がここから消えること**と、
-  // **写真 › つないだ動画に出ること**で確かめる。
-  await expect(page.getByRole("heading", { name: "つなぐものはありません" })).toBeVisible({
-    timeout: 60_000,
-  });
+  // **つなぐは押した瞬間にホームへ遷移する。** POST はジョブを積むだけで、結合は
+  // ワーカーが拾ってから進むので、つなぐ画面へ留まったまま「つなぐものはありません」
+  // を待つことはできない。済んだことは、**写真 › つないだ動画に出ること**で確かめる
+  // （そこにタイルが出るまでには結合ジョブが終わっている）。
+  await expect(page.getByRole("heading", { name: "ホーム", exact: true })).toBeVisible();
   await page.goto(app.url + "/photos?role=derived");
   await settled(page);
   await expect(page.locator("main .tile").first()).toBeVisible({ timeout: 60_000 });
@@ -331,16 +329,16 @@ test("空の DB から、ホーム起点の主要動線が通る", async ({ page
   await expect(dialog).toContainText("immich-1 / immich-2");
   await page.getByRole("button", { name: "実行する" }).click();
 
-  // 8. 送信中。**閉じても送信は続く。**
-  await expect(page.getByRole("heading", { name: "送っています" })).toBeVisible({ timeout: 60_000 });
-  await expect(page.getByText("この画面を閉じても送信は続きます。")).toBeVisible();
-  await page.getByRole("button", { name: "閉じる" }).click();
+  // 8. 送るとホームへ戻り、押したジョブをそこで追える。**押しても画面が変わらないと
+  //    「失敗した」と読まれる**ので、遷移そのものと、その受け口が見出しを持つ
+  //    ことを確かめる。閉じる操作は要らない —— 遷移した先が既にホーム。
   await expect(page.getByRole("heading", { name: "ホーム", exact: true })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "押した操作" })).toBeVisible();
 
-  // 9. 確認。**閉じたあとも送信は進み、結果がホームに出る。**
+  // 9. 確認。**送信は最後まで進み、結果がホームに出る。**
   //    合成カードの動画は 100 バイトで送信が一瞬で終わるので、「進行中の作業が
-  //    まだ出ている」ことは掴めない。掴めるのは「閉じても最後まで進むこと」で、
-  //    止めていればここが「送信済み 0」のまま止まる。
+  //    まだ出ている」ことは掴めない。掴めるのは「最後まで進むこと」で、
+  //    止まっていればここが「送信済み 0」のまま止まる。
   await expect(page.getByText("送信済み 2 ・ 未送信 0").first()).toBeVisible({ timeout: 60_000 });
   await expect(page.getByText(/送信済み 2 ・ 未送信 0/)).toHaveCount(2, { timeout: 60_000 });
 
@@ -503,7 +501,12 @@ test("狭い画面のボタンは 44px 以上", async ({ page }) => {
   // **最初の 1 件で止めない。** 落ちるたびに 1 つずつ直すと、次に何が待って
   // いるかが分からないまま何度も回すことになる。全画面ぶんを集めてから見せる。
   const tooSmall: string[] = [];
-  for (const path of SCREENS) {
+  // **巡ったパスをここへ集める。** `tooSmall` が空でも「巡るべき画面を
+  // 巡り切ったか」までは確かめられない —— くわしくのページが巡回から漏れて
+  // いても、残った画面がすべて 44px 以上なら `tooSmall` は空のまま検査が
+  // 通ってしまう。
+  const visitedPaths = await screensWithDetail(page);
+  for (const path of visitedPaths) {
     await page.goto(app.url + path);
     await settled(page);
     for (const button of await page.locator(TAPPABLE).all()) {
@@ -523,6 +526,12 @@ test("狭い画面のボタンは 44px 以上", async ({ page }) => {
     }
   }
   expect(tooSmall, tooSmall.join(" / ")).toEqual([]);
+  // **巡ったのが静的な `SCREENS` だけでないことも確かめる。** ここまでに
+  // 取り込んだ写真があれば、`screensWithDetail` はくわしくの住所を 1 件
+  // 足して返す。この断言が無いと、`screensWithDetail` を `SCREENS` へ戻す
+  // 変異が入っても検査は落ちない（くわしくが巡回から漏れたことを、大きさの
+  // 検査だけでは検出できない）。
+  expect(visitedPaths.length).toBeGreaterThan(SCREENS.length);
 });
 
 /**

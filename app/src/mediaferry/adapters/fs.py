@@ -183,9 +183,10 @@ def fsync_dir(path: Path) -> None:
 def ensure_layout(data_root: Path) -> None:
     """§7 の 5 つのディレクトリを用意する. **手順書に mkdir を書かせない.**
 
-    手で作らせていたのは、起動時の `assert_same_filesystem` が `stat` するため
-    だった（無いと `FileNotFoundError` で落ち、原因も読めない）。実際の書き込み
-    先はどれも `parents=True` で作られるので、ここで先に揃えれば手順が 1 つ減る。
+    起動時の `assert_same_filesystem` が `stat` するので、5 つのディレクトリは
+    先に揃っている必要がある（無いと `FileNotFoundError` で落ち、原因も読めない）。
+    実際の書き込み先はどれも `parents=True` で作られるので、ここで先に揃えれば
+    手順が 1 つ減る。
 
     **`chown` はアプリにはできない** —— 自分に権限を与えることになる。作れない
     ときは、何を実行すればよいかを言って止まる。

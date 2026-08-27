@@ -14,6 +14,7 @@ type Destination = {
   name: string;
   state: string | null;
   presence: string;
+  upload_id: string | null;
 };
 
 function detail(overrides: Record<string, unknown> = {}) {
@@ -85,6 +86,13 @@ function SendProbe() {
   return <div data-testid="send-state">{JSON.stringify(location.state)}</div>;
 }
 
+/** `/`（ホーム）へ渡った `location.state` を画面に出すだけの受け皿。 */
+function HomeProbe() {
+  const location = useLocation();
+  const state = location.state as { jobIds?: string[]; note?: string | null } | null;
+  return <p data-testid="home-jobs">{(state?.jobIds ?? []).join(",")}</p>;
+}
+
 function renderDetail(overrides: Record<string, unknown> = {}, extraRoutes: Record<string, unknown> = {}) {
   // 送った本文も記録する（グループへの操作は `media_ids` を渡すので、叩いた
   // ところまでしか見ないと、何を渡したかが試せない）。
@@ -100,6 +108,7 @@ function renderDetail(overrides: Record<string, unknown> = {}, extraRoutes: Reco
   render(
     <MemoryRouter initialEntries={["/photos/m1"]}>
       <Routes>
+        <Route path="/" element={<HomeProbe />} />
         <Route path="/photos" element={<div>写真一覧</div>} />
         <Route path="/photos/:id" element={<PhotoDetailScreen />} />
         <Route path="/send" element={<SendProbe />} />
@@ -271,6 +280,153 @@ describe("節の組み立て", () => {
     expect(block).not.toBeNull();
     expect(within(block as HTMLElement).getByText("まだ送っていません")).toBeInTheDocument();
     expect(within(block as HTMLElement).queryByText("Immich に入っています")).toBeNull();
+  });
+});
+
+// リモートで消えた資産を送り直す動線（§14）。`POST /uploads/{id}/requeue` を
+// 画面から呼ぶ経路をここで確かめる。
+describe("送り直す・再確認", () => {
+  // **アクセシブルネームは宛先名を含む**（`送り直す：家` のように）ので、
+  // ここでは前方一致で拾う。member の「送る：${name}」と同じ規約。
+  it("リモートから消えた宛先にだけ「送り直す」が出る", async () => {
+    renderDetail({
+      destinations: [
+        { destination_id: "d1", name: "家", state: "complete", presence: "gone", upload_id: "u1" },
+        { destination_id: "d2", name: "外", state: "complete", presence: "present", upload_id: "u2" },
+      ],
+    });
+    const buttons = await screen.findAllByRole("button", { name: /^送り直す/ });
+    expect(buttons).toHaveLength(1);
+  });
+
+  it("元のファイルが見当たらない間は、「送り直す」を押せない状態にして理由を出す", async () => {
+    // `presence === "gone"` だけでボタンを出すと、`missing_at` が立っている
+    // （データセットが一時的に見えない）ときに押しても `check_eligibility`
+    // （`db/uploads.py`）が断り、理由の消えた「この記録は送り直せません。」
+    // だけが出る。**押せない状態のボタンを並べない**という規則（`deletable` /
+    // `delete_blocked_reason` と同じ形）に合わせ、理由を添えて押せなくする。
+    renderDetail({
+      missing_at: "2026-08-20T00:00:00Z",
+      destinations: [
+        { destination_id: "d1", name: "家", state: "complete", presence: "gone", upload_id: "u1" },
+      ],
+    });
+    const button = await screen.findByRole("button", { name: /^送り直す/ });
+    expect(button).toBeDisabled();
+    expect(screen.getByText(/見当たらない/)).toBeInTheDocument();
+  });
+
+  it("元のファイルがあるときは、これまでどおり「送り直す」を押せる", async () => {
+    renderDetail({
+      missing_at: null,
+      destinations: [
+        { destination_id: "d1", name: "家", state: "complete", presence: "gone", upload_id: "u1" },
+      ],
+    });
+    const button = await screen.findByRole("button", { name: /^送り直す/ });
+    expect(button).not.toBeDisabled();
+  });
+
+  it("送り直すを押すと、その記録を pending へ戻す", async () => {
+    const { calls } = renderDetail(
+      {
+        destinations: [
+          { destination_id: "d1", name: "家", state: "complete", presence: "gone", upload_id: "u1" },
+        ],
+      },
+      { "POST /uploads/u1/requeue": { status: "ok" } },
+    );
+    await userEvent.click(await screen.findByRole("button", { name: /^送り直す/ }));
+    await waitFor(() =>
+      expect(calls()).toContainEqual({ method: "POST", path: "/uploads/u1/requeue" }),
+    );
+  });
+
+  it("サーバを確かめる動線がある（消したことに気づくには再確認が要る）", async () => {
+    const { calls } = renderDetail(
+      {
+        destinations: [
+          { destination_id: "d1", name: "家", state: "complete", presence: "present", upload_id: "u1" },
+        ],
+      },
+      { "POST /destinations/d1/recheck": { job_id: "j9" } },
+    );
+    await userEvent.click(await screen.findByRole("button", { name: /^サーバを確かめる/ }));
+    await waitFor(() =>
+      expect(calls()).toContainEqual({ method: "POST", path: "/destinations/d1/recheck" }),
+    );
+  });
+
+  it("サーバを確かめるは時間の掛かるジョブを積む操作なので、積んだと言ってからホームへ送る", async () => {
+    // `POST /destinations/{id}/recheck` はジョブを積む操作そのもの
+    // （`routes_destinations.py` の `_enqueue`）。`PhotoDetail` は SSE 購読も
+    // 拍も持たないので、その場で `detail.reload()` するだけでは画面が永久に
+    // 変わらない。`Merge.tsx` / `CardDetail.tsx` / `Send.tsx` と同じく、
+    // 積んだジョブの id を持ってホームへ送る。
+    renderDetail(
+      {
+        destinations: [
+          { destination_id: "d1", name: "家", state: "complete", presence: "present", upload_id: "u1" },
+        ],
+      },
+      { "POST /destinations/d1/recheck": { job_id: "j9" } },
+    );
+    await userEvent.click(await screen.findByRole("button", { name: /^サーバを確かめる/ }));
+    expect(await screen.findByTestId("home-jobs")).toHaveTextContent("j9");
+  });
+
+  it("サーバを確かめるは、この宛先の全件を確かめると分かる文言になる", async () => {
+    // `jobs/recheck.py` はその宛先の現行 epoch の全レコードを照合する。
+    // 写真 1 枚のくわしくで押しても「その 1 枚だけ」ではないことが読めないと、
+    // 押した結果を読み違える。
+    renderDetail({
+      destinations: [
+        { destination_id: "d1", name: "家", state: "complete", presence: "present", upload_id: "u1" },
+      ],
+    });
+    const button = await screen.findByRole("button", { name: /^サーバを確かめる/ });
+    const accessibleText = `${button.getAttribute("aria-label") ?? ""} ${button.getAttribute("title") ?? ""}`;
+    expect(accessibleText).toMatch(/すべて|全件|ぜんぶ/);
+  });
+
+  it("まだ送っていない宛先には、どちらのボタンも出さない", async () => {
+    renderDetail({
+      destinations: [
+        { destination_id: "d1", name: "家", state: null, presence: "not_sent", upload_id: null },
+      ],
+    });
+    await screen.findByText("家");
+    expect(screen.queryByRole("button", { name: /^送り直す/ })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /^サーバを確かめる/ })).not.toBeInTheDocument();
+  });
+
+  it("送り直したあとは、くわしくを引き直す（状況の表示が変わる）", async () => {
+    const { calls } = renderDetail(
+      {
+        destinations: [
+          { destination_id: "d1", name: "家", state: "complete", presence: "gone", upload_id: "u1" },
+        ],
+      },
+      { "POST /uploads/u1/requeue": { status: "ok" } },
+    );
+    await userEvent.click(await screen.findByRole("button", { name: /^送り直す/ }));
+    await waitFor(() =>
+      expect(calls().filter((call) => call.path === "/media/m1").length).toBeGreaterThan(1),
+    );
+  });
+
+  it("宛先が複数「消えた」状態でも、ボタンの名前だけで見分けられる", async () => {
+    // **同じ「送り直す」が 2 つ並ぶと、支援技術の一覧では名前だけでは
+    // どちらがどの宛先向けか分からない。** アクセシブルネームに宛先名を
+    // 足しているので、宛先ごとに違う名前で拾えるはず。
+    renderDetail({
+      destinations: [
+        { destination_id: "d1", name: "家", state: "complete", presence: "gone", upload_id: "u1" },
+        { destination_id: "d2", name: "外", state: "complete", presence: "gone", upload_id: "u2" },
+      ],
+    });
+    expect(await screen.findByRole("button", { name: "送り直す：家" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "送り直す：外" })).toBeInTheDocument();
   });
 });
 

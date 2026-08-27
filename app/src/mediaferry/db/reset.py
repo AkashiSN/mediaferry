@@ -20,13 +20,21 @@ import sqlite3
 from pathlib import Path
 
 from .connection import immediate
+from .uploads import ACTIVE_STATES
 
 #: 浅い順。**この並びが「積み上げ」の定義**で、画面もこの順で段を出す。
 SCOPES = ("jobs", "uploads", "library", "all")
 
 
 class ResetNotPossible(RuntimeError):
-    """いま走っている作業があるので、足元を外せない."""
+    """いま走っている作業や、回収待ちの公開があるので足元を外せない.
+
+    `reason` は API の `code` を決めるためのもので、利用者へ出す文ではない。
+    """
+
+    def __init__(self, message: str, reason: str) -> None:
+        super().__init__(message)
+        self.reason = reason
 
 
 class UnknownScope(ValueError):
@@ -57,9 +65,43 @@ def reset(conn: sqlite3.Connection, data_root: Path, scope: str) -> dict[str, in
             "SELECT count(*) AS n FROM job WHERE status IN ('running', 'cancelling')"
         ).fetchone()["n"]
         if live:
-            raise ResetNotPossible("走っている作業があるので、いまはリセットできない")
+            raise ResetNotPossible(
+                "走っている作業があるので、いまはリセットできない", "job_in_flight"
+            )
+
+        # **回収待ちの公開は消さない。** `writing` / `staged` の行は中断した
+        # 公開の復旧に要る（起動時の reconciliation が拾う）。消すと戻せない。
+        pending = conn.execute(
+            "SELECT count(*) AS n FROM artifact_staging WHERE state <> 'published'"
+        ).fetchone()["n"]
+        if pending:
+            raise ResetNotPossible(
+                "回収待ちの取り込みがあるので、いまはリセットできない", "staging_pending"
+            )
+
+        # **放置された claim も消さない。** `upload_record.claim_job_id` も
+        # `ON DELETE RESTRICT` で `job` を掴む（`artifact_staging.job_id` と
+        # 同じ形）。`ACTIVE_STATES` の行は `release_interrupted`（起動時）が
+        # `needs_recheck` へ落として claim を外すまで残るので、`job` を先に
+        # 消す手順 1 が外部キーで止まる。**一覧は `ACTIVE_STATES` をそのまま使う**
+        # （自分で書き写すと、片方を直したときにもう片方が置き去りになる）。
+        marks = ", ".join("?" * len(ACTIVE_STATES))
+        claimed = conn.execute(
+            f"SELECT count(*) AS n FROM upload_record WHERE state IN ({marks})",  # noqa: S608
+            ACTIVE_STATES,
+        ).fetchone()["n"]
+        if claimed:
+            raise ResetNotPossible(
+                "回収待ちの送信があるので、いまはリセットできない", "upload_claim_pending"
+            )
 
         # 1. 作業の記録。**作り直せる**（再スキャン・再検出）。
+        #    **`published` の staging を先に消す。** `job_id` を
+        #    `ON DELETE RESTRICT` で掴んでいるので、`job` を先に消すと止まる。
+        #    公開が完了した行は履歴であって、回収の対象ではない（上で確かめた）。
+        removed["artifact_staging"] = conn.execute(
+            "DELETE FROM artifact_staging WHERE state = 'published'"
+        ).rowcount
         removed["job_event"] = conn.execute("DELETE FROM job_event").rowcount
         removed["job"] = conn.execute("DELETE FROM job").rowcount
 
@@ -72,7 +114,7 @@ def reset(conn: sqlite3.Connection, data_root: Path, scope: str) -> dict[str, in
         if depth >= _index("library"):
             # 3. 取り込んだファイル。**カードに元があれば取り込み直せる。**
             #    参照している側から順に消す（外部キー）。
-            removed["artifact_staging"] = conn.execute("DELETE FROM artifact_staging").rowcount
+            removed["artifact_staging"] += conn.execute("DELETE FROM artifact_staging").rowcount
             removed["merge_member"] = conn.execute("DELETE FROM merge_member").rowcount
             removed["merge_group"] = conn.execute("DELETE FROM merge_group").rowcount
             removed["source_entry"] = conn.execute("DELETE FROM source_entry").rowcount

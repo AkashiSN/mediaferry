@@ -248,14 +248,15 @@ describe("写真の画面", () => {
       </MemoryRouter>,
     );
     await userEvent.click(await screen.findByRole("button", { name: /まだ送っていない/ }));
-    // 宛先の選択肢が、絞り込みチップの隣に出る。
-    expect(await screen.findByRole("button", { name: "家" })).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "職場" })).toBeInTheDocument();
-    expect(screen.getByText(/宛先を選んでください/)).toBeInTheDocument();
+    // 宛先の選択肢が、フィルタ行のプルダウンに出る。
+    const select = await screen.findByRole("combobox", { name: "送り先" });
+    expect(screen.getByRole("option", { name: "家" })).toBeInTheDocument();
+    expect(screen.getByRole("option", { name: "職場" })).toBeInTheDocument();
+    expect(screen.getByText(/上の送り先を選んでください/)).toBeInTheDocument();
     // 選ぶまでは、宛先を伴わない要求を送らない（400 を避ける）。
     expect(calls().some((c) => c.path.includes("status="))).toBe(false);
 
-    await userEvent.click(screen.getByRole("button", { name: "職場" }));
+    await userEvent.selectOptions(select, "d2");
     await waitFor(() =>
       expect(
         calls().some(
@@ -533,6 +534,90 @@ describe("写真の画面", () => {
 
     expect(await screen.findByText("2 件を選択中")).toBeInTheDocument();
     expect(screen.getByText(/合計 1000 B/)).toBeInTheDocument();
+  });
+});
+
+// **送り先のプルダウンは、フィルタの右端に常設する。** 宛先ごとの絞り込みを
+// 選んだときだけ出す形だと、宛先を伴わない絞り込みから送り先を切り替えられない。
+describe("フィルタの右端の送り先プルダウン", () => {
+  beforeEach(() => {
+    document.cookie = "XSRF-TOKEN=token; path=/";
+  });
+  afterEach(() => vi.restoreAllMocks());
+
+  const TWO = [
+    { id: "d1", name: "家", enabled: true },
+    { id: "d2", name: "外", enabled: true },
+  ];
+
+  it("宛先が 2 つ以上なら、どの絞り込みでもプルダウンが出る", async () => {
+    stubApi({
+      "/media": { media: [], total: 0, page: 1, page_size: 200 },
+      "/destinations": { destinations: TWO },
+    });
+    render(
+      <MemoryRouter>
+        <PhotosScreen />
+      </MemoryRouter>,
+    );
+    expect(await screen.findByRole("combobox", { name: "送り先" })).toBeInTheDocument();
+  });
+
+  it("宛先が 1 つなら出さない（黙ってそれを使う）", async () => {
+    const { calls } = stubApi({
+      "/media": { media: [], total: 0, page: 1, page_size: 200 },
+      "/destinations": { destinations: [{ id: "d1", name: "家", enabled: true }] },
+    });
+    render(
+      <MemoryRouter>
+        <PhotosScreen />
+      </MemoryRouter>,
+    );
+    // データが揃うのを待ってから確かめる（揃う前に無いのは当たり前で確かめにならない）。
+    await waitFor(() => expect(calls().some((c) => c.path.startsWith("/media?"))).toBe(true));
+    expect(screen.queryByRole("combobox", { name: "送り先" })).not.toBeInTheDocument();
+  });
+
+  it("宛先を変えると 1 ページ目へ戻る", async () => {
+    // 3 ページ目のまま移ると、当てはまるものが 1 ページ分しか無いときに
+    // 空の一覧だけが出る（既存の `selectDestination` が守っている性質）。
+    const { calls } = stubApi({
+      "/media": { media: [], total: 3421, page: 3, page_size: 200 },
+      "/destinations": { destinations: TWO },
+    });
+    const user = userEvent.setup();
+    render(
+      <MemoryRouter initialEntries={["/photos?page=3"]}>
+        <PhotosScreen />
+      </MemoryRouter>,
+    );
+    const before = calls().filter((c) => c.path.startsWith("/media?")).length;
+    await user.selectOptions(await screen.findByRole("combobox", { name: "送り先" }), "d2");
+    await waitFor(() =>
+      expect(calls().filter((c) => c.path.startsWith("/media?")).length).toBeGreaterThan(before),
+    );
+    const last = calls()
+      .filter((c) => c.path.startsWith("/media?"))
+      .at(-1);
+    expect(last?.path).not.toContain("page=");
+  });
+
+  it("宛先が要らない絞り込みでは destination_id を API に渡さない", async () => {
+    // `status` を伴わない `destination_id` は API が 400 を返す。
+    const { calls } = stubApi({
+      "/media": { media: [], total: 0, page: 1, page_size: 200 },
+      "/destinations": { destinations: TWO },
+    });
+    const user = userEvent.setup();
+    render(
+      <MemoryRouter>
+        <PhotosScreen />
+      </MemoryRouter>,
+    );
+    const select = await screen.findByRole("combobox", { name: "送り先" });
+    await user.selectOptions(select, "d2");
+    await waitFor(() => expect(select).toHaveValue("d2"));
+    expect(calls().some((c) => c.path.includes("destination_id"))).toBe(false);
   });
 });
 
@@ -843,7 +928,7 @@ describe("Shift+クリックで範囲を選ぶ", () => {
 
     const user = userEvent.setup();
     await user.click(await screen.findByRole("button", { name: "選ぶ：a.JPG" }));
-    await user.click(screen.getByRole("button", { name: "職場" }));
+    await user.selectOptions(await screen.findByRole("combobox", { name: "送り先" }), "d2");
     await waitFor(() => expect(calls().some((c) => c.path.includes("destination_id=d2"))).toBe(true));
     await user.keyboard("{Shift>}");
     await user.click(await screen.findByRole("button", { name: "選ぶ：c.JPG" }));
@@ -851,6 +936,46 @@ describe("Shift+クリックで範囲を選ぶ", () => {
 
     // **絞り込みは `unsent` のまま。** `filter` だけを鍵にした実装はここで落ちる。
     expect(await screen.findByText("2 件を選択中")).toBeInTheDocument();
+  });
+
+  it("送り先を「送り先を選ぶ」へ戻すと、絞り込みごと外れる（宛先を伴わない一覧を出さない）", async () => {
+    // レビュアーの実測: 宛先を選んで「送信済み」を見たあと、プルダウンを
+    // 「送り先を選ぶ」（value=""）へ戻すと `destination_id=""` が URL に残り、
+    // `chosenDestinationId` は `null` ではなく `""` になる。`needsDestination` は
+    // `=== null` で見るので false のままなのに、`buildMediaQuery` 側は falsy な
+    // destinationId で `status` ごと落とす —— 「送信済み」のチップが押された
+    // 表示のまま、宛先を伴わない（＝絞り込みの外れた）一覧が下に出てしまう。
+    const { calls } = stubApi({
+      "/media": { media: [], total: 0, page: 1, page_size: 50 },
+      "/media?status=sent&destination_id=d1&collapse=stack&page_size=200": {
+        media: [media("unsent-leak", "2026-08-18T15:12:00+09:00")],
+        total: 1,
+        page: 1,
+        page_size: 200,
+      },
+      "/destinations": {
+        destinations: [
+          { id: "d1", name: "家", enabled: true },
+          { id: "d2", name: "職場", enabled: true },
+        ],
+      },
+    });
+    render(
+      <MemoryRouter initialEntries={["/photos?status=sent&destination_id=d1"]}>
+        <PhotosScreen />
+      </MemoryRouter>,
+    );
+
+    const user = userEvent.setup();
+    await waitFor(() =>
+      expect(calls().some((c) => c.path.includes("status=sent&destination_id=d1"))).toBe(true),
+    );
+
+    await user.selectOptions(await screen.findByRole("combobox", { name: "送り先" }), "");
+
+    expect(screen.getByRole("button", { name: /送信済み/ })).toHaveAttribute("aria-pressed", "true");
+    expect(await screen.findByText("上の送り先を選んでください。")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /unsent-leak\.JPG/ })).not.toBeInTheDocument();
   });
 
   it("Shift を続けて 2 回押すと、2 回目のアンカーは直前に押したものから始まる", async () => {
@@ -1384,7 +1509,7 @@ describe("読み込む件数と、切れていることの表示", () => {
         <PhotosScreen />
       </MemoryRouter>,
     );
-    await userEvent.click(await screen.findByRole("button", { name: "旅行" }));
+    await userEvent.selectOptions(await screen.findByRole("combobox", { name: "送り先" }), "d2");
 
     await waitFor(() =>
       expect(calls().some((c) => c.path.includes("destination_id=d2"))).toBe(true),
@@ -1431,7 +1556,7 @@ describe("読み込む件数と、切れていることの表示", () => {
       </MemoryRouter>,
     );
     await userEvent.click(await screen.findByRole("button", { name: /まだ送っていない/ }));
-    await screen.findByText(/宛先を選んでください/);
+    await screen.findByText(/上の送り先を選んでください/);
     expect(screen.queryByText(/3421/)).toBeNull();
   });
 });

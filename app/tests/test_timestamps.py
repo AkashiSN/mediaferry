@@ -338,7 +338,7 @@ def test_the_chain_falls_through_to_mtime_when_the_container_has_no_time():
 
 def test_a_naive_container_time_falls_through_when_declared_as_an_instant():
     """`instant` を宣言していても、naive な値（オフセット無しの `creation_time`）
-    が来る筋書きにテストが無かった（繰り越し 5）.
+    が来る筋書きを確かめる.
 
     この分岐は `None` を返して連鎖が次（`mtime`）へ落ちる。
     """

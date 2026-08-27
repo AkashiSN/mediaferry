@@ -244,13 +244,19 @@ export function MergeScreen() {
     path: string,
     body?: unknown,
     method?: "POST" | "PATCH" | "DELETE",
+    /** **ジョブを積む操作だけ true。** 進捗の置き場はホームなので、押した
+     *  瞬間に画面が変わらず「失敗した」と読まれないよう、積んだジョブの id を
+     *  持ってそこへ送る。検出は候補がこの画面に出るので連れ出さない。 */
+    handOff?: boolean,
   ): Promise<boolean> {
-    const done = await edit.run(() =>
-      request(path, {
+    let queued: string | null = null;
+    const done = await edit.run(async () => {
+      const started = (await request(path, {
         method: method ?? (path.includes("?action=") ? "PATCH" : "POST"),
         body,
-      }),
-    );
+      })) as { job_id?: string } | null;
+      queued = started?.job_id ?? null;
+    });
     if (done) {
       groups.reload();
       // 破棄・採用・組み直しは進捗のイベントを出さない。**枠の「やること」も
@@ -258,6 +264,9 @@ export function MergeScreen() {
       refreshTasks();
     }
     setConfirmation(null);
+    if (done && handOff && queued) {
+      navigate("/", { state: { jobIds: [queued], note: null } });
+    }
     return done;
   }
 
@@ -308,12 +317,22 @@ export function MergeScreen() {
           </div>
           <div className="acts">
             {group.status === "detected" && (
-              <button type="button" className="btn outline" disabled={edit.busy} onClick={() => void act(`/merge-groups/${group.id}/merge`)}>
+              <button
+                type="button"
+                className="btn outline"
+                disabled={edit.busy}
+                onClick={() => void act(`/merge-groups/${group.id}/merge`, undefined, undefined, true)}
+              >
                 つなぐ
               </button>
             )}
             {group.status === "failed" && (
-              <button type="button" className="btn warnish" disabled={edit.busy} onClick={() => void act(`/merge-groups/${group.id}/merge`)}>
+              <button
+                type="button"
+                className="btn warnish"
+                disabled={edit.busy}
+                onClick={() => void act(`/merge-groups/${group.id}/merge`, undefined, undefined, true)}
+              >
                 再試行する
               </button>
             )}

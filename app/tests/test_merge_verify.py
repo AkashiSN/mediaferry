@@ -316,11 +316,9 @@ TMCD = {"index": 4, "codec_type": "data", "codec_name": None, "codec_tag_string"
 
 
 def test_a_stream_the_route_could_not_carry_is_not_counted_as_missing():
-    """**実機の DJI はここで必ず落ちていた.**
-
-    TS 経路は `tmcd` を運べない。実装はそれを `route_dropped` に記録し、`size`
-    検査も差し引いている（`excluded_streams`）のに、`streams` 検査だけが
-    差し引かずに「期待に無い」と判定していた。**TS 経路を通ると必ず不合格になる。**
+    """**TS 経路は `tmcd` を運べない。** `route_dropped` に記録し、`size` 検査は
+    `excluded_streams` で差し引く。`streams` 検査も同じく差し引き、「期待に無い」
+    とは判定しないことを確かめる —— さもないと TS 経路を通るたびに不合格になる。
     """
     parts = [a_part(extra=[TMCD]), a_part(extra=[TMCD])]
     merged = a_merged()

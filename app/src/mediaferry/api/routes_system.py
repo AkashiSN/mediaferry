@@ -51,8 +51,9 @@ def reset_data(
     except ResetNotPossible as exc:
         # **generic な conflict にしない。** 画面は code で文面を選ぶので、
         # conflict のままだと「いまの状態ではこの操作はできません」としか出ず、
-        # 何を待てばよいのかが読めない。
-        raise ApiError(409, ErrorCode.JOB_IN_FLIGHT, str(exc)) from exc
+        # 何を待てばよいのかが読めない。理由ごとに code を分けるため、
+        # `exc.reason` をそのまま `ErrorCode` に渡す。
+        raise ApiError(409, ErrorCode(exc.reason), str(exc)) from exc
     return {"status": "ok", "removed": removed}
 
 

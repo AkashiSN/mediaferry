@@ -1,7 +1,7 @@
 // 進行中の作業の進捗（§13）。**ファイル名と件数で示す。**
 //
 // ここにあるのは、進捗の型と、それを 1 行の日本語に写す関数だけ。描くのは
-// `JobCard.tsx` と `work/Sending.tsx`。
+// `JobCard.tsx`。
 
 import { formatBytes } from "../utils/formatBytes";
 

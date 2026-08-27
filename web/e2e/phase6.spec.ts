@@ -100,7 +100,8 @@ test("RAW+JPEG が 1 スタックになり、見送りの理由も画面に出�
   await page.getByRole("button", { name: "内容を確かめる" }).click();
   await expect(page.getByRole("dialog")).toContainText("3 件");
   await page.getByRole("button", { name: "実行する" }).click();
-  await expect(page.getByRole("heading", { name: "送っています" })).toBeVisible({ timeout: 60_000 });
+  // **送るは押した瞬間にホームへ遷移する。** 進捗の置き場はホーム 1 本。
+  await expect(page.getByRole("heading", { name: "ホーム", exact: true })).toBeVisible();
 
   // 5. **相手側で 1 スタックになる**（第 2 パスはアップロードの後に回る）。
   //    **どちらが先に送られるかは決まらない**ので、主資産の候補を両方引く。

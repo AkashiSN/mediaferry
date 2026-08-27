@@ -69,7 +69,7 @@ function pageFromParams(params: URLSearchParams): number {
 
 /**
  * `/media` へ渡すクエリを組み立てる。宛先が決まっていない宛先ごとの絞り込みは、
- * 400 を避けるため素通りさせる（呼び出し側が別に「宛先を選んでください」を出す）。
+ * 400 を避けるため素通りさせる（呼び出し側が別に「送り先を選んでください」を出す）。
  *
  * **探している言葉とページも渡す。** どちらも落とすと、1 度に読む 200 件の外に
  * あるものへ画面から辿り着けなくなる（API は `q` も `page` も受け付ける）。
@@ -143,7 +143,12 @@ export function PhotosScreen() {
   const destinationRows = destinations.data?.destinations ?? [];
 
   const filter = filterFromParams(params);
-  const chosenDestinationId = params.get("destination_id");
+  // **空文字は「選んでいない」として扱う。** プルダウンの `<option value="">
+  // 送り先を選ぶ</option>` を選び直すと `destination_id=""` が URL に入るが、
+  // `null` でないので `needsDestination`（`=== null` 判定）を素通りし、
+  // `buildMediaQuery` 側だけが falsy 判定で `status` ごと絞り込みを落とす ——
+  // 「送信済み」のチップは押されたままなのに、宛先を伴わない一覧が出てしまう。
+  const chosenDestinationId = params.get("destination_id") || null;
   // 宛先が 1 つしか無ければ、黙ってそれを使う。2 つ以上あるときは選ばせる。
   const effectiveDestinationId =
     destinationRows.length === 1 ? destinationRows[0].id : chosenDestinationId;
@@ -422,31 +427,34 @@ export function PhotosScreen() {
             {f.label}
           </button>
         ))}
+        {/* **宛先が 2 つ以上あるときだけ、常設で選ばせる。** 1 つしか無ければ
+            黙ってそれを使うので選ばせる意味が無い（`effectiveDestinationId`）。
+            どの絞り込みからでも切り替えられるよう、右端に置いて絞り込みとは
+            独立させる。 */}
+        {destinationRows.length > 1 && (
+          <select
+            className="field"
+            style={{ width: "auto", marginLeft: "auto" }}
+            aria-label="送り先"
+            value={effectiveDestinationId ?? ""}
+            onChange={(event) => selectDestination(event.target.value)}
+          >
+            <option value="">送り先を選ぶ</option>
+            {destinationRows.map((destination) => (
+              <option key={destination.id} value={destination.id} disabled={!destination.enabled}>
+                {destination.name}
+              </option>
+            ))}
+          </select>
+        )}
       </div>
-
-      {DESTINATION_SCOPED.has(filter) && destinationRows.length >= 2 && (
-        <div className="chips" aria-label="宛先">
-          {destinationRows.map((destination) => (
-            <button
-              key={destination.id}
-              type="button"
-              className="chip"
-              aria-pressed={destination.id === effectiveDestinationId}
-              disabled={!destination.enabled}
-              onClick={() => selectDestination(destination.id)}
-            >
-              {destination.name}
-            </button>
-          ))}
-        </div>
-      )}
 
       {needsDestination ? (
         <div className="card pad empty">
           <p className="muted">
             {destinationRows.length === 0
               ? "送り先がまだ無いので、宛先ごとの絞り込みは使えません。"
-              : "宛先を選んでください。"}
+              : "上の送り先を選んでください。"}
           </p>
         </div>
       ) : groups.length === 0 ? (

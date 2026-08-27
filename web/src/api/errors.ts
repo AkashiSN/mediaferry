@@ -26,6 +26,11 @@ const MESSAGES: Record<string, string> = {
   approval_already_queued: "この承認はもう実行待ちです。",
   job_in_flight:
     "走っている作業があります。終わってからもう一度試してください（設定 › 記録 › 作業の履歴で見られます）。",
+  staging_pending:
+    "取り込みの途中だったものが残っています。多くはアプリを再起動すると片付きますが、" +
+    "片付かない場合は「設定 › 記録 › 作業の履歴」で状況を確認してください。",
+  upload_claim_pending:
+    "取り込み中に送信を始めたものが残っています。アプリを再起動すると片付くので、そのあとで試してください。",
   setting_locked: "この設定は環境変数で固定されています。TrueNAS のアプリ設定で変更してください。",
   same_library_undecided: "同じライブラリを指しているかどうかを選んでください。",
   destination_unreachable: "送り先に接続できません。URL と API キーを確認してください。",

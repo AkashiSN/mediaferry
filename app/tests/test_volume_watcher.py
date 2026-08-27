@@ -783,9 +783,9 @@ def test_a_running_job_for_a_gone_presence_is_left_alone(watcher, db, volumes):
 def test_refreshing_does_not_close_handles_that_a_job_holds(watcher, db, volumes, broker):
     """**2 枚挿して片方を抜いても、もう片方のコピーは止まらない。**
 
-    マウントは handle ごとに独立していて（`MNT_DETACH` 済み）、
+    マウントは handle ごとに独立している（`MNT_DETACH` 済み）。
     `MountManager.release` は umount ではなく、`detach_absent` は DB の
-    `UPDATE` でしかない。この性質を守るテストが 1 つも無かった。
+    `UPDATE` でしかないので、他方の handle には触れない。
     """
     from mediaferry.jobs.volumes import VolumeService
 

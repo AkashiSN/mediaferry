@@ -37,6 +37,8 @@ type DestinationItem = {
   name: string;
   state: string | null;
   presence: string;
+  /** その送信レコードの id。まだ送っていない宛先（`state === null`）では `null`。 */
+  upload_id: string | null;
 };
 
 type MediaDetail = {
@@ -102,6 +104,13 @@ export function PhotoDetailScreen() {
     run: () => Promise<unknown>;
   } | null>(null);
   const [regrouping, setRegrouping] = useState(false);
+  // 宛先ごとの操作（送り直す・サーバを確かめる）。**消す・グループへの操作とは
+  // 別の状態で持つ** —— 確認を挟まない即時操作なので、他の busy と混ぜると
+  // 無関係な操作までボタンが押せなくなる。
+  // **busy は全宛先で 1 つを共有する。** どれか 1 つを操作している間は、
+  // 他の宛先のボタンも押せなくする（連打で同じ操作が二重に飛ぶのを防ぐのが
+  // 目的で、宛先ごとに分けるほどの重さの操作ではない）。
+  const acting = useMutation();
 
   const data = detail.data;
   // **置き換えられた組にも、何だったのかは出す。** 検証の結果は「なぜこの出力が
@@ -145,6 +154,33 @@ export function PhotoDetailScreen() {
     setGroupConfirm(null);
   }
 
+  /** リモートから消えたと確認できた送信を、pending へ戻して送り直す。 */
+  async function requeue(uploadId: string): Promise<void> {
+    if (await acting.run(() => request(`/uploads/${uploadId}/requeue`, { method: "POST" }))) {
+      detail.reload();
+    }
+  }
+
+  /** その宛先の状態をサーバへ問い合わせ直す。Immich 側で消した資産にはこれで気づく。
+   *
+   * **時間の掛かるジョブを積む操作**（`routes_destinations.py` の
+   * `_enqueue`）なので、`Merge.tsx` / `CardDetail.tsx` / `Send.tsx` と同じく
+   * 積んだと言ってからホームへ送る。`PhotoDetail` は SSE 購読も拍も持たない
+   * ので、その場で `detail.reload()` するだけでは進捗も結果も画面に出ない。
+   */
+  async function recheck(destinationId: string): Promise<void> {
+    let queued: string | null = null;
+    const done = await acting.run(async () => {
+      const started = (await request(`/destinations/${destinationId}/recheck`, {
+        method: "POST",
+      })) as { job_id?: string } | null;
+      queued = started?.job_id ?? null;
+    });
+    if (done && queued) {
+      navigate("/", { state: { jobIds: [queued], note: null } });
+    }
+  }
+
   async function runDelete() {
     if (id === undefined) {
       return;
@@ -179,10 +215,11 @@ export function PhotoDetailScreen() {
       {/* **画面が持つ失敗は 1 本**（帯も 1 本）。消すのとグループへの操作を分けて
           出すと、どちらの話なのか読む側には分からない。 */}
       <ErrorBanner
-        error={detail.error ?? deletion.error ?? edit.error}
+        error={detail.error ?? deletion.error ?? edit.error ?? acting.error}
         onDismiss={() => {
           deletion.clear();
           edit.clear();
+          acting.clear();
         }}
       />
 
@@ -272,16 +309,66 @@ export function PhotoDetailScreen() {
                   gap: 12,
                 }}
               >
-                {data.destinations.map((dest) => (
-                  // **状況は名前の直下に置く。** 左右に離して置くと、狭い画面では
-                  // 状況だけが次の行へ落ち、どの宛先の状況なのか読めなくなる。
-                  <li key={dest.destination_id} className="row">
-                    <div className="grow">
-                      <div style={{ fontSize: "13.5px", fontWeight: 600 }}>{dest.name}</div>
-                      <div className="small">{PRESENCE[dest.presence] ?? dest.presence}</div>
-                    </div>
-                  </li>
-                ))}
+                {data.destinations.map((dest) => {
+                  // **ローカル変数に写す。** `dest.upload_id` のまま条件分岐すると、
+                  // クロージャの中では絞り込みが効かず `string | null` のまま残る。
+                  const uploadId = dest.upload_id;
+                  return (
+                    // **状況は名前の直下に置く。** 左右に離して置くと、狭い画面では
+                    // 状況だけが次の行へ落ち、どの宛先の状況なのか読めなくなる。
+                    <li key={dest.destination_id} className="row">
+                      <div className="grow">
+                        <div style={{ fontSize: "13.5px", fontWeight: 600 }}>{dest.name}</div>
+                        <div className="small">{PRESENCE[dest.presence] ?? dest.presence}</div>
+                        {/* **`presence` だけでは押せるかを言い切れない。**
+                            `check_eligibility`（`db/uploads.py`）は元のファイルが
+                            見当たらない（`missing_at`）と断る。押せない状態の
+                            ボタンを並べない規則（`deletable` / `delete_blocked_reason`
+                            と同じ形）に合わせ、理由をここに出す。 */}
+                        {dest.presence === "gone" && uploadId !== null && data.missing_at !== null && (
+                          <div className="small">元のファイルがいま見当たらないので、送り直せません。</div>
+                        )}
+                      </div>
+                      {/* **`presence === "gone"` が送り直せる条件そのもの。**
+                          API 側（`remote_asset_id IS NULL` かつ `remote_checked_at IS
+                          NOT NULL` な `complete`）と同じ判断を、画面は `presence` の
+                          語彙だけで見る。組み直さない。 */}
+                      {dest.presence === "gone" && uploadId !== null && (
+                        // **`aria-label` に宛先名を足す。** `gone` な宛先が 2 つ以上
+                        // 並ぶと、同じ「送り直す」が名前だけでは見分けられない
+                        // （member の「送る：${name}」と同じ規約）。
+                        <button
+                          type="button"
+                          className="btn sm"
+                          aria-label={`送り直す：${dest.name}`}
+                          disabled={acting.busy || data.missing_at !== null}
+                          onClick={() => void requeue(uploadId)}
+                        >
+                          送り直す
+                        </button>
+                      )}
+                      {/* Immich 側で消しても、この画面へは再確認するまで反映されない。
+                          気づく手段が設定の奥にしか無いと辿り着けないので、ここにも置く。
+
+                          **この宛先の全件を照合する**（`jobs/recheck.py` は
+                          `destination_id` × 現行 epoch で絞るだけで、この 1 件には
+                          絞らない）。写真 1 枚のくわしくで押すボタンなので、
+                          文言でその範囲を伝える。 */}
+                      {dest.state !== null && (
+                        <button
+                          type="button"
+                          className="btn sm quiet"
+                          aria-label={`サーバを確かめる：${dest.name} のすべての送信記録`}
+                          title={`${dest.name} 宛てのすべての送信記録をサーバに問い合わせ直します`}
+                          disabled={acting.busy}
+                          onClick={() => void recheck(dest.destination_id)}
+                        >
+                          サーバを確かめる
+                        </button>
+                      )}
+                    </li>
+                  );
+                })}
               </ul>
             )}
           </section>

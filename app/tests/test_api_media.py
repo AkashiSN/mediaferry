@@ -546,3 +546,43 @@ def test_an_ambiguous_pair_has_no_stack_in_the_detail(client, canon_pair, ambigu
     jpeg = canon_pair.media_ids["JPG"]
 
     assert client.get(f"/api/media/{jpeg}").json()["stack"] is None
+
+
+def a_sent_media(db, *, name: str, **over):
+    """1 件だけ送った状態を作り、`(media_id, record_id, destination_id)` を返す."""
+    from .test_schema_artifacts import a_media_file
+    from .test_schema_sources import a_profile
+
+    profile = a_profile(db, slug=name)
+    media_id = a_media_file(db, profile, rel_path=f"library/{name}/DCIM/A.JPG")
+    destination = a_destination(db, name=name)
+    record_id = an_upload(
+        db,
+        destination,
+        media_id,
+        state="complete",
+        destination_revision_id=destination[1],
+        **over,
+    )
+    return media_id, record_id, destination[0]
+
+
+def test_the_detail_carries_the_upload_id_for_each_destination(client, db):
+    """**送り直すには記録の id が要る.** `presence` は状態を言うが、
+    どのレコードを操作すればよいかは言わない。
+    """
+    media_id, record_id, _ = a_sent_media(db, name="upload-id-test")
+    body = client.get(f"/api/media/{media_id}").json()
+    assert body["destinations"][0]["upload_id"] == record_id
+
+
+def test_a_destination_without_a_record_has_no_upload_id(client, db):
+    """まだ送っていない宛先は `None`（**キーごと落とさない** —— 画面が
+    「キーが無い」と「値が None」を区別できなくなる）."""
+    from .test_schema_artifacts import a_media_file
+    from .test_schema_sources import a_profile
+
+    media_id = a_media_file(db, a_profile(db, slug="no-record-test"))
+    a_destination(db, name="no-record-test")
+    body = client.get(f"/api/media/{media_id}").json()
+    assert body["destinations"][0]["upload_id"] is None

@@ -50,6 +50,17 @@ function renderHome() {
   );
 }
 
+/** `navigate(..., { state })` で着いた直後のホームを描く（`useQueuedJobs`）。 */
+function renderHomeAt(state: { jobIds?: string[]; note?: string | null }) {
+  return render(
+    <MemoryRouter initialEntries={[{ pathname: "/", state }]}>
+      <DashboardProvider>
+        <HomeScreen />
+      </DashboardProvider>
+    </MemoryRouter>,
+  );
+}
+
 beforeEach(() => {
   document.cookie = "XSRF-TOKEN=token; path=/";
 });
@@ -1106,5 +1117,165 @@ describe("ホーム", () => {
     await screen.findByRole("status");
     openStream();
     await waitFor(() => expect(screen.queryByRole("status")).not.toBeInTheDocument());
+  });
+
+  // **押したジョブを名指しで追う**（`useQueuedJobs`）。検出ジョブは実測 47 ms で
+  // 終わるので、遷移した時点でもう `succeeded` のことがある —— それでも結果は出す。
+  describe("押したジョブを名指しで追う", () => {
+    it("すぐ終わっていても、結果を出す（isLive では拾えない）", async () => {
+      stubHome({
+        "/dashboard": EMPTY_DASHBOARD,
+        "/devices": { volumes: [] },
+        "/jobs": {
+          jobs: [
+            {
+              id: "j1",
+              type: "detect_groups",
+              status: "succeeded",
+              created_at: "2026-08-26T00:00:00Z",
+              last_message: "つなぐ組を 2 件見つけました",
+            },
+          ],
+        },
+      });
+      renderHomeAt({ jobIds: ["j1"] });
+      expect(await screen.findByText("候補の検出")).toBeInTheDocument();
+      expect(screen.getByText("完了")).toBeInTheDocument();
+    });
+
+    it("走っているものは、二重に出さない（「いま動いていること」とは別枠）", async () => {
+      stubHome({
+        "/dashboard": EMPTY_DASHBOARD,
+        "/devices": { volumes: [] },
+        "/jobs": {
+          jobs: [{ id: "j1", type: "merge", status: "running", created_at: "2026-08-26T00:00:00Z" }],
+        },
+      });
+      renderHomeAt({ jobIds: ["j1"] });
+      // 「つなぐ」のカードが 1 枚だけ出る。「いま動いていること」の枠にも
+      // 同じジョブを描くと、題が 2 つ出てしまう。
+      expect(await screen.findAllByText("つなぐ")).toHaveLength(1);
+    });
+
+    // **押した直後の枠だけに残った作業でも拍は回る。** `queuedIds` で除いた分、
+    // `doing` は空になりうる（`type: "upload"` はカードに紐付かないので
+    // `sections.doing` にも入るが、`queuedIds` に含まれると `doing` から
+    // 除かれる）。それでも `queuedJobs.queued` が生きている間は `/jobs` の
+    // 取り直しが続かないと、この枠の進捗だけ固まる。
+    it("押した直後の枠だけに残っていても、走っていれば拍は止まらない", async () => {
+      vi.useFakeTimers();
+      const api = stubHome({
+        "/dashboard": EMPTY_DASHBOARD,
+        "/devices": { volumes: [] },
+        "/jobs": {
+          jobs: [{ id: "j1", type: "upload", status: "running", created_at: "2026-08-26T00:00:00Z" }],
+        },
+      });
+      renderHomeAt({ jobIds: ["j1"] });
+
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(4000);
+      });
+
+      expect(api.calls().filter((call) => call.path === "/jobs").length).toBeGreaterThan(1);
+    });
+
+    it("note を出す。1 本も始まらなかった送信でも知らせが要る（§13）", async () => {
+      stubHome({ "/dashboard": EMPTY_DASHBOARD, "/devices": { volumes: [] }, "/jobs": { jobs: [] } });
+      renderHomeAt({ jobIds: [], note: "2 件は断られました" });
+      expect(await screen.findByText("2 件は断られました")).toBeInTheDocument();
+    });
+
+    // 1 本も始まらなかった送信（`jobIds: []`）はカードもやることも無いので
+    // `nothing` が真になる。`note` はその判定より手前で見るので、
+    // 「いま、やることはありません」と同時には出ない。
+    it("note があれば、やることはありませんとは出さない", async () => {
+      stubHome({ "/dashboard": EMPTY_DASHBOARD, "/devices": { volumes: [] }, "/jobs": { jobs: [] } });
+      renderHomeAt({ jobIds: [], note: "2 件は断られました" });
+      await screen.findByText("2 件は断られました");
+      expect(screen.queryByText("いま、やることはありません")).toBeNull();
+    });
+
+    // 既存の 3 枠（いま動いていること・やること・いまの様子）はすべて見出しを
+    // 持つ。この枠だけ見出しが無いと、「押しても画面が変わらないので気づけない」
+    // を解消する受け口自体が見出しから見つからなくなる。
+    it("見出しを持つ（既存の 3 枠と同じ形）", async () => {
+      stubHome({ "/dashboard": EMPTY_DASHBOARD, "/devices": { volumes: [] }, "/jobs": { jobs: [] } });
+      renderHomeAt({ jobIds: [], note: "2 件は断られました" });
+      expect(await screen.findByRole("heading", { name: "押した操作" })).toBeInTheDocument();
+    });
+
+    // **§13 が求める「閉じても送信は続く」の案内と、作業の履歴への導線を
+    // ここで出す。** ホームを離れて戻ると `location.state` が無くこの枠ごと
+    // 消えるので、**枠が出ている間に**両方を出す。
+    it("閉じても作業は続くと書く（ジョブがあるとき）", async () => {
+      stubHome({
+        "/dashboard": EMPTY_DASHBOARD,
+        "/devices": { volumes: [] },
+        "/jobs": {
+          jobs: [{ id: "j1", type: "upload", status: "running", created_at: "2026-08-26T00:00:00Z" }],
+        },
+      });
+      renderHomeAt({ jobIds: ["j1"] });
+      expect(await screen.findByText(/閉じても.*続きます/)).toBeInTheDocument();
+    });
+
+    it("作業の履歴への導線がある", async () => {
+      stubHome({ "/dashboard": EMPTY_DASHBOARD, "/devices": { volumes: [] }, "/jobs": { jobs: [] } });
+      renderHomeAt({ jobIds: [], note: "2 件は断られました" });
+      expect(await screen.findByRole("link", { name: "作業の履歴を見る" })).toHaveAttribute(
+        "href",
+        "/settings/jobs",
+      );
+    });
+
+    // **送信ジョブの中止ボタンは、既定の「中止する」ではなく「送るのをやめる」と
+    // 書く。** 押した操作（「送る」）と同じ動詞に揃える。
+    it("送信ジョブの中止ボタンは「送るのをやめる」と書く", async () => {
+      stubHome({
+        "/dashboard": EMPTY_DASHBOARD,
+        "/devices": { volumes: [] },
+        "/jobs": {
+          jobs: [{ id: "j1", type: "upload", status: "running", created_at: "2026-08-26T00:00:00Z" }],
+        },
+      });
+      renderHomeAt({ jobIds: ["j1"] });
+      expect(await screen.findByRole("button", { name: "送るのをやめる" })).toBeInTheDocument();
+      expect(screen.queryByRole("button", { name: "中止する" })).toBeNull();
+    });
+
+    it("送信以外のジョブの中止ボタンは、既定の「中止する」のまま", async () => {
+      stubHome({
+        "/dashboard": EMPTY_DASHBOARD,
+        "/devices": { volumes: [] },
+        "/jobs": {
+          jobs: [{ id: "j1", type: "merge", status: "running", created_at: "2026-08-26T00:00:00Z" }],
+        },
+      });
+      renderHomeAt({ jobIds: ["j1"] });
+      expect(await screen.findByRole("button", { name: "中止する" })).toBeInTheDocument();
+    });
+
+    it("失敗は消すまで残る。× で消せる", async () => {
+      stubHome({
+        "/dashboard": EMPTY_DASHBOARD,
+        "/devices": { volumes: [] },
+        "/jobs": {
+          jobs: [
+            {
+              id: "j1",
+              type: "upload",
+              status: "failed",
+              created_at: "2026-08-26T00:00:00Z",
+              last_message: "だめでした",
+            },
+          ],
+        },
+      });
+      renderHomeAt({ jobIds: ["j1"] });
+      const dismissButton = await screen.findByRole("button", { name: "結果を消す" });
+      await userEvent.click(dismissButton);
+      await waitFor(() => expect(screen.queryByText("送信")).not.toBeInTheDocument());
+    });
   });
 });
