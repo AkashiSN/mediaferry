@@ -63,6 +63,30 @@ function SendProbe() {
   return <p data-testid="send-ids">{(state?.ids ?? []).join(",")}</p>;
 }
 
+/** `/`（ホーム）へ渡った `location.state` を画面に出すだけの受け皿。 */
+function HomeProbe() {
+  const location = useLocation();
+  const state = location.state as { jobIds?: string[]; note?: string | null } | null;
+  return (
+    <div>
+      <p data-testid="home-jobs">{(state?.jobIds ?? []).join(",")}</p>
+      <p data-testid="home-note">{state?.note ?? ""}</p>
+    </div>
+  );
+}
+
+/** `MergeScreen` を、遷移先（ホーム）も一緒に描く。 */
+function renderMergeWithHome() {
+  return render(
+    <MemoryRouter initialEntries={["/merge"]}>
+      <Routes>
+        <Route path="/merge" element={<MergeScreen />} />
+        <Route path="/" element={<HomeProbe />} />
+      </Routes>
+    </MemoryRouter>,
+  );
+}
+
 /** リクエストの本文（JSON）を記録する `stubApi` の代役。 */
 function stubApiWithBodies(routes: Record<string, unknown>) {
   const bodies: { path: string; body: unknown }[] = [];
@@ -448,6 +472,18 @@ describe("つなぐ", () => {
     );
   });
 
+  // 押しても画面が変わらないと「失敗した」と読まれる。POST はジョブを積むだけで、
+  // detected → merging はワーカーが拾ってからなので、直後に reload しても
+  // 押す前と同じカードが描き直される（実測で 465 ms の窓）。進捗の置き場は
+  // ホームなので、積んだジョブの id を持って遷移する。
+  it("つなぐを押すと、積んだジョブを持ってホームへ行く", async () => {
+    stubApi({ ...ROUTES, "/merge-groups": { groups: [GROUP] } });
+    renderMergeWithHome();
+    await userEvent.click(await screen.findByRole("button", { name: "つなぐ" }));
+    expect(await screen.findByTestId("home-jobs")).toHaveTextContent("j1");
+    expect(screen.getByTestId("home-note")).toHaveTextContent("");
+  });
+
   it("失敗した組の「再試行する」は結合をやり直す", async () => {
     const failed = { ...GROUP, id: "g2", status: "failed" };
     const { calls } = stubApi({ ...ROUTES, "/merge-groups": { groups: [failed] } });
@@ -460,6 +496,15 @@ describe("つなぐ", () => {
     await waitFor(() =>
       expect(calls().some((c) => c.path === "/merge-groups/g2/merge" && c.method === "POST")).toBe(true),
     );
+  });
+
+  // 再試行も「つなぐ」と同じ結合ジョブを積むだけの操作なので、同じ食い違いが起きる。
+  it("再試行するを押すと、積んだジョブを持ってホームへ行く", async () => {
+    const failed = { ...GROUP, id: "g2", status: "failed" };
+    stubApi({ ...ROUTES, "/merge-groups": { groups: [failed] } });
+    renderMergeWithHome();
+    await userEvent.click(await screen.findByRole("button", { name: "再試行する" }));
+    expect(await screen.findByTestId("home-jobs")).toHaveTextContent("j2");
   });
 
   it("「これは別々」は確認を取ってから API を叩く（未公開なら 0 件と出す）", async () => {
@@ -565,6 +610,20 @@ describe("つなぐ", () => {
     await waitFor(() =>
       expect(calls().some((c) => c.path === "/merge-groups/detect" && c.method === "POST")).toBe(true),
     );
+  });
+
+  // **候補はこの画面に出るので、連れ出したら本末転倒。** 検出ジョブは積まれるが、
+  // 見るべき結果（つないでいない組の一覧）は `/merge` 自身にしか無い。
+  it("「分かれた動画を探す」は遷移しない", async () => {
+    stubApi({ ...ROUTES, "/merge-groups": { groups: [] } });
+    renderMergeWithHome();
+    await waitFor(() => expect(screen.getByText(/つなぐものはありません/)).toBeInTheDocument());
+    await userEvent.click(screen.getByRole("button", { name: "分かれた動画を探す" }));
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: "分かれた動画を探す" })).toBeEnabled(),
+    );
+    expect(screen.queryByTestId("home-jobs")).toBeNull();
+    expect(screen.getByRole("region", { name: "つなぐ" })).toBeInTheDocument();
   });
 
 

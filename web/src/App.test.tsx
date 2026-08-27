@@ -47,14 +47,13 @@ const BASE_ROUTES = {
   "/uploads": { records: [] },
 };
 
-/** ルート表（brief のとおり 13 本）。 */
+/** ルート表（12 本）。 */
 const ROUTES: readonly [string, string][] = [
   ["/", "ホーム"],
   ["/card", "カードの中身"],
   ["/merge", "つなぐ"],
   ["/approve", "確認"],
   ["/send", "送る"],
-  ["/sending", "送信中"],
   ["/photos", "写真"],
   ["/settings", "設定"],
   ["/settings/destinations", "送り先"],
@@ -111,14 +110,6 @@ describe("ナビの現在地（App の配線として）", () => {
       "aria-current",
       "page",
     );
-  });
-
-  it("/sending を開いている間もホームが現在地のまま", async () => {
-    stubApi(BASE_ROUTES);
-    window.history.pushState({}, "", "/sending");
-    render(<App />);
-    await screen.findByRole("region", { name: "送信中" });
-    expect(screen.getByRole("link", { name: /ホーム/ })).toHaveAttribute("aria-current", "page");
   });
 
   it("/photos を開いていると写真が現在地", async () => {

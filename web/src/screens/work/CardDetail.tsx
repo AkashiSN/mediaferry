@@ -8,7 +8,7 @@
 // 取り違えうること）を書く（§12.1）。
 
 import { useState } from "react";
-import { Link } from "react-router-dom";
+import { Link, useNavigate } from "react-router-dom";
 
 import { request } from "../../api/client";
 import { useMutation, useQuery } from "../../api/hooks";
@@ -239,6 +239,7 @@ export function CardDetailScreen() {
   const [confirming, setConfirming] = useState<{ confirmation: Confirmation; id: string } | null>(
     null,
   );
+  const navigate = useNavigate();
 
   // **未解決・失敗は `null` のまま持つ。** 既定値へ倒すと、同意の内容が実挙動と
   // ずれる（`watcher.py` は積まないのに「コピーされます」と書く）。
@@ -248,11 +249,21 @@ export function CardDetailScreen() {
       : (settings.data.settings.find((setting) => setting.key === "AUTO_IMPORT")?.value ?? null);
 
   async function act(volumeId: string, action: "trust" | "scan" | "import") {
-    await card.run(async () => {
-      await request(`/volumes/${volumeId}/${action}`, { method: "POST" });
+    let queued: string | null = null;
+    const done = await card.run(async () => {
+      const started = (await request(`/volumes/${volumeId}/${action}`, {
+        method: "POST",
+      })) as { job_id?: string } | null;
+      queued = started?.job_id ?? null;
       devices.reload();
     });
     setConfirming(null);
+    // **取り込みだけホームへ送る。** 進捗の置き場はホームで、押した瞬間に
+    // 画面が変わらないと「失敗した」と読まれる。スキャンは候補がこの画面に
+    // 出るので連れ出さない。信頼は同期の記録なのでジョブを積まない。
+    if (done && action === "import" && queued) {
+      navigate("/", { state: { jobIds: [queued], note: null } });
+    }
   }
 
   const volumes = devices.data?.volumes ?? [];

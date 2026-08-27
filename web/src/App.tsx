@@ -17,7 +17,6 @@ import { HomeScreen } from "./screens/Home";
 import { MergeScreen } from "./screens/work/Merge";
 import { ApproveScreen } from "./screens/work/Approve";
 import { SendScreen } from "./screens/work/Send";
-import { SendingScreen } from "./screens/work/Sending";
 import { PhotosScreen } from "./screens/Photos";
 import { PhotoDetailScreen } from "./screens/PhotoDetail";
 import { SettingsScreen } from "./screens/Settings";
@@ -69,7 +68,6 @@ function Framed() {
           <Route path="/merge" element={<MergeScreen />} />
           <Route path="/approve" element={<ApproveScreen />} />
           <Route path="/send" element={<SendScreen />} />
-          <Route path="/sending" element={<SendingScreen />} />
           <Route path="/photos" element={<PhotosScreen />} />
           {/* react-router v6 は具体的な経路を並びに関係なく優先するので `routes_media.py`
               の並びの注意はここでは効かないが、読む順を揃えて `/photos` の隣に置く。 */}

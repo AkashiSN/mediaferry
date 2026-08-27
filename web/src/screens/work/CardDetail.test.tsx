@@ -3,12 +3,19 @@
 
 import { act, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { MemoryRouter, Route, Routes } from "react-router-dom";
+import { MemoryRouter, Route, Routes, useLocation } from "react-router-dom";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { SETTLE_MS } from "../../hooks/useReloadOnEvents";
 import { emitJob } from "../../test/setup";
 import { CardDetailScreen } from "./CardDetail";
+
+/** `/`（ホーム）へ渡った `location.state` を画面に出すだけの受け皿。 */
+function HomeProbe() {
+  const location = useLocation();
+  const state = location.state as { jobIds?: string[]; note?: string | null } | null;
+  return <p data-testid="home-jobs">{(state?.jobIds ?? []).join(",")}</p>;
+}
 
 beforeEach(() => {
   document.cookie = "XSRF-TOKEN=token; path=/";
@@ -101,6 +108,89 @@ describe("カードの信頼登録", () => {
       ).toBe(true);
     });
     expect(calls.some((call) => call.path === "/volumes/v1/close")).toBe(false);
+  });
+
+  // 押しても画面が変わらないと「失敗した」と読まれる。POST はジョブを積むだけで、
+  // ワーカーが拾うまで状態は動かない。進捗の置き場はホームなので、積んだジョブの
+  // id を持って遷移する。
+  it("「取り込む」を押すと、積んだジョブを持ってホームへ行く", async () => {
+    calls = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn((input: string, init?: RequestInit) => {
+        const path = input.replace(/^\/api/, "");
+        const method = init?.method ?? "GET";
+        calls.push({ path, method });
+        if (path === "/volumes/v1/import" && method === "POST") {
+          return Promise.resolve(new Response(JSON.stringify({ job_id: "j1" }), { status: 200 }));
+        }
+        const body =
+          path === "/settings"
+            ? {
+                warnings: [],
+                settings: [{ key: "AUTO_IMPORT", value: "trusted" }],
+              }
+            : path === "/devices"
+              ? { volumes: [{ ...base, trusted: true }] }
+              : {};
+        return Promise.resolve(new Response(JSON.stringify(body), { status: 200 }));
+      }),
+    );
+    render(
+      <MemoryRouter initialEntries={["/card"]}>
+        <Routes>
+          <Route path="/card" element={<CardDetailScreen />} />
+          <Route path="/" element={<HomeProbe />} />
+        </Routes>
+      </MemoryRouter>,
+    );
+
+    await userEvent.click(await screen.findByRole("button", { name: "SD_Card を取り込む" }));
+    expect(await screen.findByTestId("home-jobs")).toHaveTextContent("j1");
+  });
+
+  // **スキャンは連れ出さない。** 検出とスキャンの結果は取り込む前の候補として
+  // この画面に出るので、遷移させると本末転倒。
+  it("「スキャン」は遷移しない", async () => {
+    calls = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn((input: string, init?: RequestInit) => {
+        const path = input.replace(/^\/api/, "");
+        const method = init?.method ?? "GET";
+        calls.push({ path, method });
+        if (path === "/volumes/v1/scan" && method === "POST") {
+          return Promise.resolve(new Response(JSON.stringify({ job_id: "j2" }), { status: 200 }));
+        }
+        const body =
+          path === "/settings"
+            ? {
+                warnings: [],
+                settings: [{ key: "AUTO_IMPORT", value: "trusted" }],
+              }
+            : path === "/devices"
+              ? { volumes: [{ ...base, trusted: true }] }
+              : {};
+        return Promise.resolve(new Response(JSON.stringify(body), { status: 200 }));
+      }),
+    );
+    render(
+      <MemoryRouter initialEntries={["/card"]}>
+        <Routes>
+          <Route path="/card" element={<CardDetailScreen />} />
+          <Route path="/" element={<HomeProbe />} />
+        </Routes>
+      </MemoryRouter>,
+    );
+
+    await userEvent.click(await screen.findByRole("button", { name: "SD_Card をスキャン" }));
+    await waitFor(() =>
+      expect(calls.some((call) => call.path === "/volumes/v1/scan" && call.method === "POST")).toBe(
+        true,
+      ),
+    );
+    expect(screen.queryByTestId("home-jobs")).toBeNull();
+    expect(screen.getByRole("region", { name: "カードの中身" })).toBeInTheDocument();
   });
 
   it("掴まれていないカードは、抜いていいと言う", async () => {

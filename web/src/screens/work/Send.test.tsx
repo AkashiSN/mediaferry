@@ -24,14 +24,14 @@ function renderSend(ids?: string[]) {
   );
 }
 
-/** `/sending` へ渡った `location.state` を画面に出すだけの受け皿。 */
-function SendingProbe() {
+/** `/`（ホーム）へ渡った `location.state` を画面に出すだけの受け皿。 */
+function HomeProbe() {
   const location = useLocation();
   const state = location.state as { jobIds?: string[]; note?: string | null } | null;
   return (
     <div>
-      <p data-testid="sending-note">{state?.note}</p>
-      <p data-testid="sending-jobs">{(state?.jobIds ?? []).join(",")}</p>
+      <p data-testid="home-note">{state?.note}</p>
+      <p data-testid="home-jobs">{(state?.jobIds ?? []).join(",")}</p>
     </div>
   );
 }
@@ -794,7 +794,7 @@ describe("送信そのもの", () => {
         <DashboardProvider>
           <Routes>
             <Route path="/send" element={<SendScreen />} />
-            <Route path="/sending" element={<SendingProbe />} />
+            <Route path="/" element={<HomeProbe />} />
           </Routes>
         </DashboardProvider>
       </MemoryRouter>,
@@ -809,7 +809,7 @@ describe("送信そのもの", () => {
     );
   });
 
-  it("2 段階で進み、成功したら送信中の画面へジョブと結果の文を持って移る", async () => {
+  it("2 段階で進み、成功したらホームへジョブと結果の文を持って移る", async () => {
     const api = stubApi({
       "/destinations/d1/upload": { job_id: "job-1" },
       "/destinations": DESTINATIONS,
@@ -827,7 +827,7 @@ describe("送信そのもの", () => {
       <MemoryRouter initialEntries={["/send"]}>
         <Routes>
           <Route path="/send" element={<SendScreen />} />
-          <Route path="/sending" element={<SendingProbe />} />
+          <Route path="/" element={<HomeProbe />} />
         </Routes>
       </MemoryRouter>,
     );
@@ -842,10 +842,10 @@ describe("送信そのもの", () => {
         calls.filter((c) => c.path === "/destinations/d1/upload" && c.method === "POST"),
       ).toHaveLength(1);
     });
-    expect(await screen.findByTestId("sending-note")).toHaveTextContent(
+    expect(await screen.findByTestId("home-note")).toHaveTextContent(
       "1 件を、1 宛先へ送り始めました。",
     );
-    expect(await screen.findByTestId("sending-jobs")).toHaveTextContent("job-1");
+    expect(await screen.findByTestId("home-jobs")).toHaveTextContent("job-1");
   });
 
   // ブリーフが「変えてはいけない」と挙げた判断のうち、ブリーフ添付のテストだけでは
@@ -878,7 +878,7 @@ describe("送信そのもの", () => {
       <MemoryRouter initialEntries={["/send"]}>
         <Routes>
           <Route path="/send" element={<SendScreen />} />
-          <Route path="/sending" element={<SendingProbe />} />
+          <Route path="/" element={<HomeProbe />} />
         </Routes>
       </MemoryRouter>,
     );
@@ -896,7 +896,7 @@ describe("送信そのもの", () => {
       ).toHaveLength(1);
       expect(calls.some((c) => c.path === "/destinations/d2/upload")).toBe(false);
     });
-    expect(await screen.findByTestId("sending-note")).toHaveTextContent("送れない写真が 1 件");
+    expect(await screen.findByTestId("home-note")).toHaveTextContent("送れない写真が 1 件");
   });
 
   // `stubApi` は応答を常に 200 で返すので、**宛先ごとに成否を変えたいここだけ**
@@ -950,7 +950,7 @@ describe("送信そのもの", () => {
       <MemoryRouter initialEntries={["/send"]}>
         <Routes>
           <Route path="/send" element={<SendScreen />} />
-          <Route path="/sending" element={<SendingProbe />} />
+          <Route path="/" element={<HomeProbe />} />
         </Routes>
       </MemoryRouter>,
     );
@@ -962,11 +962,11 @@ describe("送信そのもの", () => {
     await userEvent.click(screen.getByRole("button", { name: "実行する" }));
 
     // **1 件失敗しても、d1 の送信は始まっている**（全部やり直しにしない）。
-    expect(await screen.findByTestId("sending-jobs")).toHaveTextContent("job-1");
-    expect(await screen.findByTestId("sending-note")).toHaveTextContent("開始できなかった宛先: 旅行用");
+    expect(await screen.findByTestId("home-jobs")).toHaveTextContent("job-1");
+    expect(await screen.findByTestId("home-note")).toHaveTextContent("開始できなかった宛先: 旅行用");
     // **始まった数は、実際に始まった数。** 組が受け付けられただけの宛先を数えると、
     // 同じ 1 文で「2 宛先で始めた」と「1 宛先は始められなかった」を並べることになる。
-    expect(await screen.findByTestId("sending-note")).toHaveTextContent(
+    expect(await screen.findByTestId("home-note")).toHaveTextContent(
       "1 宛先へ送り始めました",
     );
   });
