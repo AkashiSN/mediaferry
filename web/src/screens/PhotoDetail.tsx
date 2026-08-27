@@ -161,12 +161,23 @@ export function PhotoDetailScreen() {
     }
   }
 
-  /** その宛先の状態をサーバへ問い合わせ直す。Immich 側で消した資産にはこれで気づく。 */
+  /** その宛先の状態をサーバへ問い合わせ直す。Immich 側で消した資産にはこれで気づく。
+   *
+   * **時間の掛かるジョブを積む操作**（`routes_destinations.py` の
+   * `_enqueue`）なので、`Merge.tsx` / `CardDetail.tsx` / `Send.tsx` と同じく
+   * 積んだと言ってからホームへ送る。`PhotoDetail` は SSE 購読も拍も持たない
+   * ので、その場で `detail.reload()` するだけでは進捗も結果も画面に出ない。
+   */
   async function recheck(destinationId: string): Promise<void> {
-    if (
-      await acting.run(() => request(`/destinations/${destinationId}/recheck`, { method: "POST" }))
-    ) {
-      detail.reload();
+    let queued: string | null = null;
+    const done = await acting.run(async () => {
+      const started = (await request(`/destinations/${destinationId}/recheck`, {
+        method: "POST",
+      })) as { job_id?: string } | null;
+      queued = started?.job_id ?? null;
+    });
+    if (done && queued) {
+      navigate("/", { state: { jobIds: [queued], note: null } });
     }
   }
 
@@ -309,6 +320,14 @@ export function PhotoDetailScreen() {
                       <div className="grow">
                         <div style={{ fontSize: "13.5px", fontWeight: 600 }}>{dest.name}</div>
                         <div className="small">{PRESENCE[dest.presence] ?? dest.presence}</div>
+                        {/* **`presence` だけでは押せるかを言い切れない。**
+                            `check_eligibility`（`db/uploads.py`）は元のファイルが
+                            見当たらない（`missing_at`）と断る。押せない状態の
+                            ボタンを並べない規則（`deletable` / `delete_blocked_reason`
+                            と同じ形）に合わせ、理由をここに出す。 */}
+                        {dest.presence === "gone" && uploadId !== null && data.missing_at !== null && (
+                          <div className="small">元のファイルがいま見当たらないので、送り直せません。</div>
+                        )}
                       </div>
                       {/* **`presence === "gone"` が送り直せる条件そのもの。**
                           API 側（`remote_asset_id IS NULL` かつ `remote_checked_at IS
@@ -322,19 +341,25 @@ export function PhotoDetailScreen() {
                           type="button"
                           className="btn sm"
                           aria-label={`送り直す：${dest.name}`}
-                          disabled={acting.busy}
+                          disabled={acting.busy || data.missing_at !== null}
                           onClick={() => void requeue(uploadId)}
                         >
                           送り直す
                         </button>
                       )}
                       {/* Immich 側で消しても、この画面へは再確認するまで反映されない。
-                          気づく手段が設定の奥にしか無いと辿り着けないので、ここにも置く。 */}
+                          気づく手段が設定の奥にしか無いと辿り着けないので、ここにも置く。
+
+                          **この宛先の全件を照合する**（`jobs/recheck.py` は
+                          `destination_id` × 現行 epoch で絞るだけで、この 1 件には
+                          絞らない）。写真 1 枚のくわしくで押すボタンなので、
+                          文言でその範囲を伝える。 */}
                       {dest.state !== null && (
                         <button
                           type="button"
                           className="btn sm quiet"
-                          aria-label={`サーバを確かめる：${dest.name}`}
+                          aria-label={`サーバを確かめる：${dest.name} のすべての送信記録`}
+                          title={`${dest.name} 宛てのすべての送信記録をサーバに問い合わせ直します`}
                           disabled={acting.busy}
                           onClick={() => void recheck(dest.destination_id)}
                         >
