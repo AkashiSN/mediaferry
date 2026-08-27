@@ -19,7 +19,7 @@ from mediaferry.db.connection import Database
 from mediaferry.db.profiles import ProfileRegistry
 from mediaferry.ids import new_id
 
-from .test_schema_artifacts import a_media_file, a_merge_group
+from .test_schema_artifacts import a_media_file, a_merge_group, a_source_entry, a_staging
 from .test_schema_sources import a_volume
 from .test_schema_uploads import a_destination, an_upload
 
@@ -53,6 +53,25 @@ def a_job(db, status: str = "succeeded") -> str:
 
 def count(db, table: str) -> int:
     return db.execute(f"SELECT count(*) AS n FROM {table}").fetchone()["n"]  # noqa: S608
+
+
+def a_published_staging(db, job_id: str, ref) -> str:
+    """**公開が完了した後の形。** `artifact_staging` の行は `published` のまま残り、
+    `job_id NOT NULL REFERENCES job(id) ON DELETE RESTRICT` で `job` を掴んでいる.
+    """
+    # **`client` fixture が既定の DJI ボリューム（`fs_uuid="26B1-2FD6"`）を持つ。**
+    # `a_volume` の既定値のままだと UNIQUE (fs_uuid, fs_type, size_bytes) が衝突する。
+    entry = a_source_entry(db, a_volume(db, ref, fs_uuid="RESET-TEST-PUBLISHED"))
+    return a_staging(
+        db,
+        job_id,
+        state="published",
+        source_entry_id=entry,
+        final_rel_path="library/dji-osmo/DCIM/PUBLISHED.MP4",
+        expected_size=1,
+        content_sha1="0" * 40,
+        metadata_json="{}",
+    )
 
 
 # ------------------------------------------------------------------ 段
@@ -153,3 +172,64 @@ def test_a_reset_is_refused_while_a_job_is_running(client, api_db):
 def test_an_unknown_scope_is_refused(client):
     """**知らない段は受け取らない.** 黙って浅い方へ倒すと、消えない話になる."""
     assert client.post("/api/reset", json={"scope": "everything"}).status_code == 400
+
+
+# ------------------------------------------------------------------ 公開済みの staging
+
+
+@pytest.mark.parametrize("scope", ["jobs", "uploads", "library", "all"])
+def test_a_reset_works_after_something_was_published(client, api_db, ref, scope):
+    """**一度でも公開した DB でリセットが通る.**
+
+    `artifact_staging` は公開後も `published` のまま残り、`job` を
+    `ON DELETE RESTRICT` で掴む。`job` を先に消すと 4 段すべてが外部キーで落ちる。
+    """
+    job_id = a_job(api_db)
+    a_published_staging(api_db, job_id, ref)
+    api_db.commit()
+
+    response = client.post("/api/reset", json={"scope": scope})
+    assert response.status_code == 200
+    assert count(api_db, "job") == 0
+    assert count(api_db, "artifact_staging") == 0
+    if scope in ("library", "all"):
+        # **`library` の段の `DELETE FROM artifact_staging` は 0 件になる**
+        # （手順 1 で `published` の行を消し切っているので）。ここで `+=` の
+        # 代わりに `=` を使うと、手順 1 の分の報告が 0 で上書きされる —— 実際に
+        # 消えた行数と食い違う。
+        assert response.json()["removed"]["artifact_staging"] == 1
+
+
+def test_a_reset_is_refused_while_a_publish_waits_to_be_recovered(client, api_db, ref):
+    """**回収待ちの取り込みは消さずに断る.**
+
+    `writing` / `staged` の行は中断した公開の復旧に要る。黙って消すと戻せない。
+    """
+    job_id = a_job(api_db)
+    # 既定の fs_uuid は `client` fixture の既定ボリュームと衝突する（上と同じ注意）。
+    entry = a_source_entry(api_db, a_volume(api_db, ref, fs_uuid="RESET-TEST-PENDING"))
+    a_staging(
+        api_db,
+        job_id,
+        state="staged",
+        source_entry_id=entry,
+        final_rel_path="library/dji-osmo/DCIM/HALF.MP4",
+        expected_size=1,
+        content_sha1="0" * 40,
+        metadata_json="{}",
+    )
+    api_db.commit()
+
+    response = client.post("/api/reset", json={"scope": "jobs"})
+    assert response.status_code == 409
+    # **この 2 行が消えていないことだけを見る。** 断ったのに片付いていると、
+    # 次の判断ができない。**全体の件数では見ない**
+    # （`test_a_reset_is_refused_while_a_job_is_running` と同じ注意）——
+    # `client` fixture の既定ボリュームを監視が自動でスキャンし、別の `job` を
+    # 積むことがある（実測: フルスイート実行時に発生し、件数一致の断言は
+    # flaky だった）。
+    assert api_db.execute("SELECT 1 FROM job WHERE id = ?", (job_id,)).fetchone() is not None
+    assert (
+        api_db.execute("SELECT 1 FROM artifact_staging WHERE state = 'staged'").fetchone()
+        is not None
+    )

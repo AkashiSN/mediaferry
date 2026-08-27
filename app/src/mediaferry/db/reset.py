@@ -59,7 +59,21 @@ def reset(conn: sqlite3.Connection, data_root: Path, scope: str) -> dict[str, in
         if live:
             raise ResetNotPossible("走っている作業があるので、いまはリセットできない")
 
+        # **回収待ちの公開は消さない。** `writing` / `staged` の行は中断した
+        # 公開の復旧に要る（起動時の reconciliation が拾う）。消すと戻せない。
+        pending = conn.execute(
+            "SELECT count(*) AS n FROM artifact_staging WHERE state <> 'published'"
+        ).fetchone()["n"]
+        if pending:
+            raise ResetNotPossible("回収待ちの取り込みがあるので、いまはリセットできない")
+
         # 1. 作業の記録。**作り直せる**（再スキャン・再検出）。
+        #    **`published` の staging を先に消す。** `job_id` を
+        #    `ON DELETE RESTRICT` で掴んでいるので、`job` を先に消すと止まる。
+        #    公開が完了した行は履歴であって、回収の対象ではない（上で確かめた）。
+        removed["artifact_staging"] = conn.execute(
+            "DELETE FROM artifact_staging WHERE state = 'published'"
+        ).rowcount
         removed["job_event"] = conn.execute("DELETE FROM job_event").rowcount
         removed["job"] = conn.execute("DELETE FROM job").rowcount
 
@@ -72,7 +86,7 @@ def reset(conn: sqlite3.Connection, data_root: Path, scope: str) -> dict[str, in
         if depth >= _index("library"):
             # 3. 取り込んだファイル。**カードに元があれば取り込み直せる。**
             #    参照している側から順に消す（外部キー）。
-            removed["artifact_staging"] = conn.execute("DELETE FROM artifact_staging").rowcount
+            removed["artifact_staging"] += conn.execute("DELETE FROM artifact_staging").rowcount
             removed["merge_member"] = conn.execute("DELETE FROM merge_member").rowcount
             removed["merge_group"] = conn.execute("DELETE FROM merge_group").rowcount
             removed["source_entry"] = conn.execute("DELETE FROM source_entry").rowcount
