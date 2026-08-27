@@ -14,6 +14,7 @@ type Destination = {
   name: string;
   state: string | null;
   presence: string;
+  upload_id: string | null;
 };
 
 function detail(overrides: Record<string, unknown> = {}) {
@@ -271,6 +272,77 @@ describe("節の組み立て", () => {
     expect(block).not.toBeNull();
     expect(within(block as HTMLElement).getByText("まだ送っていません")).toBeInTheDocument();
     expect(within(block as HTMLElement).queryByText("Immich に入っています")).toBeNull();
+  });
+});
+
+// リモートで消えた資産を送り直す動線（Phase 14）。`POST /uploads/{id}/requeue`
+// は前からあるが、画面からの呼び出し元がここまで 1 つも無かった。
+describe("送り直す・再確認", () => {
+  it("リモートから消えた宛先にだけ「送り直す」が出る", async () => {
+    renderDetail({
+      destinations: [
+        { destination_id: "d1", name: "家", state: "complete", presence: "gone", upload_id: "u1" },
+        { destination_id: "d2", name: "外", state: "complete", presence: "present", upload_id: "u2" },
+      ],
+    });
+    const buttons = await screen.findAllByRole("button", { name: "送り直す" });
+    expect(buttons).toHaveLength(1);
+  });
+
+  it("送り直すを押すと、その記録を pending へ戻す", async () => {
+    const { calls } = renderDetail(
+      {
+        destinations: [
+          { destination_id: "d1", name: "家", state: "complete", presence: "gone", upload_id: "u1" },
+        ],
+      },
+      { "POST /uploads/u1/requeue": { status: "ok" } },
+    );
+    await userEvent.click(await screen.findByRole("button", { name: "送り直す" }));
+    await waitFor(() =>
+      expect(calls()).toContainEqual({ method: "POST", path: "/uploads/u1/requeue" }),
+    );
+  });
+
+  it("サーバを確かめる動線がある（消したことに気づくには再確認が要る）", async () => {
+    const { calls } = renderDetail(
+      {
+        destinations: [
+          { destination_id: "d1", name: "家", state: "complete", presence: "present", upload_id: "u1" },
+        ],
+      },
+      { "POST /destinations/d1/recheck": { status: "ok" } },
+    );
+    await userEvent.click(await screen.findByRole("button", { name: "サーバを確かめる" }));
+    await waitFor(() =>
+      expect(calls()).toContainEqual({ method: "POST", path: "/destinations/d1/recheck" }),
+    );
+  });
+
+  it("まだ送っていない宛先には、どちらのボタンも出さない", async () => {
+    renderDetail({
+      destinations: [
+        { destination_id: "d1", name: "家", state: null, presence: "not_sent", upload_id: null },
+      ],
+    });
+    await screen.findByText("家");
+    expect(screen.queryByRole("button", { name: "送り直す" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "サーバを確かめる" })).not.toBeInTheDocument();
+  });
+
+  it("送り直したあとは、くわしくを引き直す（状況の表示が変わる）", async () => {
+    const { calls } = renderDetail(
+      {
+        destinations: [
+          { destination_id: "d1", name: "家", state: "complete", presence: "gone", upload_id: "u1" },
+        ],
+      },
+      { "POST /uploads/u1/requeue": { status: "ok" } },
+    );
+    await userEvent.click(await screen.findByRole("button", { name: "送り直す" }));
+    await waitFor(() =>
+      expect(calls().filter((call) => call.path === "/media/m1").length).toBeGreaterThan(1),
+    );
   });
 });
 

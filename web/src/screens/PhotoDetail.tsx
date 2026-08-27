@@ -37,6 +37,8 @@ type DestinationItem = {
   name: string;
   state: string | null;
   presence: string;
+  /** その送信レコードの id。まだ送っていない宛先（`state === null`）では `null`。 */
+  upload_id: string | null;
 };
 
 type MediaDetail = {
@@ -102,6 +104,10 @@ export function PhotoDetailScreen() {
     run: () => Promise<unknown>;
   } | null>(null);
   const [regrouping, setRegrouping] = useState(false);
+  // 宛先ごとの操作（送り直す・サーバを確かめる）。**消す・グループへの操作とは
+  // 別の状態で持つ** —— 確認を挟まない即時操作なので、他の busy と混ぜると
+  // 無関係な操作までボタンが押せなくなる。
+  const acting = useMutation();
 
   const data = detail.data;
   // **置き換えられた組にも、何だったのかは出す。** 検証の結果は「なぜこの出力が
@@ -145,6 +151,22 @@ export function PhotoDetailScreen() {
     setGroupConfirm(null);
   }
 
+  /** リモートから消えたと確認できた送信を、pending へ戻して送り直す。 */
+  async function requeue(uploadId: string): Promise<void> {
+    if (await acting.run(() => request(`/uploads/${uploadId}/requeue`, { method: "POST" }))) {
+      detail.reload();
+    }
+  }
+
+  /** その宛先の状態をサーバへ問い合わせ直す。Immich 側で消した資産にはこれで気づく。 */
+  async function recheck(destinationId: string): Promise<void> {
+    if (
+      await acting.run(() => request(`/destinations/${destinationId}/recheck`, { method: "POST" }))
+    ) {
+      detail.reload();
+    }
+  }
+
   async function runDelete() {
     if (id === undefined) {
       return;
@@ -179,10 +201,11 @@ export function PhotoDetailScreen() {
       {/* **画面が持つ失敗は 1 本**（帯も 1 本）。消すのとグループへの操作を分けて
           出すと、どちらの話なのか読む側には分からない。 */}
       <ErrorBanner
-        error={detail.error ?? deletion.error ?? edit.error}
+        error={detail.error ?? deletion.error ?? edit.error ?? acting.error}
         onDismiss={() => {
           deletion.clear();
           edit.clear();
+          acting.clear();
         }}
       />
 
@@ -272,16 +295,47 @@ export function PhotoDetailScreen() {
                   gap: 12,
                 }}
               >
-                {data.destinations.map((dest) => (
-                  // **状況は名前の直下に置く。** 左右に離して置くと、狭い画面では
-                  // 状況だけが次の行へ落ち、どの宛先の状況なのか読めなくなる。
-                  <li key={dest.destination_id} className="row">
-                    <div className="grow">
-                      <div style={{ fontSize: "13.5px", fontWeight: 600 }}>{dest.name}</div>
-                      <div className="small">{PRESENCE[dest.presence] ?? dest.presence}</div>
-                    </div>
-                  </li>
-                ))}
+                {data.destinations.map((dest) => {
+                  // **ローカル変数に写す。** `dest.upload_id` のまま条件分岐すると、
+                  // クロージャの中では絞り込みが効かず `string | null` のまま残る。
+                  const uploadId = dest.upload_id;
+                  return (
+                    // **状況は名前の直下に置く。** 左右に離して置くと、狭い画面では
+                    // 状況だけが次の行へ落ち、どの宛先の状況なのか読めなくなる。
+                    <li key={dest.destination_id} className="row">
+                      <div className="grow">
+                        <div style={{ fontSize: "13.5px", fontWeight: 600 }}>{dest.name}</div>
+                        <div className="small">{PRESENCE[dest.presence] ?? dest.presence}</div>
+                      </div>
+                      {/* **`presence === "gone"` が送り直せる条件そのもの。**
+                          API 側（`remote_asset_id IS NULL` かつ `remote_checked_at IS
+                          NOT NULL` な `complete`）と同じ判断を、画面は `presence` の
+                          語彙だけで見る。組み直さない。 */}
+                      {dest.presence === "gone" && uploadId !== null && (
+                        <button
+                          type="button"
+                          className="btn sm"
+                          disabled={acting.busy}
+                          onClick={() => void requeue(uploadId)}
+                        >
+                          送り直す
+                        </button>
+                      )}
+                      {/* Immich 側で消しても、この画面へは再確認するまで反映されない。
+                          気づく手段が設定の奥にしか無いと辿り着けないので、ここにも置く。 */}
+                      {dest.state !== null && (
+                        <button
+                          type="button"
+                          className="btn sm quiet"
+                          disabled={acting.busy}
+                          onClick={() => void recheck(dest.destination_id)}
+                        >
+                          サーバを確かめる
+                        </button>
+                      )}
+                    </li>
+                  );
+                })}
               </ul>
             )}
           </section>
