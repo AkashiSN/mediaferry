@@ -19,6 +19,28 @@ describe("日本語のメッセージ", () => {
     expect(staging).toContain("再起動");
   });
 
+  it("staging_pending は、再起動しても片付かない場合の道も書く", () => {
+    // `jobs/reconcile.py` の `StagingLost` / `OSError` は行を消さずに残す
+    // （実体が無い・データセットが一時的に見えないなど）。「再起動すれば
+    // 片付く」だけを断定すると、この場合は再起動してもリセットが永久に
+    // 断られ続ける。片付かないときに何を見ればよいかも書く。
+    const staging = new ApiError(409, "staging_pending", "回収待ちの取り込みがある").message;
+    expect(staging).toContain("作業の履歴");
+  });
+
+  it("upload_claim_pending は job_in_flight とも staging_pending とも別の文になる", () => {
+    // `job` を先に消す手順が外部キーで止まるのは、走っている作業と回収待ちの
+    // 公開だけではない。放置された送信の claim も同じ形で止まる。
+    const claim = new ApiError(409, "upload_claim_pending", "回収待ちの送信がある").message;
+    const staging = new ApiError(409, "staging_pending", "回収待ちの取り込みがある").message;
+    const running = new ApiError(409, "job_in_flight", "走っている作業がある").message;
+    expect(claim).not.toBe(staging);
+    expect(claim).not.toBe(running);
+    // **この場合は「再起動すると片付く」が本当に正しい**
+    // （`release_interrupted` が起動時に claim を回収する）。
+    expect(claim).toContain("再起動");
+  });
+
   it("知らない code のときだけ detail を添える", () => {
     const error = new ApiError(500, "brand_new_code", "内部の文言");
     expect(error.message).toContain("内部の文言");

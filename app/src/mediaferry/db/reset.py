@@ -20,6 +20,7 @@ import sqlite3
 from pathlib import Path
 
 from .connection import immediate
+from .uploads import ACTIVE_STATES
 
 #: 浅い順。**この並びが「積み上げ」の定義**で、画面もこの順で段を出す。
 SCOPES = ("jobs", "uploads", "library", "all")
@@ -76,6 +77,22 @@ def reset(conn: sqlite3.Connection, data_root: Path, scope: str) -> dict[str, in
         if pending:
             raise ResetNotPossible(
                 "回収待ちの取り込みがあるので、いまはリセットできない", "staging_pending"
+            )
+
+        # **放置された claim も消さない。** `upload_record.claim_job_id` も
+        # `ON DELETE RESTRICT` で `job` を掴む（`artifact_staging.job_id` と
+        # 同じ形）。`ACTIVE_STATES` の行は `release_interrupted`（起動時）が
+        # `needs_recheck` へ落として claim を外すまで残るので、`job` を先に
+        # 消す手順 1 が外部キーで止まる。**一覧は `ACTIVE_STATES` をそのまま使う**
+        # （自分で書き写すと、片方を直したときにもう片方が置き去りになる）。
+        marks = ", ".join("?" * len(ACTIVE_STATES))
+        claimed = conn.execute(
+            f"SELECT count(*) AS n FROM upload_record WHERE state IN ({marks})",  # noqa: S608
+            ACTIVE_STATES,
+        ).fetchone()["n"]
+        if claimed:
+            raise ResetNotPossible(
+                "回収待ちの送信があるので、いまはリセットできない", "upload_claim_pending"
             )
 
         # 1. 作業の記録。**作り直せる**（再スキャン・再検出）。

@@ -17,6 +17,7 @@ import pytest
 from mediaferry.clock import now_iso
 from mediaferry.db.connection import Database
 from mediaferry.db.profiles import ProfileRegistry
+from mediaferry.db.uploads import ACTIVE_STATES
 from mediaferry.ids import new_id
 
 from .test_schema_artifacts import a_media_file, a_merge_group, a_source_entry, a_staging
@@ -262,3 +263,73 @@ def test_a_running_job_still_reports_job_in_flight(client, api_db):
     api_db.commit()
     body = client.post("/api/reset", json={"scope": "jobs"}).json()
     assert body["error"]["code"] == "job_in_flight"
+
+
+# ------------------------------------------------------------------ 回収待ちの claim
+#
+# `upload_record.claim_job_id -> job(id) ON DELETE RESTRICT` は
+# `artifact_staging.job_id` と同じ形の外部キー。`job` を先に消す手順 1 は
+# どの段でも走るので、放置された claim が 1 行でもあれば 4 段すべてが
+# 外部キーで落ちる（`db/uploads.py` の `release_interrupted` が起動時まで
+# 回収しない行）。
+
+
+def an_active_claim(api_db, ref, job_id: str, fs_uuid: str, state: str) -> str:
+    """`ACTIVE_STATES` のまま残った送信. `release_interrupted` が回収するまで
+    `claim_job_id` で `job` を掴み続ける."""
+    media = a_media_file(api_db, ref, rel_path=f"library/{fs_uuid}.MP4")
+    destination = a_destination(api_db, name=fs_uuid)
+    return an_upload(
+        api_db,
+        destination,
+        media,
+        state=state,
+        claim_job_id=job_id,
+        claim_token="token",
+        claim_expires_at=now_iso(),
+        destination_revision_id=destination[1],
+    )
+
+
+@pytest.mark.parametrize("scope", ["jobs", "uploads", "library", "all"])
+def test_a_reset_is_refused_while_an_upload_claim_is_pending(client, api_db, ref, scope):
+    """**放置された claim も消さずに断る.** `job` を先に消すと外部キーで落ちる."""
+    job_id = a_job(api_db)
+    upload_id = an_active_claim(api_db, ref, job_id, "RESET-TEST-CLAIM", ACTIVE_STATES[0])
+    api_db.commit()
+
+    response = client.post("/api/reset", json={"scope": scope})
+
+    assert response.status_code == 409
+    assert api_db.execute("SELECT 1 FROM job WHERE id = ?", (job_id,)).fetchone() is not None
+    assert (
+        api_db.execute("SELECT 1 FROM upload_record WHERE id = ?", (upload_id,)).fetchone()
+        is not None
+    )
+
+
+@pytest.mark.parametrize("state", ACTIVE_STATES)
+def test_a_reset_is_refused_for_every_active_state(client, api_db, ref, state):
+    """**`ACTIVE_STATES` の全語彙で断る.** 一覧を書き写した独自の部分集合に
+    差し替えても、この 1 本が漏れを拾う（`ACTIVE_STATES[0]` だけを使うテストは
+    その先頭語だけ含む書き写しを見逃す）。"""
+    job_id = a_job(api_db)
+    an_active_claim(api_db, ref, job_id, f"RESET-TEST-{state}", state)
+    api_db.commit()
+
+    response = client.post("/api/reset", json={"scope": "jobs"})
+
+    assert response.status_code == 409
+    assert response.json()["error"]["code"] == "upload_claim_pending"
+
+
+def test_a_refused_claim_reset_reports_its_own_code(client, api_db, ref):
+    """**`job_in_flight` でも `staging_pending` でもない.** どちらも実際には
+    当てはまらない理由（放置された claim）なので、別の `code` で断る。"""
+    job_id = a_job(api_db)
+    an_active_claim(api_db, ref, job_id, "RESET-TEST-CLAIM-CODE", ACTIVE_STATES[0])
+    api_db.commit()
+
+    body = client.post("/api/reset", json={"scope": "jobs"}).json()
+
+    assert body["error"]["code"] not in ("job_in_flight", "staging_pending")
