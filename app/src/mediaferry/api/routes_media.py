@@ -552,6 +552,7 @@ def _destinations(conn, media_id: str) -> list[dict[str, Any]]:  # noqa: ANN001
                     "name": info["name"],
                     "state": None,
                     "presence": "not_sent",
+                    "upload_id": None,
                 }
             )
             continue
@@ -562,6 +563,7 @@ def _destinations(conn, media_id: str) -> list[dict[str, Any]]:  # noqa: ANN001
                 "name": info["name"],
                 "state": best["state"],
                 "presence": _presence(best),
+                "upload_id": best["upload_id"],
             }
         )
     return result
