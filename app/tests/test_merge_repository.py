@@ -260,9 +260,9 @@ def test_releasing_only_moves_a_merging_group(db, profile):
 def test_regrouping_across_two_groups_is_refused_not_a_crash(db, profile):
     """**2 つのグループを 1 つにまとめる操作は、必ずこの経路を通る**（§13）.
 
-    実機で結合判定を直した後、既に 2 つに割れて検出されていたものを組み直そうと
-    して 500 になった。`create_manual` は同じ IntegrityError を捕まえて 409 で
-    断っているのに、`supersede` にだけその処理が無かった。
+    `create_manual` は同じ `IntegrityError` を捕まえて 409 で断る。`supersede`
+    でも同じ形で断ることを確かめる —— 既に 2 つに割れて検出されているものを
+    組み直そうとする操作は、クラッシュではなく 409 になるべき。
     """
     repo = MergeRepository(db)
     first = repo.save_detected(profile, a_candidate(db, profile, prefix="AAA"), "digest-a")
@@ -278,10 +278,9 @@ def test_regrouping_across_two_groups_is_refused_not_a_crash(db, profile):
 def test_discarding_a_group_frees_its_files(db, profile):
     """**破棄したグループはファイルを手放す。** さもないと組み直す経路が無い.
 
-    `active` が `superseded_by_id` だけの写しだった頃は、破棄しても member が
-    active のまま残り、再検出の境界になっていた。2 つのグループを 1 つにまとめる
-    操作（§13 の supersede）も、相手側の member が active なので必ず 409 になる。
-    実機で、割れて検出された 5 パートを組み直せずに詰まった。
+    破棄しても member が active のまま残ると、再検出の境界になる。2 つの
+    グループを 1 つにまとめる操作（§13 の supersede）も、相手側の member が
+    active だと必ず 409 になり、割れて検出されたパートを組み直せなくなる。
     """
     repo = MergeRepository(db)
     candidate = a_candidate(db, profile)

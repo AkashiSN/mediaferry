@@ -121,10 +121,10 @@ def test_same_filesystem_check_reports_a_split_layout(data_root, monkeypatch):
 # ----------------------------------------------------------------------
 # レイアウトの用意（§7）
 #
-# **手で作らせない。** 手順書の `mkdir -p <dataset>/{library,...}` は、起動時の
-# 同一ファイルシステム検査を通すためだけに存在していた（無いと `stat` が
-# `FileNotFoundError` で落ち、原因も読めない）。所有者の付与（`chown`）だけは
-# アプリにはできない —— 自分に権限を与えることになるため。
+# **手で作らせない。** `ensure_layout` が §7 の 5 つのディレクトリを先に揃える。
+# 起動時の同一ファイルシステム検査が `stat` するので、無いと `FileNotFoundError`
+# で落ち、原因も読めない。所有者の付与（`chown`）だけはアプリにはできない
+# —— 自分に権限を与えることになるため。
 
 
 def test_the_layout_is_created_under_an_empty_dataset(tmp_path):

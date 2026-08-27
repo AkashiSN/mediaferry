@@ -227,8 +227,8 @@ def test_a_reset_is_refused_while_a_publish_waits_to_be_recovered(client, api_db
     # 次の判断ができない。**全体の件数では見ない**
     # （`test_a_reset_is_refused_while_a_job_is_running` と同じ注意）——
     # `client` fixture の既定ボリュームを監視が自動でスキャンし、別の `job` を
-    # 積むことがある（実測: フルスイート実行時に発生し、件数一致の断言は
-    # flaky だった）。
+    # 積むことがある。件数一致の断言は、フルスイート実行時にこの監視の分だけ
+    # ずれうる（flaky になる）。
     assert api_db.execute("SELECT 1 FROM job WHERE id = ?", (job_id,)).fetchone() is not None
     assert (
         api_db.execute("SELECT 1 FROM artifact_staging WHERE state = 'staged'").fetchone()
