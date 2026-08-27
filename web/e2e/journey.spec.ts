@@ -501,7 +501,12 @@ test("狭い画面のボタンは 44px 以上", async ({ page }) => {
   // **最初の 1 件で止めない。** 落ちるたびに 1 つずつ直すと、次に何が待って
   // いるかが分からないまま何度も回すことになる。全画面ぶんを集めてから見せる。
   const tooSmall: string[] = [];
-  for (const path of await screensWithDetail(page)) {
+  // **巡ったパスをここへ集める。** `tooSmall` が空でも「巡るべき画面を
+  // 巡り切ったか」までは確かめられない —— くわしくのページが巡回から漏れて
+  // いても、残った画面がすべて 44px 以上なら `tooSmall` は空のまま検査が
+  // 通ってしまう。
+  const visitedPaths = await screensWithDetail(page);
+  for (const path of visitedPaths) {
     await page.goto(app.url + path);
     await settled(page);
     for (const button of await page.locator(TAPPABLE).all()) {
@@ -521,6 +526,12 @@ test("狭い画面のボタンは 44px 以上", async ({ page }) => {
     }
   }
   expect(tooSmall, tooSmall.join(" / ")).toEqual([]);
+  // **巡ったのが静的な `SCREENS` だけでないことも確かめる。** ここまでに
+  // 取り込んだ写真があれば、`screensWithDetail` はくわしくの住所を 1 件
+  // 足して返す。この断言が無いと、`screensWithDetail` を `SCREENS` へ戻す
+  // 変異が入っても検査は落ちない（くわしくが巡回から漏れたことを、大きさの
+  // 検査だけでは検出できない）。
+  expect(visitedPaths.length).toBeGreaterThan(SCREENS.length);
 });
 
 /**
