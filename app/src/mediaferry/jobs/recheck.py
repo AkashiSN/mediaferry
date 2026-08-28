@@ -16,14 +16,7 @@ import sqlite3
 from collections.abc import Callable
 from dataclasses import dataclass
 
-from ..adapters.immich import (
-    BULK_CHECK_BATCH,
-    ImmichAuthFailed,
-    ImmichClient,
-    ImmichProtocolError,
-    ImmichRedirected,
-    ImmichUnavailable,
-)
+from ..adapters.immich import BULK_CHECK_BATCH, ImmichClient, ImmichError
 from ..clock import now_iso
 from ..core.lease_pulse import with_lease_pulse
 from ..db.jobs import JobContext, LeaseLost
@@ -212,17 +205,17 @@ class Rechecker:
         照合の結果は既に commit されているので、ここから外へ例外を出すと
         「何件をどれに戻したか」の記録ごと失われる。組の照合は次の再確認で
         やり直せる。
+
+        **相手側は `ImmichError` の族ごと受け止める。** この段の失敗はどれも
+        「今回は相手の組を読めなかった」の 1 つの意味しか持たず、5xx でも 4xx でも
+        redirect でも壊れた応答でも、することは同じ（報告して次の再確認へ回す）。
+        `jobs/stacker.py` が再試行の余地で 2 つに分けているのは、あちらが
+        `stack_reason` として結論を書き残すため。ここには書き残す結論が無い。
+        族で受けると、adapter に新しい失敗が増えても**この経路は閉じたまま**になる。
         """
         try:
             return self._reconcile(ctx, revision)
-        except (
-            ImmichUnavailable,
-            ImmichAuthFailed,
-            ImmichRedirected,
-            ImmichProtocolError,
-            PreflightFailed,
-            LeaseLost,
-        ) as exc:
+        except (ImmichError, PreflightFailed, LeaseLost) as exc:
             # **相手由来の文言も、こちらの method / path / 状態コードも混ぜない**
             # （§13）。詳しい中身は運用ログへ回す。
             logger.warning("組の照合ができなかった: %s", exc)

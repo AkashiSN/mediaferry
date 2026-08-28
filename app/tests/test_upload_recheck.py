@@ -1010,3 +1010,46 @@ def test_a_lease_lost_after_the_write_still_reports_what_was_written(world, monk
 
     assert outcome.checked == 2
     assert outcome.unstacked == 0
+
+
+def test_a_rejected_stack_listing_still_reports_the_invalidation(world):
+    """**4xx でも同じ。** `GET /api/stacks` を持たない相手・間に立つ代理が返す 404.
+
+    5xx だけを受け止めると、404 / 400 / 429 で「無効化は commit 済み・報告なし」が
+    そのまま再現する。この段の失敗はどれも「今回は相手の組を読めなかった」で、
+    することも同じ（報告して次の再確認へ回す）。
+    """
+    server, rechecker, ctx, destination_id, db = world
+    a_stacked_pair(world)
+    server.stacks["stack-1"] = {"primary": "asset-1", "assets": ["asset-1", "asset-2"]}
+    vanished = a_vanished_record(world)
+    original = server.route
+
+    def reject_the_stack_listing(method, path, body, headers):
+        if method == "GET" and path == "/api/stacks":
+            return 404, {"message": "relayed-remote-wording"}
+        return original(method, path, body, headers)
+
+    server.route = reject_the_stack_listing
+
+    outcome = rechecker.run(ctx, destination_id)
+
+    assert outcome.vanished == 1
+    assert outcome.checked == 3
+    assert outcome.unstacked == 0
+    assert (
+        db.execute(
+            "SELECT invalidated_reason FROM upload_record WHERE id = ?", (vanished,)
+        ).fetchone()["invalidated_reason"]
+        == "remote_missing"
+    )
+    messages = messages_of(db, ctx.job_id)
+    assert messages.index(
+        "リモートに存在しないので、まだ送っていないものに戻した"
+    ) < messages.index("組の照合ができなかった")
+    # 相手の文言も、こちらの method / path / 状態コードも混ぜない（§13）。
+    assert not [
+        message
+        for message in messages
+        if "relayed-remote-wording" in message or "404" in message or "/api/stacks" in message
+    ]
