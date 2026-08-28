@@ -102,8 +102,28 @@ CREATE INDEX upload_record_live_pair
 
 -- 同一性の一意性。**有効な行だけを見る。** 無効化された行は監査履歴なので、
 -- 同じ組に何行あってもよい。
+--
+-- **列順は `(media_file_id, target_epoch, destination_id)`。** 一意性は列の集合で
+-- 決まるので順序は守るものを変えないが、**述語が同じ部分索引どうしは、先頭の
+-- 列が重なると計画を奪い合う**。この索引は既存の 2 本と同じ
+-- `WHERE invalidated_at IS NULL` を持つので、両方を避ける並びを選ぶ。
+--
+-- `destination_id` を先頭に置くと `upload_record_claimable`
+-- （`(destination_id, state)`）から奪う。そうなると `claim_next` は
+-- 「pending の行だけを辿る」から「その宛先・epoch の有効な全行（complete を
+-- 含む）を辿って state で捨てる」へ落ちる。claim はファイル 1 本ごとに走るので、
+-- 同期 1 回が O(N^2) になる。
+--
+-- `(media_file_id, destination_id, ...)` の並びは `upload_record_live_pair`
+-- （`(media_file_id, destination_id)`）から奪う。探索鍵は同じ 2 列なので速さは
+-- 変わらないが、駆動する索引を固定したテスト（`0019`）が指すものと食い違う。
+--
+-- **統計（`ANALYZE`）はどこでも取っていない**ので、選ばれた計画がそのまま
+-- 実機に出る。`target_epoch` を 2 番目に挟めば、`destination_id` 単独にも
+-- `(media_file_id, destination_id)` にも当たらない。3 列とも等値で
+-- `invalidated_at IS NULL` を持つ引き（送信対の解決）は、3 列とも鍵に入る。
 CREATE UNIQUE INDEX upload_record_live_identity
-    ON upload_record (destination_id, target_epoch, media_file_id)
+    ON upload_record (media_file_id, target_epoch, destination_id)
     WHERE invalidated_at IS NULL;
 
 -- 複合外部キーは destination_revision_id が NULL だと効かない。pending の行が
