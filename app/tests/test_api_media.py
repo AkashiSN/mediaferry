@@ -586,3 +586,42 @@ def test_a_destination_without_a_record_has_no_upload_id(client, db):
     a_destination(db, name="no-record-test")
     body = client.get(f"/api/media/{media_id}").json()
     assert body["destinations"][0]["upload_id"] is None
+
+
+# ------------------------------------------------------------------ 撮影日時のゾーン
+#
+# **画面は撮影日時に印を添える**（§13）。`timezone_policy: none` の値は `+00:00` で
+# 保存されるので、オフセットだけでは本当に UTC で撮ったものと区別が付かない。
+# 見分けられるのは `captured_at_tz` が空かどうかだけ。
+
+
+def test_a_media_row_carries_the_zone_of_the_shot(client, db):
+    from .test_schema_artifacts import a_media_file
+    from .test_schema_sources import a_profile
+
+    profile = a_profile(db, slug="media-tz")
+    media = a_media_file(
+        db,
+        profile,
+        rel_path="library/media-tz/A.MP4",
+        captured_at="2026-08-26T12:33:05+09:00",
+        captured_at_tz="Asia/Tokyo",
+    )
+
+    assert client.get(f"/api/media/{media}").json()["captured_at_tz"] == "Asia/Tokyo"
+
+
+def test_a_media_row_without_a_zone_says_so(client, db):
+    from .test_schema_artifacts import a_media_file
+    from .test_schema_sources import a_profile
+
+    profile = a_profile(db, slug="media-notz")
+    media = a_media_file(
+        db,
+        profile,
+        rel_path="library/media-notz/B.MP4",
+        captured_at="2026-08-26T12:33:05+00:00",
+        captured_at_tz=None,
+    )
+
+    assert client.get(f"/api/media/{media}").json()["captured_at_tz"] is None

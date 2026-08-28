@@ -7,6 +7,7 @@ import { MemoryRouter } from "react-router-dom";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { emitJob, failStream, openStream } from "../../test/setup";
+import { DashboardProvider } from "../../api/dashboard";
 import { stubApi } from "../../test/api";
 import { JobHistoryScreen } from "./JobHistory";
 
@@ -14,6 +15,22 @@ beforeEach(() => {
   document.cookie = "XSRF-TOKEN=token; path=/";
 });
 afterEach(() => vi.restoreAllMocks());
+
+/** 集計は使わないので、必要な欄だけ。**時刻の印の出所はここ。** */
+const EMPTY_DASHBOARD = {
+  media_total: 0,
+  destinations: [],
+  running_jobs: 0,
+  recent_imports: [],
+  orphans: 0,
+  missing: 0,
+  warnings: [],
+  merge_candidates: 0,
+  merge_review_total: 0,
+  unsent_total: 0,
+  awaiting_total: 0,
+  default_timezone: null,
+};
 
 describe("作業の履歴", () => {
   it("いまどのファイルをどこまで書いたかを出す", async () => {
@@ -133,8 +150,40 @@ describe("作業の履歴", () => {
       </MemoryRouter>,
     );
 
-    // システム時刻（UTC）をそのまま出すと現地時刻に見えるので、印を添える。
+    // **設定が読めていなければ直さない。** UTC のまま印を添える（枠の外で描く
+    // この形は実際には起きないが、印の無い数字だけは絶対に出さない）。
     expect(await screen.findByText(/終わった日時: 2026年8月21日 00:10（UTC）/)).toBeInTheDocument();
+  });
+
+  // **システム時刻は設定したタイムゾーンへ直して出す**（§13、利用者の要望
+  // 2026-08-28）。UTC のまま出すと、利用者は毎回 9 時間を足して読むことになる。
+  it("終わった日時は、設定したタイムゾーンへ直して出す", async () => {
+    stubApi({
+      "/dashboard": { ...EMPTY_DASHBOARD, default_timezone: "Asia/Tokyo" },
+      "/jobs": {
+        jobs: [
+          {
+            id: "j1",
+            type: "merge",
+            status: "succeeded",
+            created_at: "2026-08-21T00:00:00+00:00",
+            started_at: "2026-08-21T00:00:00+00:00",
+            finished_at: "2026-08-21T00:10:00+00:00",
+            progress: null,
+          },
+        ],
+      },
+    });
+    render(
+      <MemoryRouter>
+        <DashboardProvider>
+          <JobHistoryScreen />
+        </DashboardProvider>
+      </MemoryRouter>,
+    );
+
+    expect(await screen.findByText(/終わった日時: 2026年8月21日 09:10（JST）/)).toBeInTheDocument();
+    expect(screen.queryByText(/00:10（UTC）/)).toBeNull();
   });
 
   it("終わった日時と最後の文言は、カードの中に描く（箱の外に出さない）", async () => {

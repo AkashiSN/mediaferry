@@ -74,14 +74,25 @@ def dashboard(state=Depends(get_state), conn=Depends(get_conn)) -> dict[str, Any
     settings = SettingsService(conn, state.env).snapshot()
     return {
         "media_total": media_total,
+        # **画面が時刻に印を添えるために要る。** この 1 つのために画面ごとへ
+        # `/settings` を引かせない（この集計はアプリ全体で 1 度だけ引かれる）。
+        "default_timezone": settings.default_timezone,
         "destinations": [_destination_summary(conn, row) for row in _destinations(conn)],
         "running_jobs": conn.execute(
             "SELECT count(*) AS n FROM job WHERE status IN ('running', 'cancelling')"
         ).fetchone()["n"],
+        # **撮影日時にはゾーンを添える。** 画面はこれで印を作る（`timezone_policy:
+        # none` の値は `+00:00` で保存されるので、オフセットだけでは本当に UTC で
+        # 撮ったものと区別が付かない）。
         "recent_imports": [
-            {"id": row["id"], "rel_path": row["rel_path"], "captured_at": row["captured_at"]}
+            {
+                "id": row["id"],
+                "rel_path": row["rel_path"],
+                "captured_at": row["captured_at"],
+                "captured_at_tz": row["captured_at_tz"],
+            }
             for row in conn.execute(
-                "SELECT id, rel_path, captured_at FROM media_file"
+                "SELECT id, rel_path, captured_at, captured_at_tz FROM media_file"
                 " ORDER BY created_at DESC, id DESC LIMIT 10"
             )
         ],

@@ -350,6 +350,8 @@ def group_view(repo: MergeRepository, row, current_revisions: dict[str, str]) ->
                 "size_bytes": member["size_bytes"],
                 "duration_seconds": member["duration_seconds"],
                 "captured_at": member["captured_at"],
+                # 画面が撮影日時に添える印の出所（`routes_media._media` と同じ）。
+                "captured_at_tz": member["captured_at_tz"],
                 "missing_at": member["missing_at"],
             }
             for member in repo.members(row["id"])

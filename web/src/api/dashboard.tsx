@@ -33,7 +33,14 @@ export type Dashboard = DashboardCounts & {
   media_total: number;
   destinations: DestinationSummary[];
   running_jobs: number;
-  recent_imports: { id: string; rel_path: string; captured_at: string }[];
+  /** 設定した `DEFAULT_TIMEZONE`。未設定なら `null`（画面は UTC のまま印を添える）。 */
+  default_timezone: string | null;
+  recent_imports: {
+    id: string;
+    rel_path: string;
+    captured_at: string;
+    captured_at_tz: string | null;
+  }[];
   orphans: number;
   missing: number;
   warnings: { code: string; message: string }[];
@@ -45,6 +52,17 @@ export function DashboardProvider({ children }: { children: ReactNode }) {
   const dashboard = useQuery<Dashboard>("/dashboard");
   useReloadOnEvents(useEventCount(), dashboard.reload);
   return <DashboardContext.Provider value={dashboard}>{children}</DashboardContext.Provider>;
+}
+
+/**
+ * 設定した `DEFAULT_TIMEZONE`（時刻に添える印の出所）。
+ *
+ * **`useDashboard` と違って、外側で呼んでも投げない。** 印は補助的な表示なので、
+ * まだ読めていない・枠の外にいるというだけで画面を壊さない —— そのときは `null` を
+ * 返し、システム時刻は UTC のまま印を添える（`formatSystemDateTime`）。
+ */
+export function useDefaultTimezone(): string | null {
+  return useContext(DashboardContext)?.data?.default_timezone ?? null;
 }
 
 /** **`DashboardProvider` の内側でだけ使える。** 外側で使うと 2 本目を引くことになる。 */

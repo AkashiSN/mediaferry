@@ -1131,7 +1131,10 @@ class UploadRepository:
                 # 要る値も、ここで一緒に継いで返す（1 度に 200 件出す画面がある）。
                 "SELECT r.*, m.rel_path AS rel_path,"  # noqa: S608
                 "       m.profile_id AS media_profile_id,"
-                "       m.captured_at AS media_captured_at"
+                "       m.captured_at AS media_captured_at,"
+                # 画面が撮影日時と補正案に添える印の出所（`routes_media._media`
+                # と同じ。空なら画面が `DEFAULT_TIMEZONE` とみなす）。
+                "       m.captured_at_tz AS media_captured_at_tz"
                 " FROM upload_record r"
                 " JOIN media_file m ON m.id = r.media_file_id"
                 f" WHERE {where} ORDER BY r.updated_at DESC LIMIT ?",

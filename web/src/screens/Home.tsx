@@ -13,7 +13,7 @@ import { useState } from "react";
 import { Link } from "react-router-dom";
 
 import { request } from "../api/client";
-import { useDashboard } from "../api/dashboard";
+import { useDashboard, useDefaultTimezone } from "../api/dashboard";
 import type { DestinationSummary } from "../api/dashboard";
 import { useMutation, useQuery } from "../api/hooks";
 import { CardStanding } from "../components/CardStanding";
@@ -33,7 +33,7 @@ import { isCancellable, isLive, useJobPulse } from "../hooks/useJobPulse";
 import { useQueuedJobs } from "../hooks/useQueuedJobs";
 import { useReloadOnEvents } from "../hooks/useReloadOnEvents";
 import { useReloadWhenSettled } from "../hooks/useReloadWhenSettled";
-import { formatDateTime } from "../utils/formatDateTime";
+import { formatCapturedDateTime } from "../utils/formatDateTime";
 
 type Devices = { volumes: Volume[] };
 type Profile = { slug: string; name: string };
@@ -61,6 +61,8 @@ export function HomeScreen() {
   useReloadOnEvents(received, profiles.reload);
 
   const action = useMutation();
+  // 時刻に添える印（§13）。読めていなければ `null`（システム時刻は UTC のまま出す）。
+  const defaultZone = useDefaultTimezone();
   const [confirming, setConfirming] = useState<{ confirmation: Confirmation; id: string } | null>(
     null,
   );
@@ -446,7 +448,10 @@ export function HomeScreen() {
                     `captured_at` の ISO 文字列は読める日時に写す。 */}
                 {(dashboard.data?.recent_imports ?? []).map((media) => (
                   <li key={media.id} className="small">
-                    {fileName(media.rel_path)}（{formatDateTime(media.captured_at)}）
+                    {/* **括弧で括らない。** 日時が自分の印（「（JST）」）を持つので、
+                        括ると二重括弧になって誤植のように見える。 */}
+                    {fileName(media.rel_path)} ・{" "}
+                    {formatCapturedDateTime(media.captured_at, media.captured_at_tz, defaultZone)}
                   </li>
                 ))}
               </ul>

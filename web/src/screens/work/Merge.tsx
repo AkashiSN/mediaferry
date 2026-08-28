@@ -8,7 +8,7 @@ import { useRef, useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
 
 import { request } from "../../api/client";
-import { useDashboardReload } from "../../api/dashboard";
+import { useDashboardReload, useDefaultTimezone } from "../../api/dashboard";
 import { useMutation, useQuery } from "../../api/hooks";
 import { ConfirmDialog } from "../../components/ConfirmDialog";
 import type { Confirmation } from "../../components/ConfirmDialog";
@@ -19,7 +19,7 @@ import { useDialogFocus } from "../../components/useDialogFocus";
 import { useEvents } from "../../hooks/useEvents";
 import { useReloadOnEvents } from "../../hooks/useReloadOnEvents";
 import { formatBytes } from "../../utils/formatBytes";
-import { formatDateTime } from "../../utils/formatDateTime";
+import { formatCapturedDateTime } from "../../utils/formatDateTime";
 
 export type Member = {
   position: number;
@@ -28,6 +28,7 @@ export type Member = {
   size_bytes: number;
   duration_seconds: number | null;
   captured_at: string;
+  captured_at_tz: string | null;
 };
 /**
  * 検証の 1 項目（`core/merge/verify.py` の `Check`）。`verdict` は
@@ -231,6 +232,8 @@ export function MergeScreen() {
   const [regrouping, setRegrouping] = useState<Group | null>(null);
   const edit = useMutation();
   const { received } = useEvents();
+  // 時刻に添える印（§13）。読めていなければ `null`（システム時刻は UTC のまま出す）。
+  const defaultZone = useDefaultTimezone();
   useReloadOnEvents(received, groups.reload);
   const [confirmation, setConfirmation] = useState<{
     value: Confirmation;
@@ -307,7 +310,7 @@ export function MergeScreen() {
                     {member.rel_path}
                   </span>
                   <span className="small">
-                    {formatBytes(member.size_bytes)} ・ {formatDateTime(member.captured_at)} ・
+                    {formatBytes(member.size_bytes)} ・ {formatCapturedDateTime(member.captured_at, member.captured_at_tz, defaultZone)} ・
                     {member.duration_seconds === null ? "—" : ` ${Math.round(member.duration_seconds)} 秒`}
                   </span>
                 </li>

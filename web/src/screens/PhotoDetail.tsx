@@ -13,7 +13,8 @@ import { ErrorBanner } from "../components/ErrorBanner";
 import { Icon } from "../components/Icon";
 import { fileName } from "../components/MediaTile";
 import { formatBytes } from "../utils/formatBytes";
-import { formatDateTime } from "../utils/formatDateTime";
+import { useDefaultTimezone } from "../api/dashboard";
+import { formatCapturedDateTime } from "../utils/formatDateTime";
 // **つなぐ画面と同じ部品・同じ判断を使う。** 書き写すと、採用できる条件が
 // 2 か所に分かれ、片方だけが古くなる（`SENDABLE_CLAUSE` と揃っていないと、
 // 押しても送れるようにならないボタンが出る）。
@@ -49,6 +50,7 @@ type MediaDetail = {
   kind: string;
   captured_at: string;
   captured_at_source: string;
+  captured_at_tz: string | null;
   duration_seconds: number | null;
   probe_state: string;
   missing_at: string | null;
@@ -128,6 +130,8 @@ export function PhotoDetailScreen() {
   // 描画のたびに選択が既定へ戻る。
   const memberKey = members === null ? "" : members.map((member) => member.id).join(",");
   const [includedKey, setIncludedKey] = useState("");
+  // 時刻に添える印（§13）。読めていなければ `null`（システム時刻は UTC のまま出す）。
+  const defaultZone = useDefaultTimezone();
   const [included, setIncluded] = useState<Set<string> | null>(null);
   // **描画の途中で比べてその場で更新する。** `useEffect` で書くと、このリポジトリの
   // react-hooks/set-state-in-effect（「効果の中で同期的に setState する」形を
@@ -244,7 +248,7 @@ export function PhotoDetailScreen() {
               <p className="muted">つないだ動画（{data.sources.length} 本から）</p>
             )}
             <p className="small">
-              {formatDateTime(data.captured_at)}
+              {formatCapturedDateTime(data.captured_at, data.captured_at_tz, defaultZone)}
               {data.kind === "video" && data.duration_seconds != null
                 ? ` ・ ${formatDuration(data.duration_seconds)}`
                 : ""}

@@ -10,7 +10,7 @@
 import { useState } from "react";
 
 import { request } from "../../api/client";
-import { useDashboardReload } from "../../api/dashboard";
+import { useDashboardReload, useDefaultTimezone } from "../../api/dashboard";
 import { useMutation, useQuery } from "../../api/hooks";
 import { ConfirmDialog } from "../../components/ConfirmDialog";
 import { BackLink } from "../../components/BackLink";
@@ -18,7 +18,7 @@ import { ErrorBanner } from "../../components/ErrorBanner";
 import { fileName, MediaTile } from "../../components/MediaTile";
 import { useEvents } from "../../hooks/useEvents";
 import { useReloadOnEvents } from "../../hooks/useReloadOnEvents";
-import { formatDateTime, formatSystemDateTime } from "../../utils/formatDateTime";
+import { formatCapturedDateTime, formatSystemDateTime } from "../../utils/formatDateTime";
 
 type Record_ = {
   id: string;
@@ -28,6 +28,7 @@ type Record_ = {
   rel_path: string | null;
   origin: string;
   remote_current: string | null;
+  captured_at_tz: string | null;
   proposed: string | null;
   remote_checked_at: string | null;
   identical: boolean;
@@ -50,6 +51,8 @@ export function ApproveScreen() {
   // 2 つあると、id だけでは画面から判別できない）。
   const destinations = useQuery<Destinations>("/destinations");
   const decision = useMutation();
+  // 時刻に添える印（§13）。両側とも提案のオフセットで並ぶので、印は 1 つでよい。
+  const defaultZone = useDefaultTimezone();
   const { received } = useEvents();
   useReloadOnEvents(received, records.reload);
   const [approving, setApproving] = useState<Record_ | null>(null);
@@ -134,19 +137,27 @@ export function ApproveScreen() {
                       {/* 読めなかった値は空欄にしない（「変更なし」に見えてしまう）。 */}
                       {record.remote_current === null
                         ? "（読めませんでした）"
-                        : formatDateTime(record.remote_current)}
+                        : formatCapturedDateTime(
+                            record.remote_current,
+                            record.captured_at_tz,
+                            defaultZone,
+                          )}
                     </div>
                   </div>
                   <div style={{ alignSelf: "center", color: "var(--ink-3)" }}>→</div>
                   <div>
                     <div className="small">直したい日時</div>
                     <div style={{ fontSize: 15, fontWeight: 600, marginTop: 2, color: "var(--accent-deep)" }}>
-                      {record.proposed === null ? "—" : formatDateTime(record.proposed)}
+                      {record.proposed === null
+                        ? "—"
+                        : formatCapturedDateTime(record.proposed, record.captured_at_tz, defaultZone)}
                     </div>
                   </div>
                 </div>
                 <p className="small" style={{ marginTop: 8 }}>
-                  観測した時刻: {record.remote_checked_at ? formatSystemDateTime(record.remote_checked_at) : "—"}
+                  観測した時刻: {record.remote_checked_at
+                    ? formatSystemDateTime(record.remote_checked_at, defaultZone)
+                    : "—"}
                 </p>
               </div>
               <div className="acts">
@@ -172,9 +183,18 @@ export function ApproveScreen() {
             kind: "approve_datetime",
             // 確認にも読める形で出す（画面の表示と同じ言い方にする）。
             current:
-              approving.remote_current === null ? null : formatDateTime(approving.remote_current),
+              approving.remote_current === null
+                ? null
+                : formatCapturedDateTime(
+                    approving.remote_current,
+                    approving.captured_at_tz,
+                    defaultZone,
+                  ),
             // カードの表示（「—」）と揃える。空文字だと「変更後 」で文が途切れる。
-            proposed: approving.proposed === null ? "—" : formatDateTime(approving.proposed),
+            proposed:
+              approving.proposed === null
+                ? "—"
+                : formatCapturedDateTime(approving.proposed, approving.captured_at_tz, defaultZone),
           }}
           busy={decision.busy}
           onCancel={() => setApproving(null)}
