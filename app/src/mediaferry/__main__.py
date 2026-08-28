@@ -1,6 +1,6 @@
 """起動エントリ.
 
-BIND_HOST の既定は loopback。Phase 4 で認証と CSRF が入るまで LAN へ公開しない。
+BIND_HOST の既定は loopback。LAN へ出すなら AUTH_PASSWORD を設定する。
 """
 
 from __future__ import annotations

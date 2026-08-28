@@ -382,7 +382,7 @@ def _refuse_ts_if_lossy(streams: Sequence[dict[str, Any]], keep: KeepStreams) ->
     """TS 経路が音を捨てるなら、走らせる前に諦める.
 
     **運べないと分かっているものを、運べるか試してから諦める理由が無い。**
-    4 GB のパートを mpegts へ書き直すだけで数分かかる。
+    十数 GiB のパートを mpegts へ書き直すだけで数分かかる。
     """
     blockers = ts_route_blockers(streams, keep)
     if blockers:

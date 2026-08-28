@@ -355,7 +355,7 @@ class MergeRepository:
         """
         # **まだ無効化されていない行だけを触る。** 既に無効化されている行の理由と
         # 時刻は最初のものを残す（上書きすると、監査で見えるのが二次的な文言に
-        # 変わる。Phase 3 の 4 巡目で確定した扱い）。
+        # 変わる）。
         self._conn.execute(
             "UPDATE upload_record SET invalidated_at = ?, invalidated_reason = ?, updated_at = ?"
             " WHERE invalidated_at IS NULL AND state IN ('pending', 'needs_recheck')"

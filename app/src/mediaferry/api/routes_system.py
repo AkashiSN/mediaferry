@@ -458,7 +458,7 @@ def _job(row, with_last_message: bool = False) -> dict[str, Any]:  # noqa: ANN00
     }
     if with_last_message:
         # **終わった作業の要約。** 画面が開く前に届いた知らせは持っていないので、
-        # ここで添えないと「完了」としか出せない（Phase 11 の N4）。
+        # ここで添えないと「完了」としか出せない（`docs/history/phase11-design.md` の N4）。
         view["last_message"] = row["last_message"]
     return view
 

@@ -253,7 +253,7 @@ class VolumeWatcher:
 def _params(row: Any) -> dict[str, Any]:  # noqa: ANN401 - sqlite3.Row
     """`VolumeSelection.to_params()` と同じ形を DB の行から組み立てる.
 
-    ジョブは選択した瞬間の presence を params に持つ（Phase 1 の契約）。
+    ジョブは選択した瞬間の presence を params に持つ。
     `volume_instance_id` だけを渡すと、実行時に「最新の presence」を選ぶことに
     なり、抜き差しで別のカードが来ていてもブローカーの TOCTOU 検証を通る。
     """

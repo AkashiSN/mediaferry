@@ -145,7 +145,7 @@ class ProfileRegistry:
         return [_to_ref(row) for row in rows]
 
     # ------------------------------------------------------------------
-    # 編集（Phase 5）
+    # 編集
 
     def _assert_editable(self, slug: str) -> sqlite3.Row:
         row = self._conn.execute(
@@ -288,7 +288,7 @@ _UNREADABLE_STACK_RULE = object()
 def _stack_rule_of(definition_json: str) -> object:
     """定義から `stack` 節を**正規化して**取り出す.
 
-    **生の dict で比べてはいけない。** Phase 6 より前のリビジョンの JSON には
+    **生の dict で比べてはいけない。** 古いリビジョンの JSON には
     `stack` キーが無く（省略時は `STACK_DISABLED` として読む）、新しい JSON は
     正規形で `{"enabled": false, ...}` を持つ。生で比べると**規則が実質変わって
     いないのに全件を戻す**ことになる。

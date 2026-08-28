@@ -34,7 +34,7 @@ from .profiles import ProfileRegistry
 
 INCLUDE_FAILED_GROUP_MEMBERS = "failed_group_members"
 INCLUDE_UNADOPTED_DERIVED = "unadopted_derived"
-# 1 応答で返す上限。画面の pagination は Phase 4。
+# 1 応答で返す上限。
 DEFAULT_LIMIT = 500
 
 _ORIGINALS = (
@@ -135,8 +135,7 @@ class SelectionService:
     ) -> list[Selectable]:
         """**返す件数に上限を置く。** 数万件の一覧を 1 応答に詰めない.
 
-        呼び出し側は `len(result) == limit` で打ち切りを判断する。カーソルを
-        使った本格的な pagination は、画面の要件が決まる Phase 4 で足す。
+        呼び出し側は `len(result) == limit` で打ち切りを判断する。
         """
         items = [
             Selectable(row["id"], row["rel_path"], row["role"], "default", None)

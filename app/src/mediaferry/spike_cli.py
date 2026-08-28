@@ -1,7 +1,7 @@
-"""Phase 0 の実測用 CLI.
+"""前提を実機で確かめるための CLI.
 
 別コンテナの mountd に繋ぎ、渡された dirfd 越しに実際のボリュームを読めるかを
-確かめる。判定は終了ステータスに反映する。Phase 1 以降では使わない。
+確かめる。判定は終了ステータスに反映する。**本体の経路では使わない。**
 """
 
 from __future__ import annotations
@@ -219,7 +219,7 @@ def walk_preview(
 def main() -> int:
     """判定を終了ステータスに反映する.
 
-    「実行した」だけで成功扱いにすると Phase 0 の中心命題に偽陽性が入る。
+    「実行した」だけで成功扱いにすると スパイクの中心命題に偽陽性が入る。
     必須条件を満たさなければ非ゼロで終わる。
     """
     socket_path = Path(os.environ.get(SOCKET_ENV, "/run/mediaferry/broker.sock"))

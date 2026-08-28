@@ -461,7 +461,7 @@ class Uploader:
         media: sqlite3.Row,
         reported: _Reported,
     ):
-        """**送信中もリースと claim を延ばす。** 28 GiB は 84.5 秒（Phase 0 の実測）.
+        """**送信中もリースと claim を延ばす。** 28 GiB は 84.5 秒（実測）.
 
         **送信スレッドは数えるだけ**（`reported.add`）で、その値を DB へ書くのは
         心拍を打つ待つ側（`progress`）。接続はスコープごとに 1 本のまま。

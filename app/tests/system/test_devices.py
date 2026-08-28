@@ -2,7 +2,7 @@
 
 **Canon の実カードは手元に無い**（§1 の「残っていること」3）。ここで通せるのは
 「仕様と `require` から組み立てた合成カードが `canon-eos` に確定する」ところまでで、
-実カードの構成とラベルは `docs/hardware-checklist.md` で見る。
+実カードの構成とラベルは `docs/history/hardware-checklist.md` で見る。
 """
 
 from __future__ import annotations

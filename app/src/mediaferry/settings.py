@@ -139,8 +139,7 @@ SETTING_SPECS: dict[str, SettingSpec] = {
         SettingSpec("BROKER_SOCKET", "/run/mediaferry/broker.sock", Path, Tier.BOOTSTRAP),
         # マスター鍵を DB へ置けると、暗号文と復号鍵が同じバックアップに入る。
         SettingSpec("SECRET_KEY", None, _secret_key, Tier.BOOTSTRAP, secret=True),
-        # Phase 4 で認証を入れるときに Argon2 ハッシュの保存先を別に作る。
-        # 平文を app_setting へ置く経路は作らない。
+        # Argon2 ハッシュの保存先は別に持つ。平文を app_setting へ置く経路は作らない。
         SettingSpec("AUTH_PASSWORD", None, str, Tier.BOOTSTRAP, secret=True),
         SettingSpec("BIND_HOST", "127.0.0.1", str, Tier.RESTART),
         # 名乗ってよいホスト名。**IP と localhost は既定で通す**（利用者が直に

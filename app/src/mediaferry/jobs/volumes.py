@@ -202,17 +202,16 @@ class VolumeService:
         #
         # mountd の `generation` は uevent の数ではなく、観測した集合の
         # `(volume_key, fs_uuid, fs_type, size_bytes)` が前回と変わったときだけ
-        # 進む（`mountd/server.py::_observe`）。Phase 1 は uevent を購読せず
-        # polling なので、同じ UUID・型・容量のカードが同じ major:minor で
+        # 進む（`mountd/server.py::_observe`）。uevent は購読せず polling なので、
+        # 同じ UUID・型・容量のカードが同じ major:minor で
         # 観測の合間に差し替わると、**generation も epoch も据え置きのまま**に
         # なる。既存の dirfd は `open_tree` で切り離した旧カードを指したままな
         # ので、流用すると旧カードの中身で新カードを判定することになる。
         # 複製カードだけでなく、UUID を保持した再フォーマットも同じ。
         #
-        # 代償は「GET /devices のたびに mount / umount が走る」こと。Phase 1 は
-        # 手動操作しか無いので許容する。避けたければ mountd 側に uevent を
-        # 取りこぼさない incarnation を持たせて handle と一覧の両方へ刻印する
-        # 必要があり、それは Phase 1 の範囲を超える。
+        # 代償は「GET /devices のたびに mount / umount が走る」こと。避けたければ
+        # mountd 側に uevent を取りこぼさない incarnation を持たせて handle と
+        # 一覧の両方へ刻印する必要があり、そこまでは要らないと判断している。
         observation = VolumeObservation.of(volume)
         handle = self._client.open_volume(volume)
         try:
