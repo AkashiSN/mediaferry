@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import datetime
 from typing import Any
 
 from fastapi import APIRouter, Body, Depends
@@ -273,9 +274,40 @@ def _datetime_diff(row, profiles: _ProfileCache | None) -> dict[str, Any]:  # no
         )
         proposed = plan.proposed
     current = row["remote_datetime_original"]
+    current_at = _instant(current)
+    proposed_at = _instant(proposed)
     return {
-        "remote_current": current,
+        # **提案と同じオフセットに直して返す。** 画面は文字列から壁時計を切り出す
+        # だけなので（`web/src/utils/formatDateTime.ts`）、片方が UTC のままだと
+        # 同じ瞬間が 9 時間ずれた 2 つの時刻として並ぶ。**直せないものはそのまま**
+        # （オフセットが無い値に「たぶん現地時刻だろう」と補わない）。
+        "remote_current": (
+            current_at.astimezone(proposed_at.tzinfo).isoformat()
+            if current_at is not None and proposed_at is not None
+            else current
+        ),
         "proposed": proposed,
+        # **瞬間で比べる。** Immich は日時を UTC へ正規化して返すので、`+09:00` で
+        # 書いた値は `+00:00` の表記で戻る。文字列の一致で見ると、同じ瞬間が常に
+        # 「違う」になり、`identical` が真になる場面が無くなる。
+        #
         # **読めなかったものを「変更なし」にしない**（承認を飛ばさせない）。
-        "identical": bool(current is not None and proposed is not None and current == proposed),
+        "identical": bool(
+            current_at is not None and proposed_at is not None and current_at == proposed_at
+        ),
     }
+
+
+def _instant(value: str | None) -> datetime | None:
+    """比べられる瞬間として読む. **読めない値とオフセットの無い値は `None`.**
+
+    オフセットが無い値は瞬間が決まらない（どの地の 14:30 か分からない）ので、
+    比較にも変換にも使わない。
+    """
+    if value is None:
+        return None
+    try:
+        parsed = datetime.fromisoformat(value)
+    except ValueError:
+        return None
+    return parsed if parsed.tzinfo is not None else None
