@@ -786,29 +786,6 @@ class UploadRepository:
                     written.add(stamp.record_id)
         return written
 
-    def stamp_remote(
-        self, record_id: str, asset_id: str | None, is_trashed: int, checked_at: str
-    ) -> None:
-        """再確認の結果を書く. **`complete` の行だけ**を対象にする.
-
-        進行中の行は所有者がいるので、claim を持たないこの経路では触らない。
-        """
-        with immediate(self._conn):
-            # **契約は「`complete` だけを対象」。** 組もその内側なので、先に確かめる。
-            still = self._conn.execute(
-                "SELECT 1 FROM upload_record WHERE id = ? AND state = 'complete'",
-                (record_id,),
-            ).fetchone()
-            if still is None:
-                return
-            # 資産 ID が変わるなら、スタックの結果を組ごと捨てる（上と同じ理由）。
-            self._reopen_stack_of(record_id, new_asset_id=asset_id)
-            self._conn.execute(
-                "UPDATE upload_record SET remote_asset_id = ?, remote_is_trashed = ?,"
-                " remote_checked_at = ?, updated_at = ? WHERE id = ? AND state = 'complete'",
-                (asset_id, is_trashed, checked_at, now_iso(), record_id),
-            )
-
     def stamp_remote_datetime(
         self,
         record_id: str,
