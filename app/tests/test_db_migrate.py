@@ -825,9 +825,9 @@ def test_existing_skips_go_back_to_unevaluated(tmp_path):
     **リビジョンの公開では戻らない。** `_publish_revision` が比べるのは
     `StackRule` へパースした後の値で、`tolerance_seconds` は dataclass に無く
     パーサも読まないため、旧 JSON と新 JSON が同じ値にパースされて差が出ない。
-    他の戻し口（`retry` は `failed` だけ、`requeue` はリモートから消えた
-    `complete` だけ、`recompute` の `_reopen_stack` はその実行で `captured_at` が
-    動いた行だけ）も、**両方が見送りの組**には効かない。一度きりの移行で戻す。
+    他の戻し口（`retry` は `failed` だけ、再確認の組の照合は `stacked` だけ、
+    `recompute` の `_reopen_stack` はその実行で `captured_at` が動いた行だけ）も、
+    **両方が見送りの組**には効かない。一度きりの移行で戻す。
 
     **既に組んだものには触らない。** `stacked` は「その資産を送った結果」なので、
     未評価へ戻すと同じ組をもう一度作りに行く。
@@ -1077,5 +1077,84 @@ def test_rows_survive_the_media_file_rebuild(tmp_path, monkeypatch):
         ).fetchone()[0]
         == media_id
     )
+    assert conn.execute("PRAGMA foreign_key_check").fetchall() == []
+    conn.close()
+
+
+def test_rows_survive_the_upload_record_rebuild(tmp_path, monkeypatch):
+    """**作り直しは中身を運ぶ**（`0027`）. 表制約を落とすために行を捨てない.
+
+    `0026` と同じ形で確かめる。全列に固有の値を入れた行が、移行の後も 1 つ残らず
+    同じ値であること —— `INSERT ... SELECT` の列を 1 つでも落としたら落ちる。
+    """
+    import shutil
+
+    from mediaferry.clock import now_iso
+    from mediaferry.db import migrate
+    from mediaferry.db.jobs import JobStore
+
+    from .test_schema_artifacts import a_media_file, a_merge_group
+    from .test_schema_sources import a_profile
+    from .test_schema_uploads import a_destination
+
+    original = migrate.MIGRATIONS_DIR
+    folder = tmp_path / "m"
+    folder.mkdir()
+    for path in sorted(original.glob("*.sql")):
+        if not path.name.startswith("0027"):
+            shutil.copy(path, folder / path.name)
+    monkeypatch.setattr(migrate, "MIGRATIONS_DIR", folder)
+
+    conn = Database(tmp_path / "db.sqlite3").connect()
+    apply_migrations(conn)
+    profile = a_profile(conn)
+    media_id = a_media_file(conn, profile, rel_path="library/dji-osmo/DCIM/OLD.MP4")
+    destination_id, revision_id, _ = a_destination(conn)
+    group_id = a_merge_group(conn, profile, digest="d1")
+    job_id = JobStore(conn).enqueue("upload", {"destination_id": destination_id})
+    # **全列に固有の値を入れる。** 進行中（`checking`）にしてあるのは、claim の
+    # 3 列と `destination_revision_id` を NULL でない値で埋めるため。
+    row = {
+        "id": "record-under-test",
+        "destination_id": destination_id,
+        "target_epoch": 1,
+        "media_file_id": media_id,
+        "state": "checking",
+        "selection_rule": "adopted_derived",
+        "origin": "pre_existing",
+        "first_check_result": "reject",
+        "remote_asset_id": "asset-under-test",
+        "remote_is_trashed": 1,
+        "remote_checked_at": "2026-01-02T03:04:05+00:00",
+        "checksum": "0" * 39 + "1",
+        "attempts": 7,
+        "last_error": "前回の失敗の理由",
+        "eligibility_reason": "送ってよいと判断した理由",
+        "merge_group_id": group_id,
+        "claim_job_id": job_id,
+        "claim_token": "token-under-test",
+        "claim_expires_at": "2999-01-01T00:00:00+00:00",
+        "destination_revision_id": revision_id,
+        "invalidated_at": "2026-01-03T00:00:00+00:00",
+        "invalidated_reason": "remote_missing",
+        "created_at": "2026-01-01T00:00:00+00:00",
+        "updated_at": now_iso(),
+        "remote_datetime_original": "2026-01-01T09:00:00+09:00",
+        "stack_state": "stacked",
+        "remote_stack_id": "stack-under-test",
+        "stack_reason": None,
+    }
+    cols = ", ".join(row)
+    marks = ", ".join("?" * len(row))
+    conn.execute(f"INSERT INTO upload_record ({cols}) VALUES ({marks})", tuple(row.values()))  # noqa: S608
+    conn.commit()
+
+    # ここで初めて 0027 を持ち込み、当てる。
+    shutil.copy(original / "0027_live_identity_is_unique.sql", folder)
+    assert apply_migrations(conn) == [27]
+
+    after = conn.execute("SELECT * FROM upload_record WHERE id = ?", (row["id"],)).fetchone()
+    assert dict(after) == row
+    # 参照していた先も、参照したまま生き残る（FK を外して走る移行なので）。
     assert conn.execute("PRAGMA foreign_key_check").fetchall() == []
     conn.close()

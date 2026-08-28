@@ -122,6 +122,11 @@ CREATE INDEX upload_record_live_pair
 -- 実機に出る。`target_epoch` を 2 番目に挟めば、`destination_id` 単独にも
 -- `(media_file_id, destination_id)` にも当たらない。3 列とも等値で
 -- `invalidated_at IS NULL` を持つ引き（送信対の解決）は、3 列とも鍵に入る。
+--
+-- **この並びでも `media_file_id` 単独の等値は移る。** `deletion_blocker` は
+-- `upload_record_live_pair` からこの索引へ移るが、**先頭列も述語も同じなので
+-- コストは等価**（実測）。動かさないと言えるのは `claim_next` と
+-- 「まだ送っていない」の集計の計画で、`media_file_id` 単独の引きではない。
 CREATE UNIQUE INDEX upload_record_live_identity
     ON upload_record (media_file_id, target_epoch, destination_id)
     WHERE invalidated_at IS NULL;
