@@ -18,6 +18,40 @@ import { Icon } from "../../components/Icon";
 /** 段 1 つ。**「何が消えるか」と「取り消せるか」を並べて出す。** */
 type Stage = { scope: ResetScope; action: string; title: string; note: string; undo: string };
 
+/** `POST /reset` が返す、表ごとに消した件数。 */
+type Removed = Record<string, number>;
+
+/**
+ * 訳を持つ表だけを、画面の語彙で結果に出す（§13「内部の語を画面へ流さない」）。
+ *
+ * **訳の無いキーは黙って落とす。** `db/reset.py` が消す表を増やしても、
+ * 訳を足すまでは内部名が画面へ出ない。
+ */
+const REMOVED_LABELS: readonly (readonly [string, string])[] = [
+  ["job", "作業の履歴"],
+  ["job_event", "作業の経過"],
+  ["upload_record", "送信の記録"],
+  ["artifact_staging", "下書きの記録"],
+  ["media_file", "写真・動画"],
+  ["merge_group", "つないだ組み合わせ"],
+  ["merge_member", "つないだ組み合わせの内訳"],
+  ["source_entry", "カードで見つけたファイル"],
+  ["volume_instance", "カードの記録"],
+  ["volume_presence", "カードを挿した履歴"],
+  ["source_device", "カードの識別情報"],
+];
+
+/** 実際に消えたものだけを、訳と件数で文にする。**0 件は書かない**（段のカードに何が消えるかは既に書いてある）。 */
+function describeRemoved(removed: Removed): string {
+  const parts = REMOVED_LABELS.filter(([key]) => (removed[key] ?? 0) > 0).map(
+    ([key, label]) => `${label} ${removed[key]} 件`,
+  );
+  if (parts.length === 0) {
+    return "消すものはありませんでした。";
+  }
+  return `${parts.join("・")}を消しました。`;
+}
+
 const STAGES: readonly Stage[] = [
   {
     scope: "jobs",
@@ -54,13 +88,22 @@ const STAGES: readonly Stage[] = [
 export function ResetScreen() {
   const running = useMutation();
   const [confirming, setConfirming] = useState<ResetScope | null>(null);
-  const [done, setDone] = useState<string | null>(null);
+  const [removed, setRemoved] = useState<Removed | null>(null);
 
   async function run(scope: ResetScope): Promise<void> {
-    const ok = await running.run(() => request("/reset", { method: "POST", body: { scope } }));
+    // **応答の `removed` は `useMutation.run` の返り値では拾えない**（`run` は
+    // 成否だけを返す）ので、閉包の中で受け取る。
+    let captured: Removed | null = null;
+    const ok = await running.run(async () => {
+      const body = (await request("/reset", { method: "POST", body: { scope } })) as {
+        status: string;
+        removed: Removed;
+      };
+      captured = body.removed;
+    });
     setConfirming(null);
     if (ok) {
-      setDone(STAGES.find((stage) => stage.scope === scope)?.title ?? null);
+      setRemoved(captured);
     }
   }
 
@@ -82,7 +125,6 @@ export function ResetScreen() {
       </div>
 
       <ErrorBanner error={running.error} onDismiss={running.clear} />
-      {done !== null && <p role="status">{done}を消しました。</p>}
 
       {STAGES.map((stage) => (
         <section key={stage.scope} className="card pad">
@@ -105,6 +147,17 @@ export function ResetScreen() {
           </div>
         </section>
       ))}
+
+      {/* **段のカードの後ろに置く。** 押した人はここまでスクロールしているので、
+          帯を一番上（カードより前）に出すと視界の外になる。 */}
+      {removed !== null && (
+        <div className="result-banner" role="status">
+          <span>{describeRemoved(removed)}</span>
+          <button type="button" aria-label="閉じる" onClick={() => setRemoved(null)}>
+            <Icon name="close" size={18} />
+          </button>
+        </div>
+      )}
 
       {confirming !== null && (
         <ConfirmDialog

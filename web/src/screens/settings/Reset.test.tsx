@@ -8,14 +8,21 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { stubApi } from "../../test/api";
 import { ResetScreen } from "./Reset";
 
-function renderReset() {
-  const { calls } = stubApi({ "POST /reset": { status: "ok", removed: {} } });
+function renderReset(removed: Record<string, number> = {}) {
+  const { calls } = stubApi({ "POST /reset": { status: "ok", removed } });
   render(
     <MemoryRouter>
       <ResetScreen />
     </MemoryRouter>,
   );
   return { calls };
+}
+
+/** 段を 1 つ実行し（確認 → 実行する）、結果の帯が出るまで待つ。 */
+async function runStage(buttonName: string) {
+  await userEvent.click(await screen.findByRole("button", { name: buttonName }));
+  await userEvent.click(screen.getByRole("button", { name: "実行する" }));
+  return screen.findByRole("status");
 }
 
 beforeEach(() => {
@@ -100,5 +107,41 @@ describe("リセット", () => {
     // **generic な「いまの状態ではできません」で済ませない。** 何を待てばよいのかが
     // 読めないと、押し直すしかなくなる。
     expect(await screen.findByRole("alert")).toHaveTextContent(/走っている作業があります/);
+  });
+
+  it("消した件数を、訳と件数で出す", async () => {
+    renderReset({ job: 12, job_event: 340 });
+    const banner = await runStage("作業の記録を消す");
+    expect(banner).toHaveTextContent(/12\s*件/);
+    expect(banner).toHaveTextContent(/340\s*件/);
+    // 内部の表の名前をそのまま出さない（§13）。
+    expect(banner).not.toHaveTextContent("job_event");
+  });
+
+  it("0 件のものは書かない", async () => {
+    renderReset({ job: 12, job_event: 0 });
+    const banner = await runStage("作業の記録を消す");
+    expect(banner).toHaveTextContent(/12\s*件/);
+    expect(banner).not.toHaveTextContent(/0\s*件/);
+  });
+
+  it("全部 0 件なら、件数の羅列ではなく「消すものはありませんでした。」と書く", async () => {
+    renderReset({ job: 0, job_event: 0 });
+    const banner = await runStage("作業の記録を消す");
+    expect(banner).toHaveTextContent("消すものはありませんでした。");
+  });
+
+  it("訳の無いキーは黙って落とす（内部名を画面に出さない）", async () => {
+    renderReset({ unknown_table: 3, job: 1 });
+    const banner = await runStage("作業の記録を消す");
+    expect(banner).not.toHaveTextContent("unknown_table");
+    expect(banner).toHaveTextContent(/1\s*件/);
+  });
+
+  it("結果の帯は × で閉じられる", async () => {
+    renderReset({ job: 5 });
+    await runStage("作業の記録を消す");
+    await userEvent.click(screen.getByRole("button", { name: "閉じる" }));
+    expect(screen.queryByRole("status")).not.toBeInTheDocument();
   });
 });
