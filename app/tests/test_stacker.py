@@ -4,11 +4,12 @@
 プロファイル編集は、どれも「相手を待っている間」に起こりうる。
 """
 
+import hashlib
 import os
 
 import pytest
 
-from mediaferry.adapters.immich import ImmichClient
+from mediaferry.adapters.immich import ImmichClient, to_base64_checksum
 from mediaferry.clock import now_iso
 from mediaferry.core.crypto import SecretBox
 from mediaferry.db.credentials import CredentialStore
@@ -18,6 +19,7 @@ from mediaferry.db.profiles import ProfileRegistry
 from mediaferry.db.uploads import UploadRepository
 from mediaferry.ids import new_id
 from mediaferry.jobs.preflight import PreflightCache
+from mediaferry.jobs.recheck import Rechecker
 from mediaferry.jobs.stacker import Stacker
 
 from .fake_immich import API_KEY
@@ -130,6 +132,62 @@ class World:
             open_client,
             PreflightCache(self.destinations, open_client),
         )
+
+    def rechecker(self):
+        def open_client(revision):
+            return ImmichClient(revision["base_url"], API_KEY)
+
+        return Rechecker(
+            self.uploads,
+            self.destinations,
+            open_client,
+            PreflightCache(self.destinations, open_client),
+        )
+
+    def make_checkable(self):
+        """再確認の対象にする. **`checksum` が無い行は照合しない**（`recheck.py`）.
+
+        `checksum` は sha1 の 16 進で、adapter が base64 へ直して送る
+        （`to_base64_checksum`）。fake はその base64 を鍵に持つ。
+        """
+        for name, record_id in self.records.items():
+            digest = hashlib.sha1(name.encode(), usedforsecurity=False).hexdigest()
+            self.db.execute(
+                "UPDATE upload_record SET checksum = ? WHERE id = ?", (digest, record_id)
+            )
+            self.immich.assets[to_base64_checksum(digest)] = self.assets[name]
+
+    def forget_on_the_server(self, name):
+        """相手からその資産を消す（保持期限を過ぎて完全に消えた状態）."""
+        digest = hashlib.sha1(name.encode(), usedforsecurity=False).hexdigest()
+        del self.immich.assets[to_base64_checksum(digest)]
+
+    def resend(self, name, asset_id):
+        """無効化された記録のメディアを、通常経路で送り直した姿にする.
+
+        `create_pairs` は無効化された行を跨いで新しい行を作る（§10）。
+        **送信そのものは走らせない** —— ここで見たいのは第 2 パスの組み直し
+        なので、`complete` まで進んだ姿を直接作る。
+        """
+        media_id = self.db.execute(
+            "SELECT media_file_id FROM upload_record WHERE id = ?", (self.records[name],)
+        ).fetchone()["media_file_id"]
+        pair = self.uploads.create_pairs([media_id], [self.destination_id])[0]
+        assert pair.result == "created", pair.reason
+        self.db.execute(
+            "UPDATE upload_record SET state = 'complete', origin = 'created_by_us',"
+            " remote_asset_id = ?, destination_revision_id = ?, updated_at = ?"
+            " WHERE id = ?",
+            (
+                asset_id,
+                self.destinations.current(self.destination_id)["id"],
+                now_iso(),
+                pair.record_id,
+            ),
+        )
+        self.records[name] = pair.record_id
+        self.assets[name] = asset_id
+        return pair.record_id
 
     def run(self):
         return self.stacker().run(self.ctx, self.destination_id)
