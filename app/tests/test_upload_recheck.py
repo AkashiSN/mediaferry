@@ -487,9 +487,9 @@ def test_a_recheck_that_lost_its_lease_between_batches_sends_no_more(world, monk
 def test_a_record_that_moved_while_it_was_checked_is_not_stamped_with_the_old_result(world):
     """**照合の結果は、照合したときの行にしか書かない。**
 
-    消滅と判定された `complete` を利用者が requeue し、送り直しが済んで別の
-    資産で `complete` に戻ったところへ古い結果を書くと、新しい
-    `remote_asset_id` を古い観測（消滅＝NULL）で消してしまう。
+    消滅と判定されて `remote_asset_id` が NULL の行へ、この照合が終わる前に
+    **別の書き込みが新しい資産の観測を書いた**とする。そこへ古い結果
+    （消滅＝NULL）を書くと、新しい観測を消してしまう。
     """
     server, rechecker, ctx, destination_id, db = world
     # サーバには無い（accept ＝ 消滅と判定される）。
@@ -499,7 +499,7 @@ def test_a_record_that_moved_while_it_was_checked_is_not_stamped_with_the_old_re
 
     def resend_during_check(self, method, path, body, headers):  # noqa: ANN001, ANN202
         if path == "/api/assets/bulk-upload-check":
-            # 利用者が requeue し、送り直しが別の資産で完了した。
+            # 別の書き込みが、この行を新しい資産の観測で上書きした。
             db.execute(
                 "UPDATE upload_record SET remote_asset_id = 'asset-new', remote_checked_at = ?,"
                 " remote_is_trashed = 0",
@@ -626,23 +626,23 @@ def test_stamping_many_writes_nothing_when_the_lease_is_gone(world):
     assert row["remote_checked_at"] == "t0"
 
 
-def test_a_record_requeued_while_it_was_checked_is_not_stamped(world):
-    """**`complete` は終端ではない。** 消滅と判定された行は requeue できる.
+def test_a_record_moved_out_of_complete_while_it_was_checked_is_not_stamped(world):
+    """**`complete` は終端ではない。** 照合の最中に、別の書き込みが行の state だけを動かせる.
 
-    requeue は `remote_asset_id` も `remote_checked_at` も変えない（状態だけを
-    `pending` に戻す）ので、値の一致だけでは古い結果が通ってしまう。
+    そうした書き込みは `remote_asset_id` も `remote_checked_at` も変えない
+    （状態だけを `pending` に戻す）ので、値の一致だけでは古い結果が通ってしまう。
     """
     server, rechecker, ctx, destination_id, db = world
     server.assets.clear()  # accept ＝ 消滅と判定される
     db.execute("UPDATE upload_record SET remote_asset_id = NULL, remote_checked_at = ?", ("t0",))
     real = FakeImmich.route
 
-    def requeue_during_check(self, method, path, body, headers):  # noqa: ANN001, ANN202
+    def state_moves_during_check(self, method, path, body, headers):  # noqa: ANN001, ANN202
         if path == "/api/assets/bulk-upload-check":
             db.execute("UPDATE upload_record SET state = 'pending', remote_is_trashed = NULL")
         return real(self, method, path, body, headers)
 
-    server.route = requeue_during_check.__get__(server, FakeImmich)
+    server.route = state_moves_during_check.__get__(server, FakeImmich)
 
     outcome = rechecker.run(ctx, destination_id)
 
