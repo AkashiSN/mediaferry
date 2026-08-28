@@ -6,6 +6,7 @@ import os
 import pytest
 
 from mediaferry.adapters.immich import ImmichClient
+from mediaferry.clock import now_iso
 from mediaferry.core.crypto import SecretBox
 from mediaferry.db.credentials import CredentialStore
 from mediaferry.db.destinations import DestinationRepository, RemoteIdentity
@@ -1091,3 +1092,40 @@ def test_a_record_that_goes_back_for_a_retry_is_not_counted_as_done(world, db, m
     # 1 件を 2 周したが、送ったのは 1 件ぶん。
     assert progress["bytes_done_all"] == len(PAYLOAD)
     assert progress["bytes_total_all"] == len(PAYLOAD)
+
+
+def test_a_resent_record_is_created_by_us_again(world, db):
+    """**送り直しは新しい記録から始まる**（§9.10）.
+
+    古い記録を使い回すと `first_check_result` が前回の観測のまま残り、自作の
+    資産が `pre_existing` として承認待ちに積まれる。無効化して通常経路へ戻す
+    形なら、`origin` の判定も最初からやり直しになる。
+    """
+    server, uploader, ctx, uploads, _, destination_id, media_id = world
+    uploader.run(ctx, destination_id)
+    first = record_of(db)
+    assert first["origin"] == "created_by_us"
+
+    # 再確認が「リモートに無い」と判定して無効化した状態（§9.10）。
+    server.assets.clear()
+    server.datetimes.clear()
+    db.execute(
+        "UPDATE upload_record SET remote_asset_id = NULL, remote_checked_at = ?,"
+        " invalidated_at = ?, invalidated_reason = 'remote_missing' WHERE id = ?",
+        (now_iso(), now_iso(), first["id"]),
+    )
+    # 1 本目のジョブを畳んでから、送り直しのジョブを積む。
+    db.execute("UPDATE job SET status = 'succeeded'")
+
+    again = uploads.create_pairs([media_id], [destination_id])[0]
+    assert again.result == "created"
+    store = JobStore(db)
+    store.enqueue("upload", {"destination_id": destination_id})
+    uploader.run(store.claim_next(), destination_id)
+
+    row = db.execute("SELECT * FROM upload_record WHERE id = ?", (again.record_id,)).fetchone()
+    assert row["state"] == "complete"
+    assert row["origin"] == "created_by_us"
+    assert row["first_check_result"] == "accept"
+    # 古い記録は監査履歴として残る（消さない）。
+    assert db.execute("SELECT count(*) AS n FROM upload_record").fetchone()["n"] == 2

@@ -625,3 +625,27 @@ def test_a_media_row_without_a_zone_says_so(client, db):
     )
 
     assert client.get(f"/api/media/{media}").json()["captured_at_tz"] is None
+
+
+def test_a_record_invalidated_by_recheck_returns_to_unsent(client, db, canon_pair):
+    """再確認が無効化した記録は「この宛先の有効な記録」ではなくなる（§9.10）.
+
+    `_status_clause` の「まだ送っていない」＝「この宛先の**有効な**記録がまだ
+    無く、いま送れるもの」に、無効化がそのまま噛み合う。
+    """
+    destination = a_destination(db, name="recheck-unsent")
+    an_upload(
+        db,
+        destination,
+        canon_pair.media_ids["JPG"],
+        state="complete",
+        destination_revision_id=destination[1],
+        remote_checked_at=now_iso(),
+        invalidated_at=now_iso(),
+        invalidated_reason="remote_missing",
+    )
+    db.commit()
+
+    body = client.get(f"/api/media?destination_id={destination[0]}&status=unsent").json()
+
+    assert canon_pair.media_ids["JPG"] in [item["id"] for item in body["media"]]
