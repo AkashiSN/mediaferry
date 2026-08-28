@@ -21,7 +21,7 @@ from mediaferry.db.uploads import ACTIVE_STATES
 from mediaferry.ids import new_id
 
 from .test_schema_artifacts import a_media_file, a_merge_group, a_source_entry, a_staging
-from .test_schema_sources import a_volume
+from .test_schema_sources import a_presence, a_volume
 from .test_schema_uploads import a_destination, an_upload
 
 
@@ -149,6 +149,68 @@ def test_the_deeper_stage_includes_the_shallower_one(client, api_db, ref):
     assert count(api_db, "job") == 0
     assert count(api_db, "upload_record") == 0
     assert count(api_db, "media_file") == 0
+
+
+# ------------------------------------------------------------------ 数え直し
+#
+# **「数えた結果が 0」と「数えた記録ごと捨てた」を区別する。** ホームは
+# `pending_count == 0` を「取り込むものは無い」と読むので、印を残したまま
+# `source_entry` を消すと、カードに元があるのに入口が消える。
+
+
+def _marks(db, volume_id: str, presence_id: str) -> tuple[str | None, str | None]:
+    scanned = db.execute(
+        "SELECT scanned_at FROM volume_instance WHERE id = ?", (volume_id,)
+    ).fetchone()["scanned_at"]
+    auto = db.execute(
+        "SELECT auto_scan_at FROM volume_presence WHERE id = ?", (presence_id,)
+    ).fetchone()["auto_scan_at"]
+    return scanned, auto
+
+
+def test_resetting_the_library_makes_the_card_countable_again(client, api_db, ref):
+    """**取り込んだファイルを捨てる段は、数えた印も捨てる.**
+
+    `scanned_at` だけ残すとホームが「取り込むものは無い」を出し続け、
+    `auto_scan_at` だけ残すと監視が数え直さない。**両方落として初めて**
+    挿したままのカードが数え直され、ホームに取り込む入口が戻る。
+    """
+    volume = a_volume(api_db, ref, fs_uuid="RESET-RESCAN", scanned_at=now_iso())
+    presence = a_presence(api_db, volume, auto_scan_at=now_iso())
+
+    assert client.post("/api/reset", json={"scope": "library"}).status_code == 200
+
+    assert _marks(api_db, volume, presence) == (None, None)
+
+
+@pytest.mark.parametrize("scope", ["jobs", "uploads"])
+def test_the_shallower_stages_keep_the_count(client, api_db, ref, scope):
+    """**印を捨てるのは、数えた元（`source_entry`）を捨てる段だけ.**
+
+    浅い段は `source_entry` を残すので、数え直させると同じ結果を得るために
+    カードを読み直すだけになる。
+    """
+    at = now_iso()
+    volume = a_volume(api_db, ref, fs_uuid=f"RESET-KEEP-{scope}", scanned_at=at)
+    presence = a_presence(api_db, volume, auto_scan_at=at)
+
+    assert client.post("/api/reset", json={"scope": scope}).status_code == 200
+
+    assert _marks(api_db, volume, presence) == (at, at)
+
+
+def test_a_card_that_is_no_longer_attached_keeps_its_mark(client, api_db, ref):
+    """**抜いたカードの印は履歴。** 数え直しは挿さっているカードにしか要らないし、
+    `auto_scan_at` を消しても監視は抜けた接続を拾わない（消すのは記録だけ）。
+    """
+    at = now_iso()
+    volume = a_volume(api_db, ref, fs_uuid="RESET-DETACHED", scanned_at=at)
+    presence = a_presence(api_db, volume, auto_scan_at=at, detached_at=at)
+
+    assert client.post("/api/reset", json={"scope": "library"}).status_code == 200
+
+    # カード自体はまだ在るので数え直しの対象。接続の印だけが履歴として残る。
+    assert _marks(api_db, volume, presence) == (None, at)
 
 
 # ------------------------------------------------------------------ 断り

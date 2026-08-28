@@ -27,7 +27,10 @@ SCOPES = ("jobs", "uploads", "library", "all")
 
 
 class ResetNotPossible(RuntimeError):
-    """いま走っている作業や、回収待ちの公開があるので足元を外せない.
+    """足元を外せない。**理由は 3 つ**あり、待つものが違う.
+
+    走っている作業（終わるのを待つ）、回収待ちの公開、回収待ちの送信
+    （どちらも起動時の reconciliation が片付けるので、再起動を待つ）。
 
     `reason` は API の `code` を決めるためのもので、利用者へ出す文ではない。
     """
@@ -52,7 +55,9 @@ def reset(conn: sqlite3.Connection, data_root: Path, scope: str) -> dict[str, in
 
     **走っている作業がある間は何もしない。** `artifact_staging` が指している
     `source_entry` は `ON DELETE RESTRICT` で消せず、消せたとしても走っている
-    取り込みが書き込み先を失う。
+    取り込みが書き込み先を失う。**回収待ちの公開と、回収待ちの送信が持つ
+    `claim_job_id` も同じように断る**（どちらも `job` を `ON DELETE RESTRICT`
+    で掴むので、手順 1 が外部キーで止まる）。
     """
     depth = _index(scope)
     removed: dict[str, int] = {}
@@ -119,6 +124,17 @@ def reset(conn: sqlite3.Connection, data_root: Path, scope: str) -> dict[str, in
             removed["merge_group"] = conn.execute("DELETE FROM merge_group").rowcount
             removed["source_entry"] = conn.execute("DELETE FROM source_entry").rowcount
             removed["media_file"] = conn.execute("DELETE FROM media_file").rowcount
+
+            # **数えた印も落とす。** 数えた元（`source_entry`）を捨てたのに
+            # `scanned_at` が残ると、ホームは `pending_count == 0` を
+            # 「取り込むものは無い」と読み、カードに元があるのに入口が消える。
+            # **挿さっている接続の `auto_scan_at` も外す** —— 残すと監視の
+            # `TO_COUNT` に入らず、数え直されないまま「中身を数えています。」で
+            # 止まる。抜けた接続の印は履歴なので触らない（監視も拾わない）。
+            # **行は消えないので `removed` には出さない**（消した件数の表なので、
+            # 消えていないものを載せると数が嘘になる）。
+            conn.execute("UPDATE volume_instance SET scanned_at = NULL")
+            conn.execute("UPDATE volume_presence SET auto_scan_at = NULL WHERE detached_at IS NULL")
 
         if depth >= _index("all"):
             # 4. カードの記録。**信頼の記録もここで消える。**
