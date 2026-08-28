@@ -1,7 +1,7 @@
 # mediaferry 設計仕様書
 
-作成日: 2026-08-17
-改訂: 2026-08-17（codex レビュー 2 巡 + Phase 0 の実測 + 転送先プロファイルを反映。§21）
+**この文書は現在の仕様だけを書く。** そう決めた理由は [`decisions.md`](decisions.md)、
+どう作ったかは [`history/`](history/README.md) にある。
 
 ## 1. 背景と目的
 
@@ -251,7 +251,7 @@ immich:
 
 ### マッチ規則（明示）
 
-`hints` と `require` を分けたのは、レビューで「USB ID だけで確定してしまう」経路が
+`hints` と `require` を分けたのは、「USB ID だけで確定してしまう」経路が
 指摘されたためである。
 
 - `hints` は**候補プロファイルの順位付けにのみ**使う。単独で確定させない。
@@ -259,7 +259,7 @@ immich:
 - `require` は**確定の必要条件**で、すべて AND。`roots` はいずれか 1 つ以上が
   存在すればよい（OR）。`filename_pattern` に一致する実ファイルが
   `min_matching_files` 件以上あることを、**マウント先の中身を見て確認する**。
-- **中身が空でも正当なボリュームがある。** Phase 0 の実測で、Osmo の内蔵ストレージは
+- **中身が空でも正当なボリュームがある。** 実測で、Osmo の内蔵ストレージは
   `DCIM/` を持つが中身が無かった（まだ内蔵に録画していない）。`require.roots` を
   満たし、かつ `hints` にも一致するボリュームは、`min_matching_files` を満たさなくても
   **暫定マッチ**として扱う。ただし `identity_confidence` は `low` とし、自動取り込みの
@@ -507,7 +507,7 @@ SQLite（WAL モード、`busy_timeout` 設定、書き込みは単一ワーカ�
 `volume_instance` を `source_device` と分けたのは、**カードはリーダーの間を移動する**
 ため。デバイスとは独立に記憶する。
 
-**USB の `serial` を一意な識別子として扱ってはならない。** Phase 0 の実測で、
+**USB の `serial` を一意な識別子として扱ってはならない。** 実測で、
 DJI Osmo Pocket 4 の `serial` は Linux ガジェットの既定値 `123456789ABCDEF` だった。
 機体を識別する文字列は `product`（`OsmoPocket4-<機体固有>`）側にある。同じ機種が
 2 台あれば `serial` は衝突するので、デバイス同定は
@@ -559,7 +559,7 @@ quick_fingerprint = sha1( b"mfq" ‖ u8(version) ‖ u64le(size) ‖ w[0] ‖ w[
 
 フル SHA-1 はコピー時のストリームで 1 回だけ計算し、`media_file.sha1` に保存する
 （Immich の重複判定に必要）。ローカル同一性のためだけに SHA-256 を追加計算することは
-しない（判断の根拠は §21）。
+しない（判断の根拠は [`decisions.md`](decisions.md)）。
 
 `quick_fingerprint` が一致しても `mtime` が記録より古いなど不整合がある場合は
 「曖昧」と判定し、フルハッシュで確認する。
@@ -625,7 +625,7 @@ Web 画面で作成・編集する（§12.3）。用語を 3 層に分ける。
 2 つ作ること（内部 URL 用と VPN 用、別の運用名など）は正当な使い方であり、
 **警告は出すが拒否も統合もしない**。
 
-Phase 0 の実測で、Immich v3.1.0 はサーバインスタンス ID を公開していないことが
+実測で、Immich v3.1.0 はサーバインスタンス ID を公開していないことが
 分かった。`/api/server/about` が返すのは version・build・sourceCommit で、
 いずれもリリースに紐づく値なので同じ版の全サーバで一致し、識別子にならない。
 そのため当面 `server_instance_id` は null で、検出値は実質 `remote_user_id`
@@ -838,7 +838,7 @@ COMMIT;
 5. `identity_confidence` を判定する（§8）。`low` なら信頼を継承しない。
 6. 対象外と判定したボリュームは直ちに `close_volume` する。
 
-**`subscribe`（uevent のストリーム）は実装していない**（Phase 5 で確定）。プロトコルには
+**`subscribe`（uevent のストリーム）は実装していない。**プロトコルには
 残してあるが、アプリ側は `list_volumes` の `generation` をポーリングして変化を検出する。
 理由は、**高いのは列挙ではなく判定**だから。`enumerate_volumes` は `_is_usb` で絞ってから
 `blkid` を掛けるので、USB ブロックデバイスが無い間はサブプロセスが 1 つも起きない。
@@ -1083,7 +1083,7 @@ concat demuxer でも TS フォールバックでも**同じ `-map` を使う**�
 `verification_json` には、**期待値の算出根拠**（どのストリームを対象にしたか、
 各パートの `bit_rate` と `duration`）と、`inconclusive` の場合はその理由を残す。
 
-Phase 0 の実測では、DJI Osmo Pocket 4 の MP4 は 6 ストリームを持っていた。
+実測では、DJI Osmo Pocket 4 の MP4 は 6 ストリームを持っていた。
 
 | # | 種別 | タグ | ビットレート | 結合後 |
 | --- | --- | --- | --- | --- |
@@ -1102,7 +1102,7 @@ Phase 0 の実測では、DJI Osmo Pocket 4 の MP4 は 6 ストリームを持�
 上の例では (79,924,667 + 317,374) bit/s × 3036 秒 ÷ 8 = 30,451,573,000 B に対し
 実測 30,452,085,873 B で差 0.002% だった。
 
-判定に使う実値（Phase 2 の実装で確定）:
+判定に使う実値:
 
 - 映像フレーム数は ffprobe の `nb_frames` だけを見る。`-count_frames` は
   30 GiB を全デコードするので使わない。取れないパートが 1 つでもあれば
@@ -1121,7 +1121,7 @@ Phase 0 の実測では、DJI Osmo Pocket 4 の MP4 は 6 ストリームを持�
   結合する。外したものは `verification_json.route_dropped_streams` に残る。
   ストリーム検査は不合格になるが、出力は公開されるのでユーザが目視して採用できる
 - 期待サイズの比較は**コンテナのオーバーヘッドを含まない**。16 GiB 級の実ファイル
-  では 0.002%（Phase 0 の実測）だが、数百 KB の合成クリップでは 7〜8% に達する。
+  では 0.002%（実測）だが、数百 KB の合成クリップでは 7〜8% に達する。
   許容誤差 2% は実機の大きさを前提とした値である
 
 **データトラックの脱落は許容する。** Immich は `dbgi` を使わないので視聴上の
@@ -1247,7 +1247,7 @@ pending → checking → uploading → asset_known → tagging → fixing_dateti
    **ストリーミングで送り**、メモリに載せない。`x-immich-checksum` ヘッダを付ける。
    `deviceAssetId` に `mediaferry:<media_file_id>` を設定する。
 
-   **チェックサムの encoding は base64 に統一する。** Phase 0 の実測では
+   **チェックサムの encoding は base64 に統一する。** 実測では
    `bulk-upload-check` が hex と base64 の両方を受理したが、
    `x-immich-checksum` ヘッダは base64 で成功した。片方に揃えないと
    取り違えが起きるので、両方とも base64 で送る。
@@ -1266,11 +1266,11 @@ pending → checking → uploading → asset_known → tagging → fixing_dateti
 チェックサムの一致には 2 つの異なる原因があり、**区別せずに後処理を適用しては
 ならない**。
 
-**Phase 0 の実測で、Immich v3.1.0 の `GET /api/assets/{id}` は `deviceAssetId` を
+**実測で、Immich v3.1.0 の `GET /api/assets/{id}` は `deviceAssetId` を
 返さないことが分かった。** クライアント由来で残るのは `originalFileName` だけで、
 これは同じ元ファイルなら別経路のアップロードでも一致するので判別に使えない。
 
-代わりに次の 2 つを使う。どちらも Phase 0 で実在を確認済み。
+代わりに次の 2 つを使う。どちらも実在を確認済み。
 
 1. **`POST /api/assets` の応答に含まれる `status`**（`created` / `duplicate`）。
    `created` が返れば、その資産は自分が作ったものだと確定する。
@@ -1313,7 +1313,7 @@ pending → checking → uploading → asset_known → tagging → fixing_dateti
 修正済みかもしれない。そこへ `force_offset` を無条件に適用すると、
 **ユーザの既存資産を意図せず書き換える**。
 
-`deviceAssetId` は Phase 0 の実測で資産応答から読み戻せないことが分かっており、
+`deviceAssetId` は実測で資産応答から読み戻せないことが分かっており、
 判別には使えない。Immich 側の重複管理に使われる可能性があるのでアップロード時には
 引き続き送るが、**読み戻して判定に使うことはしない**。
 
@@ -1390,7 +1390,7 @@ CAS。§8）ので、照合の最中に動いた行は無効化もされない�
 並ぶので、`UPLOAD_CONCURRENCY` は持たない。
 
 Immich の API は破壊的変更が入りうるため、エンドポイントとフィールド名は
-Phase 0 で対象バージョンの OpenAPI 定義から確定し、対応バージョンを README に明記する。
+対象バージョンの OpenAPI 定義から確定してあり、対応バージョンは README に明記する。
 
 ### 9.11 RAW / JPEG のスタッキング
 
@@ -1445,7 +1445,7 @@ RAW+JPEG の組（§6 の `stack`）を、アップロードの後に Immich の
 `immich.tags` と `fix_datetime_after_upload` が現行リビジョンを見ているのと同じ層に
 ある（`ProfileRegistry.by_id` は `current_revision_id` を join する）。**組の全員に
 同じ `profile_id` を要求する**ので、規則は組ごとに 1 つに決まり、「どの member から
-評価しても同じ組になる」が版を跨いでも成立する。Phase 5 までに取り込んだメディアも、
+評価しても同じ組になる」が版を跨いでも成立する。それ以前に取り込んだメディアも、
 プロファイルが `stack` を持つ版へ進んだ時点で対象になる。
 
 **「現行版を使う」には再評価の経路が要る。** 一度見送りとして決着した行は未評価へ
@@ -1995,7 +1995,7 @@ API キーそのもの以外にも、漏れうる経路をすべて塞ぐ。
 リンクの生成にだけ使い、通信には使わない。
 
 **`base_url` には、CDN やリバースプロキシを経由しない直接到達できる
-アドレスを指定する。** Phase 0 の実測では、公開 URL（Cloudflare 経由）へ
+アドレスを指定する。** 実測では、公開 URL（Cloudflare 経由）へ
 28 GiB をアップロードしようとして 622 MiB 送った時点で `502 Bad Gateway` に
 なった。CDN やリバースプロキシには body size の上限とタイムアウトがあり、
 数十 GiB のアップロードは通らない。同じ構成でも内部アドレスに向ければ
@@ -2557,8 +2557,6 @@ services:
 
 ## 17. リポジトリ構成
 
-Phase 0 と Phase 1 は dotfiles リポジトリの `docker/mediaferry/` で開発し、
-Phase 1 の完了時に独立リポジトリ（`AkashiSN/mediaferry`）へ移管した。移管前から
 **環境固有の値を一切含めない**方針で書いてある。
 
 ```
@@ -2596,73 +2594,33 @@ Phase 1 の完了時に独立リポジトリ（`AkashiSN/mediaferry`）へ移管
 
 `docker/` は `.chezmoiignore` に追加する。ホームへ展開する対象ではないため。
 
-## 18. 未解決事項とリスク
+## 18. リスクと、その対処
 
 | # | 項目 | 内容 | 対処 |
 | --- | --- | --- | --- |
-| 1 | fd 受け渡し | ~~未検証~~ **Phase 0 で解消。** コンテナ間の `SCM_RIGHTS`、別 mount namespace の dirfd への `os.listdir` / `dir_fd=` 付き `os.open`、detached マウントによる `..` の固定を実 exfat デバイスで確認した | 詳細は [`history/phase0-findings.md`](history/phase0-findings.md) |
-| 2 | 巨大ファイルのアップロード | ~~未検証~~ **Phase 0 で解消。** 内部エンドポイント経由で 28.36 GiB を完走した（201 created、84.5 秒、343.82 MiB/s）。送信バイト数とサーバ側のサイズが入力と完全一致し、RSS の増分は 0.00 B だった。公開 URL（CDN 経由）は 622 MiB で 502 になるため §12.3 の分離が必須 | 詳細は [`history/phase0-findings.md`](history/phase0-findings.md) |
-| 3 | Immich API の互換性 | ~~未検証~~ **Phase 0 で解消。** 対象版 v3.1.0。サーバインスタンス ID は非公開のため、`remote_user_id` を向き先の変化を検知する guard として観測する（同一性ではない。§8）。`deviceAssetId` は資産応答に無いため、自作判別は応答の `status` と初回 `checking` の結果で行う。checksum は base64 に統一 | 詳細は [`history/phase0-findings.md`](history/phase0-findings.md) |
-| 4 | DB のバックアップとリストア | SQLite が `failed_merges/` に代わる唯一の状態保持先になるため、失うと再構築が必要 | ~~未確定~~ **Phase 1 で解消。** 再構築できる範囲・`.backup` による取得・マスター鍵を同じ搬出先へ置かないこと・リストア手順を [`backup.md`](backup.md) に定めた |
+| 1 | fd 受け渡し | **実機で確かめてある。** コンテナ間の `SCM_RIGHTS`、別 mount namespace の dirfd への `os.listdir` / `dir_fd=` 付き `os.open`、detached マウントによる `..` の固定を実 exfat デバイスで確認した | 詳細は [`history/phase0-findings.md`](history/phase0-findings.md) |
+| 2 | 巨大ファイルのアップロード | **実機で確かめてある。** 内部エンドポイント経由で 28.36 GiB を完走した（201 created、84.5 秒、343.82 MiB/s）。送信バイト数とサーバ側のサイズが入力と完全一致し、RSS の増分は 0.00 B だった。公開 URL（CDN 経由）は 622 MiB で 502 になるため §12.3 の分離が必須 | 詳細は [`history/phase0-findings.md`](history/phase0-findings.md) |
+| 3 | Immich API の互換性 | **対象版 v3.1.0 で確かめてある。** サーバインスタンス ID は非公開のため、`remote_user_id` を向き先の変化を検知する guard として観測する（同一性ではない。§8）。`deviceAssetId` は資産応答に無いため、自作判別は応答の `status` と初回 `checking` の結果で行う。checksum は base64 に統一 | 詳細は [`history/phase0-findings.md`](history/phase0-findings.md) |
+| 4 | DB のバックアップとリストア | SQLite が `failed_merges/` に代わる唯一の状態保持先になるため、失うと再構築が必要 | 再構築できる範囲・`.backup` による取得・マスター鍵を同じ搬出先へ置かないこと・リストア手順を [`backup.md`](backup.md) に定めた |
 | 5 | 同時に複数デバイス | 2 枚のカードを同時に挿すケース | ジョブキューで直列化。`volume_presence` で個別に追跡 |
 | 6 | 内蔵ストレージと SD の同時取り込み | Osmo は 2 ボリュームを同時に出し、同じ `library/dji-osmo/` に合流する | ファイル名が撮影時刻で一意なので実害は出ない見込み。衝突時は §9.3 の規則で処理する |
 | 7 | 孤立ファイルの扱い | reconciliation で見つかった orphan を自動削除するとデータを失う経路になる | 削除せず画面に出し、ユーザの判断に委ねる |
 | 8 | ボリューム同定の限界 | 複製カード・UUID 保持の復元を誤認しうる。read-only では永続マーカーを書けない | `identity_confidence` で自動信頼を抑制し、限界を UI に明示する |
 
-## 19. 現行 `dji_workflow.py` との対応
-
-| 現行 | mediaferry での扱い |
-| --- | --- |
-| `--sd-mount` | 不要。自動検出 |
-| `--dest-base` | `MEDIAFERRY_DATA_ROOT` |
-| `--since` | 不要。取り込み済みかは DB で判定する。画面のフィルタとしては残る |
-| `--immich-server` / `IMMICH_SERVER` | 転送先プロファイルの `base_url`（§12.3） |
-| `IMMICH_API_KEY` | 転送先プロファイルの API キー |
-| `--immich-client-timeout` | `MEDIAFERRY_UPLOAD_TIMEOUT_SECONDS` |
-| `--immich-concurrency` | **対応なし。** 送信は宛先ごとに 1 本で直列（§9.10） |
-| `--device-tag` / `--tag` | プロファイルの `immich.tags` |
-| `--split-tolerance` | プロファイルの `merge.tolerance_seconds` |
-| `--split-min-size-gib` | プロファイルの `merge.min_part_size_gib` |
-| `--ext` | プロファイルの `scan.extensions` |
-| `--tz` | `MEDIAFERRY_DEFAULT_TIMEZONE`。プロファイルの `timestamp.timezone` で上書き可 |
-| `--dry-run` | 結合プレビューとアップロード確認画面が役割を引き継ぐ |
-| `--skip-copy` | 不要。各工程を独立に起動できる |
-| `--eject` | 取り込み完了後に自動で dirfd 解放・アンマウント。`POST /volumes/{id}/close` は API に残るが、**画面には操作を置かない**（§13。抜いていいかは文で出す） |
-| `--fix-timezone` | プロファイルの `timezone_policy: force_offset` として自動化。ただし既存アセットへの適用は承認制（§9.10） |
-| `--yes` | 不要 |
-| `upload/` | 廃止。§10 の選択肢の提示規則 |
-| `failed_merges/` | 廃止。`merge_group.status = failed` |
-| `.rsync-partial` | 廃止。staging + no-clobber 公開 |
-| `same_file()` の size + mtime 判定 | `quick_fingerprint` で強化 |
-
-現行スクリプト `dot_local/bin/executable_dji_workflow.py` と
-`docs/dji-cheatsheet.md` は、mediaferry が実運用に入るまで残す。
-
-## 20. 何が入っているか
+## 19. 何が入っているか
 
 **ここに書いた仕様はすべて実装されている。** 大きすぎて 1 本の計画に収まらない
-ため段階に分けて作った。各段階の実装計画とレビュー記録は
+ため段階に分けて作った。段階ごとの実装計画とレビュー記録は
 [`history/`](history/README.md) にある。
 
-| 段階 | 入れたもの |
-| --- | --- |
-| 0. スパイク | コンテナ間の fd 受け渡し、対象 Immich 版の固定、巨大ファイルのアップロードの疎通（[実測値](history/phase0-findings.md)） |
-| 1. 基盤 + 取り込み | `ArtifactPublisher` / `Reconciler` の契約、DB スキーマ、プロファイルリビジョン、scan / import、crash consistency |
-| 2. 結合 | グループ検出、結合、検証、§10 の選択肢規則 |
-| 3. Immich 同期 | 状態機械、転送先の CRUD と接続検証、`origin` 判別、タグ、日時補正、複数宛先 |
-| 4. Web UI | React SPA、SSE、認証、CSRF、8 画面 |
-| 5. 汎用化 | `generic-dcim` / `canon-eos`、プロファイル編集 UI、信頼登録 UX、複数デバイス |
-| 6. スタッキング | RAW+JPEG を Immich のスタックとして束ねる（§6 の `stack`、§9.11） |
-
-**認証と CSRF が入るまで LAN へ公開しない**という制約で進めた（4 で解消）。アプリは
+**認証と CSRF が入るまで LAN へ公開しない**という制約で進めた。アプリは
 非特権でも `/data` と Immich の API キーを持つため、それ以前の公開は危険だった。
 
-`ArtifactPublisher` の契約は、1 の時点で **import と merge の両方を想定して**固定
-した。2 で派生物専用の crash model を後付けすると、取り込み側と別実装になる。
+`ArtifactPublisher` の契約は、取り込みを作った時点で **import と merge の両方を
+想定して**固定した。後から派生物専用の crash model を足すと、取り込み側と別実装に
+なる。
 
-**実機でしか確かめられない項目は残っている**（[`hardware-checklist.md`](hardware-checklist.md)）。
-
-## 21. この仕様に至るまで
+## 20. この仕様に至るまで
 
 **この文書は現在の仕様だけを書く。** どう決めたか・何を試して採らなかったかは
 別に置く。
@@ -2670,8 +2628,6 @@ Phase 1 の完了時に独立リポジトリ（`AkashiSN/mediaferry`）へ移管
 | 知りたいこと | 見る場所 |
 | --- | --- |
 | **なぜこの設計なのか**（判断とその理由） | [`decisions.md`](decisions.md) |
-| **どう作ったか**（実装計画、レビュー 28 巡の記録、変異試験） | [`history/`](history/README.md) |
+| **どう作ったか**（実装計画、レビュー記録、変異試験） | [`history/`](history/README.md) |
 | **実装の前に測った値** | [`history/phase0-findings.md`](history/phase0-findings.md) |
-
-設計は codex のレビューを 28 巡受けており、**そのうち何を反映し、何を根拠を示して
-退けたか**も `decisions.md` と `history/` に残してある。
+| **繰り返し出た誤りの型** | [`history/lessons.md`](history/lessons.md) |

@@ -1,7 +1,7 @@
 # 実 USB での確認手順（Phase 1）
 
 **2026-08-20〜21 に 1〜12 番を実機で通した。** 結果と、そこで見つかった不具合は
-[`history/hardware-verification.md`](history/hardware-verification.md) にある。
+[`history/hardware-verification.md`](hardware-verification.md) にある。
 **11 番は不合格**（実装の前提が崩れた）。5・8 番は修正後の踏み直しが残っている。
 
 自動テストは実カードを扱えない。マウントは開発コンテナ（入れ子の非特権 LXC）
@@ -147,13 +147,13 @@ TZ=UTC stat -c '%y %n' /path/to/DCIM/DJI_001/DJI_20260817143000_0001_D.MP4
 
 > **2026-08-21 の結果: 不合格。** DJI Osmo Pocket 4 は `OffsetFromUtc` を書いていた
 > （UTC 描画で 9 時間ずれ、`+09:00` 描画で終端の +2.00 秒）。直すべき 3 か所は
-> [`history/hardware-verification.md`](history/hardware-verification.md) にある。
+> [`history/hardware-verification.md`](hardware-verification.md) にある。
 
 Linux の exfat ドライバは `OffsetFromUtc` の valid bit が立っていればその
 オフセットで UTC へ変換し、立っていないときだけマウントの `time_offset`
 （既定 0）を使う（`fs/exfat/misc.c` の `exfat_get_entry_time`）。
 
-**結果はどちらであっても [`history/phase0-findings.md`](history/phase0-findings.md) に 1 件として残す。**
+**結果はどちらであっても [`history/phase0-findings.md`](phase0-findings.md) に 1 件として残す。**
 
 ### 12. 埋め込みサムネイルの disposition を確かめる
 
@@ -207,7 +207,7 @@ ls /path/to/mount/DCIM/100CANON | head
 > **`hints.usb_ids: []` も裏付けられた** —— `lsusb` に出るのは汎用の USB ストレージ
 > （リーダー）で、Canon のベンダ ID は見えない。**リーダーの ID を足すと、その
 > リーダーに挿したどのカードにも当たる**ので空のままにする。くわしくは
-> [`history/hardware-verification.md`](history/hardware-verification.md)。
+> [`history/hardware-verification.md`](hardware-verification.md)。
 
 ### 14. EOS 70D の 4GB 分割が連番から判別できるか
 
@@ -238,7 +238,7 @@ ls /path/to/mount/DCIM/100CANON | head
 > **`creation_time`（15 番）を出所にすれば、閾値を触らずに正しく分かれる** ——
 > 0006 → 0007 が **+55.063 秒**（外＝別録画）、0007 → 0008 が **+0.572 秒**
 > （内＝同一録画）。`min_part_size_gib` は **3** へ下げる。くわしくは
-> [`history/hardware-verification.md`](history/hardware-verification.md)。
+> [`history/hardware-verification.md`](hardware-verification.md)。
 
 ### 15. Canon の MOV の `creation_time` が壁時計か UTC か
 
@@ -318,7 +318,7 @@ uv run python -c "import exifread,sys; f=open(sys.argv[1],'rb'); print(exifread.
 ## Phase 13 の実機確認（18〜24 番）
 
 **17 番までは全部閉じた**（2026-08-26）。ここからは Phase 13
-（[`history/phase13-design.md`](history/phase13-design.md)）が入れた直しを実機で確かめる。
+（[`history/phase13-design.md`](phase13-design.md)）が入れた直しを実機で確かめる。
 
 **先に決めること**: **DB を作り直す**（利用者の判断、2026-08-26）。
 `library/` を残したまま DB だけ消すと、起動時の reconciliation が既存の
@@ -375,7 +375,7 @@ uv run python -c "import exifread,sys; f=open(sys.argv[1],'rb'); print(exifread.
 > ビルトインは編集できず、複製したユーザ定義に既存のメディアは紐づかない。実データで自然に踏むまで持ち越す。
 >
 > **新しく見つかった件（実機でのみ分かる形）**: **つなぐボタンを押しても画面が変わらず、
-> 利用者が「失敗した」と読んだ。** 詳細は [`development.md`](development.md) の持ち越し。
+> 利用者が「失敗した」と読んだ。** 詳細は [`development.md`](../development.md) の持ち越し。
 
 **既存の動画は `recompute` では直らない。** `container_wall` は NULL のままで、
 再計算は ffprobe を呼ばない（呼ぶと再計算がカードの有無に依存する）。
@@ -383,6 +383,6 @@ uv run python -c "import exifread,sys; f=open(sys.argv[1],'rb'); print(exifread.
 
 ## 関連
 
-- [`backup.md`](backup.md)（バックアップとリストア）
-- [`decisions.md`](decisions.md)（実測で覆った判断）と [`history/phase0-findings.md`](history/phase0-findings.md)（測った値そのもの）
-- [`development.md`](development.md)（TrueNAS ホストと開発コンテナの癖）
+- [`backup.md`](../backup.md)（バックアップとリストア）
+- [`decisions.md`](../decisions.md)（実測で覆った判断）と [`history/phase0-findings.md`](phase0-findings.md)（測った値そのもの）
+- [`development.md`](../development.md)（TrueNAS ホストと開発コンテナの癖）

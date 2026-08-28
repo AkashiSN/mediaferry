@@ -77,7 +77,7 @@
 `0004` の CHECK → `upload_record` の CHECK、など）。`docs/design.md`・
 `docs/decisions.md`・`docs/development.md` も同じ方針で直した。
 
-**`docs/hardware-checklist.md` と `docs/history/` は直していない。** どちらも
+**`docs/history/` は直していない。** どちらも
 **日付の付いた記録**で、当時そのファイルが在ったことまで含めて事実である。
 
 ## 決着済みだが、対象が消えた判断
