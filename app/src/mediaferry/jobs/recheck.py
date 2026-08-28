@@ -11,16 +11,26 @@
 
 from __future__ import annotations
 
+import logging
 import sqlite3
 from collections.abc import Callable
 from dataclasses import dataclass
 
-from ..adapters.immich import BULK_CHECK_BATCH, ImmichClient
+from ..adapters.immich import (
+    BULK_CHECK_BATCH,
+    ImmichAuthFailed,
+    ImmichClient,
+    ImmichProtocolError,
+    ImmichRedirected,
+    ImmichUnavailable,
+)
 from ..clock import now_iso
 from ..core.lease_pulse import with_lease_pulse
 from ..db.jobs import JobContext, LeaseLost
 from ..db.uploads import Stamp, UploadRepository
-from .preflight import PreflightCache
+from .preflight import PreflightCache, PreflightFailed
+
+logger = logging.getLogger(__name__)
 
 # **分割はこちらで行う。** adapter に全件を渡すと、その内部ループの合間に
 # キャンセルを見る隙が無く、最初の batch の途中で中止しても残りを全部送る。
@@ -145,7 +155,6 @@ class Rechecker:
                 ],
                 checked_at=now_iso(),
             )
-            unstacked = self._reconcile_stacks(ctx, revision)
         except LeaseLost:
             return self._cancelled_or_raise(ctx)
 
@@ -176,6 +185,10 @@ class Rechecker:
             and not outcomes[row["id"]].is_trashed
             and row["remote_is_trashed"]
         )
+        # **無効化の結果を報告し終えてから、組の照合へ移る。** 無効化は既に
+        # commit されているので、組の段の失敗で警告と集計が消えると、利用者には
+        # 「再確認が失敗した」しか残らず、写真が未送信へ戻ったことを辿れない。
+        unstacked = self._reconcile_stacks(ctx, revision)
         return RecheckOutcome(
             checked=len(written),
             trashed=trashed,
@@ -194,7 +207,29 @@ class Rechecker:
         **「無い」と「集合が違う」を 1 つの条件で見る。** どちらも
         「こちらが記録している組は現在の姿ではない」であり、戻した先の第 2 パスが
         相手を読み直して、作り直すか見送るかを決める（§9.11 の表）。
+
+        **相手側の失敗も、リースの喪失も、ここで受け止めて 0 を返す。** 資産の
+        照合の結果は既に commit されているので、ここから外へ例外を出すと
+        「何件をどれに戻したか」の記録ごと失われる。組の照合は次の再確認で
+        やり直せる。
         """
+        try:
+            return self._reconcile(ctx, revision)
+        except (
+            ImmichUnavailable,
+            ImmichAuthFailed,
+            ImmichRedirected,
+            ImmichProtocolError,
+            PreflightFailed,
+            LeaseLost,
+        ) as exc:
+            # **相手由来の文言も、こちらの method / path / 状態コードも混ぜない**
+            # （§13）。詳しい中身は運用ログへ回す。
+            logger.warning("組の照合ができなかった: %s", exc)
+            ctx.emit("warning", "組の照合ができなかった")
+            return 0
+
+    def _reconcile(self, ctx: JobContext, revision: sqlite3.Row) -> int:
         destination_id = revision["destination_id"]
         epoch = revision["target_epoch"]
         groups = self._uploads.stacked_groups(destination_id, epoch)

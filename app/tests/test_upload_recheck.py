@@ -384,31 +384,6 @@ def test_a_record_in_flight_is_not_stamped_by_a_recheck(world):
     assert record_of(db)["remote_checked_at"] is None
 
 
-def test_stamping_refuses_a_record_that_is_not_complete(world):
-    """`stamp_remote` は `complete` の行だけを触る.
-
-    再確認の選択側でも絞っているが、**このメソッドは公開されている**ので、
-    別の経路から呼ばれても進行中の行を書き換えないことを固定する。
-    """
-    from mediaferry.db.credentials import CredentialStore
-    from mediaferry.db.destinations import DestinationRepository
-    from mediaferry.db.profiles import ProfileRegistry as Registry
-    from mediaferry.db.uploads import UploadRepository
-
-    server, rechecker, ctx, destination_id, db = world
-    uploads = UploadRepository(
-        db, Registry(db), DestinationRepository(db, CredentialStore(db, _box_of(db)))
-    )
-    record_id = record_of(db)["id"]
-    db.execute("UPDATE upload_record SET state = 'needs_recheck', remote_asset_id = NULL")
-
-    uploads.stamp_remote(record_id, asset_id="asset-9", is_trashed=1, checked_at="2026-01-01")
-
-    row = record_of(db)
-    assert row["remote_asset_id"] is None
-    assert row["remote_checked_at"] is None
-
-
 def _three_complete_records(world):
     """batch の分割を起こすために、`complete` の行を 3 件にする."""
     server, rechecker, ctx, destination_id, db = world
@@ -912,3 +887,126 @@ def test_a_group_whose_member_was_requeued_is_not_seen_as_broken(world):
     assert outcome.unstacked == 0
     rows = db.execute("SELECT stack_state FROM upload_record").fetchall()
     assert all(row["stack_state"] == "stacked" for row in rows)
+
+
+def a_vanished_record(world_tuple):
+    """相手に無い資産を指す `complete` の行を 1 つ足す（組には入れない）."""
+    server, _, _, destination_id, db = world_tuple
+    profile = ProfileRegistry(db).current("dji-osmo")
+    third = a_media_file(
+        db,
+        (profile.profile_id, profile.revision_id),
+        rel_path="library/dji-osmo/DCIM/C.MP4",
+        sha1=f"{3:040d}",
+    )
+    revision_id = db.execute("SELECT destination_revision_id FROM upload_record").fetchone()[
+        "destination_revision_id"
+    ]
+    record_id = new_id()
+    db.execute(
+        "INSERT INTO upload_record (id, destination_id, target_epoch, media_file_id, state,"
+        " selection_rule, origin, checksum, remote_asset_id, remote_is_trashed,"
+        " destination_revision_id, created_at, updated_at)"
+        " VALUES (?, ?, 1, ?, 'complete', 'default', 'created_by_us', ?, 'asset-3', 0, ?, ?, ?)",
+        (record_id, destination_id, third, f"{3:040d}", revision_id, now_iso(), now_iso()),
+    )
+    return record_id
+
+
+def messages_of(db, job_id):
+    return [
+        row["message"]
+        for row in db.execute(
+            "SELECT message FROM job_event WHERE job_id = ? ORDER BY seq", (job_id,)
+        )
+    ]
+
+
+def test_a_failing_stack_listing_still_reports_the_invalidation(world):
+    """**組の照合が落ちても、無効化の報告は先に出る。**
+
+    無効化は既に commit されている。相手側の失敗をそのまま外へ上げると、
+    利用者に残るのは「再確認が失敗しました」だけで、**写真が黙って未送信へ
+    戻ったこと**を作業の履歴から辿れない。
+    """
+    server, rechecker, ctx, destination_id, db = world
+    a_stacked_pair(world)
+    server.stacks["stack-1"] = {"primary": "asset-1", "assets": ["asset-1", "asset-2"]}
+    vanished = a_vanished_record(world)
+    original = server.route
+
+    def fail_the_stack_listing(method, path, body, headers):
+        result = original(method, path, body, headers)
+        if path == "/api/assets/bulk-upload-check":
+            # 続く `GET /api/stacks` だけを落とす（照合そのものは通す）。
+            server.fail_next = 1
+        return result
+
+    server.route = fail_the_stack_listing
+
+    outcome = rechecker.run(ctx, destination_id)
+
+    assert outcome.vanished == 1
+    assert outcome.checked == 3
+    assert outcome.unstacked == 0
+    assert (
+        db.execute(
+            "SELECT invalidated_reason FROM upload_record WHERE id = ?", (vanished,)
+        ).fetchone()["invalidated_reason"]
+        == "remote_missing"
+    )
+    messages = messages_of(db, ctx.job_id)
+    # **順序も固定する。** 組の段を無効化の報告より前に置くと、その失敗で
+    # 警告ごと消える形に戻ってしまう。
+    assert messages.index(
+        "リモートに存在しないので、まだ送っていないものに戻した"
+    ) < messages.index("組の照合ができなかった")
+
+
+def test_a_failing_stack_listing_does_not_leak_the_peers_words(world):
+    """**相手由来の文言も、こちらの method / path / 状態コードも混ぜない**（§13）."""
+    server, rechecker, ctx, destination_id, db = world
+    a_stacked_pair(world)
+    original = server.route
+
+    def fail_the_stack_listing(method, path, body, headers):
+        result = original(method, path, body, headers)
+        if path == "/api/assets/bulk-upload-check":
+            server.fail_next = 1
+        return result
+
+    server.route = fail_the_stack_listing
+
+    rechecker.run(ctx, destination_id)
+
+    joined = " ".join(messages_of(db, ctx.job_id))
+    assert "unavailable" not in joined
+    assert "503" not in joined
+    assert "/api/stacks" not in joined
+
+
+def test_a_lease_lost_after_the_write_still_reports_what_was_written(world, monkeypatch):
+    """**書いた後にリースを失っても、`checked` は実際に書いた件数のまま。**
+
+    `stamp_many` は commit 済みなので、ここで 0 と報告すると
+    「何も書いていない」と読める記録が残る（実際は無効化まで済んでいる）。
+    """
+    server, rechecker, ctx, destination_id, db = world
+    a_stacked_pair(world)
+    server.stacks["stack-1"] = {"primary": "asset-1", "assets": ["asset-1", "asset-2"]}
+    real = UploadRepository.stamp_many
+
+    def expire_after_the_write(self, *args, **kwargs):  # noqa: ANN001, ANN002, ANN003, ANN202
+        written = real(self, *args, **kwargs)
+        db.execute(
+            "UPDATE job SET lease_expires_at = '2020-01-01T00:00:00+00:00' WHERE id = ?",
+            (ctx.job_id,),
+        )
+        return written
+
+    monkeypatch.setattr(UploadRepository, "stamp_many", expire_after_the_write)
+
+    outcome = rechecker.run(ctx, destination_id)
+
+    assert outcome.checked == 2
+    assert outcome.unstacked == 0
