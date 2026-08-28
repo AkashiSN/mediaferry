@@ -20,7 +20,6 @@ const MESSAGES: Record<string, string> = {
   conflict: "いまの状態ではこの操作はできません。",
   job_already_finished: "その作業はもう終わっています。",
   not_retryable: "失敗した状態ではないので、再試行できません。",
-  not_requeueable: "この記録は送り直せません。",
   not_awaiting_approval: "確認を待っている記録ではありません。画面を再読み込みしてください。",
   already_invalidated: "この記録は無効になっています。",
   approval_already_queued: "この承認はもう実行待ちです。",

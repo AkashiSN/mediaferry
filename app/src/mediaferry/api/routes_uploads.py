@@ -96,45 +96,6 @@ def retry_upload(
     return {"status": "ok"}
 
 
-@router.post("/uploads/{record_id}/requeue")
-def requeue_upload(
-    record_id: str,
-    conn=Depends(get_conn),  # noqa: ANN001, B008
-    box=Depends(get_box),  # noqa: ANN001, B008
-) -> dict[str, str]:
-    """リモートから消えた資産を、利用者の明示操作で送り直す（§9.10）.
-
-    **自動では戻さない。** 対象は「再確認でサーバに無いと分かった `complete`」
-    （`remote_asset_id IS NULL` かつ `remote_checked_at IS NOT NULL`）だけ。
-    通常の `complete` は拒否する。
-    """
-    uploads = _uploads(conn, box)
-    row = uploads.get(record_id)
-    if row is None:
-        raise ApiError(404, ErrorCode.NOT_FOUND, "そのレコードは無い")
-    reason = uploads.check_eligibility(row)
-    if reason is not None:
-        raise ApiError(409, ErrorCode.NOT_REQUEUEABLE, f"送り直せない: {reason}")
-    with immediate(conn):
-        updated = conn.execute(
-            "UPDATE upload_record SET state = 'pending', remote_is_trashed = NULL,"
-            " updated_at = ?,"
-            # 送り直す前に前回の結果を捨てる（上と同じ理由）。
-            " stack_state = NULL, remote_stack_id = NULL, stack_reason = NULL"
-            " WHERE id = ? AND state = 'complete'"
-            "   AND remote_asset_id IS NULL AND remote_checked_at IS NOT NULL"
-            "   AND invalidated_at IS NULL",
-            (now_iso(), record_id),
-        )
-    if updated.rowcount != 1:
-        raise ApiError(
-            409,
-            ErrorCode.NOT_REQUEUEABLE,
-            "リモートに存在しないと確認できたレコードだけ送り直せる",
-        )
-    return {"status": "ok"}
-
-
 @router.post("/uploads/{record_id}/approve")
 def approve_upload(
     record_id: str,

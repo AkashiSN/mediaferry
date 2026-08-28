@@ -2,6 +2,7 @@ import hashlib
 
 import pytest
 
+from mediaferry.clock import now_iso
 from mediaferry.db.connection import Database
 from mediaferry.db.profiles import ProfileRegistry
 
@@ -143,35 +144,26 @@ def test_approving_something_that_is_not_waiting_is_a_409(world, client):
     assert client.post(f"/api/uploads/{record_id}/approve").status_code == 409
 
 
-def test_a_vanished_asset_can_be_sent_again(world, client):
-    """再確認で「リモートに存在しない」と分かったものだけ送り直せる（§9.10）."""
+def test_the_requeue_route_is_gone(world, client):
+    """送り直し専用の経路は無くした（§9.10）.
+
+    消えた記録は再確認が無効化して「まだ送っていない」へ戻すので、通常の
+    送る経路から送る。**以前ならこの形が 200 を返していた**（リモートに無いと
+    確認できた `complete`）ので、経路が本当に消えたことが見える。
+    """
     _, destination_id, media_id, api_db = world
-    client.post("/api/uploads", json={"media_ids": [media_id], "destination_ids": [destination_id]})
-    record_id = api_db.execute("SELECT id FROM upload_record").fetchone()[0]
+    record_id = client.post(
+        "/api/uploads", json={"media_ids": [media_id], "destination_ids": [destination_id]}
+    ).json()["pairs"][0]["upload_record_id"]
     revision_id = api_db.execute("SELECT current_revision_id FROM upload_destination").fetchone()[0]
     api_db.execute(
         "UPDATE upload_record SET state = 'complete', remote_asset_id = NULL,"
-        " remote_checked_at = '2026-08-17T00:00:00+00:00', destination_revision_id = ?",
-        (revision_id,),
+        " remote_checked_at = ?, destination_revision_id = ? WHERE id = ?",
+        (now_iso(), revision_id, record_id),
     )
+    api_db.commit()
 
-    assert client.post(f"/api/uploads/{record_id}/requeue").status_code == 200
-
-    assert api_db.execute("SELECT state FROM upload_record").fetchone()[0] == "pending"
-
-
-def test_a_healthy_complete_record_cannot_be_requeued(world, client):
-    """送信済みのものを、確認もせずに送り直させない."""
-    _, destination_id, media_id, api_db = world
-    client.post("/api/uploads", json={"media_ids": [media_id], "destination_ids": [destination_id]})
-    record_id = api_db.execute("SELECT id FROM upload_record").fetchone()[0]
-    revision_id = api_db.execute("SELECT current_revision_id FROM upload_destination").fetchone()[0]
-    api_db.execute(
-        "UPDATE upload_record SET state = 'complete', remote_asset_id = 'asset-1',"
-        " remote_checked_at = '2026-08-17T00:00:00+00:00', destination_revision_id = ?",
-        (revision_id,),
-    )
-    assert client.post(f"/api/uploads/{record_id}/requeue").status_code == 409
+    assert client.post(f"/api/uploads/{record_id}/requeue").status_code == 404
 
 
 def test_starting_an_upload_enqueues_a_job_for_that_destination(world, client, api_db):
@@ -373,40 +365,6 @@ def test_the_dashboard_counts_stacks_not_records(secret_env, client, api_db):  #
     )
 
     assert summary["stacked"] == 1
-
-
-def test_requeue_clears_the_stack_result(secret_env, client, api_db):  # noqa: F811
-    """**送り直す前に、前回の結果を捨てる。**
-
-    残すと `unstacked_batch` が拾わず、新しい資産で組み直せない。
-    """
-    from mediaferry.clock import now_iso
-
-    from .test_schema_artifacts import a_media_file
-    from .test_schema_sources import a_profile
-    from .test_schema_uploads import a_destination, an_upload
-
-    profile = a_profile(api_db, slug="requeue-cam")
-    dest = a_destination(api_db, name="requeue-dest")
-    record = an_upload(
-        api_db,
-        dest,
-        a_media_file(api_db, profile),
-        state="complete",
-        destination_revision_id=dest[1],
-        remote_asset_id=None,
-        remote_checked_at=now_iso(),
-        stack_state="skipped",
-        stack_reason="相方が見つからない",
-    )
-
-    assert client.post(f"/api/uploads/{record}/requeue").status_code == 200
-
-    row = api_db.execute(
-        "SELECT stack_state, stack_reason FROM upload_record WHERE id = ?", (record,)
-    ).fetchone()
-    assert row["stack_state"] is None
-    assert row["stack_reason"] is None
 
 
 def test_retry_clears_the_stack_result(secret_env, client, api_db):  # noqa: F811
