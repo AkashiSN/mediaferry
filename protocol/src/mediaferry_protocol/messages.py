@@ -53,8 +53,8 @@ class VolumeExpect:
 
     `broker_epoch` は mountd の起動ごとに生成される乱数。世代番号は
     再起動で 0 に戻るため、これが無いと「mountd 再起動をまたいで残った
-    古い expect」が偶然一致してしまう。Phase 1 のジョブは app と mountd の
-    再起動をまたぐので、この欄は Phase 0 で wire schema に入れておく。
+    古い expect」が偶然一致してしまう。ジョブは app と mountd の再起動を
+    またぐので、この欄を wire schema に持つ。
     """
 
     major: int

@@ -524,7 +524,7 @@ class ArtifactPublisher:
                         metadata["duration_seconds"],
                         metadata["probe_state"],
                         # 取り込みでは「算出に使った版」＝「取り込みに使った版」。
-                        # 再計算だけがこの列を進める（`0011`）。
+                        # 再計算だけが `captured_at_revision_id` を進める。
                         metadata["profile_revision_id"],
                         now_iso(),
                     ),

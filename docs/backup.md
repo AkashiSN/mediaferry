@@ -1,9 +1,6 @@
-# バックアップとリストア（Phase 1）
+# バックアップとリストア
 
-**2026-08-21 に実機で一通り実測した**（[`history/hardware-verification.md`](history/hardware-verification.md)）。
-
-設計仕様書 §18-4 で「Phase 1 で、ライブラリからどこまで再構築できるかを明記し、
-定期バックアップ手順を用意する」と決めた項目。ここで閉じる。
+**手順は実機で一通り実測してあります**（[`history/hardware-verification.md`](history/hardware-verification.md)）。
 
 ## DB が唯一の状態保持先
 
@@ -135,6 +132,6 @@ docker start <app のコンテナ>
 
 ## 関連
 
-- 設計仕様書 §12.3（マスター鍵の境界）
-- 設計仕様書 §9.6（起動時の齟齬回収）
-- [`hardware-checklist.md`](hardware-checklist.md)（実機での確認手順）
+- [`design.md`](design.md) §12.3（マスター鍵の境界）
+- [`design.md`](design.md) §9.6（起動時の齟齬回収）
+- [`history/hardware-checklist.md`](history/hardware-checklist.md)（実機での確認の記録）

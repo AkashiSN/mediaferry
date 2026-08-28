@@ -536,7 +536,8 @@ def test_uploading_a_new_asset_over_a_stacked_record_reopens_the_group(world, db
 
     再計算は `complete` → `needs_recheck` を動かすが `stack_state` は残す
     （スタック済みという事実は真のまま）。その後の送信が新しい資産 ID を書く
-    ので、**その時点で組の結果は無効になる**。塞がないと `0016` がジョブごと
+    ので、**その時点で組の結果は無効になる**。塞がないと
+    `upload_record_stacked_needs_its_asset` がジョブごと
     落とすか、古い `remote_stack_id` が新しい資産の結果として残る。
     """
     repo, ctx, destination_id, revision, records = world

@@ -77,7 +77,7 @@ def test_a_second_claim_gets_nothing(db, world):
 def test_an_abandoned_claim_is_recovered_by_the_reconciler_not_by_a_takeover(db, world):
     """**期限切れの横取りは起こらない契約にする。**
 
-    `0004` の CHECK は「claim の 3 欄はすべて NULL かすべて非 NULL」かつ
+    `upload_record` の CHECK は「claim の 3 欄はすべて NULL かすべて非 NULL」かつ
     「進行中の状態なら claim を持つ」と定めている。つまり `pending` /
     `needs_recheck` の行に期限だけを残すことはできず、進行中の行は
     `claim_next` の対象外。**放置された claim を回収するのは起動時の

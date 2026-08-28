@@ -162,7 +162,7 @@ def detach_absent(conn: sqlite3.Connection, seen_presence_ids: Sequence[str]) ->
 def pending_contents(
     conn: sqlite3.Connection, volume_instance_id: str, limit: int
 ) -> tuple[list[sqlite3.Row], int, int]:
-    """取り込み待ちの一覧と、その件数・合計サイズ（Phase 11 の R8・R9）.
+    """取り込み待ちの一覧と、その件数・合計サイズ（`docs/history/phase11-design.md` の R8・R9）.
 
     返すのは `(rows, count, total_bytes)`。**件数と合計は上限で切らない** ——
     出せる分だけを合計にすると、画面が「このカードにどれだけ入っているか」を

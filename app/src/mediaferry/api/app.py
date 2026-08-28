@@ -6,8 +6,7 @@
   3. reconciliation（前回の中断からの回収）
   4. ワーカーの開始
 
-`BIND_HOST` の既定は loopback。認証と CSRF が入る Phase 4 より前に LAN へ
-公開しない。
+`BIND_HOST` の既定は loopback。LAN へ出すなら `AUTH_PASSWORD` を設定する。
 """
 
 from __future__ import annotations

@@ -348,7 +348,7 @@ export function CardDetailScreen() {
                     {volume.profile_slug === null ? "対象外の理由" : "判定の理由"}:{" "}
                     {volume.reason ?? "不明"}
                   </p>
-                  {/* **「対象だが中身が無い」は対象外ではない**（§6 / Phase 0 の発見 B）。 */}
+                  {/* **「対象だが中身が無い」は対象外ではない**（§6 / 実測で分かったこと B）。 */}
                   {volume.provisional && (
                     <p role="note" className="small" style={{ marginTop: 4 }}>
                       {profileName} の対象ですが、取り込む中身がまだありません。

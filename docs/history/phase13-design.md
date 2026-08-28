@@ -286,6 +286,6 @@ tie-break として成立する。`id` を足す必要は無い。副産物と�
 
 - [`hardware-verification.md`](hardware-verification.md) —— 実測の記録（Canon の
   14〜17 番、`creation_time` の値、PCM の測定）
-- [`../hardware-checklist.md`](../hardware-checklist.md) —— 13〜17 番の結果
+- [`hardware-checklist.md`](hardware-checklist.md) —— 13〜17 番の結果
 - [`phase10-design.md`](phase10-design.md) —— 組の身元から時刻を外した理由
 - [`../decisions.md`](../decisions.md) —— 実測で覆った判断

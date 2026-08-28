@@ -375,7 +375,7 @@ def test_an_invalidated_record_does_not_block_a_new_one(db, uploads, destination
     destination_id = a_destination(destinations)
     media_id = a_media_file(db, (profile.profile_id, profile.revision_id))
     first = uploads.create_pairs([media_id], [destination_id])[0]
-    # `state = 'complete'` は `destination_revision_id` 必須（`0004` の CHECK）。
+    # `state = 'complete'` は `destination_revision_id` 必須（`upload_record` の CHECK）。
     revision_id = destinations.current(destination_id)["id"]
     db.execute(
         "UPDATE upload_record SET state = 'complete', remote_asset_id = NULL,"

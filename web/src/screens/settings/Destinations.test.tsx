@@ -424,8 +424,8 @@ describe("スタックの見送り", () => {
 
 // 送り先の接続設定（`base_url` / `public_url` / `api_key` / `same_library`）を
 // ここから入れ直せる。**`name` と `enabled` だけの本文はリビジョンを作らない短絡路**
-// なので、画面は接続の欄を必ず送る —— `docs/development.md` の `0007` の回復手順
-// （宛先を保存し直すと新しい観測がリビジョンに入る）が動く唯一の入口である。
+// なので、画面は接続の欄を必ず送る —— 向き先の観測を持たないリビジョンを回復する
+// （保存し直すと新しい観測がリビジョンに入る）唯一の入口である。
 describe("接続の設定を変える", () => {
   /** 要求の本文を記録する `stubApi` の代役。 */
   function stubWithBodies(overrides: Record<string, unknown> = {}) {

@@ -10,7 +10,7 @@
 
 **`profile_revision_id` は触らない。** それは「そのレコードが取り込みに使用した
 不変の版」という別の問いで、進めると timestamp 以外の新定義（`scan` / `merge` /
-`immich`）もそのファイルに適用したと偽ることになる（`0011`）。
+`immich`）もそのファイルに適用したと偽ることになる。
 
 **`recompute` は Immich に触らない。** 日時が変わった送信済みレコードは
 `needs_recheck` へ戻し、次のアップロードジョブにパイプラインを再実行させる。
@@ -219,7 +219,8 @@ class Recomputer:
         if member["captured_at_revision_id"] != profile.revision_id:
             # **継承元が旧版のままなら進めない。** 先頭 member が飛ばされている
             # （原名が残っていない）ときにここへ来る。値は旧版で算出したままなのに
-            # 新版で算出したと記録すると、`0011` で列を分けた意味が消える。
+            # 新版で算出したと記録すると、`captured_at_revision_id` を
+            # `profile_revision_id` から分けた意味が消える。
             return None
         return CapturedAt(
             at=datetime.fromisoformat(member["captured_at"]),

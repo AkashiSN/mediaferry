@@ -3,7 +3,6 @@ import stat
 
 import pytest
 
-from mediaferry.clock import now_iso
 from mediaferry.db.connection import Database, immediate
 from mediaferry.db.migrate import MigrationError, apply_migrations
 
@@ -179,111 +178,13 @@ def test_immediate_takes_the_write_lock_immediately(tmp_path):
     b.close()
 
 
-def test_an_existing_raw_remote_id_is_converted_to_a_fingerprint(tmp_path):
-    """**指紋化より前に作られた DB の平文を残さない**（§12.3）.
-
-    残ると、相手が API キーを echo していた場合にその平文が DB に居座り、
-    一覧の API 応答にも出続ける。`preflight` も生値と指紋を比べて、
-    変わっていない向き先を「変わった」と誤判定する。
-    """
-    from mediaferry.core.destinations.identity import fingerprint
-
-    conn = Database(tmp_path / "old.sqlite3").connect()
-    apply_migrations(conn)
-    _a_destination_revision(conn, "user-a")
-
-    # 指紋化の版が入る前の DB を作る（適用の記録を外し、生値へ戻す）。
-    conn.execute("DELETE FROM schema_migration WHERE version = 5")
-    conn.execute("DROP TRIGGER destination_revision_no_update")
-    conn.execute("UPDATE destination_revision SET remote_user_id = 'user-a'")
-    # 古い DB では trigger が居るところから始まる。
-    conn.execute(
-        "CREATE TRIGGER destination_revision_no_update BEFORE UPDATE ON destination_revision"
-        " BEGIN SELECT RAISE(ABORT, 'destination_revision is immutable'); END"
-    )
-
-    assert apply_migrations(conn) == [5]
-
-    assert conn.execute("SELECT remote_user_id FROM destination_revision").fetchone()[0] == (
-        fingerprint("user-a")
-    )
-    # 版を戻した trigger も元どおり（リビジョンは不変のまま）。
-    with pytest.raises(sqlite3.IntegrityError):
-        conn.execute("UPDATE destination_revision SET remote_user_id = 'x'")
-    conn.close()
-
-
-def _a_destination_revision(conn, user_id, suffix="1"):
-    """転送先とリビジョンを 1 つ作る（repository を通さず、最小の行だけ）."""
-    when = "2026-08-18T00:00:00+00:00"
-    destination, credential, revision = f"d-{suffix}", f"c-{suffix}", f"r-{suffix}"
-    conn.execute(
-        "INSERT INTO upload_destination (id, name, kind, enabled, created_at)"
-        " VALUES (?, ?, 'immich', 1, ?)",
-        (destination, f"home-{suffix}", when),
-    )
-    conn.execute(
-        "INSERT INTO destination_credential (id, destination_id, revision, secret_encrypted,"
-        " key_fingerprint, created_at) VALUES (?, ?, 1, X'00', 'fp', ?)",
-        (credential, destination, when),
-    )
-    conn.execute(
-        "INSERT INTO destination_revision (id, destination_id, revision, target_epoch,"
-        " base_url, public_url, credential_id, remote_user_id, server_instance_id,"
-        " verified_at, created_at)"
-        " VALUES (?, ?, 1, 1, 'http://immich.invalid:2283', NULL, ?, ?, NULL, ?, ?)",
-        (revision, destination, credential, user_id, when, when),
-    )
-    conn.execute(
-        "UPDATE upload_destination SET current_revision_id = ? WHERE id = ?",
-        (revision, destination),
-    )
-    return destination, revision
-
-
-def test_a_value_that_is_already_a_fingerprint_is_not_hashed_again(tmp_path):
-    """**生値と指紋が混ざった DB が正規に作れる**（§12.3）.
-
-    指紋化を入れた版のアプリは新しいリビジョンを指紋で保存するが、この版が
-    無ければ `schema_migration` はまだ 4。そこへ版 5 を当てたとき、指紋をもう
-    一度ハッシュすると観測値の一重指紋と永久に一致せず、その宛先が恒久的に
-    拒否される。**指紋であることは形の推定ではなく接頭辞で分かる**（生の
-    観測値と見分けが付かない形にすると、鍵をそのまま残す経路が開く）。
-    """
-    from mediaferry.core.destinations.identity import fingerprint
-
-    conn = Database(tmp_path / "mixed.sqlite3").connect()
-    apply_migrations(conn)
-    _a_destination_revision(conn, "user-a", suffix="1")
-    _a_destination_revision(conn, fingerprint("user-b"), suffix="2")
-
-    # 版 5 が入る前の DB にする（適用の記録を外し、生値の行を作り直す）。
-    conn.execute("DELETE FROM schema_migration WHERE version = 5")
-    conn.execute("DROP TRIGGER destination_revision_no_update")
-    conn.execute("UPDATE destination_revision SET remote_user_id = 'user-a' WHERE id = 'r-1'")
-    conn.execute(
-        "UPDATE destination_revision SET remote_user_id = ? WHERE id = 'r-2'",
-        (fingerprint("user-b"),),
-    )
-    conn.execute(
-        "CREATE TRIGGER destination_revision_no_update BEFORE UPDATE ON destination_revision"
-        " BEGIN SELECT RAISE(ABORT, 'destination_revision is immutable'); END"
-    )
-
-    assert apply_migrations(conn) == [5]
-
-    stored = dict(conn.execute("SELECT id, remote_user_id FROM destination_revision"))
-    assert stored["r-1"] == fingerprint("user-a")
-    assert stored["r-2"] == fingerprint("user-b")  # 二重にしない
-
-
-def test_a_database_from_the_previous_release_still_opens(tmp_path):
+def test_a_shipped_migration_is_never_edited(tmp_path):
     """**適用済みの版は書き換えない**（`migrate.py` 自身の契約）.
 
-    書き換えると、前の版で作った DB は `MigrationError` で開けなくなる
+    書き換えると、その版を当てた DB は `MigrationError` で開けなくなる
     —— 移行が走る前に落ちるので、データを直す機会も無い。ここでは
     「版のファイルは追加のみ」を、記録した checksum（`migration_checksums.txt`）で
-    固定する。値が変わったら**新しい版を足す**（その一覧に 1 行足す）。
+    固定する。直したいことがあるなら**新しい版を足す**（その一覧に 1 行足す）。
     """
     import hashlib
     from pathlib import Path
@@ -319,120 +220,8 @@ def test_a_database_from_the_previous_release_still_opens(tmp_path):
     conn.close()
 
 
-def test_untrusted_remote_state_is_dropped_whatever_its_shape(tmp_path):
-    """**相手由来の値は、形を見ずに捨てる**（§12.3 / §14）.
-
-    形で選り分けると、同じ形の秘密が残る。値自身の接頭辞も出所にならない
-    （API キーを発行するのは相手なので、`sha256:` で始まる鍵を選べる）。
-    信用できるのは版そのもの（この版より前に書かれた行）だけ。
-    """
-    from .test_schema_artifacts import a_media_file
-    from .test_schema_sources import a_profile
-    from .test_schema_uploads import a_destination, an_upload
-
-    conn = Database(tmp_path / "old.sqlite3").connect()
-    apply_migrations(conn)
-    profile = a_profile(conn)
-    destination = a_destination(conn)
-    destination_id, revision_id, _ = destination
-    common = {"destination_revision_id": revision_id, "remote_checked_at": "2026-08-18T00:00:00Z"}
-    stored = {
-        value: an_upload(
-            conn,
-            destination,
-            a_media_file(conn, profile),
-            state="complete",
-            remote_asset_id=value,
-            remote_is_trashed=1,
-            **common,
-        )
-        # 鍵そのもの（unreserved だけ）・NUL 入り・空文字・正しい UUID。
-        for value in ("test-api-key", "s\x00e\x00c", "", "6f9619ff-8b86-d011-b42d-00c04fc964ff")
-    }
-    awaiting = an_upload(
-        conn,
-        destination,
-        a_media_file(conn, profile),
-        state="awaiting_datetime_approval",
-        remote_asset_id="test-api-key",
-        **common,
-    )
-    # 向き先の記録には、指紋のふりをした鍵を入れておく。
-    conn.execute("DELETE FROM schema_migration WHERE version = 7")
-    conn.execute("DROP TRIGGER destination_revision_no_update")
-    conn.execute(
-        "UPDATE destination_revision SET remote_user_id = ?, server_instance_id = 'sha256:x'",
-        ("sha256:SECRET-API-KEY",),
-    )
-    conn.execute(
-        "CREATE TRIGGER destination_revision_no_update BEFORE UPDATE ON destination_revision"
-        " BEGIN SELECT RAISE(ABORT, 'destination_revision is immutable'); END"
-    )
-
-    assert apply_migrations(conn) == [7]
-
-    revision = conn.execute("SELECT * FROM destination_revision").fetchone()
-    assert revision["remote_user_id"] is None
-    assert revision["server_instance_id"] is None
-    rows = {row["id"]: row for row in conn.execute("SELECT * FROM upload_record")}
-    for value, record_id in stored.items():
-        assert rows[record_id]["remote_asset_id"] is None, value
-        assert rows[record_id]["remote_checked_at"] is None, value
-        # **観測はまとめて捨てる。** 片方だけ残すと「どの資産の、いつの観測か
-        # 分からないゴミ箱状態」が一覧に出る。
-        assert rows[record_id]["remote_is_trashed"] is None, value
-        assert "捨てた" in rows[record_id]["last_error"]
-        assert rows[record_id]["invalidated_at"] is None
-    assert rows[awaiting]["invalidated_at"] is not None
-    assert "承認" in rows[awaiting]["invalidated_reason"]
-    # リビジョンは不変のまま（trigger を戻している）。
-    with pytest.raises(sqlite3.IntegrityError):
-        conn.execute("UPDATE destination_revision SET remote_user_id = 'x'")
-    conn.close()
-
-
-def test_existing_rows_get_the_revision_they_were_imported_with(tmp_path):
-    """`0011`。既存行の `captured_at` は取り込みに使った版で算出されている.
-
-    **列を分けるのは provenance のため**（§6）。`profile_revision_id` は「その
-    レコードが使用した不変の版」なので、再計算で値だけを新しい定義から作ると
-    嘘になり、版ごと進めると timestamp 以外の新定義も適用したと偽る。
-    """
-    from .test_schema_sources import a_profile
-
-    conn = Database(tmp_path / "old.sqlite3").connect()
-    apply_migrations(conn)
-    profile_id, revision_id = a_profile(conn)
-    _, other_revision = a_profile(conn, slug="canon-eos")
-
-    # 0011 が入る前の DB へ戻す。
-    conn.execute("DELETE FROM schema_migration WHERE version = 11")
-    conn.execute("DROP TRIGGER media_file_captured_revision_insert")
-    conn.execute("DROP TRIGGER media_file_captured_revision_update")
-    conn.execute("ALTER TABLE media_file DROP COLUMN captured_at_revision_id")
-    conn.execute(
-        "INSERT INTO media_file (id, role, profile_id, profile_revision_id, rel_path,"
-        " size_bytes, mtime_ns, sha1, kind, captured_at, captured_at_source, probe_state,"
-        " created_at) VALUES ('m-1', 'original', ?, ?, 'library/dji-osmo/A.JPG', 10, 1,"
-        " '0000000000000000000000000000000000000000', 'photo', ?, 'filename', 'ok', ?)",
-        (profile_id, revision_id, now_iso(), now_iso()),
-    )
-
-    assert apply_migrations(conn) == [11]
-
-    assert (
-        conn.execute("SELECT captured_at_revision_id FROM media_file").fetchone()[0] == revision_id
-    )
-    # 移行で入れた値の上に、trigger の 2 つの契約がそのまま乗る。
-    with pytest.raises(sqlite3.IntegrityError):
-        conn.execute("UPDATE media_file SET captured_at_revision_id = NULL")
-    with pytest.raises(sqlite3.IntegrityError):
-        conn.execute("UPDATE media_file SET captured_at_revision_id = ?", (other_revision,))
-    conn.close()
-
-
 def test_the_recompute_lookups_do_not_scan_per_row(tmp_path):
-    """`0012`。再計算の対象抽出は `media_file` 1 行ごとに相関副問い合わせを回す.
+    """`source_entry_by_media`。再計算の対象抽出は `media_file` 1 行ごとに相関副問い合わせを回す.
 
     索引が無いと `source_entry` を毎行 SCAN し、並べ替えに一時 B-tree を作る。
     数万件のライブラリでは**最初の `assert_lease` に届く前に 60 秒を超え**、
@@ -487,7 +276,7 @@ def test_the_derived_lookup_does_not_scan_members_per_row(tmp_path):
 
 
 def test_the_unsent_count_looks_up_records_by_media_and_destination(tmp_path):
-    """`0019`。「まだ送っていない」の集計が、宛先の全レコードを走査しない.
+    """`upload_record_live_pair`。「まだ送っていない」の集計が、宛先の全レコードを走査しない.
 
     ダッシュボードは media 1 件ごとに「この宛先の有効な記録があるか」を尋ねる。
     条件は `media_file_id` と `destination_id` の 2 つの等値で、統計が無いと
@@ -516,7 +305,7 @@ def test_the_unsent_count_looks_up_records_by_media_and_destination(tmp_path):
 
 
 def test_the_recompute_keyset_is_bounded_by_the_profile(tmp_path):
-    """`0013`。ページの**返却件数**だけでなく、**探索する行数**も抑える.
+    """`media_file_by_profile`。ページの**返却件数**だけでなく、**探索する行数**も抑える.
 
     `rel_path` の UNIQUE 索引だけだと、`LIMIT` は返す件数しか縛らない。
     別プロファイルの大きなライブラリがあると、1 ページ読むだけでその全行を
@@ -547,14 +336,14 @@ def test_the_recompute_keyset_is_bounded_by_the_profile(tmp_path):
 
 
 def test_a_profile_filtered_listing_does_not_sort_the_whole_profile(tmp_path):
-    """`0014`。`0013` は一覧の実行計画を退行させる.
+    """`media_file_listing`。`media_file_by_profile` だけでは一覧の実行計画が退行する.
 
     一覧は `captured_at DESC, rel_path DESC` 固定で、ページは 50 件（§11）。
-    `media_file_captured_at` を辿れば先頭ページで止まれるのに、`0013` の
+    `media_file_captured_at` を辿れば先頭ページで止まれるのに、
     `(profile_id, role, rel_path)` が選ばれると**そのプロファイルの全行を拾って
     から並べ替える**。プロファイルが大半を占める通常の構成ほど悪化する。
 
-    **`media_file_listing`（`0026`）は `rel_path DESC` で終わる**ので、`ORDER BY`
+    **`media_file_listing` は `rel_path DESC` で終わる**ので、`ORDER BY`
     と索引がちょうど噛み合う。一時ソートは一切要らない。
     """
     # **一覧が実際に組み立てる WHERE を使う。** 問い合わせを手で書き写すと、
@@ -594,7 +383,7 @@ def test_a_profile_filtered_listing_does_not_sort_the_whole_profile(tmp_path):
 
 
 def test_a_role_filtered_listing_does_not_scan_the_capture_time_index(tmp_path):
-    """`0023`。「つないだ動画」の絞り込みが、撮影日時の索引を全走査しない.
+    """`media_file_derived_listing`。「つないだ動画」の絞り込みが、撮影日時の索引を全走査しない.
 
     `derived` は `original` に比べて桁で少ない。`captured_at` 側の索引を辿ると、
     `LIMIT` を満たすまでに何行 `role` を確かめるかが読めない（実測: original
@@ -602,14 +391,13 @@ def test_a_role_filtered_listing_does_not_scan_the_capture_time_index(tmp_path):
     WHERE role = 'derived'` の部分索引を辿れば `role = 'derived'` の行だけを
     最初から並び順に読める。
 
-    **`0022` の全体索引ではなく `0023` の部分索引を見る。** `0022`
-    （`role, captured_at DESC, rel_path DESC`）は role='original' 側にも使える形で、
-    `db/selection.py` の `SENDABLE_CLAUSE` の OR 節の両方の枝から拾われて
-    `MULTI-INDEX OR` に化け、`GET /media?status=unsent&…` を退行させた
-    （`test_the_unsent_listing_does_not_multi_index_or`）。`0023` は
-    role='derived' だけの部分索引に差し替えることでその退行を塞ぐ。
+    **全体索引ではなく部分索引で持つ。** `(role, captured_at DESC, rel_path DESC)` の
+    形にすると role='original' 側にも使えてしまい、`db/selection.py` の
+    `SENDABLE_CLAUSE` の OR 節の両方の枝から拾われて `MULTI-INDEX OR` に化ける
+    （`test_the_unsent_listing_does_not_multi_index_or`）。role='derived' だけの
+    部分索引なら、その枝からしか使われない。
 
-    **`media_file_derived_listing`（`0026`）は `rel_path DESC` で終わる**ので、
+    **`media_file_derived_listing` は `rel_path DESC` で終わる**ので、
     `ORDER BY` とちょうど噛み合う。`role = 'derived'` の行だけを `captured_at` の
     並びで最初から読め、tie-break を含めて一時ソートは一切要らない。
     """
@@ -644,20 +432,19 @@ def test_a_role_filtered_listing_does_not_scan_the_capture_time_index(tmp_path):
 
 
 def test_the_unsent_listing_does_not_multi_index_or(tmp_path):
-    """`0023`。`status=unsent` の絞り込みが `MULTI-INDEX OR` に落ちない.
+    """`media_file_derived_listing`。`status=unsent` の絞り込みが `MULTI-INDEX OR` に落ちない.
 
     `db/selection.py` の `SENDABLE_CLAUSE` は
     `(m.role = 'original' AND ...) OR (m.role = 'derived' AND ...)` という形で、
-    **両方の枝が `role` の等値をリテラルで持つ**。`0022`
-    （`role, captured_at DESC, rel_path DESC`）はどちらの枝からも使えたため、
-    SQLite が `MULTI-INDEX OR` を選んでいた。OR の結果は `captured_at` の並び順に
-    出ないので最後に全件ソートが入り、`GET /media?status=unsent&destination_id=…`
-    が退行した（実測: original 60,000 行 / derived 200 行で中央値 0.58 ms →
-    74 ms。詳細は `.superpowers/sdd/phase9-plan/task-3-report.md`）。
+    **両方の枝が `role` の等値をリテラルで持つ**。`(role, captured_at DESC,
+    rel_path DESC)` の全体索引はどちらの枝からも使えるので、SQLite が
+    `MULTI-INDEX OR` を選ぶ。OR の結果は `captured_at` の並び順に出ないため
+    最後に全件ソートが入り、`GET /media?status=unsent&destination_id=…` が
+    退行する（実測: original 60,000 行 / derived 200 行で中央値 0.58 ms → 74 ms）。
 
-    `0023` は role='derived' だけの部分索引に差し替えたので、role='original' の
-    枝には索引が無くなり、`MULTI-INDEX OR` の対象から外れる —— 既存の経路
-    （`media_file_captured_at` を辿りながら絞り込む）に戻ることを見る。
+    `media_file_derived_listing` は role='derived' だけの部分索引なので、
+    role='original' の枝には索引が無く、`MULTI-INDEX OR` の対象から外れる ——
+    既存の経路（`media_file_captured_at` を辿りながら絞り込む）に戻ることを見る。
     """
     from mediaferry.api.routes_media import _filters
 
@@ -694,200 +481,6 @@ def test_the_unsent_listing_does_not_multi_index_or(tmp_path):
     # `USE TEMP B-TREE FOR LAST TERM OF ORDER BY` で、"FOR ORDER BY" を部分文字列に
     # 持たない。
     assert "FOR ORDER BY" not in plan, plan
-
-
-def test_a_group_discarded_before_the_change_gives_its_files_back(tmp_path):
-    """`0017`。**既存の DB を埋め戻さないと、実機がそのまま詰まる.**
-
-    実機には「破棄済みなのに member が active」なグループが 2 つ残っていた。
-    その状態では再検出も組み直しもできないので、版を足すだけでは直らない。
-    """
-    from .test_schema_artifacts import a_media_file
-    from .test_schema_sources import a_profile
-
-    conn = Database(tmp_path / "old.sqlite3").connect()
-    apply_migrations(conn)
-    profile_id, revision_id = a_profile(conn)
-    media = [
-        a_media_file(conn, (profile_id, revision_id), rel_path=f"library/dji-osmo/P{i}.MP4")
-        for i in range(2)
-    ]
-
-    # 0017 が入る前の DB へ戻す（active は superseded_by_id だけの写しだった）。
-    conn.execute("DELETE FROM schema_migration WHERE version = 17")
-    conn.execute("DROP TRIGGER merge_group_discard_deactivates_members")
-    conn.execute("DROP TRIGGER merge_group_discard_is_final")
-    conn.execute("DROP TRIGGER merge_member_insert_matches_parent")
-    conn.execute("DROP TRIGGER merge_member_update_matches_parent")
-    conn.execute(
-        "INSERT INTO merge_group (id, profile_id, profile_revision_id, status, input_digest,"
-        " detected_by, created_at, updated_at)"
-        " VALUES ('g-old', ?, ?, 'skipped', 'digest-old', 'auto', ?, ?)",
-        (profile_id, revision_id, now_iso(), now_iso()),
-    )
-    for position, media_id in enumerate(media):
-        conn.execute(
-            "INSERT INTO merge_member (merge_group_id, media_file_id, position, active)"
-            " VALUES ('g-old', ?, ?, 1)",
-            (media_id, position),
-        )
-
-    # 0003 の版の trigger を戻す（0017 はこれを DROP するところから始まる）。
-    for name, event in (
-        ("merge_member_insert_matches_parent", "BEFORE INSERT ON merge_member"),
-        (
-            "merge_member_update_matches_parent",
-            "BEFORE UPDATE OF merge_group_id, active ON merge_member",
-        ),
-    ):
-        conn.execute(
-            f"CREATE TRIGGER {name} {event}"  # noqa: S608
-            " WHEN NEW.active <> (SELECT superseded_by_id IS NULL FROM merge_group"
-            "                     WHERE id = NEW.merge_group_id)"
-            " BEGIN SELECT RAISE(ABORT, 'member active flag must match the group"
-            " supersede state'); END"
-        )
-
-    assert apply_migrations(conn) == [17]
-
-    assert conn.execute("SELECT count(*) FROM merge_member WHERE active = 1").fetchone()[0] == 0
-    conn.close()
-
-
-def test_a_card_that_was_already_counted_stays_counted(tmp_path):
-    """`0021`。**版を足すだけでは、既に数え終えたカードが「未計測」に戻る.**
-
-    それまで「数えた時刻」は `source_entry.observed_at` の最大値から導いて
-    いた。列を足しただけでは既存の行は `NULL` なので、更新した瞬間にホームが
-    数え終わったカードにも「中身を数えています。」を出す。
-    """
-    from .test_schema_sources import a_volume
-
-    conn = Database(tmp_path / "old.sqlite3").connect()
-    apply_migrations(conn)
-    volume_id = a_volume(conn)
-    empty_id = a_volume(conn, fs_uuid="0000-0001")
-    for index, observed in enumerate(["2026-08-24T00:00:00Z", "2026-08-25T09:00:00Z"]):
-        conn.execute(
-            "INSERT INTO source_entry (id, volume_instance_id, rel_path, size_bytes, mtime_ns,"
-            " quick_fingerprint, fingerprint_version, state, observed_at)"
-            " VALUES (?, ?, ?, 1, 1, 'x', 1, 'published', ?)",
-            (f"e-{index}", volume_id, f"DCIM/{index}.MP4", observed),
-        )
-    # 0021 が入る前の DB へ戻す。
-    conn.execute("DELETE FROM schema_migration WHERE version = 21")
-    conn.execute("ALTER TABLE volume_instance DROP COLUMN scanned_at")
-
-    assert apply_migrations(conn) == [21]
-
-    rows = {row["id"]: row["scanned_at"] for row in conn.execute("SELECT * FROM volume_instance")}
-    # 最後に数えた時刻を引き継ぐ（いちばん古い方を採ると、数え直した直後の
-    # カードが「ずっと前に数えたまま」に見える）。
-    assert rows[volume_id] == "2026-08-25T09:00:00Z"
-    # 行が無いカードは埋め戻せない。**次に挿したときに数え直される**（§12.1 の
-    # `auto_scan_at` は presence ごとなので、挿し直しで新しい行になる）。
-    assert rows[empty_id] is None
-    conn.close()
-
-
-def test_progress_left_on_a_finished_job_is_cleared(tmp_path):
-    """`0018`。**版を足すだけでは、既に終わっている行は誰も直さない.**
-
-    進捗を落とすのは終了時の 1 回きり。実機では、直す前の版で完了したジョブに
-    「結合中 …」が残り続けていた。
-    """
-    conn = Database(tmp_path / "old.sqlite3").connect()
-    apply_migrations(conn)
-    conn.execute("DELETE FROM schema_migration WHERE version = 18")
-    conn.execute(
-        "INSERT INTO job (id, type, status, params_json, progress_json, created_at, finished_at)"
-        " VALUES ('j-old', 'merge', 'succeeded', '{}', '{\"phase\": \"merge\"}', ?, ?)",
-        (now_iso(), now_iso()),
-    )
-    conn.execute(
-        "INSERT INTO job (id, type, status, params_json, progress_json, created_at)"
-        " VALUES ('j-live', 'import', 'running', '{}', '{\"phase\": \"copy\"}', ?)",
-        (now_iso(),),
-    )
-
-    assert apply_migrations(conn) == [18]
-
-    rows = {row["id"]: row["progress_json"] for row in conn.execute("SELECT * FROM job")}
-    assert rows["j-old"] is None
-    # 走っているものには触らない。
-    assert rows["j-live"] is not None
-    conn.close()
-
-
-def test_existing_skips_go_back_to_unevaluated(tmp_path):
-    """`0025`。組の判定から撮影時刻を外したので、既存の見送りを未評価へ戻す.
-
-    **リビジョンの公開では戻らない。** `_publish_revision` が比べるのは
-    `StackRule` へパースした後の値で、`tolerance_seconds` は dataclass に無く
-    パーサも読まないため、旧 JSON と新 JSON が同じ値にパースされて差が出ない。
-    他の戻し口（`retry` は `failed` だけ、再確認の組の照合は `stacked` だけ、
-    `recompute` の `_reopen_stack` はその実行で `captured_at` が動いた行だけ）も、
-    **両方が見送りの組**には効かない。一度きりの移行で戻す。
-
-    **既に組んだものには触らない。** `stacked` は「その資産を送った結果」なので、
-    未評価へ戻すと同じ組をもう一度作りに行く。
-    """
-    from .test_schema_artifacts import a_media_file
-    from .test_schema_sources import a_profile
-    from .test_schema_uploads import a_destination, an_upload
-
-    conn = Database(tmp_path / "old.sqlite3").connect()
-    apply_migrations(conn)
-    profile = a_profile(conn)
-    destination = a_destination(conn)
-    revision_id = destination[1]
-    before = "2026-01-01T00:00:00Z"
-    skipped = an_upload(
-        conn,
-        destination,
-        a_media_file(conn, profile),
-        state="complete",
-        destination_revision_id=revision_id,
-        remote_asset_id="asset-skipped",
-        stack_state="skipped",
-        stack_reason="組の相方が見つからない",
-        updated_at=before,
-    )
-    stacked = an_upload(
-        conn,
-        destination,
-        a_media_file(conn, profile),
-        state="complete",
-        destination_revision_id=revision_id,
-        remote_asset_id="asset-stacked",
-        stack_state="stacked",
-        remote_stack_id="stack-1",
-        updated_at=before,
-    )
-    unevaluated = an_upload(
-        conn,
-        destination,
-        a_media_file(conn, profile),
-        state="complete",
-        destination_revision_id=revision_id,
-        remote_asset_id="asset-unevaluated",
-        updated_at=before,
-    )
-    conn.execute("DELETE FROM schema_migration WHERE version = 25")
-
-    assert apply_migrations(conn) == [25]
-
-    rows = {row["id"]: row for row in conn.execute("SELECT * FROM upload_record")}
-    assert rows[skipped]["stack_state"] is None
-    assert rows[skipped]["stack_reason"] is None
-    assert rows[skipped]["updated_at"] != before
-    # 既に組んだものはそのまま。
-    assert rows[stacked]["stack_state"] == "stacked"
-    assert rows[stacked]["remote_stack_id"] == "stack-1"
-    assert rows[stacked]["updated_at"] == before
-    # 未評価の行は書き換えない（同じ値を書くだけでも `updated_at` が動く）。
-    assert rows[unevaluated]["updated_at"] == before
-    conn.close()
 
 
 def _fk_fixture(folder):
@@ -1009,152 +602,12 @@ def test_a_marker_that_only_appears_mid_file_does_not_turn_off_foreign_keys(tmp_
 
 
 def test_every_shipped_migration_leaves_the_references_intact(tmp_path):
-    """**外部キーを外して走る版があるので、全部流した後に必ず確かめる.**
+    """**外部キーを外して走る版がありうるので、全部流した後に必ず確かめる.**
 
-    `0026` は media_file を作り直す。子から参照されている表なので、手順を
-    1 つ間違えると参照が壊れたまま通る。
+    子から参照されている表を作り直す版は、手順を 1 つ間違えると参照が
+    壊れたまま通る。
     """
     conn = Database(tmp_path / "db.sqlite3").connect()
     apply_migrations(conn)
-    assert conn.execute("PRAGMA foreign_key_check").fetchall() == []
-    conn.close()
-
-
-def test_rows_survive_the_media_file_rebuild(tmp_path, monkeypatch):
-    """**作り直しは中身を運ぶ.** 列を足すために行を捨てない.
-
-    `missing_at` を持つ行を入れるのは、`INSERT ... SELECT` の列を 1 つでも
-    落としたら落ちるようにするため。
-    """
-    import shutil
-
-    from mediaferry.clock import now_iso
-    from mediaferry.db import migrate
-
-    from .test_schema_artifacts import a_media_file, a_merge_group
-    from .test_schema_sources import a_profile
-
-    original = migrate.MIGRATIONS_DIR
-    folder = tmp_path / "m"
-    folder.mkdir()
-    for path in sorted(original.glob("*.sql")):
-        if not path.name.startswith("0026"):
-            shutil.copy(path, folder / path.name)
-    monkeypatch.setattr(migrate, "MIGRATIONS_DIR", folder)
-
-    conn = Database(tmp_path / "db.sqlite3").connect()
-    apply_migrations(conn)
-    profile = a_profile(conn)
-    media_id = a_media_file(
-        conn,
-        profile,
-        rel_path="library/dji-osmo/DCIM/OLD.MP4",
-        captured_at_source="mtime",
-        missing_at=now_iso(),
-    )
-    # **他表から実際に参照させる。** media_file を参照する行が 1 つも無いと、
-    # 外部キーを外さずに DROP TABLE しても SQLite は文句を言わない
-    # （子に該当する行が無ければ、FK が有効でも DROP は通る）。footgun を
-    # 塞げているかは、この参照が生き残ることでしか確かめられない。
-    group_id = a_merge_group(conn, profile, digest="d1")
-    conn.execute("INSERT INTO merge_member VALUES (?, ?, 0, 1)", (group_id, media_id))
-    conn.commit()
-
-    # ここで初めて 0026 を持ち込み、当てる。
-    shutil.copy(original / "0026_media_file_container.sql", folder)
-    assert apply_migrations(conn) == [26]
-
-    row = conn.execute("SELECT * FROM media_file WHERE id = ?", (media_id,)).fetchone()
-    assert row["rel_path"] == "library/dji-osmo/DCIM/OLD.MP4"
-    assert row["captured_at_source"] == "mtime"
-    assert row["missing_at"] is not None
-    # 新しい列は既存行では空。値を捏造しない。
-    assert row["container_wall"] is None
-    # 参照していた行も、参照したまま生き残る。
-    assert (
-        conn.execute(
-            "SELECT media_file_id FROM merge_member WHERE merge_group_id = ?", (group_id,)
-        ).fetchone()[0]
-        == media_id
-    )
-    assert conn.execute("PRAGMA foreign_key_check").fetchall() == []
-    conn.close()
-
-
-def test_rows_survive_the_upload_record_rebuild(tmp_path, monkeypatch):
-    """**作り直しは中身を運ぶ**（`0027`）. 表制約を落とすために行を捨てない.
-
-    `0026` と同じ形で確かめる。全列に固有の値を入れた行が、移行の後も 1 つ残らず
-    同じ値であること —— `INSERT ... SELECT` の列を 1 つでも落としたら落ちる。
-    """
-    import shutil
-
-    from mediaferry.clock import now_iso
-    from mediaferry.db import migrate
-    from mediaferry.db.jobs import JobStore
-
-    from .test_schema_artifacts import a_media_file, a_merge_group
-    from .test_schema_sources import a_profile
-    from .test_schema_uploads import a_destination
-
-    original = migrate.MIGRATIONS_DIR
-    folder = tmp_path / "m"
-    folder.mkdir()
-    for path in sorted(original.glob("*.sql")):
-        if not path.name.startswith("0027"):
-            shutil.copy(path, folder / path.name)
-    monkeypatch.setattr(migrate, "MIGRATIONS_DIR", folder)
-
-    conn = Database(tmp_path / "db.sqlite3").connect()
-    apply_migrations(conn)
-    profile = a_profile(conn)
-    media_id = a_media_file(conn, profile, rel_path="library/dji-osmo/DCIM/OLD.MP4")
-    destination_id, revision_id, _ = a_destination(conn)
-    group_id = a_merge_group(conn, profile, digest="d1")
-    job_id = JobStore(conn).enqueue("upload", {"destination_id": destination_id})
-    # **全列に固有の値を入れる。** 進行中（`checking`）にしてあるのは、claim の
-    # 3 列と `destination_revision_id` を NULL でない値で埋めるため。
-    row = {
-        "id": "record-under-test",
-        "destination_id": destination_id,
-        "target_epoch": 1,
-        "media_file_id": media_id,
-        "state": "checking",
-        "selection_rule": "adopted_derived",
-        "origin": "pre_existing",
-        "first_check_result": "reject",
-        "remote_asset_id": "asset-under-test",
-        "remote_is_trashed": 1,
-        "remote_checked_at": "2026-01-02T03:04:05+00:00",
-        "checksum": "0" * 39 + "1",
-        "attempts": 7,
-        "last_error": "前回の失敗の理由",
-        "eligibility_reason": "送ってよいと判断した理由",
-        "merge_group_id": group_id,
-        "claim_job_id": job_id,
-        "claim_token": "token-under-test",
-        "claim_expires_at": "2999-01-01T00:00:00+00:00",
-        "destination_revision_id": revision_id,
-        "invalidated_at": "2026-01-03T00:00:00+00:00",
-        "invalidated_reason": "remote_missing",
-        "created_at": "2026-01-01T00:00:00+00:00",
-        "updated_at": now_iso(),
-        "remote_datetime_original": "2026-01-01T09:00:00+09:00",
-        "stack_state": "stacked",
-        "remote_stack_id": "stack-under-test",
-        "stack_reason": None,
-    }
-    cols = ", ".join(row)
-    marks = ", ".join("?" * len(row))
-    conn.execute(f"INSERT INTO upload_record ({cols}) VALUES ({marks})", tuple(row.values()))  # noqa: S608
-    conn.commit()
-
-    # ここで初めて 0027 を持ち込み、当てる。
-    shutil.copy(original / "0027_live_identity_is_unique.sql", folder)
-    assert apply_migrations(conn) == [27]
-
-    after = conn.execute("SELECT * FROM upload_record WHERE id = ?", (row["id"],)).fetchone()
-    assert dict(after) == row
-    # 参照していた先も、参照したまま生き残る（FK を外して走る移行なので）。
     assert conn.execute("PRAGMA foreign_key_check").fetchall() == []
     conn.close()

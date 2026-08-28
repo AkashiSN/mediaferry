@@ -623,7 +623,7 @@ function TaskCard({
               分かれている動画を {task.count} 本つなぐ
             </h3>
             <p className="small" style={{ marginTop: 3 }}>
-              カメラが 4 GiB ごとに分けて保存した動画です。つなぐと 1 本の動画になります。
+              カメラが自動で分けて保存した動画です。つなぐと 1 本の動画になります。
             </p>
           </div>
           <div className="acts">

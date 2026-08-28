@@ -34,7 +34,7 @@ from .profiles import ProfileRegistry
 
 INCLUDE_FAILED_GROUP_MEMBERS = "failed_group_members"
 INCLUDE_UNADOPTED_DERIVED = "unadopted_derived"
-# 1 応答で返す上限。画面の pagination は Phase 4。
+# 1 応答で返す上限。
 DEFAULT_LIMIT = 500
 
 _ORIGINALS = (
@@ -101,7 +101,8 @@ def sendable_clause(alias: str) -> str:
 
 SENDABLE_CLAUSE = sendable_clause("m")
 
-# **`skipped` はここに来ない。** 破棄したグループは member を手放すので（`0017`）、
+# **`skipped` はここに来ない。** 破棄したグループは member を手放すので
+# （`merge_group_discard_deactivates_members`）、
 # その構成ファイルは `_ORIGINALS` に戻る —— 破棄は「このまとまりは無し」であって、
 # ファイルを隠すことではない。ここで拾うのは `failed` だけ（再試行できるので、
 # グループは生きている）。
@@ -134,8 +135,7 @@ class SelectionService:
     ) -> list[Selectable]:
         """**返す件数に上限を置く。** 数万件の一覧を 1 応答に詰めない.
 
-        呼び出し側は `len(result) == limit` で打ち切りを判断する。カーソルを
-        使った本格的な pagination は、画面の要件が決まる Phase 4 で足す。
+        呼び出し側は `len(result) == limit` で打ち切りを判断する。
         """
         items = [
             Selectable(row["id"], row["rel_path"], row["role"], "default", None)

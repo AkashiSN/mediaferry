@@ -234,7 +234,7 @@ class JobStore:
         return self._conn.execute("SELECT * FROM job WHERE id = ?", (job_id,)).fetchone()
 
     def list_jobs(self, limit: int = 50) -> list[sqlite3.Row]:
-        """一覧。**最後の 1 文を添えて返す**（Phase 11 の N4）.
+        """一覧。**最後の 1 文を添えて返す**（`docs/history/phase11-design.md` の N4）.
 
         画面は進捗の知らせで受けた分しか要約を持てないので、**開く前に終わった
         作業は「完了」としか出せなかった**。`スキャン完了: … / 消えた 2 件` の
