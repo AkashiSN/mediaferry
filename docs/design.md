@@ -430,7 +430,7 @@ stem が一致するだけの組が通る。鍵は必ず組にして持つ。
 **規則の読み方が変わったときは、定義 JSON の比較では戻せない。** `_publish_revision` が
 見ているのは**パース後の `StackRule`** どうしなので、`stack.tolerance_seconds` のように
 「JSON には残るが読まなくなった」鍵は、旧版と新版が同じ値にパースされて差が出ない。
-Phase 10 は既存の見送りを一度きりの移行（`0025`）で未評価へ戻す。
+**この場合、既に付いた見送りは自動では戻らない。** 読み方を変えたときは、見送りを未評価へ戻す手当てを別に用意する。
 
 ## 7. ストレージレイアウト
 
@@ -668,7 +668,7 @@ epoch を進めれば、**旧 epoch の記録を監査履歴として残した�
 `base_url` は §12.4 のとおり CDN やリバースプロキシを経由しない直接到達できる
 アドレスにする。`public_url` は画面のリンク生成にだけ使う。
 
-**同一性の一意性は、部分 UNIQUE 索引 `upload_record_live_identity` で守る**（`0027`）。
+**同一性の一意性は、部分 UNIQUE 索引 `upload_record_live_identity` で守る。**
 
 ```sql
 CREATE UNIQUE INDEX upload_record_live_identity
@@ -677,13 +677,11 @@ CREATE UNIQUE INDEX upload_record_live_identity
 ```
 
 守る不変条件は「**有効な**記録は (宛先, epoch, メディア) 1 組につき高々 1 つ」であって
-「行が 1 つ」ではない。`0004` はこれを**表制約**の
-`UNIQUE (destination_id, target_epoch, media_file_id)` として持っていたが、それだと
-**無効化された行の隣に新しい行を作れない** —— 消滅した記録を無効化して「まだ送って
-いない」へ戻す（§9.10）と、同じ組に無効化された行と新しい行が並ぶので、送信が
-`IntegrityError` になる。SQLite は表制約を後から落とせないので、`0027` はテーブルを
-作り直して条件を `WHERE invalidated_at IS NULL` に付け替えた。変わるのは、無効化された
-行が監査履歴としてその隣に残れることだけである。
+「行が 1 つ」ではない。**表制約の `UNIQUE (destination_id, target_epoch, media_file_id)`
+では守れない** —— それだと無効化された行の隣に新しい行を作れず、消滅した記録を
+無効化して「まだ送っていない」へ戻す（§9.10）と、同じ組に無効化された行と新しい行が
+並ぶので、送信が `IntegrityError` になる。述語を `WHERE invalidated_at IS NULL` に
+することで、無効化された行は監査履歴としてその隣に残れる。
 
 **列順は `(media_file_id, target_epoch, destination_id)` でなければならない。** 一意性は
 列の集合で決まるので順序は守るものを変えないが、**述語が同じ部分索引どうしは、先頭の
@@ -694,7 +692,7 @@ CREATE UNIQUE INDEX upload_record_live_identity
   全行を辿って `state` で捨てる」へ落ちる（実測 20 回で 0.000 秒 → 0.095 秒）。claim は
   ファイル 1 本ごとに走るので、同期 1 回が O(N^2) になる
 - `(media_file_id, destination_id, target_epoch)` にすると、今度は
-  `upload_record_live_pair`（`(media_file_id, destination_id)`、`0019`）から奪う
+  `upload_record_live_pair`（`(media_file_id, destination_id)`）から奪う
 - `target_epoch` を 2 番目に挟めば、`destination_id` 単独にも
   `(media_file_id, destination_id)` にも当たらない。**両方を動かさない並びはこれだけ**
 
@@ -1525,7 +1523,7 @@ CAS に落ちたときは、**DB を書かずに次の送信の「既存スタ�
 - **戻す UPDATE は `assert_lease` と同じ 1 つのトランザクション**で、`target_epoch` と
   `remote_stack_id` と `stack_state = 'stacked'` を条件にした CAS で当てる
 - **対象を `state` で絞らない。** `stacked` は「その `remote_asset_id` を送った結果」で、
-  レコードの `state` とは独立である（`0015`。`decisions.md`）。`complete` に絞ると、
+  レコードの `state` とは独立である（`decisions.md`）。`complete` に絞ると、
   片方が `needs_recheck` へ差し戻された組はこちらの集合が相手の集合の真部分集合に
   なるので**毎回「崩れている」と読み**、続く第 2 パスがそれを `skipped` に落とす ——
   Immich では組んだままなのに、画面が「見送り」と言う
@@ -1641,7 +1639,7 @@ primary は `POST` の応答を見て、`extensions` の先頭側でなければ
 「うっかり選ばない」ようにするための区別である。
 
 - `status = failed` のグループの member（結合できなかったので個別に上げる）。**破棄した
-  グループの member はここではなく既定の一覧に戻る**（`0017`。破棄は「このまとまりは
+  グループの member はここではなく既定の一覧に戻る**（破棄は「このまとまりは
   無し」であって、ファイルを隠すことではない）
 - 検証不合格でまだ採用していない derived（中身を確認した上で）
 
