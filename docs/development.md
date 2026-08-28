@@ -104,7 +104,8 @@ PYTHONPATH=$PWD/app uv run python -m tests.system.serve /tmp/mf-ui "パスワー
   `web/e2e/journey.spec.ts` の `mergeTwoParts` と同じく、`<data_root>/library`
   配下の `.MP4` を小さな本物のクリップに差し替えてから「つなぐ」を押す
 - **片付けは自分の分だけ。** 親（`tests.system.serve`）を殺しても子の
-  `python3 -m mediaferry` は孤児として残る（下の「E2E がサーバを回収しない」）。
+  `python3 -m mediaferry` は孤児として残る
+  （[`history/carryover.md`](history/carryover.md) の「E2E がサーバを回収しない」）。
   同じ木で別の E2E が走っていることがあるので、`/proc/<pid>/environ` の
   `MEDIAFERRY_DATA_ROOT` で自分のものだと確かめてから落とす
 
