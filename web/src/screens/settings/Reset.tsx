@@ -29,12 +29,12 @@ type Removed = Record<string, number>;
  */
 const REMOVED_LABELS: readonly (readonly [string, string])[] = [
   ["job", "作業の履歴"],
-  ["job_event", "作業の経過"],
+  ["job_event", "出来事"],
   ["upload_record", "送信の記録"],
-  ["artifact_staging", "下書きの記録"],
+  ["artifact_staging", "公開の記録"],
   ["media_file", "写真・動画"],
   ["merge_group", "つないだ組み合わせ"],
-  ["merge_member", "つないだ組み合わせの内訳"],
+  ["merge_member", "つないだ元ファイル"],
   ["source_entry", "カードで見つけたファイル"],
   ["volume_instance", "カードの記録"],
   ["volume_presence", "カードを挿した履歴"],
@@ -91,6 +91,10 @@ export function ResetScreen() {
   const [removed, setRemoved] = useState<Removed | null>(null);
 
   async function run(scope: ResetScope): Promise<void> {
+    // **新しい操作を始めた時点で古い結果の帯を消す。** 残したままだと、次の
+    // 操作が失敗したときに前回の成功の帯とエラーの帯が同時に出て、支援技術では
+    // どちらが今回の応答か見分けが付かない。
+    setRemoved(null);
     // **応答の `removed` は `useMutation.run` の返り値では拾えない**（`run` は
     // 成否だけを返す）ので、閉包の中で受け取る。
     let captured: Removed | null = null;

@@ -144,4 +144,32 @@ describe("リセット", () => {
     await userEvent.click(screen.getByRole("button", { name: "閉じる" }));
     expect(screen.queryByRole("status")).not.toBeInTheDocument();
   });
+
+  it("次の操作を始めたら、前回の成功の帯を残さない", async () => {
+    // **筋書き**: 1 段目が成功して緑の帯が出る → 続けて 2 段目を押すが失敗する。
+    // 前回の帯を消さないと、赤（失敗）と緑（前回の成功）が同時に残り、
+    // どちらが今回の応答か支援技術では見分けが付かない。
+    renderReset({ job: 5 });
+    await runStage("作業の記録を消す");
+    expect(screen.getByRole("status")).toBeInTheDocument();
+
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(() =>
+        Promise.resolve(
+          new Response(
+            JSON.stringify({
+              error: { code: "job_in_flight", detail: "走っている作業がある", meta: {} },
+            }),
+            { status: 409 },
+          ),
+        ),
+      ),
+    );
+    await userEvent.click(screen.getByRole("button", { name: "送信の記録を消す" }));
+    await userEvent.click(screen.getByRole("button", { name: "実行する" }));
+
+    expect(await screen.findByRole("alert")).toBeInTheDocument();
+    expect(screen.queryByRole("status")).not.toBeInTheDocument();
+  });
 });
