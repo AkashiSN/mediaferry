@@ -982,3 +982,62 @@ def test_a_pair_is_restacked_after_one_side_is_resent(world):
     assert jpg["stack_state"] == "stacked"
     assert cr2["stack_state"] == "stacked"
     assert jpg["remote_stack_id"] == cr2["remote_stack_id"]
+
+
+def test_a_dissolved_stack_is_created_again(world):
+    """**利用者が Immich で解除した組も、次の再確認で作り直す**（利用者の判断）.
+
+    表示と実体が食い違ったまま残る方を避ける。この緊張は `decisions.md` に
+    中身ごと残してある。
+    """
+    world.make_checkable()
+    world.run()
+    # 利用者がスタックだけを解除した（資産は両方そのまま在る）。
+    world.immich.stacks.clear()
+    # 1 回目の `world.run()` が出した `POST /api/stacks` を消しておく。消さないと
+    # 「組み直した」の判定が、組み直していなくても通ってしまう。
+    world.immich.requests.clear()
+
+    outcome = world.rechecker().run(world.ctx, world.destination_id)
+    # 相手のスタックが消えているので、こちらが記録している組と食い違う。
+    assert outcome.unstacked == 1
+
+    world.run()
+
+    jpg = world.row("IMG_1234.JPG")
+    cr2 = world.row("IMG_1234.CR2")
+    assert jpg["stack_state"] == "stacked"
+    assert cr2["stack_state"] == "stacked"
+    assert jpg["remote_stack_id"] == cr2["remote_stack_id"]
+    # 全員が `stack: null` なので、第 2 パスは新しいスタックを作る。
+    assert ("POST", "/api/stacks") in world.immich.requests
+
+
+def test_a_stack_absorbed_by_someone_else_settles_as_skipped(world):
+    """崩れた組は、戻した先で見送りに落ちる（§9.11 の「触らない」）.
+
+    戻すことと作り直すことは別。相手側に別の組があるなら触らない、という
+    既存の判断が、戻す経路を足しても変わらないことを見る。
+    """
+    world.make_checkable()
+    world.run()
+    stack_id = world.row("IMG_1234.JPG")["remote_stack_id"]
+    # 利用者が第三の資産を組に足し、CR2 を外した（集合が一致しなくなる）。
+    world.immich.stacks[stack_id]["assets"] = [
+        world.assets["IMG_1234.JPG"],
+        "someone-else",
+    ]
+
+    outcome = world.rechecker().run(world.ctx, world.destination_id)
+    # こちらが数える集合 {JPG, CR2} と相手の集合 {JPG, someone-else} が
+    # 食い違うので、再確認が組を戻す。
+    assert outcome.unstacked == 1
+
+    world.run()
+
+    rows = [world.row("IMG_1234.JPG"), world.row("IMG_1234.CR2")]
+    # 戻した先の第 2 パスが相手を読み直し、JPG は別のスタックに、CR2 は
+    # どこにも入っていないと分かるので、`_adopted` が一致を見送り、
+    # 両方の行が見送りに落ちる。
+    assert all(row["stack_state"] == "skipped" for row in rows)
+    assert all("別のスタック" in (row["stack_reason"] or "") for row in rows)
