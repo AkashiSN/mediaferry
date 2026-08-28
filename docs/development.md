@@ -608,6 +608,8 @@ TrueNAS ホストで。手順は [`history/phase0-findings.md`](history/phase0-f
 | **「既存スタックに触らない」は保証ではない** | Immich に条件付きの作成が無く、読み直しと `POST` の間の競合は実装で閉じられない。残余として §9.11 に明記して受け入れた。吸収されても、要求と違う集合は protocol error にするので **id は記録しない** |
 | **検出できない変異: `stamp_many` の UPDATE から `AND remote_asset_id IS ?` を外す**（Phase 15） | 直前の `still` の SELECT が**同じトランザクションの中で同じ条件を先に確かめている**ので、片方だけ外しても結果が変わらない（`BEGIN IMMEDIATE` の中なので割り込みも無い）。**二重の保険で、両方を同時に外して初めて落ちる**（`pairs` で壊せば検出できる）。`claim_next` の CAS 条件と同型の、構造的な未到達 |
 | **検出できない変異: `jobs/stacker.py` の `Candidate.invalidated`**（Phase 15） | `unstacked_batch` も `record_for` も `invalidated_at IS NULL` で絞るようになったので、**無効化された行が候補として組み立てられる経路がもう無い**。それでも**残している** —— 「無効化された行とは組まない」という fail-closed をコードから消さないため。到達不能なので、この枝を壊す変異はどのテストも落とさない |
+| **消えた自動索引を誰が使っていたかを測っていなかった**（Phase 15） | `0027` は**新しい索引が既存の計画を奪わない**ことを実測で確かめたが、**表制約の UNIQUE を落として消えた `sqlite_autoindex_upload_record_2` を誰が使っていたか**は測っていなかった。`invalidate_old_epoch`（`db/uploads.py`）の計画が `(destination_id=? AND target_epoch<?)` から `upload_record_claimable (destination_id=?)` へ実際に落ちている（レビューで実測）。**実害は小さい**（epoch の繰り上げのときしか走らない）。「索引を足したら他の EXPLAIN も見る」を、**索引を消したときにもやる** |
+| **凍った migration の SQL コメントが、もう無い機能を名指ししている**（Phase 15） | `0006` / `0007` / `0016` / `0025` の SQL コメントは `requeue` を現存する機能として書いている（`0016` は `stamp_remote` も）。**どちらも Phase 15 で消した。適用済みの migration は書き換えないので、その名指しはそのまま残る。** コードの現在形として読まないこと |
 | 認証を既定 off のままにするか | ユーザの判断で off。`BIND_HOST` の既定を loopback にし、認証無効で非 loopback にバインドしていたら警告する緩和のみ |
 | Phase 1〜3 を配布可能リリースにしない | 認証と CSRF が入る Phase 4 より前に LAN へ公開しない |
 | SSE（`GET /events`） | Phase 4 の Web UI と一緒に入れる。Phase 1 は `GET /api/jobs/{id}/events?after_seq=` のポーリング |

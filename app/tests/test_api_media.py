@@ -568,8 +568,11 @@ def a_sent_media(db, *, name: str, **over):
 
 
 def test_the_detail_carries_the_upload_id_for_each_destination(client, db):
-    """**送り直すには記録の id が要る.** `presence` は状態を言うが、
-    どのレコードを操作すればよいかは言わない。
+    """宛先ごとの行が、**どの送信記録の姿を出しているか**を応答が名指しする.
+
+    `presence` は状態を言うが、どのレコードの状態かは言わない（同じ宛先に
+    無効化された行と有効な行が並ぶ）。**いまこれを読む画面は無い** ——
+    応答から落とすかどうかは別の判断なので、形だけを固定しておく。
     """
     media_id, record_id, _ = a_sent_media(db, name="upload-id-test")
     body = client.get(f"/api/media/{media_id}").json()
