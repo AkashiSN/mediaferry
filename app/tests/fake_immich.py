@@ -193,6 +193,9 @@ class FakeImmich:
             return 200, [{"id": asset_id, "success": True} for asset_id in ids]
         if method == "POST" and path == "/api/stacks":
             return self._create_stack(json.loads(body))
+        if method == "GET" and path == "/api/stacks":
+            # 絞り込み無しの一覧（再確認の照合が使う）。
+            return 200, [self._stack_view(stack_id) for stack_id in self.stacks]
         if method == "GET" and path.startswith("/api/stacks?"):
             return self._stacks_by_primary(path)
         if method == "PUT" and path.startswith("/api/stacks/"):
