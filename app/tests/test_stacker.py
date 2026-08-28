@@ -940,3 +940,45 @@ def test_a_group_whose_members_share_one_asset_id_is_refused(world):
     assert outcome.stacked == 0
     assert world.immich.stacks == {}
     assert "資産 ID が重なっている" in world.row("IMG_1234.JPG")["stack_reason"]
+
+
+def test_a_pair_is_restacked_after_one_side_is_resent(world):
+    """**片方だけ消えた組は、送り直せば組み直る**（§3.1）.
+
+    1. 再確認で CR2 が消滅と判定される
+    2. `_reopen_stack_of` が組の両方を未評価へ戻す
+    3. CR2 の記録が無効化される
+    4. 第 2 パスが JPG を拾い、相方が居ないので見送り
+    5. 利用者が通常経路で CR2 を送り直す（新しい記録）
+    6. 第 2 パスが新しい CR2 を拾い、見送りの JPG を引き上げて組み直す
+
+    **6 が通るのは `record_for` が有効な行を返すようになった後だけ。**
+    """
+    world.make_checkable()
+    world.run()
+    assert world.row("IMG_1234.CR2")["stack_state"] == "stacked"
+
+    # 利用者が Immich でスタックを解除し、CR2 だけを完全に削除した。
+    world.immich.stacks.clear()
+    world.forget_on_the_server("IMG_1234.CR2")
+    outcome = world.rechecker().run(world.ctx, world.destination_id)
+
+    # `_reopen_stack_of` が `stamp_many` の中で先に組を開くので、この時点で
+    # `stacked_groups` はもう空。**`_reconcile_stacks` が `stamp_many` の後に
+    # 置かれている**ことをここで固定する（前に置くと組がまだ見え、1 になる）。
+    assert outcome.unstacked == 0
+
+    assert world.row("IMG_1234.CR2")["invalidated_at"] is not None
+    assert world.row("IMG_1234.CR2")["invalidated_reason"] == "remote_missing"
+
+    world.run()
+    assert world.row("IMG_1234.JPG")["stack_state"] == "skipped"
+
+    world.resend("IMG_1234.CR2", "asset-CR2-again")
+    world.run()
+
+    jpg = world.row("IMG_1234.JPG")
+    cr2 = world.row("IMG_1234.CR2")
+    assert jpg["stack_state"] == "stacked"
+    assert cr2["stack_state"] == "stacked"
+    assert jpg["remote_stack_id"] == cr2["remote_stack_id"]
