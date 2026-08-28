@@ -246,7 +246,7 @@ def test_a_derived_that_vanished_from_immich_can_be_deleted(world, db, data_root
 def test_an_unobserved_complete_is_kept(world, db, data_root):
     """**「無い」には観測を要求する.**
 
-    `0007` を適用した DB には「向き先の記録が無い complete」が残っている。
+    「向き先の記録が無い complete」が残っていることがある。
     **Immich に在るのに識別子を捨てただけ**かもしれないので消さない
     （`remote_asset_id` と `remote_checked_at` の 2 列で判断する）。
     """
@@ -350,14 +350,14 @@ def test_deletion_blocker_of_an_unknown_media_file(world, db, data_root):
 #
 # **消したら、グループごと「別々にした」にする。** `merged` のまま出力だけ
 # 外すと `merge_member` が active に残り、再検出も組み直しも塞がって
-# 二度とつなげなくなる（`0017` に実機で詰まった記録がある）。
+# 二度とつなげなくなる。
 
 
 def test_deleting_a_live_groups_output_discards_the_group(world, db, data_root):
     """**現行グループの出力を消したら、グループごと「別々にした」にする.**
 
     `merged` のまま出力だけ外すと `merge_member` が active に残り、再検出も
-    組み直しも塞がって**二度とつなげなくなる**（`0017` に実機で詰まった記録がある）。
+    組み直しも塞がって**二度とつなげなくなる**。
     """
     repo, _, ref = world
     media_id, group_id, path = a_derived_with_group(db, data_root, ref)
@@ -379,7 +379,7 @@ def test_deleting_a_live_groups_output_discards_the_group(world, db, data_root):
 def test_deleting_a_sent_but_vanished_derived_removes_its_upload_records(world, db, data_root):
     """**記録も一緒に消す.**
 
-    `upload_record.media_file_id` は `ON DELETE RESTRICT`（`0004`）なので、
+    `upload_record.media_file_id` は `ON DELETE RESTRICT` なので、
     記録を残したまま `media_file` の行は消せない。Immich にも NAS にも無いものの
     記録なので、指す先の無い記録を残さない。
     """

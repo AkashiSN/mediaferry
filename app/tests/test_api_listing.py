@@ -288,7 +288,7 @@ def test_media_can_be_filtered_by_profile(client, db, library):
 
     **`IN (SELECT ...)` ではなく `= (SELECT ...)` で書く。** `IN` だと SQLite は
     複数の値を取りうると見て、索引があっても並べ替えを外せない（一覧は
-    `captured_at DESC, rel_path DESC` 固定なので、`0014` の索引が効かなくなる）。
+    `captured_at DESC, rel_path DESC` 固定なので、`media_file_listing` が効かなくなる）。
     slug は UNIQUE なので値は高々 1 つで、意味は変わらない。
     """
     other = a_profile(db, slug="another-profile")
@@ -326,7 +326,7 @@ def test_an_unknown_role_matches_nothing(client, db):
 
 
 def test_a_role_value_cannot_break_out_of_the_literal(client, db):
-    """`role` は既知の 2 値だけリテラルで埋める（`0023`）. **文字列連結の穴を作らない.**
+    """`role` は既知の 2 値だけリテラルで埋める（部分索引を選ばせる）. **文字列連結の穴を作らない.**
 
     既知の語彙以外は SQL に触れさせず常に 0 件にする。壊れていれば、この文字列は
     `WHERE m.role = ''` の外へ抜け出して全件を返してしまう。
@@ -619,7 +619,7 @@ def test_media_detail_marks_a_failed_upload(client, db, ref):
 
 
 def test_media_detail_marks_an_unswept_complete_record_as_unknown(client, db, ref):
-    """`0007` で洗った、識別子も確認時刻も無い `complete` は `unknown`."""
+    """識別子も確認時刻も無い `complete` は `unknown`."""
     output = a_media_file(db, ref, role="derived")
     dest = a_destination(db)
     an_upload(
@@ -796,7 +796,7 @@ def test_media_detail_prioritizes_an_unverified_record_over_a_trashed_one(client
         remote_is_trashed=1,
         remote_checked_at=now_iso(),
     )
-    # 新 epoch: 確かめていない（`0007` で洗った形。これだけなら消せない）。
+    # 新 epoch: 確かめていない（識別子も確認時刻も無い。これだけなら消せない）。
     an_upload(
         db,
         (dest_id, new_revision_id, credential_id),

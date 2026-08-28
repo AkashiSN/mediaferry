@@ -785,7 +785,7 @@ def test_a_derived_is_skipped_when_its_member_could_not_be_recomputed(dji, db, d
     先頭 active member が `source_entry` 欠落で飛ばされると、その `captured_at` は
     旧版で算出したまま。それを継いだ派生物に新版の
     `captured_at_revision_id` を書くと、**値は旧版由来なのに新版で算出したと
-    記録する**ことになる（`0011` で列を分けた意味が消える）。
+    記録する**ことになる（`captured_at_revision_id` を分けた意味が消える）。
     """
     profile, _, part1, part2, _ = dji
     # カードを再フォーマットしたので、先頭パートの原名が残っていない。

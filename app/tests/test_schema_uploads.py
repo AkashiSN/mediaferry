@@ -116,7 +116,7 @@ def another_revision(db, dest, epoch):
 
 
 def test_one_record_per_destination_epoch_and_media(db):
-    """**これを守っているのは部分 UNIQUE 索引 `upload_record_live_identity`**（`0027`）.
+    """**これを守っているのは部分 UNIQUE 索引 `upload_record_live_identity`**.
 
     索引の述語は `WHERE invalidated_at IS NULL` なので、一意なのは**有効な行**。
     無効化された行は監査履歴として、同じ組に何行あってもよい

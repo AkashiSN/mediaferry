@@ -247,7 +247,8 @@ def test_failed_group_members_are_ordered_by_name_within_the_same_time(db, profi
 def test_discarded_group_members_come_back_as_plain_originals(db, profile):
     """**破棄は「このまとまりは無し」であって、ファイルを隠すことではない.**
 
-    破棄したグループは member を手放すので（`0017`）、その構成ファイルは
+    破棄したグループは member を手放すので
+    （`merge_group_discard_deactivates_members`）、その構成ファイルは
     opt-in 無しで普通の選択肢に戻る。`failed` は再試行できてグループが生きて
     いるので、そちらは opt-in のまま。
     """

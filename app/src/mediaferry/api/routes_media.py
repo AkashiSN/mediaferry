@@ -20,7 +20,7 @@ from .routes_merges import _current_revisions, group_view
 
 router = APIRouter()
 
-# `media_file.role` の CHECK 制約が許す値そのもの（`db/migrations/0003_*.sql`）。
+# `media_file.role` の CHECK 制約が許す値そのもの（`db/migrations/0001_initial.sql`）。
 # `_filters` の role 節がこの外の値をリテラルで埋めないために使う。
 _KNOWN_ROLES = frozenset({"original", "derived"})
 
@@ -329,7 +329,7 @@ def _filters(  # noqa: PLR0913
         # —— `f"m.role = '{role}'"` へそのまま渡すと文字列連結になってしまう。
         # 既知の 2 値はバインド変数ではなくリテラルで埋める（`_status_clause` の
         # `known[status]` と同じ作法）。バインド変数のままだと SQLite が prepare
-        # 時に `role = 'derived'` を証明できず、`0023` の部分索引
+        # 時に `role = 'derived'` を証明できず、部分索引 `media_file_derived_listing`
         # （`WHERE role = 'derived'`）が選ばれる保証が無い。
         if role in _KNOWN_ROLES:
             clauses.append(f"{alias}.role = '{role}'")  # noqa: S608 - 語彙は上で固定
@@ -338,7 +338,7 @@ def _filters(  # noqa: PLR0913
             clauses.append("0")
     if profile is not None:
         # **`IN` ではなく `=` で書く。** `IN` だと SQLite は複数の値を取りうると
-        # 見なして、索引があっても並べ替えを外せない（`0014` が効かず、その
+        # 見なして、索引があっても並べ替えを外せない（`media_file_listing` が効かず、その
         # プロファイルの全行を拾ってから並べ替える）。slug は UNIQUE なので
         # 値は高々 1 つで、意味は変わらない（無ければ NULL 比較で 0 件）。
         clauses.append(

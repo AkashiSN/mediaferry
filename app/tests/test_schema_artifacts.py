@@ -23,7 +23,7 @@ def a_media_file(db, profile, **over):
         "kind": "video",
         "captured_at": now_iso(),
         "captured_at_source": "filename",
-        # 取り込み時は「取り込みに使った版」と同じ（`0011`）。
+        # 取り込み時は「取り込みに使った版」と同じ。
         "captured_at_revision_id": revision_id,
         "duration_seconds": 1.5,
         "probe_state": "ok",
@@ -66,7 +66,7 @@ def a_source_entry(db, volume_id):
 
 
 def test_captured_at_revision_must_be_present(db):
-    """**必ず値を持つ**（`0011`）.
+    """**`captured_at_revision_id` は必ず値を持つ**.
 
     `ALTER TABLE` では NOT NULL を後から足せないので trigger で作る。無いと
     「どの定義で算出した日時か」が分からない行ができ、再計算の provenance が
@@ -78,7 +78,7 @@ def test_captured_at_revision_must_be_present(db):
 
 
 def test_captured_at_revision_must_belong_to_the_same_profile(db):
-    """**同じプロファイルの版であること**（`0011`）.
+    """**`captured_at_revision_id` は同じプロファイルの版であること**.
 
     単一の FK は `profile_revision` のどの行でも通してしまうので、別機種の版を
     指した行が作れる。`UNIQUE (profile_id, id)` に突き合わせて塞ぐ。
@@ -346,7 +346,7 @@ def test_the_listing_indexes_break_ties_by_rel_path(db):
 
 
 def test_the_captured_revision_triggers_survive_the_rebuild(db):
-    """**作り直すと trigger も消える.** `0011` が守っていたものを落とさない."""
+    """**作り直すと trigger も消える.** `captured_at_revision_id` の 2 本を落とさない."""
     names = {
         row["name"] for row in db.execute("SELECT name FROM sqlite_master WHERE type = 'trigger'")
     }

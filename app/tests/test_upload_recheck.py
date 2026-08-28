@@ -781,7 +781,7 @@ def a_stacked_pair(world_tuple):
         (new_id(), destination_id, second, SHA1_2, revision_id, now_iso(), now_iso()),
     )
     server.assets[CHECKSUM_2] = "asset-2"
-    # `0015` / `0016` の trigger が形を守っているので、3 列を一緒に書く。
+    # スタックの形を守る trigger があるので、3 列を一緒に書く。
     db.execute("UPDATE upload_record SET stack_state = 'stacked', remote_stack_id = 'stack-1'")
 
 
@@ -869,7 +869,7 @@ def test_a_cancel_during_the_stack_check_writes_nothing(world):
 
 
 def test_a_group_whose_member_was_requeued_is_not_seen_as_broken(world):
-    """**`stacked` はレコードの state と独立**（`0015`）. 差し戻しで組が崩れて見えない.
+    """**`stacked` はレコードの state と独立**. 差し戻しで組が崩れて見えない.
 
     再計算の差し戻しは `complete` → `needs_recheck` を動かすが、その資産を送った
     という事実は変わらない。数える集合から外すと、こちらの集合が相手の真部分集合に
@@ -879,7 +879,7 @@ def test_a_group_whose_member_was_requeued_is_not_seen_as_broken(world):
     server, rechecker, ctx, destination_id, db = world
     a_stacked_pair(world)
     server.stacks["stack-1"] = {"primary": "asset-1", "assets": ["asset-1", "asset-2"]}
-    # `0004` の CHECK に当たらないよう、claim は NULL のままにする。
+    # `upload_record` の CHECK に当たらないよう、claim は NULL のままにする。
     db.execute("UPDATE upload_record SET state = 'needs_recheck' WHERE remote_asset_id = 'asset-2'")
 
     outcome = rechecker.run(ctx, destination_id)

@@ -101,7 +101,8 @@ def sendable_clause(alias: str) -> str:
 
 SENDABLE_CLAUSE = sendable_clause("m")
 
-# **`skipped` はここに来ない。** 破棄したグループは member を手放すので（`0017`）、
+# **`skipped` はここに来ない。** 破棄したグループは member を手放すので
+# （`merge_group_discard_deactivates_members`）、
 # その構成ファイルは `_ORIGINALS` に戻る —— 破棄は「このまとまりは無し」であって、
 # ファイルを隠すことではない。ここで拾うのは `failed` だけ（再試行できるので、
 # グループは生きている）。

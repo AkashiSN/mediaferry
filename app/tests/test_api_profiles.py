@@ -6,7 +6,7 @@
 `sync_builtins` は `archived_at` を戻さないので、一度 archive されたビルトインは
 再起動しても復活しない。「読み取り専用」が破れたまま元に戻せなくなる。
 
-スキーマ（`builtin` 列、`archived_at`、版の不変 trigger、複合外部キー）は `0002`
+スキーマ（`builtin` 列、`archived_at`、版の不変 trigger、複合外部キー）は `0001`
 で揃っているので移行は要らない。
 """
 

@@ -72,12 +72,12 @@ class ClaimLost(RuntimeError):
     """
 
 
-# 進行中に置ける状態と、claim を外す状態（`0004` の CHECK と一致させる）。
+# 進行中に置ける状態と、claim を外す状態（`upload_record` の CHECK と一致させる）。
 TERMINAL_STATES = ("complete", "failed", "awaiting_datetime_approval")
 RELEASED_STATES = ("pending", "needs_recheck")
 
 
-# 進行中に置ける状態と、claim を外す状態（`0004` の CHECK と一致させる）。
+# 進行中に置ける状態と、claim を外す状態（`upload_record` の CHECK と一致させる）。
 TERMINAL_STATES = ("complete", "failed", "awaiting_datetime_approval")
 RELEASED_STATES = ("pending", "needs_recheck")
 
@@ -434,7 +434,8 @@ class UploadRepository:
                 (media["id"], row["merge_group_id"]),
             ).fetchone()
             # **`skipped` はここに来ない。** 破棄したグループは member を手放すので
-            # （`0017`）、その構成ファイルは既定の一覧の側で選ばれる。
+            # （`merge_group_discard_deactivates_members`）、その構成ファイルは
+            # 既定の一覧の側で選ばれる。
             if member is None or member["status"] != "failed":
                 return "結合できなかったグループの構成ファイル、という根拠が成立しない"
             return None
@@ -589,7 +590,7 @@ class UploadRepository:
     def refuse(self, record_id: str, token: str, reason: str) -> None:
         """claim してから条件を満たさないと分かった行を無効化する（§10 の多重防御）.
 
-        **`state` も `pending` へ戻す。** `0004` の CHECK が「進行中の状態なら
+        **`state` も `pending` へ戻す。** `upload_record` の CHECK が「進行中の状態なら
         claim を持つ」と定めているので、`checking` のまま claim を外すと
         `IntegrityError` になる。無効化された行は claim の条件
         （`invalidated_at IS NULL`）で弾かれるので、`pending` に戻しても
@@ -737,7 +738,8 @@ class UploadRepository:
             ctx.assert_lease()
             for stamp in stamps:
                 # **先に、この観測がまだ通るかを確かめる。** 組を開くのは
-                # `remote_asset_id` を変える前でなければならない（`0016`）が、
+                # `remote_asset_id` を変える前でなければならない
+                # （`upload_record_stacked_needs_its_asset`）が、
                 # CAS に外れる観測で開いてしまうと「古い観測は何も書かない」を
                 # 破る（現在のスタックを壊す）。**`BEGIN IMMEDIATE` の中なので、
                 # 確認と書き込みの間に誰も割り込めない。**
@@ -852,7 +854,7 @@ class UploadRepository:
         **`LIMIT` を繰り返すだけでは足りない。** 相手が落ちていて未評価のまま
         残した行は次の周回でも条件を満たすので、同じ行を読み直して進まなくなる。
 
-        述語の順序は `0015` の部分索引と一字一句そろえる。
+        述語の順序は部分索引 `upload_record_unstacked` と一字一句そろえる。
         """
         return list(
             self._conn.execute(
@@ -868,10 +870,11 @@ class UploadRepository:
         """組んだと記録している組を、`remote_stack_id` → 資産 ID の集合で返す.
 
         再確認の照合が使う。**無効化された行は数えない。** `stacked` の行は
-        `0015` と `0016` の trigger が `remote_stack_id` と `remote_asset_id` の
+        `upload_record_stack_shape_*` と `upload_record_stacked_needs_its_asset`
+        の trigger が `remote_stack_id` と `remote_asset_id` の
         実在を強制しているので、どちらも NULL にならない。
 
-        **`state` は条件に入れない**（`0015` と同じ理由）。`stacked` は
+        **`state` は条件に入れない**（形を守る trigger と同じ理由）。`stacked` は
         「その `remote_asset_id` を送った結果」であって、レコードの state とは
         独立で、再計算の差し戻しが `complete` → `needs_recheck` を動かしても真の
         ままである。`complete` に絞ると、片方が差し戻された組はこちらの集合が
@@ -1232,7 +1235,8 @@ class UploadRepository:
         if "remote_asset_id" in fields:
             # **資産 ID が変わるなら、その前にスタックの結果を組ごと捨てる**（§9.11）。
             # 再計算で `needs_recheck` へ戻った `stacked` の行を別の資産で送り直す
-            # 経路がここを通る。`0016` の trigger が同じことを fail-closed で守る。
+            # 経路がここを通る。`upload_record_stacked_needs_its_asset` が
+            # 同じことを fail-closed で守る。
             self._reopen_stack_of(record_id, new_asset_id=fields["remote_asset_id"])
         extra = "".join(f", {name} = ?" for name in fields)
         clauses = ["id = ?", "claim_token = ?"]
