@@ -33,6 +33,8 @@ class RecheckOutcome:
     trashed: int
     vanished: int
     restored: int
+    # 相手側で解けていた／崩れていたので未評価へ戻した組の数（§9.11）。
+    unstacked: int = 0
 
 
 class Rechecker:
@@ -143,6 +145,7 @@ class Rechecker:
                 ],
                 checked_at=now_iso(),
             )
+            unstacked = self._reconcile_stacks(ctx, revision)
         except LeaseLost:
             return self._cancelled_or_raise(ctx)
 
@@ -178,7 +181,43 @@ class Rechecker:
             trashed=trashed,
             vanished=sum(1 for row in vanished if row["id"] in written),
             restored=restored,
+            unstacked=unstacked,
         )
+
+    def _reconcile_stacks(self, ctx: JobContext, revision: sqlite3.Row) -> int:
+        """スタックの現存とメンバー集合を照合し、崩れた組を未評価へ戻す（§9.11）.
+
+        **資産の照合の後に走らせる。** 消滅した資産は `stamp_many` の
+        `_reopen_stack_of` で既に組を開いており、開いた行は `stack_state` が
+        NULL なのでここの対象から外れる。逆順だと同じ組を 2 度開く。
+
+        **「無い」と「集合が違う」を 1 つの条件で見る。** どちらも
+        「こちらが記録している組は現在の姿ではない」であり、戻した先の第 2 パスが
+        相手を読み直して、作り直すか見送るかを決める（§9.11 の表）。
+        """
+        destination_id = revision["destination_id"]
+        epoch = revision["target_epoch"]
+        groups = self._uploads.stacked_groups(destination_id, epoch)
+        if not groups:
+            # **空振りの要求を出さない。**
+            return 0
+        # 相手へ触る前に、キャンセルとリースの両方を見る（batch の照合と同じ）。
+        if ctx.cancelled():
+            return 0
+        ctx.assert_lease()
+        ctx.heartbeat()
+        with self._open_client(revision) as client:
+            live = {
+                stack.stack_id: frozenset(stack.asset_ids)
+                for stack in with_lease_pulse(ctx, client.stacks)
+            }
+        # **照合の最中にキャンセルされていたら、結果を書かずに降りる。**
+        if ctx.cancelled():
+            return 0
+        broken = [stack_id for stack_id, members in groups.items() if live.get(stack_id) != members]
+        if not broken:
+            return 0
+        return self._uploads.reopen_stacks(ctx, destination_id, epoch, broken)
 
 
 def _stamp_of(row: sqlite3.Row, asset_id: str | None, is_trashed: int) -> Stamp:

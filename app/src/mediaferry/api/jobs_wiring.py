@@ -176,7 +176,8 @@ class JobWorld:
             ctx.emit(
                 "info",
                 f"再確認: {outcome.checked} 件 / ゴミ箱 {outcome.trashed} 件"
-                f" / 消滅 {outcome.vanished} 件 / 復元 {outcome.restored} 件",
+                f" / 消滅 {outcome.vanished} 件 / 復元 {outcome.restored} 件"
+                f" / 組を戻した {outcome.unstacked} 組",
             )
             _emit_stacks(ctx, stacker.run(ctx, destination_id))
             return

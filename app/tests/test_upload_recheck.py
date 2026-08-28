@@ -6,13 +6,14 @@ from datetime import timedelta
 import pytest
 
 from mediaferry.adapters.immich import ImmichClient
-from mediaferry.clock import iso, utcnow
+from mediaferry.clock import iso, now_iso, utcnow
 from mediaferry.core.crypto import SecretBox
 from mediaferry.db.credentials import CredentialStore
 from mediaferry.db.destinations import DestinationRepository, RemoteIdentity
 from mediaferry.db.jobs import JobStore
 from mediaferry.db.profiles import ProfileRegistry
 from mediaferry.db.uploads import UploadRepository
+from mediaferry.ids import new_id
 from mediaferry.jobs.preflight import PreflightCache
 from mediaferry.jobs.recheck import Rechecker
 
@@ -21,6 +22,12 @@ from .test_schema_artifacts import a_media_file
 
 PAYLOAD = b"video-bytes"
 CHECKSUM = base64.b64encode(hashlib.sha1(PAYLOAD, usedforsecurity=False).digest()).decode()
+
+PAYLOAD_2 = b"video-bytes-2"
+# `upload_record.checksum` は sha1 の 16 進。adapter が base64 へ直して送るので、
+# fake の `assets` には base64 の方を鍵として入れる。
+SHA1_2 = hashlib.sha1(PAYLOAD_2, usedforsecurity=False).hexdigest()
+CHECKSUM_2 = base64.b64encode(hashlib.sha1(PAYLOAD_2, usedforsecurity=False).digest()).decode()
 
 
 _BOXES: dict[int, SecretBox] = {}
@@ -773,3 +780,114 @@ def test_a_slow_preflight_keeps_the_lease_alive(world, monkeypatch):
     outcome = rechecker.run(ctx, destination_id)
 
     assert outcome.checked == 1
+
+
+def a_stacked_pair(world_tuple):
+    """`world` の 1 件に相方を足して、両方を同じ組の `stacked` にする.
+
+    資産はどちらも相手に在る状態にする（消滅とスタックの照合を混ぜない）。
+    """
+    server, _, _, destination_id, db = world_tuple
+    profile = ProfileRegistry(db).current("dji-osmo")
+    second = a_media_file(
+        db,
+        (profile.profile_id, profile.revision_id),
+        rel_path="library/dji-osmo/DCIM/B.MP4",
+        sha1=SHA1_2,
+    )
+    revision_id = db.execute("SELECT destination_revision_id FROM upload_record").fetchone()[
+        "destination_revision_id"
+    ]
+    db.execute(
+        "INSERT INTO upload_record (id, destination_id, target_epoch, media_file_id, state,"
+        " selection_rule, origin, checksum, remote_asset_id, remote_is_trashed,"
+        " destination_revision_id, created_at, updated_at)"
+        " VALUES (?, ?, 1, ?, 'complete', 'default', 'created_by_us', ?, 'asset-2', 0, ?, ?, ?)",
+        (new_id(), destination_id, second, SHA1_2, revision_id, now_iso(), now_iso()),
+    )
+    server.assets[CHECKSUM_2] = "asset-2"
+    # `0015` / `0016` の trigger が形を守っているので、3 列を一緒に書く。
+    db.execute("UPDATE upload_record SET stack_state = 'stacked', remote_stack_id = 'stack-1'")
+
+
+def test_a_stack_that_is_gone_on_the_server_is_reopened(world):
+    """**解けた組を `stacked` のまま残さない。** 設定 › 送り先の「N 組」が嘘になる."""
+    server, rechecker, ctx, destination_id, db = world
+    a_stacked_pair(world)
+    # 相手にはスタックが無い（利用者が解除した）。資産はどちらも在る。
+
+    outcome = rechecker.run(ctx, destination_id)
+
+    assert outcome.unstacked == 1
+    rows = db.execute("SELECT stack_state, remote_stack_id FROM upload_record").fetchall()
+    assert [row["stack_state"] for row in rows] == [None, None]
+    assert [row["remote_stack_id"] for row in rows] == [None, None]
+
+
+def test_a_stack_whose_members_changed_is_reopened(world):
+    """集合が一致しない組も戻す。§9.11 が「触らない」と決めている状態へ落とすため."""
+    server, rechecker, ctx, destination_id, db = world
+    a_stacked_pair(world)
+    server.stacks["stack-1"] = {"primary": "asset-1", "assets": ["asset-1", "someone-else"]}
+
+    outcome = rechecker.run(ctx, destination_id)
+
+    assert outcome.unstacked == 1
+    assert (
+        db.execute("SELECT count(*) AS n FROM upload_record WHERE stack_state IS NULL").fetchone()[
+            "n"
+        ]
+        == 2
+    )
+
+
+def test_a_stack_that_still_matches_is_not_touched(world):
+    """一致している組には触らない."""
+    server, rechecker, ctx, destination_id, db = world
+    a_stacked_pair(world)
+    server.stacks["stack-1"] = {"primary": "asset-1", "assets": ["asset-1", "asset-2"]}
+
+    outcome = rechecker.run(ctx, destination_id)
+
+    assert outcome.unstacked == 0
+    rows = db.execute("SELECT stack_state, remote_stack_id FROM upload_record").fetchall()
+    assert all(row["stack_state"] == "stacked" for row in rows)
+    assert all(row["remote_stack_id"] == "stack-1" for row in rows)
+
+
+def test_no_stacked_rows_means_no_request_for_stacks(world):
+    """**空振りの要求を出さない。** `stacked` が 0 件なら相手に聞かない."""
+    server, rechecker, ctx, destination_id, db = world
+
+    rechecker.run(ctx, destination_id)
+
+    assert ("GET", "/api/stacks") not in server.requests
+
+
+def test_a_cancel_during_the_stack_check_writes_nothing(world):
+    """照合の最中にキャンセルされたら、1 組も戻さない.
+
+    「キャンセルした」と表示しながら組を開いていた、という状態を残さない
+    （`stamp_many` の後のキャンセル確認と同じ考え方）。
+    """
+    server, rechecker, ctx, destination_id, db = world
+    a_stacked_pair(world)
+    original = server.route
+
+    def hooked(method, path, body, headers):
+        result = original(method, path, body, headers)
+        if path == "/api/stacks":
+            # 一覧を返した直後に、利用者がキャンセルを commit した。
+            db.execute("UPDATE job SET status = 'cancelling'")
+        return result
+
+    server.route = hooked
+
+    outcome = rechecker.run(ctx, destination_id)
+
+    assert outcome.unstacked == 0
+    rows = db.execute("SELECT stack_state FROM upload_record").fetchall()
+    assert all(row["stack_state"] == "stacked" for row in rows)
+    # **資産の照合の結果は既に書いてある。** ここで降りるのは組の段だけなので、
+    # 「N 件確認した」の N は実際に書いた件数のまま（0 に化けない）。
+    assert outcome.checked == 2

@@ -887,6 +887,53 @@ class UploadRepository:
             )
         )
 
+    def stacked_groups(self, destination_id: str, target_epoch: int) -> dict[str, frozenset[str]]:
+        """組んだと記録している組を、`remote_stack_id` → 資産 ID の集合で返す.
+
+        再確認の照合が使う。**無効化された行は数えない。** `stacked` の行は
+        `0015` と `0016` の trigger が `remote_stack_id` と `remote_asset_id` の
+        実在を強制しているので、どちらも NULL にならない。
+
+        **`target_epoch` を必ず絞る。** 旧 epoch は別ライブラリの履歴で、
+        現行の資格情報で読んだスタック一覧とは突き合わせられない。
+        """
+        groups: dict[str, set[str]] = {}
+        for row in self._conn.execute(
+            "SELECT remote_stack_id, remote_asset_id FROM upload_record"
+            " WHERE destination_id = ? AND target_epoch = ? AND state = 'complete'"
+            "   AND invalidated_at IS NULL AND stack_state = 'stacked'",
+            (destination_id, target_epoch),
+        ):
+            groups.setdefault(row["remote_stack_id"], set()).add(row["remote_asset_id"])
+        return {stack_id: frozenset(assets) for stack_id, assets in groups.items()}
+
+    def reopen_stacks(
+        self,
+        ctx: JobContext,
+        destination_id: str,
+        target_epoch: int,
+        stack_ids: Sequence[str],
+    ) -> int:
+        """崩れた組を未評価へ戻す. **戻した組の数**を返す.
+
+        `_reopen_stack_of` と同じ形の CAS を、**1 つのトランザクション**で当てる
+        （`assert_lease` も同じ取引に入れる）。**組ごとに数える** —— 組は互いに
+        独立なので、片方が動いても他方の照合結果は古くならない。
+        """
+        reopened = 0
+        with immediate(self._conn):
+            ctx.assert_lease()
+            for stack_id in stack_ids:
+                updated = self._conn.execute(
+                    "UPDATE upload_record SET stack_state = NULL, remote_stack_id = NULL,"
+                    " stack_reason = NULL, updated_at = ?"
+                    " WHERE destination_id = ? AND target_epoch = ? AND remote_stack_id = ?"
+                    "   AND stack_state = 'stacked' AND invalidated_at IS NULL",
+                    (now_iso(), destination_id, target_epoch, stack_id),
+                )
+                reopened += updated.rowcount > 0
+        return reopened
+
     def sources_of(self, media_file_id: str) -> list[sqlite3.Row]:
         """公開の元になったカード上の観測（**すべて**）.
 
