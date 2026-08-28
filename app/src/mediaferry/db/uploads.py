@@ -916,10 +916,17 @@ class UploadRepository:
     def record_for(
         self, destination_id: str, target_epoch: int, media_file_id: str
     ) -> sqlite3.Row | None:
-        """**現行 epoch のレコードだけ**を返す（旧 epoch は別ライブラリの履歴）."""
+        """**現行 epoch の有効なレコードだけ**を返す.
+
+        旧 epoch は別ライブラリの履歴。**無効化された行も返さない** ——
+        消滅を無効化して送り直すと、同じ組に行が 2 つ並ぶ。`ORDER BY` が
+        無いので、除かないと古い方を返し、第 2 パスが「相方が無効化済み」と
+        読んで永久に組めなくなる。
+        """
         return self._conn.execute(
             "SELECT * FROM upload_record"
-            " WHERE destination_id = ? AND target_epoch = ? AND media_file_id = ?",
+            " WHERE destination_id = ? AND target_epoch = ? AND media_file_id = ?"
+            "   AND invalidated_at IS NULL",
             (destination_id, target_epoch, media_file_id),
         ).fetchone()
 
