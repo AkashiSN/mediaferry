@@ -474,15 +474,6 @@ def test_an_unchanged_remote_asset_id_keeps_the_stack(world, db):
     assert rows(db)[records["JPG"]]["stack_state"] == "stacked"
 
 
-def test_stamp_remote_also_reopens_the_stack(world, db):
-    repo, ctx, destination_id, revision, records = world
-    repo.mark_stacked(ctx, list(rows(db).values()), destination_id, EPOCH, revision, "stack-1")
-
-    repo.stamp_remote(records["JPG"], "another-asset", 0, now_iso())
-
-    assert rows(db)[records["JPG"]]["stack_state"] is None
-
-
 def test_a_changed_asset_id_reopens_the_whole_group(world, db):
     """**組は 1 つの結果。** 片方の資産 ID が変われば、相方の結果も無効になる.
 
@@ -513,23 +504,29 @@ def test_a_changed_asset_id_reopens_the_whole_group(world, db):
     assert {row["remote_stack_id"] for row in rows(db).values()} == {None}
 
 
-def test_stamp_remote_reopens_the_whole_group(world, db):
-    repo, ctx, destination_id, revision, records = world
-    repo.mark_stacked(ctx, list(rows(db).values()), destination_id, EPOCH, revision, "stack-1")
-
-    repo.stamp_remote(records["JPG"], "another-asset", 0, now_iso())
-
-    assert {row["stack_state"] for row in rows(db).values()} == {None}
-
-
 def test_a_skipped_partner_is_not_disturbed(world, db):
     """見送りは組の結果ではないので、他人の資産 ID の変化で戻さない."""
+    from mediaferry.db.uploads import Stamp
+
     repo, ctx, destination_id, revision, records = world
     repo.mark_skipped(
         ctx, rows(db)[records["CR2"]], destination_id, EPOCH, revision, "相方が見つからない"
     )
+    record = rows(db)[records["JPG"]]
 
-    repo.stamp_remote(records["JPG"], "another-asset", 0, now_iso())
+    repo.stamp_many(
+        ctx,
+        [
+            Stamp(
+                record_id=record["id"],
+                asset_id="another-asset",
+                is_trashed=0,
+                expect_asset_id=record["remote_asset_id"],
+                expect_checked_at=record["remote_checked_at"],
+            )
+        ],
+        now_iso(),
+    )
 
     assert rows(db)[records["CR2"]]["stack_state"] == "skipped"
 
@@ -579,20 +576,6 @@ class _Ctx:
         return getattr(self._ctx, name)
 
 
-def test_rewriting_the_same_asset_id_keeps_the_stack(world, db):
-    """**同じ値を書き直すだけなら、結果は現在の姿のまま。**
-
-    再確認は毎回この経路を通るので、ここで戻すと組が永久に落ち着かない。
-    """
-    repo, ctx, destination_id, revision, records = world
-    repo.mark_stacked(ctx, list(rows(db).values()), destination_id, EPOCH, revision, "stack-1")
-    record = rows(db)[records["JPG"]]
-
-    repo.stamp_remote(record["id"], record["remote_asset_id"], 0, now_iso())
-
-    assert rows(db)[records["JPG"]]["stack_state"] == "stacked"
-
-
 def test_a_stale_observation_does_not_touch_the_group(world, db):
     """**古い観測は何も書かない。** 組の再オープンも「何も」に含まれる.
 
@@ -625,12 +608,79 @@ def test_a_stale_observation_does_not_touch_the_group(world, db):
     assert {row["remote_stack_id"] for row in rows(db).values()} == {"stack-1"}
 
 
-def test_stamp_remote_leaves_the_group_alone_when_the_row_is_not_complete(world, db):
-    """公開契約は「`complete` だけを対象」。**組もその契約の内側。**"""
+def test_stamping_leaves_the_group_alone_when_the_row_is_not_complete(world, db):
+    """契約は「`complete` だけを対象」。**組もその契約の内側。**"""
+    from mediaferry.db.uploads import Stamp
+
     repo, ctx, destination_id, revision, records = world
     repo.mark_stacked(ctx, list(rows(db).values()), destination_id, EPOCH, revision, "stack-1")
+    record = rows(db)[records["JPG"]]
     db.execute("UPDATE upload_record SET state = 'needs_recheck' WHERE id = ?", (records["JPG"],))
 
-    repo.stamp_remote(records["JPG"], "another-asset", 0, now_iso())
+    repo.stamp_many(
+        ctx,
+        [
+            Stamp(
+                record_id=record["id"],
+                asset_id="another-asset",
+                is_trashed=0,
+                expect_asset_id=record["remote_asset_id"],
+                expect_checked_at=record["remote_checked_at"],
+            )
+        ],
+        now_iso(),
+    )
 
     assert {row["stack_state"] for row in rows(db).values()} == {"stacked"}
+
+
+def test_record_for_returns_the_live_row_not_the_invalidated_one(world, db):
+    """**送り直した後は同じ組に行が 2 つ並ぶ。**
+
+    `record_for` は `ORDER BY` を持たないので、無効化を除かないと古い方を
+    返す。第 2 パスはこれで相方を引くので、返し間違えると「相方が無効化
+    済み」と読んで、送り直しても永久に組めない（§9.11）。
+    """
+    repo, _, destination_id, _, records = world
+    old = records["CR2"]
+    media_id = db.execute(
+        "SELECT media_file_id FROM upload_record WHERE id = ?", (old,)
+    ).fetchone()["media_file_id"]
+    revision_id = db.execute(
+        "SELECT destination_revision_id FROM upload_record WHERE id = ?", (old,)
+    ).fetchone()["destination_revision_id"]
+    db.execute(
+        "UPDATE upload_record SET invalidated_at = ?, invalidated_reason = 'remote_missing'"
+        " WHERE id = ?",
+        (now_iso(), old),
+    )
+    fresh = an_upload(
+        db,
+        (destination_id, None, None),
+        media_id,
+        state="complete",
+        origin="created_by_us",
+        destination_revision_id=revision_id,
+        remote_asset_id="asset-CR2-again",
+    )
+
+    found = repo.record_for(destination_id, EPOCH, media_id)
+
+    assert found is not None
+    assert found["id"] == fresh
+
+
+def test_record_for_returns_none_when_only_an_invalidated_row_is_left(world, db):
+    """消えたまま送り直していない相方は「この宛先へ送っていない」と同じ扱い."""
+    repo, _, destination_id, _, records = world
+    old = records["CR2"]
+    media_id = db.execute(
+        "SELECT media_file_id FROM upload_record WHERE id = ?", (old,)
+    ).fetchone()["media_file_id"]
+    db.execute(
+        "UPDATE upload_record SET invalidated_at = ?, invalidated_reason = 'remote_missing'"
+        " WHERE id = ?",
+        (now_iso(), old),
+    )
+
+    assert repo.record_for(destination_id, EPOCH, media_id) is None

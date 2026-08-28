@@ -283,63 +283,19 @@ describe("節の組み立て", () => {
   });
 });
 
-// リモートで消えた資産を送り直す動線（§14）。`POST /uploads/{id}/requeue` を
-// 画面から呼ぶ経路をここで確かめる。
-describe("送り直す・再確認", () => {
-  // **アクセシブルネームは宛先名を含む**（`送り直す：家` のように）ので、
-  // ここでは前方一致で拾う。member の「送る：${name}」と同じ規約。
-  it("リモートから消えた宛先にだけ「送り直す」が出る", async () => {
+// リモートで消えた資産に気づくための再確認の動線を、画面から確かめる。
+describe("再確認", () => {
+  it("リモートから消えた宛先にも「送り直す」は出さない", async () => {
+    // 送り直し専用の経路は無くした。消えた記録は再確認が無効化して
+    // 「まだ送っていない」へ戻すので、通常の送る画面から送る（§9.10）。
     renderDetail({
-      destinations: [
-        { destination_id: "d1", name: "家", state: "complete", presence: "gone", upload_id: "u1" },
-        { destination_id: "d2", name: "外", state: "complete", presence: "present", upload_id: "u2" },
-      ],
-    });
-    const buttons = await screen.findAllByRole("button", { name: /^送り直す/ });
-    expect(buttons).toHaveLength(1);
-  });
-
-  it("元のファイルが見当たらない間は、「送り直す」を押せない状態にして理由を出す", async () => {
-    // `presence === "gone"` だけでボタンを出すと、`missing_at` が立っている
-    // （データセットが一時的に見えない）ときに押しても `check_eligibility`
-    // （`db/uploads.py`）が断り、理由の消えた「この記録は送り直せません。」
-    // だけが出る。**押せない状態のボタンを並べない**という規則（`deletable` /
-    // `delete_blocked_reason` と同じ形）に合わせ、理由を添えて押せなくする。
-    renderDetail({
-      missing_at: "2026-08-20T00:00:00Z",
       destinations: [
         { destination_id: "d1", name: "家", state: "complete", presence: "gone", upload_id: "u1" },
       ],
     });
-    const button = await screen.findByRole("button", { name: /^送り直す/ });
-    expect(button).toBeDisabled();
-    expect(screen.getByText(/見当たらない/)).toBeInTheDocument();
-  });
 
-  it("元のファイルがあるときは、これまでどおり「送り直す」を押せる", async () => {
-    renderDetail({
-      missing_at: null,
-      destinations: [
-        { destination_id: "d1", name: "家", state: "complete", presence: "gone", upload_id: "u1" },
-      ],
-    });
-    const button = await screen.findByRole("button", { name: /^送り直す/ });
-    expect(button).not.toBeDisabled();
-  });
-
-  it("送り直すを押すと、その記録を pending へ戻す", async () => {
-    const { calls } = renderDetail(
-      {
-        destinations: [
-          { destination_id: "d1", name: "家", state: "complete", presence: "gone", upload_id: "u1" },
-        ],
-      },
-      { "POST /uploads/u1/requeue": { status: "ok" } },
-    );
-    await userEvent.click(await screen.findByRole("button", { name: /^送り直す/ }));
-    await waitFor(() =>
-      expect(calls()).toContainEqual({ method: "POST", path: "/uploads/u1/requeue" }),
-    );
+    expect(await screen.findByRole("button", { name: /^サーバを確かめる/ })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /^送り直す/ })).not.toBeInTheDocument();
   });
 
   it("サーバを確かめる動線がある（消したことに気づくには再確認が要る）", async () => {
@@ -398,35 +354,6 @@ describe("送り直す・再確認", () => {
     await screen.findByText("家");
     expect(screen.queryByRole("button", { name: /^送り直す/ })).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: /^サーバを確かめる/ })).not.toBeInTheDocument();
-  });
-
-  it("送り直したあとは、くわしくを引き直す（状況の表示が変わる）", async () => {
-    const { calls } = renderDetail(
-      {
-        destinations: [
-          { destination_id: "d1", name: "家", state: "complete", presence: "gone", upload_id: "u1" },
-        ],
-      },
-      { "POST /uploads/u1/requeue": { status: "ok" } },
-    );
-    await userEvent.click(await screen.findByRole("button", { name: /^送り直す/ }));
-    await waitFor(() =>
-      expect(calls().filter((call) => call.path === "/media/m1").length).toBeGreaterThan(1),
-    );
-  });
-
-  it("宛先が複数「消えた」状態でも、ボタンの名前だけで見分けられる", async () => {
-    // **同じ「送り直す」が 2 つ並ぶと、支援技術の一覧では名前だけでは
-    // どちらがどの宛先向けか分からない。** アクセシブルネームに宛先名を
-    // 足しているので、宛先ごとに違う名前で拾えるはず。
-    renderDetail({
-      destinations: [
-        { destination_id: "d1", name: "家", state: "complete", presence: "gone", upload_id: "u1" },
-        { destination_id: "d2", name: "外", state: "complete", presence: "gone", upload_id: "u2" },
-      ],
-    });
-    expect(await screen.findByRole("button", { name: "送り直す：家" })).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "送り直す：外" })).toBeInTheDocument();
   });
 });
 

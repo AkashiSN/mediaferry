@@ -568,8 +568,11 @@ def a_sent_media(db, *, name: str, **over):
 
 
 def test_the_detail_carries_the_upload_id_for_each_destination(client, db):
-    """**送り直すには記録の id が要る.** `presence` は状態を言うが、
-    どのレコードを操作すればよいかは言わない。
+    """宛先ごとの行が、**どの送信記録の姿を出しているか**を応答が名指しする.
+
+    `presence` は状態を言うが、どのレコードの状態かは言わない（同じ宛先に
+    無効化された行と有効な行が並ぶ）。**いまこれを読む画面は無い** ——
+    応答から落とすかどうかは別の判断なので、形だけを固定しておく。
     """
     media_id, record_id, _ = a_sent_media(db, name="upload-id-test")
     body = client.get(f"/api/media/{media_id}").json()
@@ -625,3 +628,27 @@ def test_a_media_row_without_a_zone_says_so(client, db):
     )
 
     assert client.get(f"/api/media/{media}").json()["captured_at_tz"] is None
+
+
+def test_a_record_invalidated_by_recheck_returns_to_unsent(client, db, canon_pair):
+    """再確認が無効化した記録は「この宛先の有効な記録」ではなくなる（§9.10）.
+
+    `_status_clause` の「まだ送っていない」＝「この宛先の**有効な**記録がまだ
+    無く、いま送れるもの」に、無効化がそのまま噛み合う。
+    """
+    destination = a_destination(db, name="recheck-unsent")
+    an_upload(
+        db,
+        destination,
+        canon_pair.media_ids["JPG"],
+        state="complete",
+        destination_revision_id=destination[1],
+        remote_checked_at=now_iso(),
+        invalidated_at=now_iso(),
+        invalidated_reason="remote_missing",
+    )
+    db.commit()
+
+    body = client.get(f"/api/media?destination_id={destination[0]}&status=unsent").json()
+
+    assert canon_pair.media_ids["JPG"] in [item["id"] for item in body["media"]]

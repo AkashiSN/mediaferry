@@ -4,11 +4,12 @@
 プロファイル編集は、どれも「相手を待っている間」に起こりうる。
 """
 
+import hashlib
 import os
 
 import pytest
 
-from mediaferry.adapters.immich import ImmichClient
+from mediaferry.adapters.immich import ImmichClient, to_base64_checksum
 from mediaferry.clock import now_iso
 from mediaferry.core.crypto import SecretBox
 from mediaferry.db.credentials import CredentialStore
@@ -18,6 +19,7 @@ from mediaferry.db.profiles import ProfileRegistry
 from mediaferry.db.uploads import UploadRepository
 from mediaferry.ids import new_id
 from mediaferry.jobs.preflight import PreflightCache
+from mediaferry.jobs.recheck import Rechecker
 from mediaferry.jobs.stacker import Stacker
 
 from .fake_immich import API_KEY
@@ -130,6 +132,62 @@ class World:
             open_client,
             PreflightCache(self.destinations, open_client),
         )
+
+    def rechecker(self):
+        def open_client(revision):
+            return ImmichClient(revision["base_url"], API_KEY)
+
+        return Rechecker(
+            self.uploads,
+            self.destinations,
+            open_client,
+            PreflightCache(self.destinations, open_client),
+        )
+
+    def make_checkable(self):
+        """再確認の対象にする. **`checksum` が無い行は照合しない**（`recheck.py`）.
+
+        `checksum` は sha1 の 16 進で、adapter が base64 へ直して送る
+        （`to_base64_checksum`）。fake はその base64 を鍵に持つ。
+        """
+        for name, record_id in self.records.items():
+            digest = hashlib.sha1(name.encode(), usedforsecurity=False).hexdigest()
+            self.db.execute(
+                "UPDATE upload_record SET checksum = ? WHERE id = ?", (digest, record_id)
+            )
+            self.immich.assets[to_base64_checksum(digest)] = self.assets[name]
+
+    def forget_on_the_server(self, name):
+        """相手からその資産を消す（保持期限を過ぎて完全に消えた状態）."""
+        digest = hashlib.sha1(name.encode(), usedforsecurity=False).hexdigest()
+        del self.immich.assets[to_base64_checksum(digest)]
+
+    def resend(self, name, asset_id):
+        """無効化された記録のメディアを、通常経路で送り直した姿にする.
+
+        `create_pairs` は無効化された行を跨いで新しい行を作る（§10）。
+        **送信そのものは走らせない** —— ここで見たいのは第 2 パスの組み直し
+        なので、`complete` まで進んだ姿を直接作る。
+        """
+        media_id = self.db.execute(
+            "SELECT media_file_id FROM upload_record WHERE id = ?", (self.records[name],)
+        ).fetchone()["media_file_id"]
+        pair = self.uploads.create_pairs([media_id], [self.destination_id])[0]
+        assert pair.result == "created", pair.reason
+        self.db.execute(
+            "UPDATE upload_record SET state = 'complete', origin = 'created_by_us',"
+            " remote_asset_id = ?, destination_revision_id = ?, updated_at = ?"
+            " WHERE id = ?",
+            (
+                asset_id,
+                self.destinations.current(self.destination_id)["id"],
+                now_iso(),
+                pair.record_id,
+            ),
+        )
+        self.records[name] = pair.record_id
+        self.assets[name] = asset_id
+        return pair.record_id
 
     def run(self):
         return self.stacker().run(self.ctx, self.destination_id)
@@ -882,3 +940,104 @@ def test_a_group_whose_members_share_one_asset_id_is_refused(world):
     assert outcome.stacked == 0
     assert world.immich.stacks == {}
     assert "資産 ID が重なっている" in world.row("IMG_1234.JPG")["stack_reason"]
+
+
+def test_a_pair_is_restacked_after_one_side_is_resent(world):
+    """**片方だけ消えた組は、送り直せば組み直る**（§3.1）.
+
+    1. 再確認で CR2 が消滅と判定される
+    2. `_reopen_stack_of` が組の両方を未評価へ戻す
+    3. CR2 の記録が無効化される
+    4. 第 2 パスが JPG を拾い、相方が居ないので見送り
+    5. 利用者が通常経路で CR2 を送り直す（新しい記録）
+    6. 第 2 パスが新しい CR2 を拾い、見送りの JPG を引き上げて組み直す
+
+    **6 が通るのは `record_for` が有効な行を返すようになった後だけ。**
+    """
+    world.make_checkable()
+    world.run()
+    assert world.row("IMG_1234.CR2")["stack_state"] == "stacked"
+
+    # 利用者が Immich でスタックを解除し、CR2 だけを完全に削除した。
+    world.immich.stacks.clear()
+    world.forget_on_the_server("IMG_1234.CR2")
+    outcome = world.rechecker().run(world.ctx, world.destination_id)
+
+    # `_reopen_stack_of` が `stamp_many` の中で先に組を開くので、この時点で
+    # `stacked_groups` はもう空。**`_reconcile_stacks` が `stamp_many` の後に
+    # 置かれている**ことをここで固定する（前に置くと組がまだ見え、1 になる）。
+    assert outcome.unstacked == 0
+
+    assert world.row("IMG_1234.CR2")["invalidated_at"] is not None
+    assert world.row("IMG_1234.CR2")["invalidated_reason"] == "remote_missing"
+
+    world.run()
+    assert world.row("IMG_1234.JPG")["stack_state"] == "skipped"
+
+    world.resend("IMG_1234.CR2", "asset-CR2-again")
+    world.run()
+
+    jpg = world.row("IMG_1234.JPG")
+    cr2 = world.row("IMG_1234.CR2")
+    assert jpg["stack_state"] == "stacked"
+    assert cr2["stack_state"] == "stacked"
+    assert jpg["remote_stack_id"] == cr2["remote_stack_id"]
+
+
+def test_a_dissolved_stack_is_created_again(world):
+    """**利用者が Immich で解除した組も、次の再確認で作り直す**（利用者の判断）.
+
+    表示と実体が食い違ったまま残る方を避ける。この緊張は `decisions.md` に
+    中身ごと残してある。
+    """
+    world.make_checkable()
+    world.run()
+    # 利用者がスタックだけを解除した（資産は両方そのまま在る）。
+    world.immich.stacks.clear()
+    # 1 回目の `world.run()` が出した `POST /api/stacks` を消しておく。消さないと
+    # 「組み直した」の判定が、組み直していなくても通ってしまう。
+    world.immich.requests.clear()
+
+    outcome = world.rechecker().run(world.ctx, world.destination_id)
+    # 相手のスタックが消えているので、こちらが記録している組と食い違う。
+    assert outcome.unstacked == 1
+
+    world.run()
+
+    jpg = world.row("IMG_1234.JPG")
+    cr2 = world.row("IMG_1234.CR2")
+    assert jpg["stack_state"] == "stacked"
+    assert cr2["stack_state"] == "stacked"
+    assert jpg["remote_stack_id"] == cr2["remote_stack_id"]
+    # 全員が `stack: null` なので、第 2 パスは新しいスタックを作る。
+    assert ("POST", "/api/stacks") in world.immich.requests
+
+
+def test_a_stack_absorbed_by_someone_else_settles_as_skipped(world):
+    """崩れた組は、戻した先で見送りに落ちる（§9.11 の「触らない」）.
+
+    戻すことと作り直すことは別。相手側に別の組があるなら触らない、という
+    既存の判断が、戻す経路を足しても変わらないことを見る。
+    """
+    world.make_checkable()
+    world.run()
+    stack_id = world.row("IMG_1234.JPG")["remote_stack_id"]
+    # 利用者が第三の資産を組に足し、CR2 を外した（集合が一致しなくなる）。
+    world.immich.stacks[stack_id]["assets"] = [
+        world.assets["IMG_1234.JPG"],
+        "someone-else",
+    ]
+
+    outcome = world.rechecker().run(world.ctx, world.destination_id)
+    # こちらが数える集合 {JPG, CR2} と相手の集合 {JPG, someone-else} が
+    # 食い違うので、再確認が組を戻す。
+    assert outcome.unstacked == 1
+
+    world.run()
+
+    rows = [world.row("IMG_1234.JPG"), world.row("IMG_1234.CR2")]
+    # 戻した先の第 2 パスが相手を読み直し、JPG は別のスタックに、CR2 は
+    # どこにも入っていないと分かるので、`_adopted` が一致を見送り、
+    # 両方の行が見送りに落ちる。
+    assert all(row["stack_state"] == "skipped" for row in rows)
+    assert all("別のスタック" in (row["stack_reason"] or "") for row in rows)

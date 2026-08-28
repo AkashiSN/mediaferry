@@ -888,30 +888,6 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/api/uploads/{record_id}/requeue": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        get?: never;
-        put?: never;
-        /**
-         * Requeue Upload
-         * @description リモートから消えた資産を、利用者の明示操作で送り直す（§9.10）.
-         *
-         *     **自動では戻さない。** 対象は「再確認でサーバに無いと分かった `complete`」
-         *     （`remote_asset_id IS NULL` かつ `remote_checked_at IS NOT NULL`）だけ。
-         *     通常の `complete` は拒否する。
-         */
-        post: operations["requeue_upload_api_uploads__record_id__requeue_post"];
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
     "/api/uploads/{record_id}/approve": {
         parameters: {
             query?: never;
@@ -2607,39 +2583,6 @@ export interface operations {
         };
     };
     retry_upload_api_uploads__record_id__retry_post: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path: {
-                record_id: string;
-            };
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Successful Response */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": {
-                        [key: string]: string;
-                    };
-                };
-            };
-            /** @description Validation Error */
-            422: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["HTTPValidationError"];
-                };
-            };
-        };
-    };
-    requeue_upload_api_uploads__record_id__requeue_post: {
         parameters: {
             query?: never;
             header?: never;

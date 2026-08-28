@@ -52,7 +52,6 @@ class ErrorCode(StrEnum):
     CONFLICT = "conflict"
     JOB_ALREADY_FINISHED = "job_already_finished"
     NOT_RETRYABLE = "not_retryable"
-    NOT_REQUEUEABLE = "not_requeueable"
     NOT_AWAITING_APPROVAL = "not_awaiting_approval"
     ALREADY_INVALIDATED = "already_invalidated"
     APPROVAL_ALREADY_QUEUED = "approval_already_queued"

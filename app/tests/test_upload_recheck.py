@@ -6,13 +6,14 @@ from datetime import timedelta
 import pytest
 
 from mediaferry.adapters.immich import ImmichClient
-from mediaferry.clock import iso, utcnow
+from mediaferry.clock import iso, now_iso, utcnow
 from mediaferry.core.crypto import SecretBox
 from mediaferry.db.credentials import CredentialStore
 from mediaferry.db.destinations import DestinationRepository, RemoteIdentity
 from mediaferry.db.jobs import JobStore
 from mediaferry.db.profiles import ProfileRegistry
 from mediaferry.db.uploads import UploadRepository
+from mediaferry.ids import new_id
 from mediaferry.jobs.preflight import PreflightCache
 from mediaferry.jobs.recheck import Rechecker
 
@@ -21,6 +22,12 @@ from .test_schema_artifacts import a_media_file
 
 PAYLOAD = b"video-bytes"
 CHECKSUM = base64.b64encode(hashlib.sha1(PAYLOAD, usedforsecurity=False).digest()).decode()
+
+PAYLOAD_2 = b"video-bytes-2"
+# `upload_record.checksum` は sha1 の 16 進。adapter が base64 へ直して送るので、
+# fake の `assets` には base64 の方を鍵として入れる。
+SHA1_2 = hashlib.sha1(PAYLOAD_2, usedforsecurity=False).hexdigest()
+CHECKSUM_2 = base64.b64encode(hashlib.sha1(PAYLOAD_2, usedforsecurity=False).digest()).decode()
 
 
 _BOXES: dict[int, SecretBox] = {}
@@ -109,7 +116,13 @@ def test_an_asset_restored_from_the_trash_clears_the_flag(world):
     assert record_of(db)["remote_is_trashed"] == 0
 
 
-def test_a_vanished_asset_is_shown_as_missing_not_resent(world):
+def test_a_vanished_asset_is_invalidated_so_it_returns_to_unsent(world):
+    """消えた資産の記録は無効化する。**送り直し専用の状態を持たない。**
+
+    無効化された記録は「この宛先の有効な記録」ではなくなるので、そのメディアは
+    通常の「まだ送っていない」へ戻る（§9.10）。送信そのものは利用者の明示操作の
+    ままなので、「意図的に消したものを黙って送り直さない」は保てる。
+    """
     server, rechecker, ctx, destination_id, db = world
     server.assets.clear()  # 保持期限を過ぎて完全に消えた
 
@@ -117,11 +130,52 @@ def test_a_vanished_asset_is_shown_as_missing_not_resent(world):
 
     row = record_of(db)
     assert outcome.vanished == 1
-    # 自動では送り直さない。利用者が意図的に消したものを黙って戻さない。
-    assert row["state"] == "complete"
     assert row["remote_asset_id"] is None
     assert row["remote_checked_at"] is not None
+    assert row["invalidated_at"] is not None
+    assert row["invalidated_reason"] == "remote_missing"
+    # **この場では送らない。** 送るのは利用者が通常経路で選んだとき。
     assert server.uploads == []
+
+
+def test_an_asset_in_the_trash_is_not_invalidated(world):
+    """ゴミ箱に在るのは「無い」の証明ではない。無効化すると二重に上がる."""
+    server, rechecker, ctx, destination_id, db = world
+    server.trashed.add("asset-1")
+
+    rechecker.run(ctx, destination_id)
+
+    row = record_of(db)
+    assert row["remote_is_trashed"] == 1
+    assert row["invalidated_at"] is None
+
+
+def test_a_row_that_moved_during_the_check_is_not_invalidated_either(world):
+    """**照合したときの行にしか書かない**（§9.10）。無効化も同じ条件で守る.
+
+    照合の最中に他の書き手が `remote_asset_id` を動かしていたら、こちらの
+    「消えていた」は古い観測である。それで無効化すると、在る資産の記録を
+    未送信へ戻して二重に上げる。
+    """
+    server, rechecker, ctx, destination_id, db = world
+    server.assets.clear()
+    original = server.route
+
+    def hooked(method, path, body, headers):
+        result = original(method, path, body, headers)
+        if path == "/api/assets/bulk-upload-check":
+            # 照合の応答を返した直後に、別の書き手が行を動かした。
+            db.execute("UPDATE upload_record SET remote_asset_id = 'asset-moved'")
+        return result
+
+    server.route = hooked
+
+    outcome = rechecker.run(ctx, destination_id)
+
+    row = record_of(db)
+    assert outcome.checked == 0
+    assert row["remote_asset_id"] == "asset-moved"
+    assert row["invalidated_at"] is None
 
 
 def test_records_from_an_old_epoch_are_not_touched(world):
@@ -330,31 +384,6 @@ def test_a_record_in_flight_is_not_stamped_by_a_recheck(world):
     assert record_of(db)["remote_checked_at"] is None
 
 
-def test_stamping_refuses_a_record_that_is_not_complete(world):
-    """`stamp_remote` は `complete` の行だけを触る.
-
-    再確認の選択側でも絞っているが、**このメソッドは公開されている**ので、
-    別の経路から呼ばれても進行中の行を書き換えないことを固定する。
-    """
-    from mediaferry.db.credentials import CredentialStore
-    from mediaferry.db.destinations import DestinationRepository
-    from mediaferry.db.profiles import ProfileRegistry as Registry
-    from mediaferry.db.uploads import UploadRepository
-
-    server, rechecker, ctx, destination_id, db = world
-    uploads = UploadRepository(
-        db, Registry(db), DestinationRepository(db, CredentialStore(db, _box_of(db)))
-    )
-    record_id = record_of(db)["id"]
-    db.execute("UPDATE upload_record SET state = 'needs_recheck', remote_asset_id = NULL")
-
-    uploads.stamp_remote(record_id, asset_id="asset-9", is_trashed=1, checked_at="2026-01-01")
-
-    row = record_of(db)
-    assert row["remote_asset_id"] is None
-    assert row["remote_checked_at"] is None
-
-
 def _three_complete_records(world):
     """batch の分割を起こすために、`complete` の行を 3 件にする."""
     server, rechecker, ctx, destination_id, db = world
@@ -433,9 +462,9 @@ def test_a_recheck_that_lost_its_lease_between_batches_sends_no_more(world, monk
 def test_a_record_that_moved_while_it_was_checked_is_not_stamped_with_the_old_result(world):
     """**照合の結果は、照合したときの行にしか書かない。**
 
-    消滅と判定された `complete` を利用者が requeue し、送り直しが済んで別の
-    資産で `complete` に戻ったところへ古い結果を書くと、新しい
-    `remote_asset_id` を古い観測（消滅＝NULL）で消してしまう。
+    消滅と判定されて `remote_asset_id` が NULL の行へ、この照合が終わる前に
+    **別の書き込みが新しい資産の観測を書いた**とする。そこへ古い結果
+    （消滅＝NULL）を書くと、新しい観測を消してしまう。
     """
     server, rechecker, ctx, destination_id, db = world
     # サーバには無い（accept ＝ 消滅と判定される）。
@@ -445,7 +474,7 @@ def test_a_record_that_moved_while_it_was_checked_is_not_stamped_with_the_old_re
 
     def resend_during_check(self, method, path, body, headers):  # noqa: ANN001, ANN202
         if path == "/api/assets/bulk-upload-check":
-            # 利用者が requeue し、送り直しが別の資産で完了した。
+            # 別の書き込みが、この行を新しい資産の観測で上書きした。
             db.execute(
                 "UPDATE upload_record SET remote_asset_id = 'asset-new', remote_checked_at = ?,"
                 " remote_is_trashed = 0",
@@ -572,23 +601,23 @@ def test_stamping_many_writes_nothing_when_the_lease_is_gone(world):
     assert row["remote_checked_at"] == "t0"
 
 
-def test_a_record_requeued_while_it_was_checked_is_not_stamped(world):
-    """**`complete` は終端ではない。** 消滅と判定された行は requeue できる.
+def test_a_record_moved_out_of_complete_while_it_was_checked_is_not_stamped(world):
+    """**`complete` は終端ではない。** 照合の最中に、別の書き込みが行の state だけを動かせる.
 
-    requeue は `remote_asset_id` も `remote_checked_at` も変えない（状態だけを
-    `pending` に戻す）ので、値の一致だけでは古い結果が通ってしまう。
+    そうした書き込みは `remote_asset_id` も `remote_checked_at` も変えない
+    （状態だけを `pending` に戻す）ので、値の一致だけでは古い結果が通ってしまう。
     """
     server, rechecker, ctx, destination_id, db = world
     server.assets.clear()  # accept ＝ 消滅と判定される
     db.execute("UPDATE upload_record SET remote_asset_id = NULL, remote_checked_at = ?", ("t0",))
     real = FakeImmich.route
 
-    def requeue_during_check(self, method, path, body, headers):  # noqa: ANN001, ANN202
+    def state_moves_during_check(self, method, path, body, headers):  # noqa: ANN001, ANN202
         if path == "/api/assets/bulk-upload-check":
             db.execute("UPDATE upload_record SET state = 'pending', remote_is_trashed = NULL")
         return real(self, method, path, body, headers)
 
-    server.route = requeue_during_check.__get__(server, FakeImmich)
+    server.route = state_moves_during_check.__get__(server, FakeImmich)
 
     outcome = rechecker.run(ctx, destination_id)
 
@@ -726,3 +755,301 @@ def test_a_slow_preflight_keeps_the_lease_alive(world, monkeypatch):
     outcome = rechecker.run(ctx, destination_id)
 
     assert outcome.checked == 1
+
+
+def a_stacked_pair(world_tuple):
+    """`world` の 1 件に相方を足して、両方を同じ組の `stacked` にする.
+
+    資産はどちらも相手に在る状態にする（消滅とスタックの照合を混ぜない）。
+    """
+    server, _, _, destination_id, db = world_tuple
+    profile = ProfileRegistry(db).current("dji-osmo")
+    second = a_media_file(
+        db,
+        (profile.profile_id, profile.revision_id),
+        rel_path="library/dji-osmo/DCIM/B.MP4",
+        sha1=SHA1_2,
+    )
+    revision_id = db.execute("SELECT destination_revision_id FROM upload_record").fetchone()[
+        "destination_revision_id"
+    ]
+    db.execute(
+        "INSERT INTO upload_record (id, destination_id, target_epoch, media_file_id, state,"
+        " selection_rule, origin, checksum, remote_asset_id, remote_is_trashed,"
+        " destination_revision_id, created_at, updated_at)"
+        " VALUES (?, ?, 1, ?, 'complete', 'default', 'created_by_us', ?, 'asset-2', 0, ?, ?, ?)",
+        (new_id(), destination_id, second, SHA1_2, revision_id, now_iso(), now_iso()),
+    )
+    server.assets[CHECKSUM_2] = "asset-2"
+    # `0015` / `0016` の trigger が形を守っているので、3 列を一緒に書く。
+    db.execute("UPDATE upload_record SET stack_state = 'stacked', remote_stack_id = 'stack-1'")
+
+
+def test_a_stack_that_is_gone_on_the_server_is_reopened(world):
+    """**解けた組を `stacked` のまま残さない。** 設定 › 送り先の「N 組」が嘘になる."""
+    server, rechecker, ctx, destination_id, db = world
+    a_stacked_pair(world)
+    # 相手にはスタックが無い（利用者が解除した）。資産はどちらも在る。
+
+    outcome = rechecker.run(ctx, destination_id)
+
+    assert outcome.unstacked == 1
+    rows = db.execute("SELECT stack_state, remote_stack_id FROM upload_record").fetchall()
+    assert [row["stack_state"] for row in rows] == [None, None]
+    assert [row["remote_stack_id"] for row in rows] == [None, None]
+
+
+def test_a_stack_whose_members_changed_is_reopened(world):
+    """集合が一致しない組も戻す。§9.11 が「触らない」と決めている状態へ落とすため."""
+    server, rechecker, ctx, destination_id, db = world
+    a_stacked_pair(world)
+    server.stacks["stack-1"] = {"primary": "asset-1", "assets": ["asset-1", "someone-else"]}
+
+    outcome = rechecker.run(ctx, destination_id)
+
+    assert outcome.unstacked == 1
+    assert (
+        db.execute("SELECT count(*) AS n FROM upload_record WHERE stack_state IS NULL").fetchone()[
+            "n"
+        ]
+        == 2
+    )
+
+
+def test_a_stack_that_still_matches_is_not_touched(world):
+    """一致している組には触らない."""
+    server, rechecker, ctx, destination_id, db = world
+    a_stacked_pair(world)
+    server.stacks["stack-1"] = {"primary": "asset-1", "assets": ["asset-1", "asset-2"]}
+
+    outcome = rechecker.run(ctx, destination_id)
+
+    assert outcome.unstacked == 0
+    rows = db.execute("SELECT stack_state, remote_stack_id FROM upload_record").fetchall()
+    assert all(row["stack_state"] == "stacked" for row in rows)
+    assert all(row["remote_stack_id"] == "stack-1" for row in rows)
+
+
+def test_no_stacked_rows_means_no_request_for_stacks(world):
+    """**空振りの要求を出さない。** `stacked` が 0 件なら相手に聞かない."""
+    server, rechecker, ctx, destination_id, db = world
+
+    rechecker.run(ctx, destination_id)
+
+    assert ("GET", "/api/stacks") not in server.requests
+
+
+def test_a_cancel_during_the_stack_check_writes_nothing(world):
+    """照合の最中にキャンセルされたら、1 組も戻さない.
+
+    「キャンセルした」と表示しながら組を開いていた、という状態を残さない
+    （`stamp_many` の後のキャンセル確認と同じ考え方）。
+    """
+    server, rechecker, ctx, destination_id, db = world
+    a_stacked_pair(world)
+    original = server.route
+
+    def hooked(method, path, body, headers):
+        result = original(method, path, body, headers)
+        if path == "/api/stacks":
+            # 一覧を返した直後に、利用者がキャンセルを commit した。
+            db.execute("UPDATE job SET status = 'cancelling'")
+        return result
+
+    server.route = hooked
+
+    outcome = rechecker.run(ctx, destination_id)
+
+    assert outcome.unstacked == 0
+    rows = db.execute("SELECT stack_state FROM upload_record").fetchall()
+    assert all(row["stack_state"] == "stacked" for row in rows)
+    # **資産の照合の結果は既に書いてある。** ここで降りるのは組の段だけなので、
+    # 「N 件確認した」の N は実際に書いた件数のまま（0 に化けない）。
+    assert outcome.checked == 2
+
+
+def test_a_group_whose_member_was_requeued_is_not_seen_as_broken(world):
+    """**`stacked` はレコードの state と独立**（`0015`）. 差し戻しで組が崩れて見えない.
+
+    再計算の差し戻しは `complete` → `needs_recheck` を動かすが、その資産を送った
+    という事実は変わらない。数える集合から外すと、こちらの集合が相手の真部分集合に
+    なって毎回「崩れている」と読み、戻した先の第 2 パスが「相方がまだ `complete` で
+    ない」で見送りに落とす —— Immich では組んだままなのに画面が「見送り」と言う。
+    """
+    server, rechecker, ctx, destination_id, db = world
+    a_stacked_pair(world)
+    server.stacks["stack-1"] = {"primary": "asset-1", "assets": ["asset-1", "asset-2"]}
+    # `0004` の CHECK に当たらないよう、claim は NULL のままにする。
+    db.execute("UPDATE upload_record SET state = 'needs_recheck' WHERE remote_asset_id = 'asset-2'")
+
+    outcome = rechecker.run(ctx, destination_id)
+
+    assert outcome.unstacked == 0
+    rows = db.execute("SELECT stack_state FROM upload_record").fetchall()
+    assert all(row["stack_state"] == "stacked" for row in rows)
+
+
+def a_vanished_record(world_tuple):
+    """相手に無い資産を指す `complete` の行を 1 つ足す（組には入れない）."""
+    server, _, _, destination_id, db = world_tuple
+    profile = ProfileRegistry(db).current("dji-osmo")
+    third = a_media_file(
+        db,
+        (profile.profile_id, profile.revision_id),
+        rel_path="library/dji-osmo/DCIM/C.MP4",
+        sha1=f"{3:040d}",
+    )
+    revision_id = db.execute("SELECT destination_revision_id FROM upload_record").fetchone()[
+        "destination_revision_id"
+    ]
+    record_id = new_id()
+    db.execute(
+        "INSERT INTO upload_record (id, destination_id, target_epoch, media_file_id, state,"
+        " selection_rule, origin, checksum, remote_asset_id, remote_is_trashed,"
+        " destination_revision_id, created_at, updated_at)"
+        " VALUES (?, ?, 1, ?, 'complete', 'default', 'created_by_us', ?, 'asset-3', 0, ?, ?, ?)",
+        (record_id, destination_id, third, f"{3:040d}", revision_id, now_iso(), now_iso()),
+    )
+    return record_id
+
+
+def messages_of(db, job_id):
+    return [
+        row["message"]
+        for row in db.execute(
+            "SELECT message FROM job_event WHERE job_id = ? ORDER BY seq", (job_id,)
+        )
+    ]
+
+
+def test_a_failing_stack_listing_still_reports_the_invalidation(world):
+    """**組の照合が落ちても、無効化の報告は先に出る。**
+
+    無効化は既に commit されている。相手側の失敗をそのまま外へ上げると、
+    利用者に残るのは「再確認が失敗しました」だけで、**写真が黙って未送信へ
+    戻ったこと**を作業の履歴から辿れない。
+    """
+    server, rechecker, ctx, destination_id, db = world
+    a_stacked_pair(world)
+    server.stacks["stack-1"] = {"primary": "asset-1", "assets": ["asset-1", "asset-2"]}
+    vanished = a_vanished_record(world)
+    original = server.route
+
+    def fail_the_stack_listing(method, path, body, headers):
+        result = original(method, path, body, headers)
+        if path == "/api/assets/bulk-upload-check":
+            # 続く `GET /api/stacks` だけを落とす（照合そのものは通す）。
+            server.fail_next = 1
+        return result
+
+    server.route = fail_the_stack_listing
+
+    outcome = rechecker.run(ctx, destination_id)
+
+    assert outcome.vanished == 1
+    assert outcome.checked == 3
+    assert outcome.unstacked == 0
+    assert (
+        db.execute(
+            "SELECT invalidated_reason FROM upload_record WHERE id = ?", (vanished,)
+        ).fetchone()["invalidated_reason"]
+        == "remote_missing"
+    )
+    messages = messages_of(db, ctx.job_id)
+    # **順序も固定する。** 組の段を無効化の報告より前に置くと、その失敗で
+    # 警告ごと消える形に戻ってしまう。
+    assert messages.index(
+        "リモートに存在しないので、まだ送っていないものに戻した"
+    ) < messages.index("組の照合ができなかった")
+
+
+def test_a_failing_stack_listing_does_not_leak_the_peers_words(world):
+    """**相手由来の文言も、こちらの method / path / 状態コードも混ぜない**（§13）."""
+    server, rechecker, ctx, destination_id, db = world
+    a_stacked_pair(world)
+    original = server.route
+
+    def fail_the_stack_listing(method, path, body, headers):
+        result = original(method, path, body, headers)
+        if path == "/api/assets/bulk-upload-check":
+            server.fail_next = 1
+        return result
+
+    server.route = fail_the_stack_listing
+
+    rechecker.run(ctx, destination_id)
+
+    joined = " ".join(messages_of(db, ctx.job_id))
+    assert "unavailable" not in joined
+    assert "503" not in joined
+    assert "/api/stacks" not in joined
+
+
+def test_a_lease_lost_after_the_write_still_reports_what_was_written(world, monkeypatch):
+    """**書いた後にリースを失っても、`checked` は実際に書いた件数のまま。**
+
+    `stamp_many` は commit 済みなので、ここで 0 と報告すると
+    「何も書いていない」と読める記録が残る（実際は無効化まで済んでいる）。
+    """
+    server, rechecker, ctx, destination_id, db = world
+    a_stacked_pair(world)
+    server.stacks["stack-1"] = {"primary": "asset-1", "assets": ["asset-1", "asset-2"]}
+    real = UploadRepository.stamp_many
+
+    def expire_after_the_write(self, *args, **kwargs):  # noqa: ANN001, ANN002, ANN003, ANN202
+        written = real(self, *args, **kwargs)
+        db.execute(
+            "UPDATE job SET lease_expires_at = '2020-01-01T00:00:00+00:00' WHERE id = ?",
+            (ctx.job_id,),
+        )
+        return written
+
+    monkeypatch.setattr(UploadRepository, "stamp_many", expire_after_the_write)
+
+    outcome = rechecker.run(ctx, destination_id)
+
+    assert outcome.checked == 2
+    assert outcome.unstacked == 0
+
+
+def test_a_rejected_stack_listing_still_reports_the_invalidation(world):
+    """**4xx でも同じ。** `GET /api/stacks` を持たない相手・間に立つ代理が返す 404.
+
+    5xx だけを受け止めると、404 / 400 / 429 で「無効化は commit 済み・報告なし」が
+    そのまま再現する。この段の失敗はどれも「今回は相手の組を読めなかった」で、
+    することも同じ（報告して次の再確認へ回す）。
+    """
+    server, rechecker, ctx, destination_id, db = world
+    a_stacked_pair(world)
+    server.stacks["stack-1"] = {"primary": "asset-1", "assets": ["asset-1", "asset-2"]}
+    vanished = a_vanished_record(world)
+    original = server.route
+
+    def reject_the_stack_listing(method, path, body, headers):
+        if method == "GET" and path == "/api/stacks":
+            return 404, {"message": "relayed-remote-wording"}
+        return original(method, path, body, headers)
+
+    server.route = reject_the_stack_listing
+
+    outcome = rechecker.run(ctx, destination_id)
+
+    assert outcome.vanished == 1
+    assert outcome.checked == 3
+    assert outcome.unstacked == 0
+    assert (
+        db.execute(
+            "SELECT invalidated_reason FROM upload_record WHERE id = ?", (vanished,)
+        ).fetchone()["invalidated_reason"]
+        == "remote_missing"
+    )
+    messages = messages_of(db, ctx.job_id)
+    assert messages.index(
+        "リモートに存在しないので、まだ送っていないものに戻した"
+    ) < messages.index("組の照合ができなかった")
+    # 相手の文言も、こちらの method / path / 状態コードも混ぜない（§13）。
+    assert not [
+        message
+        for message in messages
+        if "relayed-remote-wording" in message or "404" in message or "/api/stacks" in message
+    ]

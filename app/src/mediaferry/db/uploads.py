@@ -236,8 +236,10 @@ class UploadRepository:
     def _pair(self, media: sqlite3.Row, revision: sqlite3.Row, choice: _Choice) -> PairResult:
         destination_id = revision["destination_id"]
         existing = self._conn.execute(
+            # **無効化された行は無いものとして扱う**（§10 の遷移表「再利用しない」）。
+            # 拾うと `_existing` が断り、「まだ送っていない」と出ているのに送れない。
             "SELECT * FROM upload_record WHERE destination_id = ? AND target_epoch = ?"
-            "   AND media_file_id = ?",
+            "   AND media_file_id = ? AND invalidated_at IS NULL",
             (destination_id, revision["target_epoch"], media["id"]),
         ).fetchone()
         if existing is not None:
@@ -274,7 +276,12 @@ class UploadRepository:
         return PairResult(media["id"], destination_id, "created", record_id=record_id)
 
     def _existing(self, media: sqlite3.Row, destination_id: str, row: sqlite3.Row) -> PairResult:
-        """§10「既存レコードがある場合の遷移」."""
+        """§10「既存レコードがある場合の遷移」.
+
+        **`invalidated_at` の分岐は保険。** `_pair` は無効化された行を引かないので
+        構造的に到達しない。**それでも残す**（無効化された行を再利用しない、という
+        判断をコードから消さない）。
+        """
         if row["invalidated_at"] is not None:
             return PairResult(
                 media["id"],
@@ -721,13 +728,9 @@ class UploadRepository:
 
         **`complete` の行だけ**を対象にする。進行中の行には所有者がいる。
 
-        **照合したときの行にしか書かない。** `complete` は終端ではない: 消滅と
-        判定された行を利用者が requeue でき、送り直しが済めばまた `complete` に
-        戻る。id と現在の状態だけを条件にすると、その新しい `remote_asset_id` を
-        古い観測（消滅＝NULL）で消す。観測した値そのものを条件に入れて、動いた
-        行は**書かずに飛ばす**（相手側は新しい観測を持っているので、こちらの
-        古い結果で上書きする理由が無い）。書けた id を返すので、呼び出し側は
-        飛ばした行を「確認した」と数えずに済む。
+        **照合したときの行にしか書かない。** 観測と現在の姿がずれていれば、
+        こちらの結果は古い。id と現在の状態だけを条件にすると、他の照合が書いた
+        新しい `remote_asset_id` を古い観測（消滅＝NULL）で消す。
         """
         written: set[str] = set()
         with immediate(self._conn):
@@ -752,7 +755,17 @@ class UploadRepository:
                     self._reopen_stack_of(stamp.record_id)
                 updated = self._conn.execute(
                     "UPDATE upload_record SET remote_asset_id = ?, remote_is_trashed = ?,"
-                    " remote_checked_at = ?, updated_at = ?"
+                    " remote_checked_at = ?, updated_at = ?,"
+                    # **消えていたら、その場で無効化する**（§9.10）。無効化された
+                    # 記録は「この宛先の有効な記録」ではなくなるので、メディアは
+                    # 通常の「まだ送っていない」へ戻る。**観測と無効化を別の取引に
+                    # 分けない** —— 分けると「消えたと記録したが未送信に戻って
+                    # いない」中途半端な状態が残る。
+                    #
+                    # **`COALESCE` で書く。** 在る側には NULL を渡すので、既存の
+                    # 値をそのまま残す（消し戻さない）。
+                    " invalidated_at = COALESCE(invalidated_at, ?),"
+                    " invalidated_reason = COALESCE(invalidated_reason, ?)"
                     " WHERE id = ? AND state = 'complete'"
                     "   AND remote_asset_id IS ? AND remote_checked_at IS ?",
                     (
@@ -760,6 +773,10 @@ class UploadRepository:
                         stamp.is_trashed,
                         checked_at,
                         now_iso(),
+                        # **消滅の判定は呼び出し側で済んでいる。** `Stamp` に旗を
+                        # 足さず、`asset_id` が無いことをそのまま条件にする。
+                        checked_at if stamp.asset_id is None else None,
+                        "remote_missing" if stamp.asset_id is None else None,
                         stamp.record_id,
                         stamp.expect_asset_id,
                         stamp.expect_checked_at,
@@ -768,29 +785,6 @@ class UploadRepository:
                 if updated.rowcount == 1:
                     written.add(stamp.record_id)
         return written
-
-    def stamp_remote(
-        self, record_id: str, asset_id: str | None, is_trashed: int, checked_at: str
-    ) -> None:
-        """再確認の結果を書く. **`complete` の行だけ**を対象にする.
-
-        進行中の行は所有者がいるので、claim を持たないこの経路では触らない。
-        """
-        with immediate(self._conn):
-            # **契約は「`complete` だけを対象」。** 組もその内側なので、先に確かめる。
-            still = self._conn.execute(
-                "SELECT 1 FROM upload_record WHERE id = ? AND state = 'complete'",
-                (record_id,),
-            ).fetchone()
-            if still is None:
-                return
-            # 資産 ID が変わるなら、スタックの結果を組ごと捨てる（上と同じ理由）。
-            self._reopen_stack_of(record_id, new_asset_id=asset_id)
-            self._conn.execute(
-                "UPDATE upload_record SET remote_asset_id = ?, remote_is_trashed = ?,"
-                " remote_checked_at = ?, updated_at = ? WHERE id = ? AND state = 'complete'",
-                (asset_id, is_trashed, checked_at, now_iso(), record_id),
-            )
 
     def stamp_remote_datetime(
         self,
@@ -870,6 +864,59 @@ class UploadRepository:
             )
         )
 
+    def stacked_groups(self, destination_id: str, target_epoch: int) -> dict[str, frozenset[str]]:
+        """組んだと記録している組を、`remote_stack_id` → 資産 ID の集合で返す.
+
+        再確認の照合が使う。**無効化された行は数えない。** `stacked` の行は
+        `0015` と `0016` の trigger が `remote_stack_id` と `remote_asset_id` の
+        実在を強制しているので、どちらも NULL にならない。
+
+        **`state` は条件に入れない**（`0015` と同じ理由）。`stacked` は
+        「その `remote_asset_id` を送った結果」であって、レコードの state とは
+        独立で、再計算の差し戻しが `complete` → `needs_recheck` を動かしても真の
+        ままである。`complete` に絞ると、片方が差し戻された組はこちらの集合が
+        相手の集合の真部分集合になり、毎回「崩れている」と読む。
+
+        **`target_epoch` を必ず絞る。** 旧 epoch は別ライブラリの履歴で、
+        現行の資格情報で読んだスタック一覧とは突き合わせられない。
+        """
+        groups: dict[str, set[str]] = {}
+        for row in self._conn.execute(
+            "SELECT remote_stack_id, remote_asset_id FROM upload_record"
+            " WHERE destination_id = ? AND target_epoch = ?"
+            "   AND invalidated_at IS NULL AND stack_state = 'stacked'",
+            (destination_id, target_epoch),
+        ):
+            groups.setdefault(row["remote_stack_id"], set()).add(row["remote_asset_id"])
+        return {stack_id: frozenset(assets) for stack_id, assets in groups.items()}
+
+    def reopen_stacks(
+        self,
+        ctx: JobContext,
+        destination_id: str,
+        target_epoch: int,
+        stack_ids: Sequence[str],
+    ) -> int:
+        """崩れた組を未評価へ戻す. **戻した組の数**を返す.
+
+        `_reopen_stack_of` と同じ形の CAS を、**1 つのトランザクション**で当てる
+        （`assert_lease` も同じ取引に入れる）。**組ごとに数える** —— 組は互いに
+        独立なので、片方が動いても他方の照合結果は古くならない。
+        """
+        reopened = 0
+        with immediate(self._conn):
+            ctx.assert_lease()
+            for stack_id in stack_ids:
+                updated = self._conn.execute(
+                    "UPDATE upload_record SET stack_state = NULL, remote_stack_id = NULL,"
+                    " stack_reason = NULL, updated_at = ?"
+                    " WHERE destination_id = ? AND target_epoch = ? AND remote_stack_id = ?"
+                    "   AND stack_state = 'stacked' AND invalidated_at IS NULL",
+                    (now_iso(), destination_id, target_epoch, stack_id),
+                )
+                reopened += updated.rowcount > 0
+        return reopened
+
     def sources_of(self, media_file_id: str) -> list[sqlite3.Row]:
         """公開の元になったカード上の観測（**すべて**）.
 
@@ -899,10 +946,17 @@ class UploadRepository:
     def record_for(
         self, destination_id: str, target_epoch: int, media_file_id: str
     ) -> sqlite3.Row | None:
-        """**現行 epoch のレコードだけ**を返す（旧 epoch は別ライブラリの履歴）."""
+        """**現行 epoch の有効なレコードだけ**を返す.
+
+        旧 epoch は別ライブラリの履歴。**無効化された行も返さない** ——
+        消滅を無効化して送り直すと、同じ組に行が 2 つ並ぶ。`ORDER BY` が
+        無いので、除かないと古い方を返し、第 2 パスが「相方が無効化済み」と
+        読んで永久に組めなくなる。
+        """
         return self._conn.execute(
             "SELECT * FROM upload_record"
-            " WHERE destination_id = ? AND target_epoch = ? AND media_file_id = ?",
+            " WHERE destination_id = ? AND target_epoch = ? AND media_file_id = ?"
+            "   AND invalidated_at IS NULL",
             (destination_id, target_epoch, media_file_id),
         ).fetchone()
 

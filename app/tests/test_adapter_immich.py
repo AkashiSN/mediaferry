@@ -388,3 +388,25 @@ def test_an_explicit_null_stack_is_not_a_stack(client, immich):
     """実 Immich はスタックに入っていない資産へ `"stack": null` を返す."""
     immich.null_stack_field = True
     assert client.asset("asset-1").stack_id is None
+
+
+def test_stacks_lists_every_stack(immich):
+    immich.stacks["stack-1"] = {"primary": "asset-a", "assets": ["asset-a", "asset-b"]}
+    immich.stacks["stack-2"] = {"primary": "asset-c", "assets": ["asset-c", "asset-d"]}
+    with ImmichClient(immich.url, API_KEY) as client:
+        found = client.stacks()
+
+    assert {stack.stack_id for stack in found} == {"stack-1", "stack-2"}
+    assert {stack.stack_id: set(stack.asset_ids) for stack in found}["stack-1"] == {
+        "asset-a",
+        "asset-b",
+    }
+
+
+def test_a_broken_stack_list_is_a_protocol_error(immich):
+    """**壊れた応答を DB へ確定させない。** 黙って「スタックが無い」と読むと、
+    組み直しの判断が全部ひっくり返る（在る組を解けていると読む）。"""
+    immich.stacks["stack-1"] = {"primary": "asset-a", "assets": ["asset-a", "asset-b"]}
+    immich.stack_response_without_assets = True
+    with ImmichClient(immich.url, API_KEY) as client, pytest.raises(ImmichProtocolError):
+        client.stacks()

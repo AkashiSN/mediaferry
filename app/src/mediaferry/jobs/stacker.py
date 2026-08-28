@@ -246,6 +246,9 @@ class Stacker:
             origin=record["origin"],
             state=record["state"],
             remote_asset_id=record["remote_asset_id"],
+            # **保険。** `unstacked_batch` も `record_for` も無効化を除くので、
+            # ここへ来る行は必ず有効。それでも「無効化された行とは組まない」と
+            # いう判断をコードから消さない。
             invalidated=record["invalidated_at"] is not None,
         )
 

@@ -248,7 +248,7 @@ def test_an_unobserved_complete_is_kept(world, db, data_root):
 
     `0007` を適用した DB には「向き先の記録が無い complete」が残っている。
     **Immich に在るのに識別子を捨てただけ**かもしれないので消さない
-    （`POST /uploads/{id}/requeue` が同じ 2 列で選んでいるのと条件をそろえる）。
+    （`remote_asset_id` と `remote_checked_at` の 2 列で判断する）。
     """
     repo, _, ref = world
     media_id, _, _ = a_derived_with_group(db, data_root, ref)

@@ -4,22 +4,26 @@
 保持期限を過ぎて資産が消えても「送信済み」のまま残るので、宛先ごとの明示操作で
 照合し直す。
 
-**自動で再アップロードはしない。** 消えていた資産は `remote_asset_id` を外して
-「リモートに存在しない」と分かる形にし、ユーザが明示的に `pending` へ戻す。
+**消えていた資産の記録は無効化する。** 無効化された記録は「この宛先の有効な
+記録」ではなくなるので、そのメディアは通常の「まだ送っていない」へ戻る。
+**この場では送らない** —— 送るのは利用者が通常経路で選んだときだけ。
 """
 
 from __future__ import annotations
 
+import logging
 import sqlite3
 from collections.abc import Callable
 from dataclasses import dataclass
 
-from ..adapters.immich import BULK_CHECK_BATCH, ImmichClient
+from ..adapters.immich import BULK_CHECK_BATCH, ImmichClient, ImmichError
 from ..clock import now_iso
 from ..core.lease_pulse import with_lease_pulse
 from ..db.jobs import JobContext, LeaseLost
 from ..db.uploads import Stamp, UploadRepository
-from .preflight import PreflightCache
+from .preflight import PreflightCache, PreflightFailed
+
+logger = logging.getLogger(__name__)
 
 # **分割はこちらで行う。** adapter に全件を渡すと、その内部ループの合間に
 # キャンセルを見る隙が無く、最初の batch の途中で中止しても残りを全部送る。
@@ -32,6 +36,8 @@ class RecheckOutcome:
     trashed: int
     vanished: int
     restored: int
+    # 相手側で解けていた／崩れていたので未評価へ戻した組の数（§9.11）。
+    unstacked: int = 0
 
 
 class Rechecker:
@@ -148,8 +154,12 @@ class Rechecker:
         for row in vanished:
             if row["id"] not in written:
                 continue
-            # **送り直さない。** 見えるようにするだけ。
-            ctx.emit("warning", "リモートに存在しない資産がある", {"upload_record_id": row["id"]})
+            # **無効化して「まだ送っていない」へ戻す。** 送るのは利用者の明示操作。
+            ctx.emit(
+                "warning",
+                "リモートに存在しないので、まだ送っていないものに戻した",
+                {"upload_record_id": row["id"]},
+            )
         skipped = len(records) - len(written)
         if skipped:
             # **黙って飛ばさない。** 「N 件確認した」の N と実際が食い違う。
@@ -168,12 +178,74 @@ class Rechecker:
             and not outcomes[row["id"]].is_trashed
             and row["remote_is_trashed"]
         )
+        # **無効化の結果を報告し終えてから、組の照合へ移る。** 無効化は既に
+        # commit されているので、組の段の失敗で警告と集計が消えると、利用者には
+        # 「再確認が失敗した」しか残らず、写真が未送信へ戻ったことを辿れない。
+        unstacked = self._reconcile_stacks(ctx, revision)
         return RecheckOutcome(
             checked=len(written),
             trashed=trashed,
             vanished=sum(1 for row in vanished if row["id"] in written),
             restored=restored,
+            unstacked=unstacked,
         )
+
+    def _reconcile_stacks(self, ctx: JobContext, revision: sqlite3.Row) -> int:
+        """スタックの現存とメンバー集合を照合し、崩れた組を未評価へ戻す（§9.11）.
+
+        **資産の照合の後に走らせる。** 消滅した資産は `stamp_many` の
+        `_reopen_stack_of` で既に組を開いており、開いた行は `stack_state` が
+        NULL なのでここの対象から外れる。逆順だと同じ組を 2 度開く。
+
+        **「無い」と「集合が違う」を 1 つの条件で見る。** どちらも
+        「こちらが記録している組は現在の姿ではない」であり、戻した先の第 2 パスが
+        相手を読み直して、作り直すか見送るかを決める（§9.11 の表）。
+
+        **相手側の失敗も、リースの喪失も、ここで受け止めて 0 を返す。** 資産の
+        照合の結果は既に commit されているので、ここから外へ例外を出すと
+        「何件をどれに戻したか」の記録ごと失われる。組の照合は次の再確認で
+        やり直せる。
+
+        **相手側は `ImmichError` の族ごと受け止める。** この段の失敗はどれも
+        「今回は相手の組を読めなかった」の 1 つの意味しか持たず、5xx でも 4xx でも
+        redirect でも壊れた応答でも、することは同じ（報告して次の再確認へ回す）。
+        `jobs/stacker.py` が再試行の余地で 2 つに分けているのは、あちらが
+        `stack_reason` として結論を書き残すため。ここには書き残す結論が無い。
+        族で受けると、adapter に新しい失敗が増えても**この経路は閉じたまま**になる。
+        """
+        try:
+            return self._reconcile(ctx, revision)
+        except (ImmichError, PreflightFailed, LeaseLost) as exc:
+            # **相手由来の文言も、こちらの method / path / 状態コードも混ぜない**
+            # （§13）。詳しい中身は運用ログへ回す。
+            logger.warning("組の照合ができなかった: %s", exc)
+            ctx.emit("warning", "組の照合ができなかった")
+            return 0
+
+    def _reconcile(self, ctx: JobContext, revision: sqlite3.Row) -> int:
+        destination_id = revision["destination_id"]
+        epoch = revision["target_epoch"]
+        groups = self._uploads.stacked_groups(destination_id, epoch)
+        if not groups:
+            # **空振りの要求を出さない。**
+            return 0
+        # 相手へ触る前に、キャンセルとリースの両方を見る（batch の照合と同じ）。
+        if ctx.cancelled():
+            return 0
+        ctx.assert_lease()
+        ctx.heartbeat()
+        with self._open_client(revision) as client:
+            live = {
+                stack.stack_id: frozenset(stack.asset_ids)
+                for stack in with_lease_pulse(ctx, client.stacks)
+            }
+        # **照合の最中にキャンセルされていたら、結果を書かずに降りる。**
+        if ctx.cancelled():
+            return 0
+        broken = [stack_id for stack_id, members in groups.items() if live.get(stack_id) != members]
+        if not broken:
+            return 0
+        return self._uploads.reopen_stacks(ctx, destination_id, epoch, broken)
 
 
 def _stamp_of(row: sqlite3.Row, asset_id: str | None, is_trashed: int) -> Stamp:

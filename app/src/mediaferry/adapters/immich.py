@@ -373,6 +373,22 @@ class ImmichClient:
             raise ImmichProtocolError("POST /api/stacks が要求と違う集合を返した")
         return created
 
+    def stacks(self) -> list[RemoteStack]:
+        """相手が持っているスタックを全部読む（再確認の照合）.
+
+        **絞り込まない。** こちらが持つ `remote_stack_id` の現存とメンバー集合を
+        まとめて照合するので、1 要求で足りる。**件数の上限は置かない** ——
+        打ち切ると「照合した」が嘘になる（`records_for_recheck` と同じ）。
+
+        **形が違えば protocol error にする**（`_stack_from`）。黙って
+        「スタックが無い」と読むと、在る組を解けていると判断して作り直す。
+        """
+        response = self._request("GET", "/api/stacks")
+        return [
+            self._stack_from(item, "GET /api/stacks")
+            for item in _as_array(response, "GET /api/stacks")
+        ]
+
     def stack_by_primary(self, primary_asset_id: str) -> RemoteStack | None:
         """主資産から引く. 見つからなければ `None`."""
         checked = self._identifier(primary_asset_id, "GET /api/stacks の primary asset id")
