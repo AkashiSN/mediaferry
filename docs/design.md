@@ -2276,19 +2276,29 @@ JPG と CR2 の両方が付く。したがってタイルは `JPG+RAW` と名乗
 | --- | --- | --- |
 | 作業の記録 | `job` / `job_event`、別々にした組み合わせの記録、**公開が完了した `artifact_staging`** | 作り直せる（再スキャン・再検出） |
 | 送信の記録 | `upload_record` | **戻らない。** 次に送ると初回の `checking` が `reject` を返して `origin` が `pre_existing` に決まり、`first_check_result` は不変なので `created_by_us` には二度と戻らない（§9.10）。日時の自動補正は 1 件ずつの承認に変わり、スタックは `skipped` になる |
-| 取り込んだファイル | `media_file`・`merge_group`・`source_entry` と、`DATA_ROOT` 直下の実体 | カードに元があれば取り込み直せる |
+| 取り込んだファイル | `media_file`・`merge_group`・`source_entry` と、`DATA_ROOT` 直下の実体。加えて**数えた印**（`volume_instance.scanned_at` と、挿さっている接続の `volume_presence.auto_scan_at`） | カードに元があれば取り込み直せる |
 | すべて | 上のすべてと、カードの記録（信頼の記録を含む） | 戻らない |
 
 **送り先とカメラの種類はどの段でも残す。** 取り込んだデータではなく設定で、消すと
 接続のやり直し（API キーの入れ直し）になる。
 
-**断る条件は 2 つあり、`code` で書き分ける。** 画面は `code` で文面を選ぶので、
+**「取り込んだファイル」の段は、数えた印も落とす。** ホームは `pending_count == 0` を
+「取り込むものは無い」と読むので（§13 の分岐は `scanned_at` を先に見る）、数えた元を
+捨てたのに印を残すと、**カードに元があるのに取り込む入口が消える**。`scanned_at` と
+`auto_scan_at` の両方を落として初めて、監視が数え直してホームに入口が戻る
+（片方だけでは、ホームが「中身を数えています。」から動かない）。**抜けた接続の
+`auto_scan_at` は履歴なので触らない**（監視も抜けた接続は拾わない）。
+
+**断る条件は 3 つあり、`code` で書き分ける。** 画面は `code` で文面を選ぶので、
 まとめると「何を待てばよいか」が書けない。
 
 - **走っている作業がある**（`job_in_flight`）—— 消せたとしても走っている取り込みが書き込み先を失う。
   **`queued` は見ない**（まだ誰も掴んでおらず、ここに入れると監視がスキャンを積むカードでは一度も通らない）
 - **回収待ちの公開がある**（`staging_pending`）—— `writing` / `staged` の `artifact_staging` は
   中断した公開の復旧に要る（起動時の reconciliation が拾う）。**消さずに断る**
+- **回収待ちの送信がある**（`upload_claim_pending`）—— `upload_record.claim_job_id` も
+  `job` を `ON DELETE RESTRICT` で掴む。中断した送信の claim は起動時の
+  `release_interrupted` が外すまで残るので、**どの段でも**外部キーが `job` の削除を止める
 
 **公開が完了した `artifact_staging`（`published`）は「作業の記録」の段で、`job` より先に消す。**
 `job_id` を `ON DELETE RESTRICT` で掴んでいるので、順序を逆にすると外部キーが止める。
