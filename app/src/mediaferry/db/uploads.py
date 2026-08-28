@@ -894,13 +894,19 @@ class UploadRepository:
         `0015` と `0016` の trigger が `remote_stack_id` と `remote_asset_id` の
         実在を強制しているので、どちらも NULL にならない。
 
+        **`state` は条件に入れない**（`0015` と同じ理由）。`stacked` は
+        「その `remote_asset_id` を送った結果」であって、レコードの state とは
+        独立で、再計算の差し戻しが `complete` → `needs_recheck` を動かしても真の
+        ままである。`complete` に絞ると、片方が差し戻された組はこちらの集合が
+        相手の集合の真部分集合になり、毎回「崩れている」と読む。
+
         **`target_epoch` を必ず絞る。** 旧 epoch は別ライブラリの履歴で、
         現行の資格情報で読んだスタック一覧とは突き合わせられない。
         """
         groups: dict[str, set[str]] = {}
         for row in self._conn.execute(
             "SELECT remote_stack_id, remote_asset_id FROM upload_record"
-            " WHERE destination_id = ? AND target_epoch = ? AND state = 'complete'"
+            " WHERE destination_id = ? AND target_epoch = ?"
             "   AND invalidated_at IS NULL AND stack_state = 'stacked'",
             (destination_id, target_epoch),
         ):

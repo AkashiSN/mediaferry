@@ -891,3 +891,24 @@ def test_a_cancel_during_the_stack_check_writes_nothing(world):
     # **資産の照合の結果は既に書いてある。** ここで降りるのは組の段だけなので、
     # 「N 件確認した」の N は実際に書いた件数のまま（0 に化けない）。
     assert outcome.checked == 2
+
+
+def test_a_group_whose_member_was_requeued_is_not_seen_as_broken(world):
+    """**`stacked` はレコードの state と独立**（`0015`）. 差し戻しで組が崩れて見えない.
+
+    再計算の差し戻しは `complete` → `needs_recheck` を動かすが、その資産を送った
+    という事実は変わらない。数える集合から外すと、こちらの集合が相手の真部分集合に
+    なって毎回「崩れている」と読み、戻した先の第 2 パスが「相方がまだ `complete` で
+    ない」で見送りに落とす —— Immich では組んだままなのに画面が「見送り」と言う。
+    """
+    server, rechecker, ctx, destination_id, db = world
+    a_stacked_pair(world)
+    server.stacks["stack-1"] = {"primary": "asset-1", "assets": ["asset-1", "asset-2"]}
+    # `0004` の CHECK に当たらないよう、claim は NULL のままにする。
+    db.execute("UPDATE upload_record SET state = 'needs_recheck' WHERE remote_asset_id = 'asset-2'")
+
+    outcome = rechecker.run(ctx, destination_id)
+
+    assert outcome.unstacked == 0
+    rows = db.execute("SELECT stack_state FROM upload_record").fetchall()
+    assert all(row["stack_state"] == "stacked" for row in rows)
