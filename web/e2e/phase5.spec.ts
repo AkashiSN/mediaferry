@@ -32,13 +32,13 @@ test.afterAll(() => {
   app?.stop();
 });
 
-/** ホームの「さっき取り込んだもの」の 1 行（`ファイル名（撮影日時）`）。
+/** ホームの「さっき取り込んだもの」の 1 行（`ファイル名 ・ 撮影日時（印）`）。
  *
  * **画面は内部の相対パスも生の ISO 文字列も出さない**（§13）ので、ここで読めるのは
- * ファイル名と、解決済みのオフセットで書いた**現地の壁時計**だけ。 */
+ * ファイル名と、解決済みのオフセットで書いた**現地の壁時計**と、その印だけ。 */
 function recentRow(text: string): { fileName: string; capturedAt: string } {
-  const [fileName, rest] = text.split("（");
-  return { fileName, capturedAt: (rest ?? "").replace("）", "") };
+  const [fileName, rest] = text.split(" ・ ");
+  return { fileName: fileName.trim(), capturedAt: (rest ?? "").trim() };
 }
 
 test("汎用化の受け入れが画面から通る", async ({ page }) => {
@@ -85,7 +85,7 @@ test("汎用化の受け入れが画面から通る", async ({ page }) => {
 
   // ホームの「さっき取り込んだもの」に、取り込んだ順に出る。
   await nav.getByRole("link", { name: "ホーム" }).click();
-  const dji = page.getByText(/^DJI_\d+_\d+_D\.MP4（/).first();
+  const dji = page.getByText(/^DJI_\d+_\d+_D\.MP4 ・ /).first();
   await expect(dji).toBeVisible({ timeout: 90_000 });
   const before = recentRow((await dji.textContent()) ?? "");
   expect(before.capturedAt).not.toBe("");
@@ -99,9 +99,12 @@ test("汎用化の受け入れが画面から通る", async ({ page }) => {
   // **取り込むは押した瞬間にホームへ遷移する。** 進捗の置き場はホームなので、
   // 「ホームへ」を押す必要は無い。
   await expect(page.getByRole("heading", { name: "ホーム", exact: true })).toBeVisible();
-  await expect(page.getByText(/^IMG_0001\.JPG（/)).toBeVisible({ timeout: 90_000 });
-  // `timezone_policy: none` なので、EXIF の壁時計がそのまま出る。
-  await expect(page.getByText(/^IMG_0001\.JPG（2026年2月3日 04:05）$/)).toBeVisible();
+  await expect(page.getByText(/^IMG_0001\.JPG ・ /)).toBeVisible({ timeout: 90_000 });
+  // `timezone_policy: none` なので、EXIF の壁時計がそのまま出る。**印は
+  // `DEFAULT_TIMEZONE` から付く** —— このプロファイルはゾーンを決めないので
+  // `captured_at_tz` が空で、そのときは設定したゾーンとみなす（§13）。
+  // **数字は直さない**（04:05 のまま。直すと現地で何時だったかが読めなくなる）。
+  await expect(page.getByText(/^IMG_0001\.JPG ・ 2026年2月3日 04:05（JST）$/)).toBeVisible();
 
   // 4. 複製して編集 → 新しい版 → 試した判定が変わる。
   await nav.getByRole("link", { name: "設定" }).click();

@@ -287,6 +287,9 @@ def _datetime_diff(row, profiles: _ProfileCache | None) -> dict[str, Any]:  # no
             else current
         ),
         "proposed": proposed,
+        # 画面が両側に添える印の出所。**両側とも提案のオフセットで並ぶ**ので、
+        # 印も 1 つでよい（空なら画面が `DEFAULT_TIMEZONE` とみなす）。
+        "captured_at_tz": row["media_captured_at_tz"],
         # **瞬間で比べる。** Immich は日時を UTC へ正規化して返すので、`+09:00` で
         # 書いた値は `+00:00` の表記で戻る。文字列の一致で見ると、同じ瞬間が常に
         # 「違う」になり、`identical` が真になる場面が無くなる。

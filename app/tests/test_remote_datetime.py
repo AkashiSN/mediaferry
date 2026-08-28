@@ -233,3 +233,17 @@ def test_an_unreadable_value_is_passed_through(secret_env, client, db):
 
     assert row["identical"] is False
     assert row["remote_current"] == "いつだったか"
+
+
+def test_the_pending_approval_carries_the_zone_for_the_label(secret_env, client, db):
+    """**画面が印を作れるように、撮影日時のゾーンも継いで返す**（§13）.
+
+    両側とも提案のオフセットで並ぶので、印は 1 つでよい。空なら画面が
+    `DEFAULT_TIMEZONE` とみなす（`timezone_policy: none` の値がここに来る）。
+    """
+    _awaiting(db, current="2026-08-17T05:30:00+00:00")
+    db.execute("UPDATE media_file SET captured_at_tz = 'Asia/Tokyo'")
+
+    [row] = client.get("/api/uploads?state=awaiting_datetime_approval").json()["records"]
+
+    assert row["captured_at_tz"] == "Asia/Tokyo"

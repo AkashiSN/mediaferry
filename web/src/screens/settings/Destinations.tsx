@@ -8,7 +8,7 @@ import { Link } from "react-router-dom";
 
 import { request } from "../../api/client";
 import { ApiError } from "../../api/errors";
-import { useDashboardReload } from "../../api/dashboard";
+import { useDashboardReload, useDefaultTimezone } from "../../api/dashboard";
 import { useMutation, useQuery } from "../../api/hooks";
 import { ConfirmDialog } from "../../components/ConfirmDialog";
 import { ErrorBanner, UserFacingError } from "../../components/ErrorBanner";
@@ -301,6 +301,8 @@ export function DestinationsScreen() {
   const destinations = useQuery<Destinations>("/destinations");
   const refreshTasks = useDashboardReload();
   const edit = useMutation();
+  // 時刻に添える印（§13）。読めていなければ `null`（システム時刻は UTC のまま出す）。
+  const defaultZone = useDefaultTimezone();
   const [archiving, setArchiving] = useState<Destination | null>(null);
 
   /**
@@ -496,7 +498,7 @@ export function DestinationsScreen() {
                 最後に確かめた:{" "}
                 {destination.verified_at === null
                   ? "まだ確かめていません"
-                  : formatSystemDateTime(destination.verified_at)}
+                  : formatSystemDateTime(destination.verified_at, defaultZone)}
               </p>
               {sharesLibrary(all, destination) && (
                 <p role="note" className="small" style={{ marginTop: 4 }}>

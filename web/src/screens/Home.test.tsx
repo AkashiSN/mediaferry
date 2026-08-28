@@ -13,6 +13,7 @@ import { HomeScreen } from "./Home";
 
 const EMPTY_DASHBOARD = {
   media_total: 0,
+  default_timezone: "Asia/Tokyo",
   destinations: [],
   running_jobs: 0,
   recent_imports: [],
@@ -90,15 +91,21 @@ describe("ホーム", () => {
       "/dashboard": {
         ...EMPTY_DASHBOARD,
         recent_imports: [
-          { id: "m1", rel_path: "2026/08/21/DJI_0043.MP4", captured_at: "2026-08-21T14:05:33+09:00" },
+          {
+            id: "m1",
+            rel_path: "2026/08/21/DJI_0043.MP4",
+            captured_at: "2026-08-21T14:05:33+09:00",
+            captured_at_tz: "Asia/Tokyo",
+          },
         ],
       },
       "/devices": { volumes: [] },
       "/jobs": { jobs: [] },
     });
     renderHome();
+    // **どの時計の数字かを印で言う**（§13）。撮影日時は撮った土地の壁時計のまま。
     await waitFor(() =>
-      expect(screen.getByText("DJI_0043.MP4（2026年8月21日 14:05）")).toBeInTheDocument(),
+      expect(screen.getByText("DJI_0043.MP4 ・ 2026年8月21日 14:05（JST）")).toBeInTheDocument(),
     );
     expect(screen.queryByText(/2026\/08\/21\/DJI_0043\.MP4/)).toBeNull();
     expect(screen.queryByText(/14:05:33/)).toBeNull();

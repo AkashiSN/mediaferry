@@ -242,3 +242,72 @@ def test_a_merged_group_from_an_older_profile_revision_is_not_a_task(client, db)
     )
 
     assert client.get("/api/dashboard").json()["merge_review_total"] == 0
+
+
+# ------------------------------------------------------------------ 時刻の出し方
+#
+# **画面は時刻に印を添える**（§13）。システム時刻は `DEFAULT_TIMEZONE` へ直して出し、
+# 撮影日時は撮った土地の壁時計のまま出す。どちらも**どの時計のものか**を言うために
+# ゾーンが要るが、その 1 つのために画面ごとに `/settings` を引かせない
+# （`DashboardProvider` はアプリ全体を包んでいる）。
+
+
+def test_the_dashboard_carries_the_default_timezone(client, db, monkeypatch):
+    """**設定したゾーンを、集計と一緒に配る.**"""
+    monkeypatch.setenv("MEDIAFERRY_DEFAULT_TIMEZONE", "Asia/Tokyo")
+    assert client.get("/api/dashboard").json()["default_timezone"] == "Asia/Tokyo"
+
+
+def test_an_unset_timezone_is_reported_as_such(data_root, broker_factory, monkeypatch):
+    """**未設定は未設定のまま返す。** 画面はそのとき UTC のまま印を添える.
+
+    **`client` fixture は使えない。** あれは `MEDIAFERRY_DEFAULT_TIMEZONE` を
+    立ててからアプリを作るので、後から消しても起動時の env は変わらない。
+    """
+    from fastapi.testclient import TestClient
+
+    from mediaferry.api.app import create_app
+
+    monkeypatch.setenv("MEDIAFERRY_DATA_ROOT", str(data_root))
+    monkeypatch.delenv("MEDIAFERRY_DEFAULT_TIMEZONE", raising=False)
+    with TestClient(
+        create_app(broker_factory=broker_factory), base_url="http://127.0.0.1:8080"
+    ) as bare:
+        assert bare.get("/api/dashboard").json()["default_timezone"] is None
+
+
+def test_recent_imports_carry_the_zone_of_the_shot(client, db):
+    """**撮影日時には、その値のゾーンを添える.**
+
+    `timezone_policy: none` の値は `+00:00` で保存されるので、オフセットだけでは
+    本当に UTC で撮ったものと区別が付かない。空かどうかで見分けられるのは
+    `captured_at_tz` だけ。
+    """
+    profile = a_profile(db, slug="dash-tz")
+    a_media_file(
+        db,
+        profile,
+        rel_path="library/dash-tz/A.MP4",
+        captured_at="2026-08-26T12:33:05+09:00",
+        captured_at_tz="Asia/Tokyo",
+    )
+
+    [row] = client.get("/api/dashboard").json()["recent_imports"]
+
+    assert row["captured_at_tz"] == "Asia/Tokyo"
+
+
+def test_a_shot_without_a_zone_says_so(client, db):
+    """**決まらなかったゾーンは `null` のまま返す**（画面が既定のゾーンとみなす）."""
+    profile = a_profile(db, slug="dash-notz")
+    a_media_file(
+        db,
+        profile,
+        rel_path="library/dash-notz/B.MP4",
+        captured_at="2026-08-26T12:33:05+00:00",
+        captured_at_tz=None,
+    )
+
+    [row] = client.get("/api/dashboard").json()["recent_imports"]
+
+    assert row["captured_at_tz"] is None

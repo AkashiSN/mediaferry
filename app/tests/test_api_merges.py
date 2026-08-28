@@ -52,6 +52,27 @@ def test_the_group_list_carries_its_members_and_verification(client, api_db):
     assert [member["media_file_id"] for member in body["groups"][0]["members"]] == [media_id]
 
 
+def test_a_member_carries_the_zone_of_the_shot(client, api_db):
+    """**つなぐ画面も撮影日時に印を添える**（§13）。出所は `routes_media` と同じ.
+
+    `timezone_policy: none` の値は `+00:00` で保存されるので、オフセットだけでは
+    本当に UTC で撮ったものと区別が付かない。
+    """
+    profile = ProfileRegistry(api_db).current("dji-osmo")
+    ref = (profile.profile_id, profile.revision_id)
+    media_id = a_media_file(api_db, ref, captured_at_tz="Asia/Tokyo")
+    group_id = a_merge_group(api_db, ref, "digest-tz")
+    api_db.execute(
+        "INSERT INTO merge_member (merge_group_id, media_file_id, position, active)"
+        " VALUES (?, ?, 0, 1)",
+        (group_id, media_id),
+    )
+
+    [group] = client.get("/api/merge-groups").json()["groups"]
+
+    assert [member["captured_at_tz"] for member in group["members"]] == ["Asia/Tokyo"]
+
+
 def test_merging_fixes_the_digest_and_the_revision_in_the_job(client, api_db):
     profile = ProfileRegistry(api_db).current("dji-osmo")
     group_id = a_merge_group(api_db, (profile.profile_id, profile.revision_id), "digest-1")

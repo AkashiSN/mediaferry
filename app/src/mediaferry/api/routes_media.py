@@ -668,6 +668,10 @@ def _media(row) -> dict[str, Any]:  # noqa: ANN001
         "kind": row["kind"],
         "captured_at": row["captured_at"],
         "captured_at_source": row["captured_at_source"],
+        # **どの時計の壁時計かを画面へ渡す。** `timezone_policy: none` の値は
+        # `+00:00` で保存されるので、オフセットだけでは本当に UTC で撮ったものと
+        # 区別が付かない。空なら画面が `DEFAULT_TIMEZONE` とみなす。
+        "captured_at_tz": row["captured_at_tz"],
         "duration_seconds": row["duration_seconds"],
         "probe_state": row["probe_state"],
         "missing_at": row["missing_at"],

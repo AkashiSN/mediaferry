@@ -376,6 +376,7 @@ describe("何を、どこで書き換えるのか", () => {
     origin: "pre_existing",
     remote_current: "2026-08-14T10:00:00+09:00",
     proposed: "2026-08-14T20:02:00+09:00",
+    captured_at_tz: "Asia/Tokyo",
     remote_checked_at: "2026-08-14T09:00:00Z",
     identical: false,
   };
@@ -457,9 +458,10 @@ describe("何を、どこで書き換えるのか", () => {
   it("現在値と変更案も人が読める形にする", async () => {
     stubApprove();
     renderApprove();
-    // 撮影日時系はそのまま切り出す（`formatDateTime`）。UTC の印は付けない。
-    expect(await screen.findByText("2026年8月14日 10:00")).toBeInTheDocument();
-    expect(screen.getByText("2026年8月14日 20:02")).toBeInTheDocument();
+    // **撮影日時系は壁時計をそのまま切り出す。** 直さない代わりに、どの時計の
+    // 数字かを印で言う（出所は `captured_at_tz`。空なら `DEFAULT_TIMEZONE`）。
+    expect(await screen.findByText("2026年8月14日 10:00（JST）")).toBeInTheDocument();
+    expect(screen.getByText("2026年8月14日 20:02（JST）")).toBeInTheDocument();
     expect(screen.queryByText("2026-08-14T10:00:00+09:00")).toBeNull();
     expect(screen.queryByText(/2026年8月14日 10:00（UTC）/)).toBeNull();
   });
@@ -469,8 +471,8 @@ describe("何を、どこで書き換えるのか", () => {
     renderApprove();
     await userEvent.click(await screen.findByRole("button", { name: "承認する" }));
     const dialog = screen.getByRole("dialog");
-    expect(dialog).toHaveTextContent("2026年8月14日 10:00");
-    expect(dialog).toHaveTextContent("2026年8月14日 20:02");
+    expect(dialog).toHaveTextContent("2026年8月14日 10:00（JST）");
+    expect(dialog).toHaveTextContent("2026年8月14日 20:02（JST）");
   });
 });
 

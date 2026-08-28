@@ -12,6 +12,7 @@ import type { Job } from "../../components/JobProgress";
 import { useEvents } from "../../hooks/useEvents";
 import { isCancellable, isLive, useJobPulse } from "../../hooks/useJobPulse";
 import { useReloadOnEvents } from "../../hooks/useReloadOnEvents";
+import { useDefaultTimezone } from "../../api/dashboard";
 import { formatSystemDateTime } from "../../utils/formatDateTime";
 
 type Jobs = { jobs: Job[] };
@@ -20,6 +21,8 @@ export function JobHistoryScreen() {
   const jobs = useQuery<Jobs>("/jobs");
   const { events, received, connected } = useEvents();
   const cancelling = useMutation();
+  // 時刻に添える印（§13）。読めていなければ `null`（システム時刻は UTC のまま出す）。
+  const defaultZone = useDefaultTimezone();
   useReloadOnEvents(received, jobs.reload);
 
   const running = (jobs.data?.jobs ?? []).some(isLive);
@@ -48,7 +51,7 @@ export function JobHistoryScreen() {
   function notesFor(job: Job): string[] {
     const notes: string[] = [];
     if (job.finished_at) {
-      notes.push(`終わった日時: ${formatSystemDateTime(job.finished_at)}`);
+      notes.push(`終わった日時: ${formatSystemDateTime(job.finished_at, defaultZone)}`);
     }
     // 進捗が無い（終わった）ジョブには、届いた最後のイベントの文言を添える。
     // **開いている間に届いた知らせを優先し、無ければサーバが添えた 1 文を使う。**
