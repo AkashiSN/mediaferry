@@ -137,10 +137,12 @@ fail-closed をコードから消さない。**検出できない変異として
 
 ### 安全性
 
-- **UNIQUE 制約は無い。** `upload_record_live_pair` は
-  `(media_file_id, destination_id) WHERE invalidated_at IS NULL` の**部分インデックス**で、
-  UNIQUE ではない。同じ組の行が 2 つ（1 つは無効化済み）並んでも制約に触れない
-- **有効な行は常に 1 つ。** 古い方は無効化されている
+- **表制約の `UNIQUE` を、部分 UNIQUE 索引へ置き換える移行が要る**（§2.3）。
+  `upload_record` には `0004` の表制約
+  `UNIQUE (destination_id, target_epoch, media_file_id)` が在り、**無効化された行の
+  隣に新しい行を作れない**。守りたい不変条件は「**有効な**記録は 1 組につき高々 1 つ」
+  であって「行は 1 つ」ではないので、条件を `WHERE invalidated_at IS NULL` に付け替える
+- **有効な行は常に 1 つ。** 古い方は無効化されており、新しい部分索引がそれを強制する
 - **数え上げは全部そろっている。** `/dashboard` の `unsent_total` と宛先ごとの内訳、
   `/media?status=unsent`、`deletion_blocker`、`_destinations`（くわしくの presence）、
   `merges.py` の編集可否は**すべて `invalidated_at IS NULL` を持っている**。
@@ -150,6 +152,37 @@ fail-closed をコードから消さない。**検出できない変異として
   - supersede された derived は `sendable_clause` の `superseded_by_id IS NULL` で
     落ちるので、`_choose` が rejected を返す
   - 旧 epoch の行は `_pair` が現行 epoch で引くので最初から当たらない
+
+### 2.3 移行 —— 表制約の `UNIQUE` を部分 UNIQUE 索引へ
+
+`upload_record` は `0004` で
+
+```sql
+UNIQUE (destination_id, target_epoch, media_file_id)
+```
+
+を**表制約**として持つ。SQLite は表制約を後から落とせないので、**テーブルを作り直す**
+（`0026` が `media_file` で通した 12 手順と同じ形。`-- mediaferry:foreign-keys-off` の
+目印を付け、runner が `PRAGMA foreign_key_check` を COMMIT の前に確かめる）。
+
+置き換え先:
+
+```sql
+CREATE UNIQUE INDEX upload_record_live_identity
+    ON upload_record (destination_id, target_epoch, media_file_id)
+    WHERE invalidated_at IS NULL;
+```
+
+**守る不変条件は変わらない** —— 「1 つの (宛先, epoch, メディア) に**有効な**記録は
+高々 1 つ」。変わるのは、無効化された行が監査履歴としてその隣に残れることだけ。
+
+**行を使い回す案は採らない。** `upload_record_first_check_immutable` が
+`first_check_result` の書き換えを止めるので `origin` の判定をやり直せず、
+`design.md` §10 の「無効化された記録は再利用しない」とその理由（**なぜ最初に送信を
+許可したかが失われる**）にも反する。
+
+**行を消す案も採らない。** 再確認が破壊的になる —— 相手が誤って `accept` を返した
+だけで、その宛先の送信記録が消える。
 
 ### 副産物 — `origin` がやり直しになる
 

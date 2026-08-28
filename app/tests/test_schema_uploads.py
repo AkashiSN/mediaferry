@@ -126,6 +126,69 @@ def test_one_record_per_destination_epoch_and_media(db):
     an_upload(db, dest, media_id, target_epoch=2)
 
 
+def test_an_invalidated_row_can_sit_beside_a_live_one(db):
+    """**守る不変条件は「有効な記録は 1 組につき高々 1 つ」。**
+
+    消滅を無効化して送り直すと、同じ (宛先, epoch, メディア) に行が 2 つ並ぶ。
+    無効化された方は監査履歴で、有効なのは新しい方だけ。
+    """
+    profile = a_profile(db)
+    dest = a_destination(db)
+    media = a_media_file(db, profile)
+    old = an_upload(db, dest, media, state="complete", destination_revision_id=dest[1])
+    db.execute(
+        "UPDATE upload_record SET invalidated_at = ?, invalidated_reason = 'remote_missing'"
+        " WHERE id = ?",
+        (now_iso(), old),
+    )
+
+    fresh = an_upload(db, dest, media)
+
+    live = db.execute("SELECT id FROM upload_record WHERE invalidated_at IS NULL").fetchall()
+    assert [row["id"] for row in live] == [fresh]
+
+
+def test_two_live_rows_for_the_same_triple_are_refused(db):
+    """**有効な行が 2 つは許さない。** 片方が無効化されていることが条件."""
+    profile = a_profile(db)
+    dest = a_destination(db)
+    media = a_media_file(db, profile)
+    an_upload(db, dest, media)
+
+    with pytest.raises(sqlite3.IntegrityError):
+        an_upload(db, dest, media)
+
+
+def test_the_upload_record_schema_survives_the_rebuild(db):
+    """**作り直しで guard を落としていないこと。**
+
+    表を作り直すと trigger も索引も一緒に消える。**明示の一覧と突き合わせる**
+    ——「たぶん全部作り直した」では、消えた guard に気づけない。
+    """
+    found = {
+        (row["type"], row["name"])
+        for row in db.execute(
+            "SELECT type, name FROM sqlite_master WHERE tbl_name = 'upload_record'"
+            "   AND type IN ('trigger', 'index') AND name NOT LIKE 'sqlite_%'"
+        )
+    }
+    assert found == {
+        ("trigger", "upload_record_epoch_must_exist"),
+        ("trigger", "upload_record_identity_is_immutable"),
+        ("trigger", "upload_record_selection_rule_immutable"),
+        ("trigger", "upload_record_first_check_immutable"),
+        ("trigger", "upload_record_stack_shape_insert"),
+        ("trigger", "upload_record_stack_shape_update"),
+        ("trigger", "upload_record_stacked_needs_its_asset"),
+        ("trigger", "upload_record_stacked_needs_its_asset_insert"),
+        ("index", "upload_record_by_media"),
+        ("index", "upload_record_claimable"),
+        ("index", "upload_record_unstacked"),
+        ("index", "upload_record_live_pair"),
+        ("index", "upload_record_live_identity"),
+    }
+
+
 def test_a_record_cannot_name_an_epoch_that_has_no_revision(db):
     """複合 FK は destination_revision_id が NULL だと効かない."""
     profile = a_profile(db)

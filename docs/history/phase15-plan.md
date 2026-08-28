@@ -51,7 +51,8 @@ pytest / vitest。
 
 | # | 中身 | 依存 |
 | --- | --- | --- |
-| 1〜3 | 土台。無効化と、それを跨ぐ 2 か所（`_pair` / `record_for`） | — |
+| 2A | **実行中に足した。** 表制約の UNIQUE を部分 UNIQUE 索引へ（移行） | 1 |
+| 1〜3 | 土台。無効化と、それを跨ぐ 2 か所（`_pair` / `record_for`） | 2A |
 | 4 | 土台の通し（一覧に戻る・`origin` がやり直しになる） | 1〜3 |
 | 5〜6 | スタックの照合（adapter と再確認の新しい段） | — |
 | 7 | 通しテスト用に `World` を広げる | — |
@@ -282,6 +283,181 @@ feat(recheck): 消えた資産の記録を、その場で無効化する
 
 ゴミ箱は無効化しない。ゴミ箱に在るのは「無い」の証明ではないので、
 無効化すると同じ資産を二重に上げることになる。
+MSG
+)"
+```
+
+---
+
+### Task 2A: 表制約の `UNIQUE` を、部分 UNIQUE 索引へ置き換える
+
+**この節は実行中に足した。** Task 2 の実装で、設計の安全性の主張
+（「UNIQUE 制約は無い」）が誤りだと分かったため。`upload_record` には `0004` の**表制約**
+
+```sql
+UNIQUE (destination_id, target_epoch, media_file_id)
+```
+
+が在り、**無効化された行の隣に新しい行を作れない**（`sqlite3.IntegrityError`）。
+Task 2 / 3 / 4 / 8 が全部これに当たる。詳細は設計の §2.3。
+
+**ファイル:**
+- 作成: `app/src/mediaferry/db/migrations/0027_live_identity_is_unique.sql`
+- テスト: `app/tests/test_schema_uploads.py`
+
+**インタフェース:**
+- 提供: 同じ `(destination_id, target_epoch, media_file_id)` に、**無効化された行と
+  有効な行が共存できる**。有効な行は依然として高々 1 つ
+
+- [ ] **Step 1: 落ちるテストを書く**
+
+`app/tests/test_schema_uploads.py` に足す。`a_destination` / `an_upload` / `a_media_file` は
+このファイルが既に持っている。
+
+```python
+def test_an_invalidated_row_can_sit_beside_a_live_one(db):
+    """**守る不変条件は「有効な記録は 1 組につき高々 1 つ」。**
+
+    消滅を無効化して送り直すと、同じ (宛先, epoch, メディア) に行が 2 つ並ぶ。
+    無効化された方は監査履歴で、有効なのは新しい方だけ。
+    """
+    dest = a_destination(db)
+    media = a_media_file(db)
+    old = an_upload(db, dest, media, state="complete", destination_revision_id=dest[1])
+    db.execute(
+        "UPDATE upload_record SET invalidated_at = ?, invalidated_reason = 'remote_missing'"
+        " WHERE id = ?",
+        (now_iso(), old),
+    )
+
+    fresh = an_upload(db, dest, media)
+
+    live = db.execute(
+        "SELECT id FROM upload_record WHERE invalidated_at IS NULL"
+    ).fetchall()
+    assert [row["id"] for row in live] == [fresh]
+
+
+def test_two_live_rows_for_the_same_triple_are_refused(db):
+    """**有効な行が 2 つは許さない。** 片方が無効化されていることが条件."""
+    dest = a_destination(db)
+    media = a_media_file(db)
+    an_upload(db, dest, media)
+
+    with pytest.raises(sqlite3.IntegrityError):
+        an_upload(db, dest, media)
+
+
+def test_the_upload_record_schema_survives_the_rebuild(db):
+    """**作り直しで guard を落としていないこと。**
+
+    表を作り直すと trigger も索引も一緒に消える。**明示の一覧と突き合わせる**
+    ——「たぶん全部作り直した」では、消えた guard に気づけない。
+    """
+    found = {
+        (row["type"], row["name"])
+        for row in db.execute(
+            "SELECT type, name FROM sqlite_master WHERE tbl_name = 'upload_record'"
+            "   AND type IN ('trigger', 'index') AND name NOT LIKE 'sqlite_%'"
+        )
+    }
+    assert found == {
+        ("trigger", "upload_record_epoch_must_exist"),
+        ("trigger", "upload_record_identity_is_immutable"),
+        ("trigger", "upload_record_selection_rule_immutable"),
+        ("trigger", "upload_record_first_check_immutable"),
+        ("trigger", "upload_record_stack_shape_insert"),
+        ("trigger", "upload_record_stack_shape_update"),
+        ("trigger", "upload_record_stacked_needs_its_asset"),
+        ("trigger", "upload_record_stacked_needs_its_asset_insert"),
+        ("index", "upload_record_by_media"),
+        ("index", "upload_record_claimable"),
+        ("index", "upload_record_unstacked"),
+        ("index", "upload_record_live_pair"),
+        ("index", "upload_record_live_identity"),
+    }
+```
+
+**import を足す**（無ければ）: `import sqlite3`、`pytest`、`from mediaferry.clock import now_iso`。
+
+- [ ] **Step 2: 落ちることを確認する**
+
+```bash
+uv run pytest app/tests/test_schema_uploads.py -k "invalidated_row_can_sit or survives_the_rebuild" -v
+```
+
+期待: 1 つ目が `sqlite3.IntegrityError: UNIQUE constraint failed` で FAIL。
+3 つ目が `upload_record_live_identity` が無いので FAIL。
+2 つ目は**いまも通る**（表制約が効いているので）。**通ったままでよい** ——
+移行の後も同じ結論であることを固定するのがこのテストの目的。
+
+- [ ] **Step 3: 移行を書く**
+
+`app/src/mediaferry/db/migrations/0027_live_identity_is_unique.sql` を作る。
+**`0026_media_file_container.sql` が同じ 12 手順の前例**なので、その形にそろえる。
+
+1. 先頭行に `-- mediaferry:foreign-keys-off` を置く
+2. なぜ作り直すのかを日本語のコメントで書く（表制約は後から落とせない、守る不変条件は
+   「有効な記録が 1 組につき高々 1 つ」であること）
+3. `CREATE TABLE upload_record_new (...)` —— **`0004` の定義に `0009` の
+   `remote_datetime_original` と `0015` の `stack_state` / `remote_stack_id` /
+   `stack_reason` を足した、現在の姿**。**表制約の `UNIQUE (...)` だけを外す**。
+   CHECK 4 個と FK 5 本（`destination_id` / `media_file_id` / `merge_group_id` /
+   `claim_job_id` / 複合 `(destination_id, target_epoch, destination_revision_id)`）は
+   そのまま写す
+4. 列を明示した `INSERT INTO upload_record_new (...) SELECT ... FROM upload_record`
+5. `DROP TABLE upload_record;` → `ALTER TABLE upload_record_new RENAME TO upload_record;`
+6. **trigger 8 個と索引 4 個を作り直す**（`0004` / `0015` / `0016` / `0019` から
+   一字一句写す。部分索引は述語が一致しないと使われないので、特に写し間違えない）
+7. 新しい部分 UNIQUE 索引を足す
+
+```sql
+CREATE UNIQUE INDEX upload_record_live_identity
+    ON upload_record (destination_id, target_epoch, media_file_id)
+    WHERE invalidated_at IS NULL;
+```
+
+**`DROP TABLE` の前に trigger を作らない**（copy の最中に発火する）。順序は
+`0026` と同じく「作る → 写す → 落とす → 改名 → 索引と trigger」。
+
+- [ ] **Step 4: 通ることを確認する**
+
+```bash
+uv run pytest app/tests/test_schema_uploads.py -v
+uv run pytest
+```
+
+- [ ] **Step 5: 変異試験**
+
+| 壊し方 | 落ちるはず |
+| --- | --- |
+| 新しい索引から `WHERE invalidated_at IS NULL` を外す | `test_an_invalidated_row_can_sit_beside_a_live_one` |
+| 新しい索引を `UNIQUE` でなくする | `test_two_live_rows_for_the_same_triple_are_refused` |
+| trigger を 1 つ作り忘れる | `test_the_upload_record_schema_survives_the_rebuild` |
+
+- [ ] **Step 6: コミット**
+
+```bash
+uv run ruff check . && uv run ruff format --check .
+git add app/src/mediaferry/db/migrations/0027_live_identity_is_unique.sql app/tests/test_schema_uploads.py docs/history/phase15-design.md docs/history/phase15-plan.md
+git commit -m "$(cat <<'MSG'
+feat(db): 同一性の UNIQUE を、有効な行だけの部分索引にする
+
+消滅した送信記録を無効化して通常経路へ戻す形にすると、同じ
+(宛先, epoch, メディア) に無効化された行と新しい行が並ぶ。`0004` の
+表制約 UNIQUE はそれを許さないので、送り直しが IntegrityError になる。
+
+守りたい不変条件は「**有効な**記録は 1 組につき高々 1 つ」であって
+「行は 1 つ」ではない。条件を `WHERE invalidated_at IS NULL` に付け替える。
+
+表制約は後から落とせないので、`0026` と同じ 12 手順でテーブルを作り直す。
+作り直すと trigger も索引も消えるため、`sqlite_master` を明示の一覧と
+突き合わせるテストを置いて、guard の消し忘れを落とす。
+
+行を使い回す案は採らない。first_check_result が immutable なので origin の
+判定をやり直せず、「なぜ最初に送信を許可したか」が失われる。行を消す案も
+採らない。相手が誤って accept を返しただけで送信記録が消え、再確認が
+破壊的な操作になる。
 MSG
 )"
 ```
