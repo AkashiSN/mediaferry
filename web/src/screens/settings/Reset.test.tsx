@@ -172,4 +172,30 @@ describe("リセット", () => {
     expect(await screen.findByRole("alert")).toBeInTheDocument();
     expect(screen.queryByRole("status")).not.toBeInTheDocument();
   });
+
+  it("11 個すべての訳語を固定する（黙って変わったら気づけるように）", async () => {
+    // **表の名前を画面にそのまま出さない代わりに、画面が出す言葉そのものを
+    // ここで守る。** 訳語は利用者が読む文字そのものなので、書き換わるなら
+    // それは意図した変更のはず——気づかず変わるのがいちばん困る。
+    renderReset({
+      job: 1,
+      job_event: 2,
+      upload_record: 3,
+      artifact_staging: 4,
+      media_file: 5,
+      merge_group: 6,
+      merge_member: 7,
+      source_entry: 8,
+      volume_instance: 9,
+      volume_presence: 10,
+      source_device: 11,
+    });
+    const banner = await runStage("作業の記録を消す");
+    const text = banner.querySelector("span")?.textContent;
+    expect(text).toBe(
+      "作業の履歴 1 件・出来事 2 件・送信の記録 3 件・公開の記録 4 件・写真・動画 5 件・" +
+        "つないだ組み合わせ 6 件・つないだ元ファイル 7 件・カードで見つけたファイル 8 件・" +
+        "カードの記録 9 件・カードを挿した履歴 10 件・カードの識別情報 11 件を消しました。",
+    );
+  });
 });
