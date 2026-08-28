@@ -26,6 +26,7 @@
   --warn-line: #ecd9b4;
   --warn-dot: #c8901f;
   --ok: #3a7350;
+  --ok-line: #c7e1d1;
   --danger: #a32a1c;
   --danger-line: #e6d3d0;
   --track: #ece7de;
@@ -56,6 +57,7 @@
     --warn-line: #453820;
     --warn-dot: #d9962f;
     --ok: #6bab80;
+    --ok-line: #2f4a37;
     --danger: #e08272;
     --danger-line: #4a2c26;
     --track: #2b2823;
@@ -180,6 +182,20 @@ a:hover { text-decoration: underline; }
 .error-banner button {
   flex: 0 0 auto; height: 36px; padding: 0 14px; border-radius: 8px;
   border: 1px solid var(--danger-line); background: transparent; color: var(--danger); font-size: 13px;
+}
+
+/* `.error-banner` と同じ重さの帯。色だけ落ち着いた成功色にする（リセットの結果、
+   `Reset.tsx`）。閉じるボタンは文字ではなく × のアイコン 1 つ。 */
+.result-banner {
+  display: flex; align-items: center; gap: 12px;
+  border: 1px solid var(--ok-line); background: var(--surface); color: var(--ok);
+  border-radius: 11px; padding: 12px 16px; margin-bottom: 16px;
+}
+.result-banner span { flex: 1; font-size: 14px; }
+.result-banner button {
+  flex: 0 0 auto; width: 44px; height: 44px; border-radius: 8px;
+  border: 1px solid var(--ok-line); background: transparent; color: var(--ok);
+  display: flex; align-items: center; justify-content: center;
 }
 
 .btn {
