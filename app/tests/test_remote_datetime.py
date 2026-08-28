@@ -143,7 +143,9 @@ def test_the_pending_approval_carries_both_sides(secret_env, client, db):
     [row] = body["records"]
 
     assert row["id"] == record_id
-    assert row["remote_current"] == "2020-01-01T00:00:00+00:00"
+    # **観測した値は、提案と同じオフセットに直して並べる**（同じ瞬間のまま）。
+    # 片方が UTC のままだと、壁時計を切り出すだけの画面で 9 時間ずれて見える。
+    assert row["remote_current"] == "2020-01-01T09:00:00+09:00"
     assert row["proposed"] == "2026-08-17T14:30:00+09:00"
     # **いつ時点の値かを一緒に返す**（最新が要るなら再確認を回す導線を出す）。
     assert row["remote_checked_at"] == "2026-08-18T00:00:00+00:00"
@@ -171,3 +173,63 @@ def test_an_unknown_current_value_is_not_called_identical(secret_env, client, db
 
     assert row["remote_current"] is None
     assert row["identical"] is False
+
+
+# ------------------------------------------------------------------ 同じ瞬間
+#
+# **Immich は日時を UTC へ正規化して返す。** `+09:00` で書いた値は
+# `+00:00` の表記で戻るので、文字列の一致で見ると**同じ瞬間が常に「違う」**に
+# なる —— `identical` が JST のカードでは一度も真にならず、リセット後に送り直した
+# ものが全部「直しますか」の確認に並ぶ（2026-08-28 に実機で発見）。
+
+
+def test_the_same_instant_in_another_offset_is_not_a_change(secret_env, client, db):
+    """**同じ瞬間なら「変更なし」。** 表記のオフセットが違うだけで直しに行かない."""
+    _awaiting(db, current="2026-08-17T05:30:00+00:00")  # = 14:30+09:00
+
+    [row] = client.get("/api/uploads?state=awaiting_datetime_approval").json()["records"]
+
+    assert row["identical"] is True
+
+
+def test_the_current_value_is_shown_in_the_offset_of_the_proposal(secret_env, client, db):
+    """**並べて読めるように、同じオフセットへ直して返す.**
+
+    画面は文字列から壁時計を切り出すだけなので（`formatDateTime`）、片方が UTC の
+    ままだと「変更なし」と書いてある横に 9 時間ずれた 2 つの時刻が並ぶ。
+    """
+    _awaiting(db, current="2026-08-17T05:30:00+00:00")
+
+    [row] = client.get("/api/uploads?state=awaiting_datetime_approval").json()["records"]
+
+    assert row["remote_current"] == "2026-08-17T14:30:00+09:00"
+
+
+def test_a_different_instant_is_still_a_change(secret_env, client, db):
+    """**壁時計が同じでも、瞬間が違えば直す。** 9 時間ずれて入った資産がここ."""
+    _awaiting(db, current="2026-08-17T14:30:00+00:00")  # 壁時計は同じ、瞬間は違う
+
+    [row] = client.get("/api/uploads?state=awaiting_datetime_approval").json()["records"]
+
+    assert row["identical"] is False
+
+
+def test_a_value_without_an_offset_is_not_called_identical(secret_env, client, db):
+    """**オフセットの無い値は比べられない。** 承認を黙って飛ばす方へは倒さない."""
+    _awaiting(db, current="2026-08-17T14:30:00")
+
+    [row] = client.get("/api/uploads?state=awaiting_datetime_approval").json()["records"]
+
+    assert row["identical"] is False
+    # 直せないので、観測したままを出す（勝手に「+09:00 だろう」と補わない）。
+    assert row["remote_current"] == "2026-08-17T14:30:00"
+
+
+def test_an_unreadable_value_is_passed_through(secret_env, client, db):
+    """読めない値でも落ちない。**そのまま出して、変更なしにはしない.**"""
+    _awaiting(db, current="いつだったか")
+
+    [row] = client.get("/api/uploads?state=awaiting_datetime_approval").json()["records"]
+
+    assert row["identical"] is False
+    assert row["remote_current"] == "いつだったか"
