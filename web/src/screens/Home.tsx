@@ -291,7 +291,7 @@ export function HomeScreen() {
                   cancelBusy={action.busy}
                   footer={
                     <div className="row" style={{ gap: 10 }}>
-                      {card !== null && <CardStanding card={card} />}
+                      {card !== null && <CardStanding card={card} held={isLive(job)} />}
                       {/* **走っている間は消せない。** 中止はボタンが別にあり、
                           結果が出てから読み終えたと分かるように消す操作を出す。
                           失敗は時間で自動に消さない（見逃した人には「何も
@@ -333,7 +333,13 @@ export function HomeScreen() {
                 // **抜いていいかは、掴まれている間こそ要る**（§3）。文言は
                 // `CardStanding` の 1 か所だけが持つ。カードに紐づかない作業
                 // （送信など）には抜く相手がいないので出さない。
-                footer={card === null ? undefined : <CardStanding card={card} />}
+                //
+                // **掴まれていることは、写しを待たずに渡す。** この一覧に居る
+                // のは live な作業に名指しされたカードだけ（`homeSections` の
+                // `held`）で、コピーの間は `/devices` を取り直す合図が届かない。
+                footer={
+                  card === null ? undefined : <CardStanding card={card} held={isLive(job)} />
+                }
               />
             ))}
           </section>
