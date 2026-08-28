@@ -4,8 +4,9 @@
 保持期限を過ぎて資産が消えても「送信済み」のまま残るので、宛先ごとの明示操作で
 照合し直す。
 
-**自動で再アップロードはしない。** 消えていた資産は `remote_asset_id` を外して
-「リモートに存在しない」と分かる形にし、ユーザが明示的に `pending` へ戻す。
+**消えていた資産の記録は無効化する。** 無効化された記録は「この宛先の有効な
+記録」ではなくなるので、そのメディアは通常の「まだ送っていない」へ戻る。
+**この場では送らない** —— 送るのは利用者が通常経路で選んだときだけ。
 """
 
 from __future__ import annotations
@@ -148,8 +149,12 @@ class Rechecker:
         for row in vanished:
             if row["id"] not in written:
                 continue
-            # **送り直さない。** 見えるようにするだけ。
-            ctx.emit("warning", "リモートに存在しない資産がある", {"upload_record_id": row["id"]})
+            # **無効化して「まだ送っていない」へ戻す。** 送るのは利用者の明示操作。
+            ctx.emit(
+                "warning",
+                "リモートに存在しないので、まだ送っていないものに戻した",
+                {"upload_record_id": row["id"]},
+            )
         skipped = len(records) - len(written)
         if skipped:
             # **黙って飛ばさない。** 「N 件確認した」の N と実際が食い違う。

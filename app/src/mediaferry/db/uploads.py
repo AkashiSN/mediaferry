@@ -721,13 +721,9 @@ class UploadRepository:
 
         **`complete` の行だけ**を対象にする。進行中の行には所有者がいる。
 
-        **照合したときの行にしか書かない。** `complete` は終端ではない: 消滅と
-        判定された行を利用者が requeue でき、送り直しが済めばまた `complete` に
-        戻る。id と現在の状態だけを条件にすると、その新しい `remote_asset_id` を
-        古い観測（消滅＝NULL）で消す。観測した値そのものを条件に入れて、動いた
-        行は**書かずに飛ばす**（相手側は新しい観測を持っているので、こちらの
-        古い結果で上書きする理由が無い）。書けた id を返すので、呼び出し側は
-        飛ばした行を「確認した」と数えずに済む。
+        **照合したときの行にしか書かない。** 観測と現在の姿がずれていれば、
+        こちらの結果は古い。id と現在の状態だけを条件にすると、他の照合が書いた
+        新しい `remote_asset_id` を古い観測（消滅＝NULL）で消す。
         """
         written: set[str] = set()
         with immediate(self._conn):
@@ -752,7 +748,17 @@ class UploadRepository:
                     self._reopen_stack_of(stamp.record_id)
                 updated = self._conn.execute(
                     "UPDATE upload_record SET remote_asset_id = ?, remote_is_trashed = ?,"
-                    " remote_checked_at = ?, updated_at = ?"
+                    " remote_checked_at = ?, updated_at = ?,"
+                    # **消えていたら、その場で無効化する**（§9.10）。無効化された
+                    # 記録は「この宛先の有効な記録」ではなくなるので、メディアは
+                    # 通常の「まだ送っていない」へ戻る。**観測と無効化を別の取引に
+                    # 分けない** —— 分けると「消えたと記録したが未送信に戻って
+                    # いない」中途半端な状態が残る。
+                    #
+                    # **`COALESCE` で書く。** 在る側には NULL を渡すので、既存の
+                    # 値をそのまま残す（消し戻さない）。
+                    " invalidated_at = COALESCE(invalidated_at, ?),"
+                    " invalidated_reason = COALESCE(invalidated_reason, ?)"
                     " WHERE id = ? AND state = 'complete'"
                     "   AND remote_asset_id IS ? AND remote_checked_at IS ?",
                     (
@@ -760,6 +766,10 @@ class UploadRepository:
                         stamp.is_trashed,
                         checked_at,
                         now_iso(),
+                        # **消滅の判定は呼び出し側で済んでいる。** `Stamp` に旗を
+                        # 足さず、`asset_id` が無いことをそのまま条件にする。
+                        checked_at if stamp.asset_id is None else None,
+                        "remote_missing" if stamp.asset_id is None else None,
                         stamp.record_id,
                         stamp.expect_asset_id,
                         stamp.expect_checked_at,

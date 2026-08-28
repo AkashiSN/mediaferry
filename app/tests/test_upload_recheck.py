@@ -109,7 +109,13 @@ def test_an_asset_restored_from_the_trash_clears_the_flag(world):
     assert record_of(db)["remote_is_trashed"] == 0
 
 
-def test_a_vanished_asset_is_shown_as_missing_not_resent(world):
+def test_a_vanished_asset_is_invalidated_so_it_returns_to_unsent(world):
+    """消えた資産の記録は無効化する。**送り直し専用の状態を持たない。**
+
+    無効化された記録は「この宛先の有効な記録」ではなくなるので、そのメディアは
+    通常の「まだ送っていない」へ戻る（§9.10）。送信そのものは利用者の明示操作の
+    ままなので、「意図的に消したものを黙って送り直さない」は保てる。
+    """
     server, rechecker, ctx, destination_id, db = world
     server.assets.clear()  # 保持期限を過ぎて完全に消えた
 
@@ -117,11 +123,52 @@ def test_a_vanished_asset_is_shown_as_missing_not_resent(world):
 
     row = record_of(db)
     assert outcome.vanished == 1
-    # 自動では送り直さない。利用者が意図的に消したものを黙って戻さない。
-    assert row["state"] == "complete"
     assert row["remote_asset_id"] is None
     assert row["remote_checked_at"] is not None
+    assert row["invalidated_at"] is not None
+    assert row["invalidated_reason"] == "remote_missing"
+    # **この場では送らない。** 送るのは利用者が通常経路で選んだとき。
     assert server.uploads == []
+
+
+def test_an_asset_in_the_trash_is_not_invalidated(world):
+    """ゴミ箱に在るのは「無い」の証明ではない。無効化すると二重に上がる."""
+    server, rechecker, ctx, destination_id, db = world
+    server.trashed.add("asset-1")
+
+    rechecker.run(ctx, destination_id)
+
+    row = record_of(db)
+    assert row["remote_is_trashed"] == 1
+    assert row["invalidated_at"] is None
+
+
+def test_a_row_that_moved_during_the_check_is_not_invalidated_either(world):
+    """**照合したときの行にしか書かない**（§9.10）。無効化も同じ条件で守る.
+
+    照合の最中に他の書き手が `remote_asset_id` を動かしていたら、こちらの
+    「消えていた」は古い観測である。それで無効化すると、在る資産の記録を
+    未送信へ戻して二重に上げる。
+    """
+    server, rechecker, ctx, destination_id, db = world
+    server.assets.clear()
+    original = server.route
+
+    def hooked(method, path, body, headers):
+        result = original(method, path, body, headers)
+        if path == "/api/assets/bulk-upload-check":
+            # 照合の応答を返した直後に、別の書き手が行を動かした。
+            db.execute("UPDATE upload_record SET remote_asset_id = 'asset-moved'")
+        return result
+
+    server.route = hooked
+
+    outcome = rechecker.run(ctx, destination_id)
+
+    row = record_of(db)
+    assert outcome.checked == 0
+    assert row["remote_asset_id"] == "asset-moved"
+    assert row["invalidated_at"] is None
 
 
 def test_records_from_an_old_epoch_are_not_touched(world):
