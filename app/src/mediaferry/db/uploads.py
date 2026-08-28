@@ -236,8 +236,10 @@ class UploadRepository:
     def _pair(self, media: sqlite3.Row, revision: sqlite3.Row, choice: _Choice) -> PairResult:
         destination_id = revision["destination_id"]
         existing = self._conn.execute(
+            # **無効化された行は無いものとして扱う**（§10 の遷移表「再利用しない」）。
+            # 拾うと `_existing` が断り、「まだ送っていない」と出ているのに送れない。
             "SELECT * FROM upload_record WHERE destination_id = ? AND target_epoch = ?"
-            "   AND media_file_id = ?",
+            "   AND media_file_id = ? AND invalidated_at IS NULL",
             (destination_id, revision["target_epoch"], media["id"]),
         ).fetchone()
         if existing is not None:
@@ -274,7 +276,12 @@ class UploadRepository:
         return PairResult(media["id"], destination_id, "created", record_id=record_id)
 
     def _existing(self, media: sqlite3.Row, destination_id: str, row: sqlite3.Row) -> PairResult:
-        """§10「既存レコードがある場合の遷移」."""
+        """§10「既存レコードがある場合の遷移」.
+
+        **`invalidated_at` の分岐は保険。** `_pair` は無効化された行を引かないので
+        構造的に到達しない。**それでも残す**（無効化された行を再利用しない、という
+        判断をコードから消さない）。
+        """
         if row["invalidated_at"] is not None:
             return PairResult(
                 media["id"],

@@ -3,6 +3,7 @@ import os
 
 import pytest
 
+from mediaferry.clock import now_iso
 from mediaferry.core.crypto import SecretBox
 from mediaferry.db import uploads as uploads_module
 from mediaferry.db.connection import Database
@@ -326,16 +327,26 @@ def test_a_failed_record_is_queued_again_without_changing_its_rule(
 
 
 def test_an_invalidated_record_is_not_reused(db, profile, destinations, uploads):
+    """`_existing` の無効化判定は保険として残る（§10）.
+
+    `_pair` は無効化された行を渡さないので、この経路は `create_pairs` からは
+    到達しない。`_existing` を直接呼んで、判断そのものが生きていることを確かめる。
+    """
     media_id = a_media_file(db, (profile.profile_id, profile.revision_id))
     destination_id = a_destination(destinations)
-    uploads.create_pairs([media_id], [destination_id])
+    record_id = uploads.create_pairs([media_id], [destination_id])[0].record_id
     db.execute(
         "UPDATE upload_record SET invalidated_at = '2026-08-17T00:00:00+00:00',"
-        " invalidated_reason = 'group changed'"
+        " invalidated_reason = 'group changed' WHERE id = ?",
+        (record_id,),
     )
-    pairs = uploads.create_pairs([media_id], [destination_id])
-    assert pairs[0].result == "rejected"
-    assert "無効" in pairs[0].reason
+    media = db.execute("SELECT * FROM media_file WHERE id = ?", (media_id,)).fetchone()
+    row = db.execute("SELECT * FROM upload_record WHERE id = ?", (record_id,)).fetchone()
+
+    result = uploads._existing(media, destination_id, row)
+
+    assert result.result == "rejected"
+    assert "無効" in result.reason
 
 
 def test_pairs_for_two_destinations_are_independent(db, profile, destinations, uploads):
@@ -352,3 +363,34 @@ def test_pairs_for_two_destinations_are_independent(db, profile, destinations, u
 
     assert results_of(pairs)[(media_id, home)] == "already_complete"
     assert results_of(pairs)[(media_id, family)] == "created"
+
+
+def test_an_invalidated_record_does_not_block_a_new_one(db, uploads, destinations, profile):
+    """**無効化された記録は無いものとして扱う。**
+
+    再確認が消滅を無効化すると（§9.10）、そのメディアは「まだ送っていない」に
+    戻る。ここで古い行を拾って断ると、画面には「まだ送っていない」と出るのに
+    送れない。`design.md` §10 の遷移表が既に「再利用しない」と書いている。
+    """
+    destination_id = a_destination(destinations)
+    media_id = a_media_file(db, (profile.profile_id, profile.revision_id))
+    first = uploads.create_pairs([media_id], [destination_id])[0]
+    # `state = 'complete'` は `destination_revision_id` 必須（`0004` の CHECK）。
+    revision_id = destinations.current(destination_id)["id"]
+    db.execute(
+        "UPDATE upload_record SET state = 'complete', remote_asset_id = NULL,"
+        " remote_checked_at = ?, invalidated_at = ?, invalidated_reason = 'remote_missing',"
+        " destination_revision_id = ?"
+        " WHERE id = ?",
+        (now_iso(), now_iso(), revision_id, first.record_id),
+    )
+
+    again = uploads.create_pairs([media_id], [destination_id])[0]
+
+    assert again.result == "created"
+    assert again.record_id != first.record_id
+    live = db.execute(
+        "SELECT id FROM upload_record WHERE media_file_id = ? AND invalidated_at IS NULL",
+        (media_id,),
+    ).fetchall()
+    assert [row["id"] for row in live] == [again.record_id]
