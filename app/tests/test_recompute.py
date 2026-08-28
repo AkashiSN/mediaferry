@@ -1143,3 +1143,43 @@ def test_the_skip_of_another_media_is_left_alone(dji, db, data_root):
 
     row = db.execute("SELECT * FROM upload_record WHERE id = ?", (other,)).fetchone()
     assert row["stack_state"] == "skipped"
+
+
+def test_an_invalidated_record_is_not_requeued(dji, db, data_root):
+    """**無効化された行は監査履歴。** 書き換えると「なぜ送ったか」が読めなくなる.
+
+    再確認が消滅と判定して無効化した `complete` は、そのメディアの過去の送信
+    記録として残す（§2.3）。ここで `needs_recheck` へ動かすと、その行が
+    「送信済みだった」という事実を指さなくなる。
+    """
+    profile, _, part1, _, _ = dji
+    dest = a_destination(db)
+    record = a_sent_record(db, part1, dest)
+    db.execute(
+        "UPDATE upload_record SET invalidated_at = ?, invalidated_reason = 'remote_missing'"
+        " WHERE id = ?",
+        (now_iso(), record),
+    )
+
+    outcome = run(db, data_root, to_berlin(db, profile))
+
+    row = db.execute("SELECT * FROM upload_record WHERE id = ?", (record,)).fetchone()
+    assert row["state"] == "complete"
+    assert outcome.requeued == 0
+
+
+def test_an_invalidated_skip_is_not_reopened(dji, db, data_root):
+    """無効化された見送りも監査履歴。第 2 パスは無効化を除くので、戻す意味も無い."""
+    profile, _, part1, _, _ = dji
+    record = a_skipped_record(db, part1, a_destination(db))
+    db.execute(
+        "UPDATE upload_record SET invalidated_at = ?, invalidated_reason = 'remote_missing'"
+        " WHERE id = ?",
+        (now_iso(), record),
+    )
+
+    outcome = run(db, data_root, to_berlin(db, profile))
+
+    row = db.execute("SELECT * FROM upload_record WHERE id = ?", (record,)).fetchone()
+    assert row["stack_state"] == "skipped"
+    assert outcome.reopened == 0
