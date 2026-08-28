@@ -130,6 +130,16 @@ export function ResetScreen() {
 
       <ErrorBanner error={running.error} onDismiss={running.clear} />
 
+      {/* **失敗の帯と同じ位置に置く。** 結果の知らせは種類を問わず同じ場所に出す。 */}
+      {removed !== null && (
+        <div className="result-banner" role="status">
+          <span>{describeRemoved(removed)}</span>
+          <button type="button" aria-label="閉じる" onClick={() => setRemoved(null)}>
+            <Icon name="close" size={18} />
+          </button>
+        </div>
+      )}
+
       {STAGES.map((stage) => (
         <section key={stage.scope} className="card pad">
           <div className="sechead" style={{ marginBottom: 8 }}>
@@ -151,17 +161,6 @@ export function ResetScreen() {
           </div>
         </section>
       ))}
-
-      {/* **段のカードの後ろに置く。** 押した人はここまでスクロールしているので、
-          帯を一番上（カードより前）に出すと視界の外になる。 */}
-      {removed !== null && (
-        <div className="result-banner" role="status">
-          <span>{describeRemoved(removed)}</span>
-          <button type="button" aria-label="閉じる" onClick={() => setRemoved(null)}>
-            <Icon name="close" size={18} />
-          </button>
-        </div>
-      )}
 
       {confirming !== null && (
         <ConfirmDialog
