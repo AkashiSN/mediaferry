@@ -677,6 +677,38 @@ describe("ホーム", () => {
     expect(box).toHaveTextContent("作業中です。終わるまで抜かないでください。");
   });
 
+  // **コピーの間、`/devices` の写しは古いままになりうる**（§13）。進捗は
+  // `job.progress` の心拍で運ばれ、`job_event` は 1 件取り込み終えるまで出ない
+  // （`jobs/importer.py`）ので、取り直しの合図が届かない。16 GiB を 1 本コピー
+  // している間ずっと「いま抜いて大丈夫です。」と断定してしまう。
+  //
+  // **そのカードが「いま動いていること」に居ること自体が、掴まれている証拠。**
+  // `homeSections` は live な作業に名指しされたカードだけをそこへ入れるので、
+  // 写しの `busy` を待たずに答えられる。
+  it("コピー中は、/devices がまだ busy を返していなくても抜かないでと言う", async () => {
+    stubHome({
+      "/dashboard": EMPTY_DASHBOARD,
+      "/devices": { volumes: [{ ...actionableVolume, busy: false }] },
+      "/jobs": {
+        jobs: [
+          {
+            id: "j1",
+            type: "import",
+            status: "running",
+            created_at: "2026-08-24T00:00:00Z",
+            volume_instance_id: "v1",
+          },
+        ],
+      },
+      "/settings": { settings: [{ key: "AUTO_IMPORT", value: "trusted" }], warnings: [] },
+    });
+    renderHome();
+
+    const box = (await screen.findByText("取り込み")).closest("section");
+    expect(box).toHaveTextContent("作業中です。終わるまで抜かないでください。");
+    expect(screen.queryByText("いま抜いて大丈夫です。")).toBeNull();
+  });
+
   /** 掴まれているカードと、それを掴んでいる作業。 */
   const busyCard = {
     "/dashboard": EMPTY_DASHBOARD,
@@ -700,9 +732,30 @@ describe("ホーム", () => {
   //
   // **ここは知らせの経路だけを見る。** 作業の一覧は走ったままにしてあるので、
   // 下の「空になった縁」では答えが出ない。
+  //
+  // **掴んでいる作業は、このカードとは別のものにする。** 同じカードを掴む作業を
+  // 置くと、画面は写しを見るまでもなく「掴まれている」と分かってしまい
+  // （`CardStanding` の `held`）、取り直したかどうかがこの文からは読めない。
+  const busyElsewhere = {
+    "/dashboard": EMPTY_DASHBOARD,
+    "/devices": { volumes: [{ ...actionableVolume, busy: true }] },
+    "/jobs": {
+      jobs: [
+        {
+          id: "j1",
+          type: "upload",
+          status: "running",
+          created_at: "2026-08-24T00:00:00Z",
+          volume_instance_id: null,
+        },
+      ],
+    },
+    "/settings": { settings: [{ key: "AUTO_IMPORT", value: "trusted" }], warnings: [] },
+  };
+
   it("進捗の知らせが届いたら、抜いていいかも取り直す", async () => {
     vi.useFakeTimers();
-    stubHome(busyCard);
+    stubHome(busyElsewhere);
     renderHome();
     await act(async () => {
       await vi.advanceTimersByTimeAsync(100);
@@ -711,7 +764,7 @@ describe("ホーム", () => {
 
     // サーバ側では作業が決着してカードを離した（失敗でも合図は届く）。
     stubHome({
-      ...busyCard,
+      ...busyElsewhere,
       "/devices": { volumes: [{ ...actionableVolume, busy: false }] },
     });
     act(() => {
@@ -1218,6 +1271,56 @@ describe("ホーム", () => {
       });
       renderHomeAt({ jobIds: ["j1"] });
       expect(await screen.findByText(/閉じても.*続きます/)).toBeInTheDocument();
+    });
+
+    // **押した操作の枠でも、掴まれている間は抜かないでと言う**（§3）。走っている
+    // 間は `/devices` を取り直す合図が届かないので、写しの `busy` を待たない。
+    it("押した取り込みが走っている間は、抜かないでと言う", async () => {
+      stubHome({
+        "/dashboard": EMPTY_DASHBOARD,
+        "/devices": { volumes: [{ ...actionableVolume, busy: false }] },
+        "/jobs": {
+          jobs: [
+            {
+              id: "j1",
+              type: "import",
+              status: "running",
+              created_at: "2026-08-26T00:00:00Z",
+              volume_instance_id: "v1",
+            },
+          ],
+        },
+      });
+      renderHomeAt({ jobIds: ["j1"] });
+      const box = (await screen.findByRole("heading", { name: "押した操作" })).closest("section");
+      expect(box).toHaveTextContent("作業中です。終わるまで抜かないでください。");
+    });
+
+    // **終わった作業は掴んでいない。** 枠に残っている間も「抜かないで」のままだと、
+    // 30 秒のフェードが終わるまで抜けないことになる。ここは写しの `busy` が答える。
+    it("押した取り込みが終わったら、抜いていいと言う", async () => {
+      stubHome({
+        "/dashboard": EMPTY_DASHBOARD,
+        "/devices": { volumes: [{ ...actionableVolume, busy: false }] },
+        "/jobs": {
+          jobs: [
+            {
+              id: "j1",
+              type: "import",
+              status: "succeeded",
+              created_at: "2026-08-26T00:00:00Z",
+              volume_instance_id: "v1",
+            },
+          ],
+        },
+        "/settings": { settings: [{ key: "AUTO_IMPORT", value: "trusted" }], warnings: [] },
+      });
+      renderHomeAt({ jobIds: ["j1"] });
+      // **この枠の中だけを見る。** 掴まれていないカードは「やること」にも出るので、
+      // 画面全体で数えると同じ文が 2 つ見つかる。
+      const box = (await screen.findByRole("heading", { name: "押した操作" })).closest("section");
+      expect(box).toHaveTextContent("いま抜いて大丈夫です。");
+      expect(box).not.toHaveTextContent("作業中です。終わるまで抜かないでください。");
     });
 
     it("作業の履歴への導線がある", async () => {
