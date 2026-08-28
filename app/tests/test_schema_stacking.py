@@ -1,4 +1,4 @@
-"""`0015` のスタック 3 列（§9.11）.
+"""`upload_record` のスタック 3 列（§9.11）.
 
 **状態機械には状態を足さない。** 結果は `upload_record` の 3 列で持ち、組み合わせの
 不変は trigger で守る（`ALTER TABLE` では表制約を足せない）。
@@ -7,10 +7,6 @@
 import sqlite3
 
 import pytest
-
-from mediaferry.clock import now_iso
-from mediaferry.db.connection import Database
-from mediaferry.db.migrate import apply_migrations
 
 from .test_schema_artifacts import a_media_file
 from .test_schema_sources import a_profile
@@ -131,49 +127,12 @@ def test_the_extraction_uses_the_partial_index(db):
     assert "USE TEMP B-TREE FOR ORDER BY" not in details
 
 
-def test_the_dead_concurrency_setting_is_removed(tmp_path, monkeypatch):
-    """**効かないまま残っていた設定行を消す**（§21）.
-
-    `0014` までを適用した DB に行を入れてから `0015` を当てる。
-    """
-    import shutil
-
-    from mediaferry.db import migrate as migrate_module
-    from mediaferry.db.migrate import MIGRATIONS_DIR
-
-    staged = tmp_path / "migrations"
-    staged.mkdir()
-    for path in sorted(MIGRATIONS_DIR.glob("*.sql")):
-        if path.name < "0015":
-            shutil.copy(path, staged / path.name)
-    monkeypatch.setattr(migrate_module, "MIGRATIONS_DIR", staged)
-
-    conn = Database(tmp_path / "db.sqlite3").connect()
-    apply_migrations(conn)
-    conn.execute(
-        "INSERT INTO app_setting (key, value, updated_at) VALUES ('UPLOAD_CONCURRENCY', '4', ?)",
-        (now_iso(),),
-    )
-    assert _settings_rows(conn) == 1
-
-    shutil.copy(MIGRATIONS_DIR / "0015_stacking.sql", staged / "0015_stacking.sql")
-    apply_migrations(conn)
-    assert _settings_rows(conn) == 0
-    conn.close()
-
-
-def _settings_rows(conn):
-    return conn.execute(
-        "SELECT count(*) AS n FROM app_setting WHERE key = 'UPLOAD_CONCURRENCY'"
-    ).fetchone()["n"]
-
-
 def _row(db, record_id):
     return db.execute("SELECT * FROM upload_record WHERE id = ?", (record_id,)).fetchone()
 
 
 def test_a_stacked_record_must_keep_its_remote_asset(db):
-    """**将来の消し忘れを fail-closed にする**（`0016`）.
+    """**将来の消し忘れを fail-closed にする**（`upload_record_stacked_needs_its_asset`）.
 
     スタックは「その `remote_asset_id` を送った結果」なので、ID を消すなら
     結果も一緒に捨てる。
@@ -214,7 +173,7 @@ def test_a_skipped_record_may_lose_its_remote_asset(db):
 
 
 def test_a_stacked_record_must_not_switch_to_another_asset(db):
-    """**別 ID への差し替えも fail-closed にする**（`0016`）.
+    """**別 ID への差し替えも fail-closed にする**（`upload_record_stacked_needs_its_asset`）.
 
     NULL だけを塞ぐと、`advance_owned` のような汎用の書き手が古い
     `remote_stack_id` を新しい資産の結果として残せる。
@@ -254,7 +213,7 @@ def test_rewriting_the_same_asset_id_is_allowed(db):
 
 
 def test_an_insert_cannot_create_a_stacked_record_without_an_asset(db):
-    """行を作る側でも見る（`0015` は `remote_stack_id` しか要求しない）."""
+    """行を作る側でも見る（形の trigger は `remote_stack_id` しか要求しない）."""
     profile = a_profile(db)
     media = a_media_file(db, profile)
     dest = a_destination(db)

@@ -4,9 +4,13 @@ from mediaferry.api.app import create_app
 
 
 def test_health_reports_the_schema_version(client):
+    """出荷している最後の版を返す（`schema_migration` の最大値）."""
+    from mediaferry.db.migrate import MIGRATIONS_DIR
+
+    shipped = max(int(path.name[:4]) for path in MIGRATIONS_DIR.glob("*.sql"))
     body = client.get("/api/health").json()
     assert body["status"] == "ok"
-    assert body["schema_version"] >= 4
+    assert body["schema_version"] == shipped
 
 
 def test_startup_seeds_the_builtin_profiles(client):
