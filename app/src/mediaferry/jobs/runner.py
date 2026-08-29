@@ -20,11 +20,12 @@ import asyncio
 import contextlib
 import logging
 import sqlite3
+import time
 from collections.abc import Callable
 from dataclasses import replace
 
 from ..db.connection import Database
-from ..db.jobs import JobContext, JobStore
+from ..db.jobs import LEASE_SECONDS, JobContext, JobStore
 
 logger = logging.getLogger(__name__)
 
@@ -32,9 +33,12 @@ Handler = Callable[[JobContext, sqlite3.Connection], None]
 
 
 class JobRunner:
-    def __init__(self, database: Database, poll_interval: float = 0.5) -> None:
+    def __init__(
+        self, database: Database, poll_interval: float = 0.5, reap_interval: float = LEASE_SECONDS
+    ) -> None:
         self._database = database
         self._poll_interval = poll_interval
+        self._reap_interval = reap_interval
         self._handlers: dict[str, Handler] = {}
         self._stopping = asyncio.Event()
         self._current: JobContext | None = None
@@ -71,10 +75,22 @@ class JobRunner:
     async def run_forever(self) -> None:
         poller = self._database.connect()
         poll_store = JobStore(poller)
+        reaped_at = 0.0
         try:
             while not self._stopping.is_set():
                 ctx = await asyncio.to_thread(poll_store.claim_next)
                 if ctx is None:
+                    # **期限切れの running を倒すのは、掴めなかったときだけ。**
+                    # ワーカーは 1 本しかジョブを持たないので、claim が空を返した
+                    # 瞬間は、このプロセスが 1 つも所有していないことが確定する。
+                    # 走っている自分のジョブを誤って倒す経路が無い。
+                    #
+                    # **リース長ごとに間引く。** poll は 0.5 秒ごとなので、毎周回
+                    # 呼ぶと空振りの UPDATE が書き込みロックを取り続ける。
+                    now = time.monotonic()
+                    if now - reaped_at >= self._reap_interval:
+                        reaped_at = now
+                        await asyncio.to_thread(self._reap, poll_store)
                     # 停止要求が来るまで待つ。来なければ次の周回で claim を試す。
                     with contextlib.suppress(TimeoutError):
                         await asyncio.wait_for(self._stopping.wait(), timeout=self._poll_interval)
@@ -88,6 +104,25 @@ class JobRunner:
                 await self._run_one(ctx, poll_store)
         finally:
             poller.close()
+
+    def _reap(self, store: JobStore) -> None:
+        """期限切れのリースを倒す. **ここから例外を出さない.**
+
+        `_settle` が決着を書けなかった行は `running` のまま残る。倒す経路が
+        起動時の `sweep_interrupted` だけだと、その行は再起動するまで居座り、
+        リセットが `job_in_flight` で断られ続ける —— 案内は「終わってから」だが、
+        終わる主体はもう居ない。
+
+        `run_forever` を抜けさせない（抜けると `api/app.py` の `create_task` の
+        中で黙って死に、HTTP は生きたままジョブだけが走らなくなる）。
+        """
+        try:
+            reaped = store.reap_expired_leases()
+        except Exception:  # noqa: BLE001 - 回収できなくてもワーカーは生かす
+            logger.exception("期限切れのリースを回収できなかった")
+            return
+        if reaped:
+            logger.warning("期限切れのジョブを %d 件、中断として倒した", reaped)
 
     async def _run_one(self, ctx: JobContext, poll_store: JobStore) -> None:
         row = poll_store.get(ctx.job_id)

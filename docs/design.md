@@ -1185,6 +1185,15 @@ concat demuxer でも TS フォールバックでも**同じ `-map` を使う**�
 **再開**: 起動時に `status = running` のジョブを `interrupted` に倒し、
 `artifact_staging` や `upload_record` のレコード単位の進捗から再開する。
 
+**期限切れの回収**: 起動時だけでは足りない。決着（`_settle`）はハンドラが落ちた
+後にも通る唯一の経路で、そこで `finish` が書けなかった行は `running` のまま残る。
+残ると**リセットが `job_in_flight` で断られ続ける** —— 案内は「終わってから」だが、
+終わる主体はもう居ない。そこでワーカーは、**`claim_next` が空を返したときにだけ**
+`reap_expired_leases` を回す。掴めなかった瞬間はそのワーカーが 1 つも所有していない
+ことが確定するので、走っている自分のジョブを誤って倒す経路が無い。**リース長ごとに
+間引く**（poll は 0.5 秒ごとで、毎周回だと空振りの UPDATE が書き込みロックを取り
+続ける）。
+
 **キャンセル**: 協調的キャンセル。
 
 1. `job.status = cancelling` にする
@@ -2554,6 +2563,14 @@ services:
 
 `mountd` イメージには `util-linux`（`mount`, `blkid`）と exfat ユーティリティのみ。
 `app` イメージには Python ランタイム、ffmpeg / ffprobe、ビルド済みフロントエンド資産。
+
+**同じ `DATA_ROOT` を 2 つのプロセスに持たせない。** 起動時に
+`DATA_ROOT/var/mediaferry.lock` を `flock(LOCK_EX|LOCK_NB)` で握り、**握れなければ
+起動を拒否する**（`single_instance.py`）。移行も reconciliation も、握れてから
+走らせる —— 後から起動した側の reconciliation は、有効期限内の `running` を
+`interrupted` に倒して作業ディレクトリを消す。**待たずに断る** —— 待つ形にすると、
+壊す側が「起動が遅い」だけに見える。**ファイルの存在では見張らない** ——
+`flock` は開いたファイル記述に紐づくので、落ちれば OS が解放する。
 
 ## 17. リポジトリ構成
 

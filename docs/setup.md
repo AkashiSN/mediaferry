@@ -49,7 +49,7 @@ chown <app-uid>:<app-gid> <dataset>
 | `derived/` | 結合してできた動画などの派生物 |
 | `staging/` | 公開前の一時領域 |
 | `work/` | 結合の中間生成物 |
-| `var/` | データベース、サムネイル、ログ |
+| `var/` | データベースと、起動の錠（`mediaferry.lock`） |
 
 **5 つとも同じデータセットの中に置いてください。** 公開はハードリンクの張り替えで
 行うので、`staging/` が `library/` と別のファイルシステムにあると動きません
@@ -115,7 +115,7 @@ python3 -c "import base64, os; print(base64.b64encode(os.urandom(32)).decode())"
 
 ```bash
 curl http://127.0.0.1:8080/api/health
-# {"status":"ok","schema_version":16}
+# {"status":"ok","schema_version":1}
 ```
 
 **この時点ではまだ本体からしか見えません**（`MEDIAFERRY_BIND_HOST` の既定が
@@ -129,6 +129,7 @@ curl http://127.0.0.1:8080/api/health
 | `broker.sock` に繋がらない | ソケットのパスか、UID/GID の食い違い（手順 3・5） |
 | `DEFAULT_TIMEZONE` が要る旨 | 手順 5 のタイムゾーンが未設定です |
 | `MEDIAFERRY_SECRET_KEY が未設定` | 転送先を作ろうとしています。手順 4 の鍵を入れてください |
+| `起動しない: 同じデータの置き場所（…）を別のプロセスが使っている` | **同じデータセットを見るアプリが既に動いています。** 入れ替えのときは、古い方が完全に止まってから新しい方を起動してください（1 つだけ動かします） |
 
 ## 7. LAN から使えるようにする
 

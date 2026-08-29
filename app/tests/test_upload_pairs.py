@@ -394,3 +394,71 @@ def test_an_invalidated_record_does_not_block_a_new_one(db, uploads, destination
         (media_id,),
     ).fetchall()
     assert [row["id"] for row in live] == [again.record_id]
+
+
+def a_redone_group_sharing_one_output(db, profile, members, derived):
+    """**構成を変えないやり直し。** 2 つのグループが同じ出力を指す状態を作る.
+
+    `merges.supersede` と同じ順序で組む —— 旧グループを先に向け直し、外部キーの
+    検査を commit まで遅らせる（`UNIQUE(input_digest) WHERE superseded_by_id IS
+    NULL` があるので、digest が同じ新しい行を先に入れると必ず衝突する）。
+    出力が同じ `media_file` 行になるのは、`rel_path` が変わらないので
+    `publisher._commit` が同じ行を再利用するため。
+
+    旧グループが先に入るので **rowid は旧の方が小さい**。並び順を指定しない
+    `fetchone()` は、決定的に旧（superseded）側を拾う。
+    """
+    from mediaferry.core.merge.digest import input_digest
+    from mediaferry.db.connection import immediate
+    from mediaferry.ids import new_id
+
+    from .test_schema_artifacts import a_merge_group
+    from .test_selection import PASSED
+
+    digest = input_digest(
+        [(media_id, sha1) for media_id, sha1 in members],
+        profile.definition.merge,
+        profile.revision_id,
+    )
+    old = a_group(db, profile, members, output_id=derived, digest=digest)
+    new = new_id()
+    with immediate(db):
+        db.execute("PRAGMA defer_foreign_keys = ON")
+        db.execute("UPDATE merge_group SET superseded_by_id = ? WHERE id = ?", (new, old))
+        a_merge_group(
+            db,
+            (profile.profile_id, profile.revision_id),
+            digest,
+            id=new,
+            status="merged",
+            verification_json=PASSED,
+            output_media_file_id=derived,
+        )
+        for position, (media_id, _) in enumerate(members):
+            db.execute(
+                "INSERT INTO merge_member (merge_group_id, media_file_id, position, active)"
+                " VALUES (?, ?, ?, 1)",
+                (new, media_id, position),
+            )
+    return old, new
+
+
+def test_a_redone_derived_is_still_sendable(db, profile, destinations, uploads):
+    """**持ち主のグループは「現行」を拾う**（`db/media.py` の `owner_group`）.
+
+    構成を変えないやり直しでは、旧グループが `output_media_file_id` を持ったまま
+    superseded になり、新グループが同じ出力を指す。並び順を指定せずに引くと索引順
+    ＝ rowid の小さい順で**古い superseded 側**を決定的に拾い、`group_is_current`
+    が偽になる。結果として、一覧が「送れる」と数えているファイルの送信が
+    「生成元のグループが現在の構成と一致しない」で断られる。
+    """
+    members = a_pair(db, profile)
+    derived = a_derived(db, profile)
+    old, new = a_redone_group_sharing_one_output(db, profile, members, derived)
+
+    dest = a_destination(destinations)
+    pairs = uploads.create_pairs([derived], [dest])
+
+    assert [pair.result for pair in pairs] == ["created"], pairs[0].reason
+    record = uploads.get(pairs[0].record_id)
+    assert record["merge_group_id"] == new, "持ち主は現行のグループ"
