@@ -1,6 +1,7 @@
 import asyncio
 import sqlite3
 import threading
+from datetime import timedelta
 
 import anyio
 import anyio.to_thread
@@ -392,3 +393,85 @@ async def test_a_failure_verdict_that_cannot_be_written_does_not_kill_the_worker
         await runner.stop()
 
     assert store.get(later)["status"] == "failed", "失敗の決着が書けないとワーカーが死ぬ"
+
+
+@pytest.mark.anyio
+async def test_the_runner_reaps_a_job_whose_lease_expired(db, database):
+    """**決着を書けなかった行を、再起動を待たずに倒す.**
+
+    `_settle` は「決着が書けなくてもワーカーを生かす」ので、そこを踏んだ行は
+    `running` のまま残る。倒す経路が起動時の `sweep_interrupted` だけだと、
+    その行は再起動するまで残り、リセットが `job_in_flight` で断られ続ける
+    （案内は「終わってから」だが、終わる主体がもう居ない）。
+    """
+    stale = JobStore(db, lease_seconds=-1)  # 即座に失効する
+    stale.enqueue("import", {})
+    ctx = stale.claim_next()
+    assert stale.get(ctx.job_id)["status"] == "running"
+
+    store = JobStore(db)
+    runner = JobRunner(database, poll_interval=0.01, reap_interval=0.0)
+    async with anyio.create_task_group() as tg:
+        tg.start_soon(runner.run_forever)
+        with anyio.fail_after(5):
+            while store.get(ctx.job_id)["status"] == "running":
+                await anyio.sleep(0.01)
+        await runner.stop()
+
+    assert store.get(ctx.job_id)["status"] == "interrupted"
+
+
+@pytest.mark.anyio
+async def test_the_runner_does_not_reap_a_job_whose_lease_is_alive(db, database):
+    """**期限を見ずに倒さない.** 見ないと、走っている取り込みを毎周期で殺す."""
+    store = JobStore(db)
+    store.enqueue("import", {})
+    ctx = store.claim_next()
+
+    runner = JobRunner(database, poll_interval=0.01, reap_interval=0.0)
+    async with anyio.create_task_group() as tg:
+        tg.start_soon(runner.run_forever)
+        await anyio.sleep(0.1)  # 回収の周回を何度も通す
+        await runner.stop()
+
+    assert store.get(ctx.job_id)["status"] == "running"
+    ctx.assert_lease()  # リースも無傷
+
+
+def a_running_job_with_an_expired_lease(db):
+    """`_settle` が決着を書けなかった行. **`running` のまま、リースだけ切れている.**
+
+    `enqueue` してから `claim_next` すると、走っているワーカーが先に掴みうる。
+    1 文で入れて競合を無くす。
+    """
+    from mediaferry.clock import iso, utcnow
+    from mediaferry.ids import new_id
+
+    job_id = new_id()
+    db.execute(
+        "INSERT INTO job (id, type, status, params_json, lease_token, lease_expires_at,"
+        " created_at) VALUES (?, 'import', 'running', '{}', 'stale', ?, ?)",
+        (job_id, iso(utcnow() - timedelta(seconds=1)), iso(utcnow())),
+    )
+    return job_id
+
+
+@pytest.mark.anyio
+async def test_the_runner_does_not_reap_on_every_poll(db, database):
+    """**回収は間引く.**
+
+    poll は既定 0.5 秒ごとなので、毎周回 `reap_expired_leases` を呼ぶと、
+    倒す行が 1 つも無くても UPDATE が書き込みロックを取り続ける。窓の中に
+    現れた行は、次の窓まで回収されない。
+    """
+    store = JobStore(db)
+    runner = JobRunner(database, poll_interval=0.01, reap_interval=30.0)
+
+    async with anyio.create_task_group() as tg:
+        tg.start_soon(runner.run_forever)
+        await anyio.sleep(0.05)  # 最初の回収を通す
+        job_id = a_running_job_with_an_expired_lease(db)
+        await anyio.sleep(0.15)  # 何周回も回す
+        await runner.stop()
+
+    assert store.get(job_id)["status"] == "running", "窓の中では回収しない"
