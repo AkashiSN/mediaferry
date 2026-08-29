@@ -2555,6 +2555,14 @@ services:
 `mountd` イメージには `util-linux`（`mount`, `blkid`）と exfat ユーティリティのみ。
 `app` イメージには Python ランタイム、ffmpeg / ffprobe、ビルド済みフロントエンド資産。
 
+**同じ `DATA_ROOT` を 2 つのプロセスに持たせない。** 起動時に
+`DATA_ROOT/var/mediaferry.lock` を `flock(LOCK_EX|LOCK_NB)` で握り、**握れなければ
+起動を拒否する**（`single_instance.py`）。移行も reconciliation も、握れてから
+走らせる —— 後から起動した側の reconciliation は、有効期限内の `running` を
+`interrupted` に倒して作業ディレクトリを消す。**待たずに断る** —— 待つ形にすると、
+壊す側が「起動が遅い」だけに見える。**ファイルの存在では見張らない** ——
+`flock` は開いたファイル記述に紐づくので、落ちれば OS が解放する。
+
 ## 17. リポジトリ構成
 
 **環境固有の値を一切含めない**方針で書いてある。
