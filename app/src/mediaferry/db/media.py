@@ -52,7 +52,9 @@ def owner_group(conn: sqlite3.Connection, media_file_id: str) -> sqlite3.Row | N
     指している状態で、判定と予告と表示がそれぞれ違うグループを見る。
     """
     return conn.execute(
-        "SELECT o.id, o.status, o.superseded_by_id FROM merge_group o"  # noqa: S608
+        # **行ごと返す。** `_choose_derived`（`db/uploads.py`）は `adopted_at` と
+        # `verification_json` も見る。列を絞ると、そこだけ別の問い合わせに戻る。
+        "SELECT o.* FROM merge_group o"  # noqa: S608
         " WHERE o.output_media_file_id = ?" + _OWNER_PICK,
         (media_file_id,),
     ).fetchone()

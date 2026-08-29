@@ -23,6 +23,7 @@ from ..ids import new_id
 from .connection import immediate
 from .destinations import DestinationRepository
 from .jobs import JobContext
+from .media import owner_group
 from .profiles import ProfileRegistry
 from .selection import group_is_current
 
@@ -213,9 +214,12 @@ class UploadRepository:
         return _Choice(None, None, f"アクティブな結合グループの構成ファイル（{member['status']}）")
 
     def _choose_derived(self, media: sqlite3.Row) -> _Choice:
-        group = self._conn.execute(
-            "SELECT * FROM merge_group WHERE output_media_file_id = ?", (media["id"],)
-        ).fetchone()
+        # **持ち主は `owner_group` に決めさせる。** 構成を変えないやり直しでは
+        # 旧グループが `output_media_file_id` を持ったまま superseded になり、
+        # 新グループが同じ出力を指す。並び順を指定せずに引くと索引順（rowid の
+        # 小さい順）で古い superseded 側を拾い、送れるはずの派生物が
+        # 「現在の構成と一致しない」で断られる。
+        group = owner_group(self._conn, media["id"])
         if group is None:
             return _Choice(None, None, "生成元のグループが分からない派生物")
         if group["status"] != "merged":
