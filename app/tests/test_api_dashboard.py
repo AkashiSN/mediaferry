@@ -120,7 +120,13 @@ def test_unsent_total_ignores_disabled_destinations(client, db):
     assert client.get("/api/dashboard").json()["unsent_total"] == 0
 
 
-def test_unsent_total_counts_a_file_sent_to_only_one_of_two(client, db):
+def test_a_file_sent_to_one_of_two_destinations_is_no_longer_unsent(client, db):
+    """**「まだ送っていません」は「どこにも送っていない」.**
+
+    宛先ごとの「未送信」は写真の一覧で絞れる（`GET /media?status=unsent` に宛先を
+    添える）。ホームの数まで宛先ごとにすると、**片方に送った時点で数が減らず**、
+    どこを見れば片付くのかが読めない。
+    """
     profile = a_profile(db, slug="dash-partial")
     media = a_media_file(db, profile, rel_path="library/dash/C.JPG")
     first = a_destination(db, name="first")
@@ -133,7 +139,61 @@ def test_unsent_total_counts_a_file_sent_to_only_one_of_two(client, db):
         destination_revision_id=first[1],
         remote_asset_id="asset-1",
     )
+    assert client.get("/api/dashboard").json()["unsent_total"] == 0
+
+
+def test_a_record_at_a_disabled_destination_does_not_count_as_sent(client, db):
+    """**休止中の宛先は「送った」に数えない**（いま送れる宛先だけを見る）."""
+    profile = a_profile(db, slug="dash-paused-sent")
+    media = a_media_file(db, profile, rel_path="library/dash/E.JPG")
+    paused = a_destination(db, name="paused-one")
+    a_destination(db, name="live-one")
+    an_upload(
+        db,
+        paused,
+        media,
+        state="complete",
+        destination_revision_id=paused[1],
+        remote_asset_id="asset-2",
+    )
+    db.execute("UPDATE upload_destination SET enabled = 0 WHERE id = ?", (paused[0],))
     assert client.get("/api/dashboard").json()["unsent_total"] == 1
+
+
+def test_a_file_still_counts_while_a_send_is_in_flight(client, db):
+    """**記録があれば「送った」.** 送信中・失敗・承認待ちは別の枠で数えている."""
+    profile = a_profile(db, slug="dash-inflight")
+    media = a_media_file(db, profile, rel_path="library/dash/F.JPG")
+    only = a_destination(db, name="only")
+    an_upload(db, only, media, state="pending", destination_revision_id=only[1])
+    assert client.get("/api/dashboard").json()["unsent_total"] == 0
+
+
+def test_the_home_count_and_the_photo_list_agree(client, db):
+    """**ホームが数えたものを、一覧で見られる。**
+
+    条件を 2 か所に書くと、片方だけ直したときに数と並びが食い違う。
+    """
+    profile = a_profile(db, slug="dash-agree")
+    a_media_file(db, profile, rel_path="library/dash/G.JPG")
+    sent = a_media_file(db, profile, rel_path="library/dash/H.JPG")
+    first = a_destination(db, name="agree-first")
+    a_destination(db, name="agree-second")
+    an_upload(
+        db,
+        first,
+        sent,
+        state="complete",
+        destination_revision_id=first[1],
+        remote_asset_id="asset-3",
+    )
+
+    total = client.get("/api/dashboard").json()["unsent_total"]
+    listed = client.get("/api/media?status=unsent").json()
+
+    assert total == 1
+    assert listed["total"] == total
+    assert sent not in [row["id"] for row in listed["media"]]
 
 
 def test_awaiting_total_sums_across_destinations(client, db):

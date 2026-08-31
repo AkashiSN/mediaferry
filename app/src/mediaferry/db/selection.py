@@ -101,6 +101,38 @@ def sendable_clause(alias: str) -> str:
 
 SENDABLE_CLAUSE = sendable_clause("m")
 
+
+# 「有効な宛先のどれにも送っていない」を表す SQL の断片（§13 の「やること」）。
+#
+# **ホームの件数（`/dashboard` の `unsent_total`）と、写真の一覧（`GET /media` の
+# `status=unsent` を宛先無しで呼んだとき）が、同じ 1 つの条件を使う。** 2 か所に
+# 書くと、片方だけ直したときに「N 件あります」と言いながら一覧が別の集合を出す。
+#
+# **有効な宛先が 1 つも無ければ、何も該当しない。** ホームの「やること」は**いま
+# 押せる操作**なので、送り先が無い・全部休止中・全部アーカイブ済みのときに
+# 「まだ送っていません」と言っても、押す先が無い。
+#
+# **休止中とアーカイブ済みの宛先への記録は「送った」に数えない。** そこへはもう
+# 送れないので、その 1 件だけを頼りに「もう送ってある」とは言えない。
+_SENT_NOWHERE_TEMPLATE = (
+    "EXISTS (SELECT 1 FROM upload_destination d"
+    "         WHERE d.archived_at IS NULL AND d.enabled = 1)"
+    " AND NOT EXISTS ("
+    "   SELECT 1 FROM upload_record u"
+    "     JOIN upload_destination d ON d.id = u.destination_id"
+    "    WHERE u.media_file_id = {m}.id AND u.invalidated_at IS NULL"
+    "      AND d.archived_at IS NULL AND d.enabled = 1)"
+)
+
+
+def sent_nowhere_clause(alias: str) -> str:
+    """「どこにも送っていない」を、指定した `media_file` の別名に当てた SQL の断片.
+
+    **別名は呼び出し側の定数だけ**（値を埋める口ではない）。
+    """
+    return _SENT_NOWHERE_TEMPLATE.format(m=alias)
+
+
 # **`skipped` はここに来ない。** 破棄したグループは member を手放すので
 # （`merge_group_discard_deactivates_members`）、
 # その構成ファイルは `_ORIGINALS` に戻る —— 破棄は「このまとまりは無し」であって、

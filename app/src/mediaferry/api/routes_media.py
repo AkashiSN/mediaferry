@@ -12,7 +12,7 @@ from ..core.listing import DEFAULT_PAGE_SIZE, escape_like, page_bounds, stack_ex
 from ..db.media import IN_FLIGHT_STATES, MediaRepository, owner_group
 from ..db.merges import GroupNotEditable, MergeRepository
 from ..db.profiles import ProfileRegistry
-from ..db.selection import sendable_clause
+from ..db.selection import sendable_clause, sent_nowhere_clause
 from .deps import conn as get_conn
 from .deps import state as get_state
 from .errors import ApiError, ErrorCode
@@ -358,14 +358,29 @@ def _filters(  # noqa: PLR0913
         )
         params.append(f"%{escape_like(q)}%")
     if status is not None:
-        if destination_id is None:
+        # **`unsent` だけは宛先を伴わなくてよい。** 伴わなければ「有効な宛先の
+        # どれにも送っていない」を意味する（ホームの「まだ送っていません」と
+        # 同じもの）。ほかの状態は「どの宛先での状態か」が決まらないと答えられない。
+        if status == "unsent" and destination_id is None:
+            clauses.append(_sent_nowhere_status_clause(alias))
+        elif destination_id is None:
             raise ApiError(400, ErrorCode.BAD_REQUEST, "status は destination_id と一緒に指定する")
-        clauses.append(_status_clause(status, alias))
-        params.append(destination_id)
+        else:
+            clauses.append(_status_clause(status, alias))
+            params.append(destination_id)
     elif destination_id is not None:
         clauses.append("1 = 1 AND ? IS NOT NULL")
         params.append(destination_id)
     return " AND ".join(clauses), tuple(params)
+
+
+def _sent_nowhere_status_clause(alias: str) -> str:
+    """宛先を伴わない `status=unsent`. **どこにも送っていない、いま送れるもの.**
+
+    **`/dashboard` の `unsent_total` と同じ条件を使う**（`sent_nowhere_clause`）。
+    2 か所に書くと、ホームが「N 件あります」と言いながら一覧が別の集合を出す。
+    """
+    return f"{sent_nowhere_clause(alias)} AND {sendable_clause(alias)}"  # noqa: S608 - 定数のみ
 
 
 def _status_clause(status: str, alias: str) -> str:

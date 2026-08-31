@@ -32,14 +32,20 @@ const FILTERS: { key: FilterKey; label: string }[] = [
   { key: "failed", label: "送れなかった" },
 ];
 
-// **「まだ送っていない」「確認が要る」「送信済み」「送れなかった」は宛先ごと**なので、
-// `destination_id` を伴わなければ API が 400 を返す。
+// **「まだ送っていない」「確認が要る」「送信済み」「送れなかった」は送り先の話。**
+// 送り先が 1 つも無ければ、どれも意味を作れないので押せなくする。
 const DESTINATION_SCOPED: ReadonlySet<FilterKey> = new Set([
   "unsent",
   "awaiting",
   "sent",
   "failed",
 ]);
+
+// **そのうち「送り先を選ぶまで答えが決まらない」もの。** `unsent` はここに
+// 入れない —— 送り先を伴わなければ「**どの送り先にも送っていない**」という
+// 別の答えが決まるからで、それはホームの「まだ送っていません」と同じ集合。
+// 残り 3 つは、どの送り先での状態かが決まらないと答えられない（API も 400）。
+const NEEDS_DESTINATION: ReadonlySet<FilterKey> = new Set(["awaiting", "sent", "failed"]);
 
 // 1 度に読む件数。**渡さないと API の既定（50 件）で切れる。** 上限は
 // `core/listing.MAX_PAGE_SIZE` と同じ 200 で、`work/Send.tsx` や `work/Merge.tsx`
@@ -84,6 +90,9 @@ function buildMediaQuery(
     query.set("kind", "video");
   } else if (filter === "derived") {
     query.set("role", "derived");
+  } else if (filter === "unsent" && !destinationId) {
+    // **送り先を伴わない `unsent`。** どの送り先にも送っていないもの。
+    query.set("status", "unsent");
   } else if (DESTINATION_SCOPED.has(filter) && destinationId) {
     query.set("status", filter);
     query.set("destination_id", destinationId);
@@ -156,7 +165,7 @@ export function PhotosScreen() {
   // 生の式のままだと React Compiler が `rows` 側の手動メモ化を安全に保てず、
   // 最適化を諦める（lint の react-hooks/preserve-manual-memoization が指す）。
   const needsDestination = useMemo(
-    () => DESTINATION_SCOPED.has(filter) && effectiveDestinationId === null,
+    () => NEEDS_DESTINATION.has(filter) && effectiveDestinationId === null,
     [filter, effectiveDestinationId],
   );
 
@@ -448,6 +457,15 @@ export function PhotosScreen() {
           </select>
         )}
       </div>
+
+      {/* **いま何を出しているかを言う。** チップの名前（「まだ送っていない」）
+          だけでは範囲が読めない —— 送り先を選んでいない間は、どの送り先にも
+          送っていないものが並んでいる（ホームの「まだ送っていません」と同じ集合）。 */}
+      {filter === "unsent" && effectiveDestinationId === null && (
+        <p role="note" className="small">
+          どの送り先にも送っていないものを出しています。送り先を選ぶと、その送り先について絞ります。
+        </p>
+      )}
 
       {needsDestination ? (
         <div className="card pad empty">

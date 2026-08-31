@@ -322,6 +322,45 @@ def test_an_unsendable_jpeg_does_not_hide_its_raw(client, db, canon_pair):
     assert [m["rel_path"].split("/")[-1] for m in body["media"]] == ["IMG_0001.CR2"]
 
 
+def test_an_unsendable_jpeg_does_not_hide_its_raw_without_a_destination(client, db, canon_pair):
+    """宛先を伴わない `status=unsent` でも、判断を兄弟の行に当てる.
+
+    **写真の画面が実際に投げるのはこの形**（`collapse=stack` 付き・宛先無し）。
+    """
+    db.execute(
+        "UPDATE media_file SET missing_at = ? WHERE id = ?",
+        (now_iso(), canon_pair.media_ids["JPG"]),
+    )
+    a_destination(db, name="stack-nowhere")
+    db.commit()
+
+    body = client.get("/api/media?collapse=stack&status=unsent").json()
+
+    assert [m["rel_path"].split("/")[-1] for m in body["media"]] == ["IMG_0001.CR2"]
+
+
+def test_a_stack_sent_to_one_destination_drops_out_without_a_destination(client, db, canon_pair):
+    """**片方の宛先へ送った組は、宛先を伴わない `unsent` から消える.**"""
+    from .test_schema_uploads import an_upload
+
+    first = a_destination(db, name="stack-first")
+    a_destination(db, name="stack-second")
+    for key in ("JPG", "CR2"):
+        an_upload(
+            db,
+            first,
+            canon_pair.media_ids[key],
+            state="complete",
+            destination_revision_id=first[1],
+            remote_asset_id=f"asset-{key}",
+        )
+    db.commit()
+
+    body = client.get("/api/media?collapse=stack&status=unsent").json()
+
+    assert body["media"] == []
+
+
 def test_searching_for_the_raw_by_name_finds_it(client, canon_pair):
     """名前で探した従は出す. **主（JPG）はこの `q` を通らない。**"""
     body = client.get("/api/media?collapse=stack&q=IMG_0001.CR2").json()
