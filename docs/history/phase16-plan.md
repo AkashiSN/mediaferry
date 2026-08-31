@@ -89,7 +89,7 @@
 読める。**API に新しい欄を足さない**（`type` と `params` で決まるものを、サーバが
 表示用に写すと出所が 2 つになる）。
 
-- [ ] **Step 1: 落ちるテストを書く**
+- [x] **Step 1: 落ちるテストを書く**
 
 `web/src/components/JobCard.test.tsx`（無ければ作る）に、**3 つの札**を固定する。
 
@@ -103,7 +103,7 @@
 **`params` が読めない形（`params_json` が壊れている・欄が無い）でも落ちないこと**も
 固定する。履歴は過去の行を出す画面なので、**古い形の行が混ざる**。
 
-- [ ] **Step 2: 落ちることを確認する**
+- [x] **Step 2: 落ちることを確認する**
 
 ```bash
 npm --prefix web test -- JobCard
@@ -112,19 +112,19 @@ npm --prefix web test -- JobCard
 期待: `再確認` / `日時の承認` を探す 2 本が落ちる（**要素が無い**ため）。
 「送信」の 2 本は最初から通る —— それでよい（退行の錠）。
 
-- [ ] **Step 3: 最小実装**
+- [x] **Step 3: 最小実装**
 
 `JobCard.tsx` の札の決め方を `type` + `mode` にする。**`JOB_TYPE_LABELS` は残す**
 （`mode` を持たない種別がそのまま使う）。`JobProgress.tsx` の「送信中」も同じ規則で
 分ける必要があるか確かめる —— **走っている最中の表示にも出る**。
 
-- [ ] **Step 4: 通ることを確認する**
+- [x] **Step 4: 通ることを確認する**
 
 ```bash
 npm --prefix web test && npx --prefix web tsc --noEmit && npm --prefix web run lint
 ```
 
-- [ ] **Step 5: 変異試験**
+- [x] **Step 5: 変異試験**
 
 | 変異 | 期待 |
 | --- | --- |
@@ -133,7 +133,7 @@ npm --prefix web test && npx --prefix web tsc --noEmit && npm --prefix web run l
 | 未知の `mode` を空文字にする | 検出 |
 | `params` が読めないときに例外を投げる | 検出 |
 
-- [ ] **Step 6: コミット**
+- [x] **Step 6: コミット**
 
 ```
 fix(web): 作業の履歴を、押した操作の名前で出す
@@ -194,7 +194,7 @@ fix(web): 作業の履歴を、押した操作の名前で出す
   片方だけ直したときに画面と状態機械が食い違う。**共通の関数へ寄せる**
   （`core/uploads/decisions.py` が HTTP も DB も知らない層なので、そこが自然）
 
-- [ ] **Step 1: 落ちるテストを書く（判定そのもの）**
+- [x] **Step 1: 落ちるテストを書く（判定そのもの）**
 
 `app/tests/test_upload_decisions.py` に、**同じ瞬間かどうかを判定する関数**の錠を書く。
 
@@ -206,7 +206,7 @@ fix(web): 作業の履歴を、押した操作の名前で出す
 - 読めない文字列                                             → **同じにしない**
 ```
 
-- [ ] **Step 2: 落ちることを確認する**
+- [x] **Step 2: 落ちることを確認する**
 
 ```bash
 PYTHONDONTWRITEBYTECODE=1 uv run pytest -q app/tests/test_upload_decisions.py
@@ -215,12 +215,12 @@ PYTHONDONTWRITEBYTECODE=1 uv run pytest -q app/tests/test_upload_decisions.py
 期待: 関数が無いので `ImportError` / `AttributeError`。**「機能が無い」で落ちること**を
 確かめる（誤字ではない）。
 
-- [ ] **Step 3: 判定を実装し、`_datetime_diff` をそれに寄せる**
+- [x] **Step 3: 判定を実装し、`_datetime_diff` をそれに寄せる**
 
 `core/uploads/decisions.py` に置く。`routes_uploads.py` の `identical` の計算を
 **その関数の呼び出しに置き換える**（挙動は変えない。テストが緑のままであることを見る）。
 
-- [ ] **Step 4: 落ちるテストを書く（状態機械）**
+- [x] **Step 4: 落ちるテストを書く（状態機械）**
 
 `app/tests/test_uploader.py` に足す。**fake の Immich が、こちらが送った日時と
 同じ瞬間を UTC 表記で返す**筋書きを作る。
@@ -235,11 +235,11 @@ PYTHONDONTWRITEBYTECODE=1 uv run pytest -q app/tests/test_upload_decisions.py
 **`complete` になった行が `remote_datetime_original` と `remote_checked_at` を持つ**
 ことも固定する（送り先の一覧から「いつ時点の観測か」を追えなくなる）。
 
-- [ ] **Step 5: 落ちることを確認する**
+- [x] **Step 5: 落ちることを確認する**
 
 期待: 1 本目が `awaiting_datetime_approval` のまま落ちる。
 
-- [ ] **Step 6: 最小実装**
+- [x] **Step 6: 最小実装**
 
 `uploader.py` の `if not plan.automatic:` の枝で、`_observed_datetime` の結果と
 `plan.proposed` を比べる。同じ瞬間なら `complete` へ倒す。
@@ -248,14 +248,14 @@ PYTHONDONTWRITEBYTECODE=1 uv run pytest -q app/tests/test_upload_decisions.py
 **同じだったときは、そう言う**（`日時は既に合っている` 等）。履歴の 1 文は
 「なぜ件数が変わったのか」を後から追う唯一の手がかり（`list_jobs` の docstring）。
 
-- [ ] **Step 7: 通ることを確認する**
+- [x] **Step 7: 通ることを確認する**
 
 ```bash
 PYTHONDONTWRITEBYTECODE=1 uv run pytest -q
 uv run ruff check . && uv run ruff format --check .
 ```
 
-- [ ] **Step 8: 画面の始末**
+- [x] **Step 8: 画面の始末**
 
 **`identical` の行は原理的に出なくなる**が、**画面の分岐は消さない。**
 
@@ -273,7 +273,7 @@ uv run ruff check . && uv run ruff format --check .
 **vitest で錠を書いてから直す。** 「`identical` の行に『承認する』が無い」
 「`identical` だけの一覧で、決断を迫る見出しが出ない」を固定する。
 
-- [ ] **Step 9: 変異試験**
+- [x] **Step 9: 変異試験**
 
 | 変異 | 期待 |
 | --- | --- |
@@ -285,7 +285,7 @@ uv run ruff check . && uv run ruff format --check .
 
 **`_observed_datetime` が `None` を返す経路は、fake を黙らせて作る。**
 
-- [ ] **Step 10: E2E**
+- [x] **Step 10: E2E**
 
 ```bash
 npm --prefix web run test:e2e
@@ -293,7 +293,7 @@ npm --prefix web run test:e2e
 
 **単独で回す。** 終わったら孤児サーバを掃除する。
 
-- [ ] **Step 11: コミット**
+- [x] **Step 11: コミット**
 
 ```
 fix(uploads): 日時が既に合っているなら、承認を求めない
@@ -307,16 +307,16 @@ fix(uploads): 日時が既に合っているなら、承認を求めない
 
 ## Task C: 記録を直す
 
-- [ ] `../known-issues.md` から 2 行を落とす（「履歴に『送信』としか出ない」
+- [x] `../known-issues.md` から 2 行を落とす（「履歴に『送信』としか出ない」
       「日時が同じなのに『確認があります』と言われる」）
-- [ ] `../decisions.md` の方針の行から「**未実装**」を外す
-- [ ] `../design.md` §9.10 に、**同じ瞬間なら承認を待たない**ことを書く
+- [x] `../decisions.md` の方針の行から「**未実装**」を外す
+- [x] `../design.md` §9.10 に、**同じ瞬間なら承認を待たない**ことを書く
       （状態遷移が変わるので、仕様の側に無いと読めない）
-- [ ] `hardware-verification.md` の 3 番に決着を記す（**当時の記録は残す**）
+- [x] `hardware-verification.md` の 3 番に決着を記す（**当時の記録は残す**）
 
 ## Task D: 全体の確認
 
-- [ ] **全部通す**
+- [x] **全部通す**
 
 ```bash
 PYTHONDONTWRITEBYTECODE=1 uv run pytest
@@ -325,7 +325,7 @@ npm --prefix web test && npx --prefix web tsc --noEmit && npm --prefix web run l
 npm --prefix web run test:e2e   # 単独で
 ```
 
-- [ ] **リンク切れが 0 件であることを確かめる**（`docs/` を触ったので）
+- [x] **リンク切れが 0 件であることを確かめる**（`docs/` を触ったので）
 
 - [ ] **実機で踏み直す。** 実機には**この題材が生きている** ——
       `IMG_0019` / `IMG_0020` の 4 件が `awaiting_datetime_approval` のまま残っている。
