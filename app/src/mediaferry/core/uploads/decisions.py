@@ -7,6 +7,7 @@ HTTP も DB も知らない。**「自分が作った資産か」を証明でき
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime
 
 from ..profiles.model import ImmichRule
 
@@ -60,3 +61,33 @@ def datetime_plan(rule: ImmichRule, policy: str, captured_at: str, origin: str) 
         return DatetimePlan(captured_at, True, "自分がアップロードした資産")
     # 別経路で既に上がっていて、ユーザが手で直しているかもしれない。
     return DatetimePlan(captured_at, False, "自作と証明できない資産なので承認を待つ")
+
+
+def instant(value: str | None) -> datetime | None:
+    """比べられる瞬間として読む. **読めない値とオフセットの無い値は `None`.**
+
+    オフセットが無い値は瞬間が決まらない（どの地の 14:30 か分からない）ので、
+    比較にも変換にも使わない。**書かれたオフセットは保つ** —— 画面は文字列から
+    壁時計を切り出すだけなので、UTC へ寄せると現地の時刻が読めなくなる。
+    """
+    if value is None:
+        return None
+    try:
+        parsed = datetime.fromisoformat(value)
+    except ValueError:
+        return None
+    return parsed if parsed.tzinfo is not None else None
+
+
+def same_instant(left: str | None, right: str | None) -> bool:
+    """同じ瞬間か. **文字列では比べない。**
+
+    Immich は日時を UTC へ正規化して返すので、`+09:00` で書いた値は `+00:00` の
+    表記で戻る。文字列の一致で見ると、同じ瞬間が常に「違う」になる。
+
+    **読めなかったものを「同じ」にしない** —— 「分からない」は「変更なし」では
+    ないので、承認を飛ばす根拠にならない。
+    """
+    left_at = instant(left)
+    right_at = instant(right)
+    return left_at is not None and right_at is not None and left_at == right_at

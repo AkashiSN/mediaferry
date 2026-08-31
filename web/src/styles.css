@@ -226,6 +226,13 @@ a:hover { text-decoration: underline; }
 .row { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
 .rowtop { display: flex; align-items: flex-start; gap: 14px; flex-wrap: wrap; }
 .acts { display: flex; gap: 8px; flex-wrap: wrap; }
+/* 操作の並びに置く「押すものが無い」ことの表示。**ボタンと同じ重さで出す** ——
+   ボタンがあった場所なので、小さな地の文にすると目が滑り、変えるものが無いことに
+   気付けないまま「片付ける」だけを見ることになる。 */
+.acts .state {
+  display: inline-flex; align-items: center; height: 44px; padding: 0 4px;
+  color: var(--ink-2); font-size: 14px; font-weight: 600;
+}
 .grow { flex: 1; min-width: 0; }
 .muted { color: var(--ink-2); font-size: 13px; }
 .small { color: var(--ink-3); font-size: 12.5px; }

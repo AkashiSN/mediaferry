@@ -796,6 +796,113 @@ def test_a_remote_that_cannot_be_read_still_ends_up_awaiting(world, db, monkeypa
     assert row["remote_datetime_original"] is None
 
 
+# ------------------------------------------- 変えるものが無いなら、承認を求めない
+#
+# 承認が守っているのは「**他人が上げた写真を勝手に書き換えない**」こと。日時が既に
+# 合っているなら書き換えは起きないので、守るものが無い。**外部への副作用を起こさない**
+# ので §9.10 の「明示操作でしか起こさない」にも触れない。
+#
+# **Immich は日時を UTC へ正規化して返す。** `+09:00` で書いた値は `+00:00` の表記で
+# 戻るので、文字列で比べると同じ瞬間が常に「違う」になる（それが #36 で直したこと）。
+
+CAPTURED_IN_UTC = "2026-08-17T05:30:00+00:00"
+
+
+def messages_of(db, job_id):
+    return [
+        row["message"]
+        for row in db.execute(
+            "SELECT message FROM job_event WHERE job_id = ? ORDER BY seq", (job_id,)
+        )
+    ]
+
+
+def test_a_pre_existing_asset_that_is_already_dated_right_needs_no_approval(world, db):
+    """**同じ瞬間なら承認を待たない。** 決めることが無いのに「やること」を立てない."""
+    server, uploader, ctx, _, _, destination_id, _ = world
+    _an_existing_asset(server)
+    # **UTC の表記で返す。** 文字列で比べると「違う」になる筋書き。
+    server.datetimes["asset-existing"] = CAPTURED_IN_UTC
+
+    outcome = uploader.run(ctx, destination_id)
+
+    assert outcome.awaiting == 0
+    assert outcome.sent == 1
+    row = record_of(db)
+    assert row["origin"] == "pre_existing"
+    assert row["state"] == "complete"
+    # **いつ時点の観測かを残す。** 落とすと、送り先の一覧から追えなくなる。
+    assert row["remote_datetime_original"] == CAPTURED_IN_UTC
+    assert row["remote_checked_at"] is not None
+
+
+def test_a_datetime_that_already_matches_is_not_written_back(world, db):
+    """**書き換えないから承認が要らない**のであって、黙って書くのではない."""
+    server, uploader, ctx, _, _, destination_id, _ = world
+    _an_existing_asset(server)
+    server.datetimes["asset-existing"] = CAPTURED_IN_UTC
+
+    uploader.run(ctx, destination_id)
+
+    # fake は書き戻しを受けると値を差し替える。表記が変わっていない＝書いていない。
+    assert server.datetimes["asset-existing"] == CAPTURED_IN_UTC
+
+
+def test_the_history_says_the_datetime_was_already_right(world, db):
+    """履歴の 1 文は、**なぜ件数が変わったのかを後から追う唯一の手がかり**."""
+    server, uploader, ctx, _, _, destination_id, _ = world
+    _an_existing_asset(server)
+    server.datetimes["asset-existing"] = CAPTURED_IN_UTC
+
+    uploader.run(ctx, destination_id)
+
+    messages = messages_of(db, ctx.job_id)
+    assert any("日時は既に合っている" in m for m in messages)
+    assert not any("承認が要る" in m for m in messages)
+
+
+def test_a_pre_existing_asset_with_a_different_datetime_still_waits(world, db):
+    """1 秒でも違えば、これまでどおり承認を待つ."""
+    server, uploader, ctx, _, _, destination_id, _ = world
+    _an_existing_asset(server)
+    server.datetimes["asset-existing"] = "2026-08-17T05:30:01+00:00"
+
+    outcome = uploader.run(ctx, destination_id)
+
+    assert outcome.awaiting == 1
+    assert record_of(db)["state"] == "awaiting_datetime_approval"
+
+
+def test_a_remote_datetime_that_cannot_be_read_is_not_treated_as_a_match(world, db, monkeypatch):
+    """**「分からない」は「変更なし」ではない**（承認を飛ばして黙って終わらせない）."""
+    from mediaferry.adapters.immich import ImmichUnavailable
+
+    server, uploader, ctx, _, _, destination_id, _ = world
+    _an_existing_asset(server)
+
+    def unavailable(self, asset_id):  # noqa: ANN001, ANN202
+        raise ImmichUnavailable("読めない")
+
+    monkeypatch.setattr(ImmichClient, "asset", unavailable)
+
+    outcome = uploader.run(ctx, destination_id)
+
+    assert outcome.awaiting == 1
+    assert record_of(db)["state"] == "awaiting_datetime_approval"
+
+
+def test_our_own_asset_is_still_dated_automatically(world, db):
+    """**自作の資産はこれまでどおり自動で書き戻す**（承認の経路に入らない）."""
+    server, uploader, ctx, _, _, destination_id, _ = world
+
+    uploader.run(ctx, destination_id)
+
+    row = record_of(db)
+    assert row["origin"] == "created_by_us"
+    assert row["state"] == "complete"
+    assert server.datetimes[row["remote_asset_id"]] == CAPTURED
+
+
 def test_many_quick_sends_do_not_lose_the_lease(world, db, data_root, monkeypatch):
     """**速い送信を続けても、ジョブのリースが切れない。**
 

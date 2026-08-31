@@ -364,6 +364,95 @@ describe("確認", () => {
   });
 });
 
+// 変更が無い行は、送信の時点で `complete` になるので原理的には出ない。**それでも
+// 画面の分岐は残す** —— 古い DB には `awaiting_datetime_approval` のまま残っている行が
+// あり、相手が日時を変えれば新しく作ることもできる。
+//
+// 変えるものが無いのに決断を迫らない。片付ける手段の名前も「却下」ではない
+// （却下は**変更を拒む**意味で、変えるものが無い場面の語彙ではない）。
+describe("変えるものが無いとき", () => {
+  const IDENTICAL = {
+    id: "r1",
+    destination_id: "d1",
+    media_file_id: "m1",
+    rel_path: "library/2026/08/DJI_0001.MP4",
+    origin: "pre_existing",
+    remote_current: "2026-08-14T20:02:00+09:00",
+    proposed: "2026-08-14T20:02:00+09:00",
+    captured_at_tz: "Asia/Tokyo",
+    remote_checked_at: "2026-08-14T09:00:00Z",
+    identical: true,
+  };
+  const CHANGED = { ...IDENTICAL, id: "r2", media_file_id: "m2", remote_current: "2026-08-14T10:00:00+09:00", identical: false };
+
+  function stubRows(records: unknown[], overrides: Record<string, unknown> = {}) {
+    return stubApi({
+      "/uploads?state=awaiting_datetime_approval": { records },
+      "/destinations": { destinations: [{ id: "d1", name: "家の Immich" }] },
+      ...overrides,
+    });
+  }
+
+  function renderApprove() {
+    return render(
+      <MemoryRouter>
+        <ApproveScreen />
+      </MemoryRouter>,
+    );
+  }
+
+  it("変更のある行が 1 つも無ければ、決断を迫らない", async () => {
+    stubRows([IDENTICAL]);
+    renderApprove();
+    await screen.findByText("変更なし");
+    expect(screen.queryByText(/書き換えていいかどうかを決めてください/)).toBeNull();
+    expect(screen.getByText(/決めることはありません/)).toBeInTheDocument();
+  });
+
+  it("変更のある行が 1 つでもあれば、これまでどおり決断を求める", async () => {
+    stubRows([IDENTICAL, CHANGED]);
+    renderApprove();
+    await screen.findByText("変更なし");
+    expect(screen.getByText(/書き換えていいかどうかを決めてください/)).toBeInTheDocument();
+    expect(screen.queryByText(/決めることはありません/)).toBeNull();
+  });
+
+  it("変更が無い行を片付ける操作を「却下」と呼ばない", async () => {
+    stubRows([IDENTICAL]);
+    renderApprove();
+    expect(await screen.findByRole("button", { name: "片付ける" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "却下する" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "承認する" })).toBeNull();
+  });
+
+  it("変更のある行は、これまでどおり「却下する」", async () => {
+    stubRows([CHANGED]);
+    renderApprove();
+    expect(await screen.findByRole("button", { name: "却下する" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "片付ける" })).toBeNull();
+  });
+
+  it("「片付ける」は却下と同じ経路を叩く（新しい API を作っていない）", async () => {
+    const { calls } = stubRows([IDENTICAL], { "/uploads/r1/reject": { status: "ok" } });
+    renderApprove();
+    await userEvent.click(await screen.findByRole("button", { name: "片付ける" }));
+    // 確認は取らない（リモートに触らないので）。
+    expect(screen.queryByRole("dialog")).toBeNull();
+    await waitFor(() =>
+      expect(calls().some((c) => c.path === "/uploads/r1/reject" && c.method === "POST")).toBe(true),
+    );
+    expect(calls().some((c) => c.path.endsWith("/approve"))).toBe(false);
+  });
+
+  it("「変更なし」を、小さな地の文にしない", async () => {
+    // **ボタンがあった場所なので、地の文にすると目が滑る。** 押すものが無いことは
+    // ボタンと同じ重さで言う。
+    stubRows([IDENTICAL]);
+    renderApprove();
+    expect(await screen.findByText("変更なし")).not.toHaveClass("small");
+  });
+});
+
 // **どの写真を、どの Immich で書き換えるのかを画面に出す。** これはリモート資産の
 // 書き換えなので取り消せず、送り先が 2 つあると名前が無ければどちらのライブラリを
 // 触るのか判別できない（§13「宛先を取り違えたまま送ると取り消せない」）。
