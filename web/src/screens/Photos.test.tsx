@@ -247,7 +247,7 @@ describe("写真の画面", () => {
         <PhotosScreen />
       </MemoryRouter>,
     );
-    await userEvent.click(await screen.findByRole("button", { name: /まだ送っていない/ }));
+    await userEvent.click(await screen.findByRole("button", { name: /送信済み/ }));
     // 宛先の選択肢が、フィルタ行のプルダウンに出る。
     const select = await screen.findByRole("combobox", { name: "送り先" });
     expect(screen.getByRole("option", { name: "家" })).toBeInTheDocument();
@@ -260,12 +260,115 @@ describe("写真の画面", () => {
     await waitFor(() =>
       expect(
         calls().some(
-          (c) => c.path === "/media?status=unsent&destination_id=d2&collapse=stack&page_size=200" && c.method === "GET",
+          (c) => c.path === "/media?status=sent&destination_id=d2&collapse=stack&page_size=200" && c.method === "GET",
         ),
       ).toBe(true),
     );
     // 選ばなかった方の宛先では問い合わせない。
     expect(calls().some((c) => c.path.includes("destination_id=d1"))).toBe(false);
+  });
+
+  // 「まだ送っていない」だけは、送り先を選ばなくても意味が決まる ——
+  // **どの送り先にも送っていないもの**。ホームの「まだ送っていません」が
+  // 数えているのと同じ集合で、行き止まりだった「送り先を選んでください」が
+  // 意味のある既定になる。
+
+  it("「まだ送っていない」は、送り先を選ばなくても出せる（どこにも送っていない）", async () => {
+    const { calls } = stubApi({
+      "/media": { media: [], total: 0, page: 1, page_size: 50 },
+      "/media?status=unsent&collapse=stack&page_size=200": {
+        media: [media("nowhere", "2026-08-18T15:12:00+09:00")],
+        total: 1,
+        page: 1,
+        page_size: 200,
+      },
+      "/destinations": {
+        destinations: [
+          { id: "d1", name: "家", enabled: true },
+          { id: "d2", name: "職場", enabled: true },
+        ],
+      },
+    });
+    render(
+      <MemoryRouter>
+        <PhotosScreen />
+      </MemoryRouter>,
+    );
+    await userEvent.click(await screen.findByRole("button", { name: /まだ送っていない/ }));
+
+    await waitFor(() =>
+      expect(
+        calls().some(
+          (c) => c.path === "/media?status=unsent&collapse=stack&page_size=200" && c.method === "GET",
+        ),
+      ).toBe(true),
+    );
+    expect(screen.queryByText(/上の送り先を選んでください/)).toBeNull();
+    expect(await screen.findByRole("button", { name: /nowhere\.JPG/ })).toBeInTheDocument();
+  });
+
+  it("送り先を選んでいないときは、何を出しているのかを書く", async () => {
+    // チップの名前（「まだ送っていない」）だけでは範囲が読めない。
+    stubApi({
+      "/media": { media: [], total: 0, page: 1, page_size: 50 },
+      "/media?status=unsent&collapse=stack&page_size=200": {
+        media: [],
+        total: 0,
+        page: 1,
+        page_size: 200,
+      },
+      "/destinations": {
+        destinations: [
+          { id: "d1", name: "家", enabled: true },
+          { id: "d2", name: "職場", enabled: true },
+        ],
+      },
+    });
+    render(
+      <MemoryRouter>
+        <PhotosScreen />
+      </MemoryRouter>,
+    );
+    await userEvent.click(await screen.findByRole("button", { name: /まだ送っていない/ }));
+
+    expect(
+      await screen.findByText(/どの送り先にも送っていないものを出しています/),
+    ).toBeInTheDocument();
+  });
+
+  it("送り先を選べば、これまでどおりその送り先について絞る", async () => {
+    const { calls } = stubApi({
+      "/media": { media: [], total: 0, page: 1, page_size: 50 },
+      "/media?status=unsent&collapse=stack&page_size=200": {
+        media: [],
+        total: 0,
+        page: 1,
+        page_size: 200,
+      },
+      "/destinations": {
+        destinations: [
+          { id: "d1", name: "家", enabled: true },
+          { id: "d2", name: "職場", enabled: true },
+        ],
+      },
+    });
+    render(
+      <MemoryRouter>
+        <PhotosScreen />
+      </MemoryRouter>,
+    );
+    await userEvent.click(await screen.findByRole("button", { name: /まだ送っていない/ }));
+    await userEvent.selectOptions(await screen.findByRole("combobox", { name: "送り先" }), "d2");
+
+    await waitFor(() =>
+      expect(
+        calls().some(
+          (c) => c.path === "/media?status=unsent&destination_id=d2&collapse=stack&page_size=200" && c.method === "GET",
+        ),
+      ).toBe(true),
+    );
+    // 何を出しているかの 1 行は、送り先を選んだら引っ込める（宛先ごとの絞り込みに戻る）。
+    expect(screen.queryByText(/どの送り先にも送っていないものを出しています/)).toBeNull();
   });
 
   it("宛先ごとの絞り込みが効いていても、状態の印も凡例も出さない", async () => {
@@ -1555,7 +1658,9 @@ describe("読み込む件数と、切れていることの表示", () => {
         <PhotosScreen />
       </MemoryRouter>,
     );
-    await userEvent.click(await screen.findByRole("button", { name: /まだ送っていない/ }));
+    // **宛先ごとの絞り込みで見る。**「まだ送っていない」は送り先を選ばなくても
+    // 答えが決まるので、選ぶ前で止まらない。
+    await userEvent.click(await screen.findByRole("button", { name: /送信済み/ }));
     await screen.findByText(/上の送り先を選んでください/);
     expect(screen.queryByText(/3421/)).toBeNull();
   });

@@ -18,7 +18,7 @@ from ..db.profiles import (
     UnknownProfile,
 )
 from ..db.reset import ResetNotPossible, UnknownScope, reset
-from ..db.selection import SENDABLE_CLAUSE
+from ..db.selection import SENDABLE_CLAUSE, sent_nowhere_clause
 from ..settings import SettingInvalid, SettingLocked, SettingsService, startup_warnings
 from .deps import conn as get_conn
 from .deps import state as get_state
@@ -126,16 +126,14 @@ def dashboard(state=Depends(get_state), conn=Depends(get_conn)) -> dict[str, Any
             "   AND json_valid(g.verification_json)"
             "   AND json_type(g.verification_json, '$.passed') IS NOT 'true'"
         ).fetchone()["n"],
-        # **和を取らない。** 2 つの宛先に未送信の 1 件は 1 件。休止中の宛先は
-        # 送り先に選べないので、それしか無ければ「やること」は無い。
+        # **「まだ送っていません」＝ 有効な宛先のどれにも送っていないもの。**
+        # 宛先ごとの「未送信」は写真の一覧で絞れる（`GET /media?status=unsent` に
+        # 宛先を添える）ので、ホームの数は「どこにも送っていない」を指す ——
+        # 宛先ごとにすると、片方へ送っても数が減らず、どこを見れば片付くのかが
+        # 読めない。**条件は一覧と共有する**（`sent_nowhere_clause`）。
         "unsent_total": conn.execute(
-            "SELECT count(*) AS n FROM media_file m WHERE EXISTS ("  # noqa: S608
-            " SELECT 1 FROM upload_destination d"
-            "  WHERE d.archived_at IS NULL AND d.enabled = 1"
-            "    AND NOT EXISTS (SELECT 1 FROM upload_record u"
-            "                    WHERE u.media_file_id = m.id AND u.destination_id = d.id"
-            "                      AND u.invalidated_at IS NULL))"
-            f" AND {SENDABLE_CLAUSE}"
+            "SELECT count(*) AS n FROM media_file m"  # noqa: S608
+            f" WHERE {sent_nowhere_clause('m')} AND {SENDABLE_CLAUSE}"
         ).fetchone()["n"],
         # **宛先をまたいだ合計。** 承認待ちは宛先ごとの操作なので、和で問題ない。
         "awaiting_total": conn.execute(

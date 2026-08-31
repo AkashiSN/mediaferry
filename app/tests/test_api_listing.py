@@ -231,9 +231,78 @@ def test_media_can_be_filtered_by_what_a_destination_has(client, db, library):
 
 def test_a_status_filter_needs_a_destination(client, library):
     """どの宛先での状態かが決まらない要求は断る（黙って全件を返さない）."""
-    response = client.get("/api/media?status=sent")
-    assert response.status_code == 400
-    assert response.json()["error"]["code"] == "bad_request"
+    for status in ("sent", "failed", "awaiting"):
+        response = client.get(f"/api/media?status={status}")
+        assert response.status_code == 400, status
+        assert response.json()["error"]["code"] == "bad_request"
+
+
+# ------------------------------------------------ 「どこにも送っていない」
+#
+# **`unsent` だけは宛先を伴わなくてよい。** 伴わなければ「有効な宛先のどれにも
+# 送っていない」を意味し、ホームの「まだ送っていません」と同じものを指す
+# （`/dashboard` の `unsent_total` と条件を共有する）。伴えば、これまでどおり
+# その宛先について絞る。
+
+
+def test_unsent_without_a_destination_means_sent_nowhere(client, db, library):
+    """宛先を伴わない `unsent` は、**どこにも送っていない**もの."""
+    first = a_destination(db, name="anywhere-first")
+    a_destination(db, name="anywhere-second")
+    an_upload(
+        db,
+        first,
+        library[0],
+        state="complete",
+        destination_revision_id=first[1],
+        remote_asset_id="asset-1",
+    )
+
+    body = client.get("/api/media?status=unsent").json()
+
+    assert body["total"] == 4
+    assert library[0] not in [row["id"] for row in body["media"]]
+
+
+def test_unsent_with_a_destination_still_scopes_to_it(client, db, library):
+    """**宛先を伴えば、これまでどおり。** 片方に送っても、もう片方では未送信."""
+    first = a_destination(db, name="scoped-first")
+    second = a_destination(db, name="scoped-second")
+    an_upload(
+        db,
+        first,
+        library[0],
+        state="complete",
+        destination_revision_id=first[1],
+        remote_asset_id="asset-2",
+    )
+
+    assert client.get(f"/api/media?status=unsent&destination_id={first[0]}").json()["total"] == 4
+    assert client.get(f"/api/media?status=unsent&destination_id={second[0]}").json()["total"] == 5
+
+
+def test_unsent_without_a_destination_needs_a_place_to_send_to(client, library):
+    """**送り先が 1 つも無ければ、送るものは無い。** 押せる操作が無い."""
+    assert client.get("/api/media?status=unsent").json()["total"] == 0
+
+
+def test_a_record_at_a_disabled_destination_is_not_sent_anywhere(client, db, library):
+    """休止中の宛先へ送っただけでは「どこにも送っていない」のまま."""
+    paused = a_destination(db, name="anywhere-paused")
+    a_destination(db, name="anywhere-live")
+    an_upload(
+        db,
+        paused,
+        library[0],
+        state="complete",
+        destination_revision_id=paused[1],
+        remote_asset_id="asset-3",
+    )
+    db.execute("UPDATE upload_destination SET enabled = 0 WHERE id = ?", (paused[0],))
+
+    body = client.get("/api/media?status=unsent").json()
+
+    assert body["total"] == 5
 
 
 # ---------------------------------------------------------------- ダッシュボード
@@ -421,6 +490,25 @@ def test_unsent_excludes_members_of_a_live_merge_group(client, db):
 
     body = client.get(f"/api/media?destination_id={destination[0]}&status=unsent").json()
     assert body["total"] == 0
+
+
+def test_unsent_without_a_destination_also_excludes_merge_members(client, db):
+    """**送れないものは、宛先を伴わない `unsent` にも出ない**（§10）.
+
+    出すと、ホームが「まだ送っていません」と数えたものを送ろうとして
+    `POST /uploads` が断ることになる。
+    """
+    profile = a_profile(db, slug="nowhere-members")
+    part = a_media_file(db, profile, rel_path="library/nowhere/PART1.MP4")
+    group = a_merge_group(db, profile, "digest-nowhere", status="detected")
+    db.execute(
+        "INSERT INTO merge_member (merge_group_id, media_file_id, position, active)"
+        " VALUES (?, ?, 0, 1)",
+        (group, part),
+    )
+    a_destination(db, name="nowhere-members")
+
+    assert client.get("/api/media?status=unsent").json()["total"] == 0
 
 
 def test_unsent_includes_the_output_of_a_merged_group(client, db):
