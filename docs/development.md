@@ -224,6 +224,17 @@ PYTHONDONTWRITEBYTECODE=1 uv run python mutate.py \
    **`start_new_session=True` を外す変異は当ててはいけない**（子がテストランナーと
    同じプロセスグループに入り、キャンセル試験の `killpg` が pytest ごと撃つ）
 
+## 次にやること
+
+**直すべきものが 3 件ある**（[`known-issues.md`](known-issues.md)）。うち 2 件は
+実装計画が書いてある —— [`history/phase16-plan.md`](history/phase16-plan.md)。
+
+| # | 中身 | 状態 |
+| --- | --- | --- |
+| 1 | 作業の履歴が再確認・承認を「送信」と描く | **計画済み**（Task A） |
+| 2 | 未送信で絞ると、組のタイルのどちらが未送信か読めない | **未決。** Phase 10 の「組は 1 タイルに畳む」と衝突する |
+| 3 | 変更の無い日時の確認が「やること」に立つ | **計画済み**（Task B）。方針は [`decisions.md`](decisions.md) |
+
 ## いま実機で確かめられていないこと
 
 実機の記録は [`history/hardware-verification.md`](history/hardware-verification.md)
