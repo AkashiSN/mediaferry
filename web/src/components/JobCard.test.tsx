@@ -41,6 +41,13 @@ describe("作業の札", () => {
     expect(title({ mode: "approve" })).toBe("日時の承認");
   });
 
+  it("送信は mode を持つ（保険ではなく、名指しで「送信」と出す）", () => {
+    // **送る経路は `mode: "send"` を積む**（`api/routes_destinations.py`）。
+    // 未知の値へ落ちる保険が拾うのに任せると、mode が増えたとき黙って
+    // 「送信」と出る。
+    expect(title({ mode: "send" })).toBe("送信");
+  });
+
   it("知らない mode は、その種別の札に落ちる（**札を空にしない**）", () => {
     expect(title({ mode: "wat" })).toBe("送信");
   });

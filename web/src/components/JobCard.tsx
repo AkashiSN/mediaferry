@@ -19,6 +19,9 @@ const JOB_TYPE_LABELS: Record<string, string> = {
 // 決めると 3 つとも「送信」になり、押したことが履歴に伝わらない。
 const JOB_MODE_LABELS: Record<string, Record<string, string>> = {
   upload: {
+    // **送る経路も `mode` を積む**（`api/routes_destinations.py`）。名指しで書く ——
+    // 下の保険に拾わせると、この表が「実際にある操作の一覧」でなくなる。
+    send: "送信",
     recheck: "再確認",
     approve: "日時の承認",
   },
