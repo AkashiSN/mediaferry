@@ -97,15 +97,19 @@ def test_one_media_goes_to_two_destinations_independently(world, db):
 
     an_uploader().run(a_job(family), family)
 
-    rows = {
-        row["destination_id"]: row
-        for row in db.execute("SELECT destination_id, state, remote_asset_id FROM upload_record")
-    }
+    rows = {row["destination_id"]: row for row in db.execute("SELECT * FROM upload_record")}
     # 2 つ目の宛先は同じ fake を見ているので、重複として扱われる。**送信は起きず**、
-    # 既にある資産を引き受ける。自作と証明できないので日時の補正は承認待ちになる（§9.10）。
+    # 既にある資産を引き受ける。自作と証明できないので承認の経路に入るが、**1 つ目の
+    # 送信が既に日時を書き戻している**ので変えるものが無く、承認を待たずに決着する
+    # （§9.10）。
     assert len(server.uploads) == 1
-    assert rows[family]["state"] == "awaiting_datetime_approval"
+    assert rows[family]["state"] == "complete"
     assert rows[family]["remote_asset_id"] == rows[home]["remote_asset_id"]
+    # **承認を飛ばしたのではなく、変える必要が無かった。** 観測した現在値と、
+    # いつ時点の観測かは残っている（送り先の一覧から追える）。
+    assert rows[family]["origin"] == "pre_existing"
+    assert rows[family]["remote_datetime_original"] is not None
+    assert rows[family]["remote_checked_at"] is not None
 
 
 def test_a_second_run_sends_nothing(world, db):

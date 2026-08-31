@@ -29,6 +29,9 @@ export type Job = {
   finished_at?: string | null;
   // どのカードの作業か。カードに紐づかない作業（送信など）では null。
   volume_instance_id?: string | null;
+  /** 押した操作。`upload` 型は 1 つの種別で 3 つの仕事を兼ねている（送る・
+   * 再確認する・日時の承認）ので、札はこれと合わせて決める。持たない種別では null。 */
+  mode?: string | null;
   progress?: JobProgressValue | null;
   /** 最後に出した 1 文。**終わった作業の要約**で、一覧（`GET /jobs`）だけが持つ。
    * 進捗の知らせは画面を開いた後のぶんしか来ないので、これが無いと開く前に

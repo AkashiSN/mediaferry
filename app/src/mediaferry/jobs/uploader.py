@@ -31,7 +31,12 @@ from ..adapters.immich import (
 )
 from ..clock import now_iso
 from ..core.lease_pulse import with_lease_pulse
-from ..core.uploads.decisions import datetime_plan, origin_after_upload, tags_to_apply
+from ..core.uploads.decisions import (
+    datetime_plan,
+    origin_after_upload,
+    same_instant,
+    tags_to_apply,
+)
 from ..db.jobs import JobContext, LeaseLost
 from ..db.profiles import ProfileRegistry
 from ..db.uploads import CLAIMABLE_STATES, ClaimLost, NoLongerEligible, UploadRepository
@@ -407,21 +412,42 @@ class Uploader:
             self._uploads.finish_owned(ctx, record["id"], "complete", expect_state="tagging")
             return "complete"
         if not plan.automatic:
+            # **現在値をここで 1 度だけ読む。** 承認の画面に出す差分（§13）と、
+            # そもそも承認が要るかどうかの両方が、この 1 回の観測で決まる。画面を
+            # 開くたびに N 件ぶんの HTTP を出さないためでもある。
+            observed = self._observed_datetime(
+                ctx, client, record, revision_id, progress, row["remote_asset_id"]
+            )
+            # **観測した現在値が提案と同じ瞬間なら、承認を待たずに終える**（§9.10）。
+            # 承認が守っているのは「他人が上げた写真を勝手に書き換えない」ことなので、
+            # **書き換えないなら守るものが無い**。読めなかった値は「同じ」にしない
+            # （`same_instant`）—— 「分からない」は「変更なし」ではない。
+            if same_instant(observed, plan.proposed):
+                ctx.emit(
+                    "info",
+                    "日時は既に合っているので承認は要らない",
+                    {"upload_record_id": record["id"]},
+                )
+                self._uploads.finish_owned(
+                    ctx,
+                    record["id"],
+                    "complete",
+                    expect_state="tagging",
+                    remote_datetime_original=observed,
+                    remote_checked_at=now_iso(),
+                )
+                return "complete"
             ctx.emit(
                 "info",
                 f"日時の補正に承認が要る: {plan.reason}",
                 {"upload_record_id": record["id"]},
             )
-            # **承認を求める時点の「現在値」を控える**（§13 の差分表示）。画面を
-            # 開くたびに N 件ぶんの HTTP を出さないために、ここで 1 度だけ読む。
             self._uploads.finish_owned(
                 ctx,
                 record["id"],
                 "awaiting_datetime_approval",
                 expect_state="tagging",
-                remote_datetime_original=self._observed_datetime(
-                    ctx, client, record, revision_id, progress, row["remote_asset_id"]
-                ),
+                remote_datetime_original=observed,
                 remote_checked_at=now_iso(),
             )
             return "awaiting_datetime_approval"
@@ -444,8 +470,10 @@ class Uploader:
     ) -> str | None:
         """リモートの現在の日時を読む. **読めなくても送信の結果は変えない。**
 
-        承認の画面に出すための値なので、相手が答えられなくても「分からない」まま
-        承認待ちにする（ここで失敗にすると、送信そのものが失敗として記録される）。
+        承認の画面に出す差分と、そもそも承認が要るかどうかの両方がこの値で決まる。
+        相手が答えられなければ「分からない」まま承認待ちにする（ここで失敗にすると、
+        送信そのものが失敗として記録される）。**`None` を「変更なし」として扱わない**
+        —— 承認を飛ばして黙って終わらせることになる。
         """
         try:
             self._guard(ctx, record, revision_id, "tagging", progress)

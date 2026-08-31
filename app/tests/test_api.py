@@ -453,6 +453,53 @@ def test_a_job_with_no_card_says_so(client, db):
     assert jobs["j2"]["volume_instance_id"] is None
 
 
+# ------------------------------------------------------- 押した操作を名指す
+#
+# `upload` 型は `params.mode` で **3 つの別の仕事**を兼ねている（送る・再確認する・
+# 日時の承認）。**札は画面が `type` と `mode` から決める**（§13。ラベルはサーバが
+# 作らない）ので、判別子だけを添えて返す。**params を丸ごと返す口は作らない。**
+
+
+def test_a_job_says_which_operation_was_pressed(client, db):
+    """`upload` の 3 つの仕事を、画面が見分けられるようにする."""
+    db.executemany(
+        "INSERT INTO job (id, type, status, params_json, created_at)"
+        " VALUES (?, 'upload', 'succeeded', ?, '2026-08-24T00:00:00Z')",
+        [
+            ("j3", '{"destination_id": "d1", "mode": "recheck"}'),
+            ("j4", '{"destination_id": "d1", "mode": "approve"}'),
+        ],
+    )
+    db.commit()
+    jobs = {job["id"]: job for job in client.get("/api/jobs").json()["jobs"]}
+    assert jobs["j3"]["mode"] == "recheck"
+    assert jobs["j4"]["mode"] == "approve"
+
+
+def test_a_job_with_no_mode_says_so(client, db):
+    """送信そのものには `mode` が無い（**無い話を作らない**）."""
+    db.execute(
+        "INSERT INTO job (id, type, status, params_json, created_at)"
+        " VALUES ('j5', 'upload', 'succeeded', '{}', '2026-08-24T00:00:00Z')",
+    )
+    db.commit()
+    jobs = {job["id"]: job for job in client.get("/api/jobs").json()["jobs"]}
+    assert jobs["j5"]["mode"] is None
+
+
+def test_the_job_view_does_not_hand_out_the_whole_params(client, db):
+    """**丸ごと返す口は作らない**（`params` に何が入るかは呼び出し元が決める）."""
+    db.execute(
+        "INSERT INTO job (id, type, status, params_json, created_at)"
+        " VALUES ('j6', 'upload', 'succeeded', ?, '2026-08-24T00:00:00Z')",
+        ('{"destination_id": "d1", "upload_record_id": "u1", "mode": "approve"}',),
+    )
+    db.commit()
+    jobs = {job["id"]: job for job in client.get("/api/jobs").json()["jobs"]}
+    assert "params" not in jobs["j6"]
+    assert "upload_record_id" not in jobs["j6"]
+
+
 # ---------------------------------------------------------------- 作業の要約
 #
 # **終わった作業の要約が、後から読めない**（Phase 11 の N4）。画面は進捗の知らせで

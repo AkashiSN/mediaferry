@@ -14,6 +14,24 @@ const JOB_TYPE_LABELS: Record<string, string> = {
   recompute_timestamps: "日時の再計算",
 };
 
+// **1 つの種別が複数の仕事を兼ねているとき、押した操作で呼び分ける。** `upload` は
+// 送る・再確認する・日時の承認の 3 つを `params.mode` で分けているので、種別だけで
+// 決めると 3 つとも「送信」になり、押したことが履歴に伝わらない。
+const JOB_MODE_LABELS: Record<string, Record<string, string>> = {
+  upload: {
+    recheck: "再確認",
+    approve: "日時の承認",
+  },
+};
+
+/** 作業の札。**知らない値で札を空にしない** —— `mode` を写せなければ種別の札へ、
+ * 種別も写せなければ生の値へ落とす。履歴は過去の行を出す画面なので、こちらが
+ * 知らない形の行が混ざる。 */
+function jobLabel(job: Job): string {
+  const byMode = typeof job.mode === "string" ? JOB_MODE_LABELS[job.type]?.[job.mode] : undefined;
+  return byMode ?? JOB_TYPE_LABELS[job.type] ?? job.type;
+}
+
 export function JobCard({
   job,
   subject,
@@ -50,7 +68,7 @@ export function JobCard({
    */
   footer?: ReactNode;
 }) {
-  const title = JOB_TYPE_LABELS[job.type] ?? job.type;
+  const title = jobLabel(job);
   return (
     <section className="card pad">
       <div className="row">

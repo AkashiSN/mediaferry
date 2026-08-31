@@ -70,6 +70,8 @@ export function ApproveScreen() {
   const found = records.data?.records ?? [];
   const truncated = found.length > APPROVE_PAGE;
   const rows = truncated ? found.slice(0, APPROVE_PAGE) : found;
+  /** 書き換えの可否を決める行が 1 つでもあるか。**見出しの言い方がこれで決まる。** */
+  const needsDecision = rows.some((record) => !record.identical);
 
   /** 送り先の表示名。引けないときも**内部の ID は出さない**（§13）。 */
   function destinationName(id: string): string {
@@ -87,8 +89,21 @@ export function ApproveScreen() {
         </h1>
         <p className="muted" style={{ marginTop: 7 }}>
           下の写真は、先に誰かが Immich へ上げていたものです。mediaferry は自分が上げた写真の
-          日時しか直しません。書き換えていいかどうかを決めてください。
-          <b>却下しても、Immich には何も起きません。</b>
+          日時しか直しません。
+          {/* **変えるものが無いなら、決断を迫らない。** 変更のある行が 1 つも無い
+              一覧に「決めてください」と書くと、決めることが無いのに決断を求めた
+              ことになる。 */}
+          {needsDecision ? (
+            <>
+              書き換えていいかどうかを決めてください。
+              <b>却下しても、Immich には何も起きません。</b>
+            </>
+          ) : (
+            <>
+              日時は既に合っているので、決めることはありません。
+              <b>片付けても、Immich には何も起きません。</b>
+            </>
+          )}
         </p>
       </div>
 
@@ -162,14 +177,18 @@ export function ApproveScreen() {
               </div>
               <div className="acts">
                 {record.identical ? (
-                  <span className="small">変更なし</span>
+                  // **ボタンと同じ重さで出す。** ここは「承認する」があった場所
+                  // なので、小さな地の文にすると目が滑る。
+                  <span className="state">変更なし</span>
                 ) : (
                   <button type="button" className="btn outline" disabled={decision.busy} onClick={() => setApproving(record)}>
                     承認する
                   </button>
                 )}
+                {/* **叩く先は同じ**（却下）。**呼び方だけを変える** —— 却下は
+                    「変更を拒む」意味なので、変えるものが無い行の語彙ではない。 */}
                 <button type="button" className="btn sm" disabled={decision.busy} onClick={() => void act(record, "reject")}>
-                  却下する
+                  {record.identical ? "片付ける" : "却下する"}
                 </button>
               </div>
             </div>

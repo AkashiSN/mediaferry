@@ -2,14 +2,13 @@
 
 from __future__ import annotations
 
-from datetime import datetime
 from typing import Any
 
 from fastapi import APIRouter, Body, Depends
 
 from ..adapters.immich import ImmichClient
 from ..clock import now_iso
-from ..core.uploads.decisions import datetime_plan
+from ..core.uploads.decisions import datetime_plan, instant, same_instant
 from ..db.connection import immediate
 from ..db.credentials import CredentialStore
 from ..db.destinations import DestinationRepository
@@ -235,8 +234,8 @@ def _datetime_diff(row, profiles: _ProfileCache | None) -> dict[str, Any]:  # no
         )
         proposed = plan.proposed
     current = row["remote_datetime_original"]
-    current_at = _instant(current)
-    proposed_at = _instant(proposed)
+    current_at = instant(current)
+    proposed_at = instant(proposed)
     return {
         # **提案と同じオフセットに直して返す。** 画面は文字列から壁時計を切り出す
         # だけなので（`web/src/utils/formatDateTime.ts`）、片方が UTC のままだと
@@ -251,27 +250,8 @@ def _datetime_diff(row, profiles: _ProfileCache | None) -> dict[str, Any]:  # no
         # 画面が両側に添える印の出所。**両側とも提案のオフセットで並ぶ**ので、
         # 印も 1 つでよい（空なら画面が `DEFAULT_TIMEZONE` とみなす）。
         "captured_at_tz": row["media_captured_at_tz"],
-        # **瞬間で比べる。** Immich は日時を UTC へ正規化して返すので、`+09:00` で
-        # 書いた値は `+00:00` の表記で戻る。文字列の一致で見ると、同じ瞬間が常に
-        # 「違う」になり、`identical` が真になる場面が無くなる。
-        #
-        # **読めなかったものを「変更なし」にしない**（承認を飛ばさせない）。
-        "identical": bool(
-            current_at is not None and proposed_at is not None and current_at == proposed_at
-        ),
+        # **瞬間で比べる**（`same_instant`）。送信のときに承認を待つかどうかも同じ
+        # 判定で決めているので、**ここに 2 本目を書かない** —— 片方だけ直すと、
+        # 画面に出る差分と状態機械の判断が食い違う。
+        "identical": same_instant(current, proposed),
     }
-
-
-def _instant(value: str | None) -> datetime | None:
-    """比べられる瞬間として読む. **読めない値とオフセットの無い値は `None`.**
-
-    オフセットが無い値は瞬間が決まらない（どの地の 14:30 か分からない）ので、
-    比較にも変換にも使わない。
-    """
-    if value is None:
-        return None
-    try:
-        parsed = datetime.fromisoformat(value)
-    except ValueError:
-        return None
-    return parsed if parsed.tzinfo is not None else None

@@ -439,6 +439,9 @@ def _job(row, with_last_message: bool = False) -> dict[str, Any]:  # noqa: ANN00
     `with_last_message` は一覧だけ（`list_jobs` の問い合わせがその欄を持つ）。
     1 件を引く経路は `/jobs/{id}/events` で全文が読めるので、要約は要らない。
     """
+    # **取り出すのは名指しした欄だけ。** params には秘密を入れない約束だが、
+    # 丸ごと返す口は作らない（何が入るかは積んだ側が決める）。
+    params = json.loads(row["params_json"])
     view = {
         "id": row["id"],
         "type": row["type"],
@@ -448,9 +451,12 @@ def _job(row, with_last_message: bool = False) -> dict[str, Any]:  # noqa: ANN00
         "started_at": row["started_at"],
         "finished_at": row["finished_at"],
         "error": row["error"],
-        # どのカードの作業か。**`params_json` から取り出すのはこの 1 欄だけ**
-        # —— params には秘密を入れない約束だが、丸ごと返す口は作らない。
-        "volume_instance_id": json.loads(row["params_json"]).get("volume_instance_id"),
+        # どのカードの作業か。
+        "volume_instance_id": params.get("volume_instance_id"),
+        # 押した操作。`upload` 型は `mode` で 3 つの別の仕事を兼ねている（送る・
+        # 再確認する・日時の承認）ので、これが無いと画面は 3 つを見分けられない。
+        # **札はここで作らない** —— 名前付けの実装を 2 つにしない（§13）。
+        "mode": params.get("mode"),
         # **走っている間だけ入る**（`finish` が落とす）。速度と残り時間は画面が
         # 2 点の差分から出す —— こちらで持つと、心拍の間隔に依存した値を
         # 永続化することになる。
