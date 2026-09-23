@@ -296,6 +296,20 @@ GUI での編集は既存定義を書き換えず、**新しいリビジョン�
   [`history/hardware-verification.md`](history/hardware-verification.md)）。
   `none` のときは描画に使う TZ が無いので、UTC 表現の壁時計をそのまま採る。
 
+**`timezone` はカメラの時計のゾーンであって、撮影地ではない。** 時計を合わせずに
+旅行先で撮ると、解いた瞬間は正しいが、壁時計は日本の時刻のまま出る。これは
+**ファイルごとの撮影地の上書き**（`media_file.captured_at_zone_override`、
+`POST /media/timezone`）で直す。
+
+- **瞬間は変えない。** 保存済みの `captured_at` を撮影地のゾーンへ直し、
+  `captured_at_tz` をそのゾーン名にする（`core/timestamps.py` の `with_zone_override`）
+- 上書きを持つのは `original` だけ。`derived` は今までどおり先頭の active member から継ぐ
+- `recompute_timestamps` は解き直した値へ毎回上書きを付け直す（再計算で消えない）
+- 上書きを外すと、カメラの時計のゾーン（その値を解いた版の `timezone`、無ければ
+  `DEFAULT_TIMEZONE`）へ戻す。これも瞬間を保つ変換
+- `timezone_policy: none` のファイルには付けられない（値が瞬間ではない）
+- 値が動いた送信済みの記録は `needs_recheck` へ戻す（`recompute_timestamps` と同じ）
+
 `mtime_semantics` は **mtime が何を表すか**を宣言する。**媒体の性質であって、値の形からは
 見分けられない。**
 
@@ -569,7 +583,7 @@ quick_fingerprint = sha1( b"mfq" ‖ u8(version) ‖ u64le(size) ‖ w[0] ‖ w[
 | テーブル | 主なカラム |
 | --- | --- |
 | `artifact_staging` | `id`, `kind`(import/merge), `job_id`, `lease_token`, `state`, `staging_rel_path`, `final_rel_path`, `expected_size`, `content_sha1`, `metadata_json`, `source_entry_id`, `merge_group_id`, `created_at`, `updated_at` |
-| `media_file` | `id`, `role`(original/derived), `profile_id`, `profile_revision_id`, `rel_path` UNIQUE, `size_bytes`, `mtime_ns`, `sha1`, `kind`(photo/video), `captured_at`, `captured_at_source`(filename/exif/**container**/mtime), `captured_at_tz`, `captured_at_note`, **`container_wall`**（ffprobe が返した `creation_time` を**解釈せず生のまま**持つ。意味は `container_semantics` が決めるので、読み違えても再計算で直せる）, `duration_seconds`, `probe_state`, `missing_at`, `captured_at_revision_id`, `created_at` |
+| `media_file` | `id`, `role`(original/derived), `profile_id`, `profile_revision_id`, `rel_path` UNIQUE, `size_bytes`, `mtime_ns`, `sha1`, `kind`(photo/video), `captured_at`, `captured_at_source`(filename/exif/**container**/mtime), `captured_at_tz`, `captured_at_note`, **`captured_at_zone_override`**（利用者が付けた撮影地の IANA 名。NULL は上書きなし。`original` だけが持つ）, **`container_wall`**（ffprobe が返した `creation_time` を**解釈せず生のまま**持つ。意味は `container_semantics` が決めるので、読み違えても再計算で直せる）, `duration_seconds`, `probe_state`, `missing_at`, `captured_at_revision_id`, `created_at` |
 
 `artifact_staging` は **import と merge の両方**が使う。派生物の公開に
 取り込みと同じ crash protocol を適用するためで、これがないと結合物だけが
@@ -1833,6 +1847,8 @@ claim では **(a) を必ず評価し、`selection_rule` に対応する現在�
 | GET | `/media` | 一覧。`status` / `profile` / `kind` / `from` / `to` / `q` / `page` / `collapse` / `stack`。**`status` は原則 `destination_id` と一緒に指定する**（どの宛先での状態かが決まらない要求は 400）。**例外は `status=unsent`** —— 伴わなければ「有効な宛先のどれにも送っていない」を意味し、`/dashboard` の `unsent_total` と同じ集合を返す（§10）。**並びは `captured_at DESC, rel_path DESC`** —— 同じ撮影日時の行は現実に起きる（カメラの時計が止まれば連続して起きる）ので、tie-break が決まっていないとページの境目で重複・欠落する。**`rel_path` は `UNIQUE` なので単独で足りる**。`id` は乱数なので、同じ撮影日時の並びに意味が出ない。`db/selection.py` の 3 つの断片（`_ORIGINALS` / `_DERIVED` / `_MEMBERS_OF_UNMERGED`）も同じ並びで揃える —— `limit` で切るので、順序が決まらないとどれが候補に入るかが実行ごとに変わる。`collapse=stack` は RAW+JPEG の組を 1 行に畳み、主の行に `stack.members`（`id` / `rel_path` / `size_bytes`）を添える。**曖昧な組は畳まない**（全員が別々の行として残り、`stack` は付かない）。`total` は畳んだ後の件数。**`stack=members` は隠さず、組に属する行すべて（主も従も）に同じ `stack` を添えるだけ** —— 行は減らず `total` も変わらない。**送る画面はこちらを使う**: `collapse=stack` だと未送信の従（CR2）が主の陰に隠れ、返った行をそのまま送る画面では**その 1 枚が送られない**（Immich でスタックも組まれない）。両方来たときは `collapse=stack` が勝つ（隠す）—— 片方だけを 400 にすると既存の呼び出し元が壊れる |
 | GET | `/media/{id}` | 詳細。**`stack`** も返す（一覧と同じ `_members_of` を通す。組でなければ `null`、曖昧な組でも `null`） |
 | GET | `/media/{id}/thumbnail` | サムネイル（`at` で秒指定。10 秒刻みに丸め、1 本あたり 32 枚まで） |
+| POST | `/media/timezone` | 選んだファイルを撮影地のゾーンへ付け替える（瞬間は変えない）。本文 `{ids, timezone}`、`timezone: null` で上書きを外す。`derived` の id は active member 全員へ広げる。**1 件でも付け替えられなければ 400 で全体を断る**（`timezone_policy: none`・知らないゾーン・無い id）。応答は `{changed, unchanged, requeued}` |
+| GET | `/timezones` | 撮影地として選べるゾーン名（`POST /media/timezone` が受け付ける集合と同じ） |
 | GET | `/merge-groups` | 結合グループ一覧。**既定はいま操作できるものだけ**（`superseded_by_id IS NULL` かつ `status <> 'skipped'`）。履歴は `?status=skipped` で取る。**置き換えられた行は `status` を指定しても出さない**。各行に **`profile_changed`**（作ったときからカメラの種類の版が上がったか）を添える —— 上がっていると `group_is_current` が必ず断るので、画面は採用のボタンを出さない |
 | POST | `/merge-groups/detect` | 結合グループの検出ジョブを開始（プロファイルごとに 1 本） |
 | POST | `/merge-groups/preview` | 閾値を変えたときの候補を再計算（保存しない） |
