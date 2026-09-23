@@ -83,6 +83,26 @@ def resolve_captured_at(
     return CapturedAt(at=at, source=source, tz=name, note=note)
 
 
+def with_zone_override(value: CapturedAt, zone_name: str | None) -> CapturedAt:
+    """瞬間を保ったまま、表示のゾーンを撮影地のものへ付け替える.
+
+    プロファイルの timezone はカメラの時計のゾーンで、撮影地とは限らない
+    （時計を合わせずに旅行先で撮る）。**付け替えるのは見せ方だけ**で、
+    ファイル名や EXIF から解いた瞬間は変えない。`source` と `note` は
+    その瞬間をどう解いたかの記録なので保つ。
+
+    `timezone_policy: none` の値は瞬間ではないので、呼び出し側が渡さない。
+    """
+    if zone_name is None:
+        return value
+    return CapturedAt(
+        at=value.at.astimezone(ZoneInfo(zone_name)),
+        source=value.source,
+        tz=zone_name,
+        note=value.note,
+    )
+
+
 def _wall_clock(
     defn: ProfileDefinition,
     rel_path: str,

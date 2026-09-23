@@ -4,9 +4,11 @@ import pytest
 
 from mediaferry.core.profiles.model import parse_definition
 from mediaferry.core.timestamps import (
+    CapturedAt,
     TimezoneUnresolved,
     container_wall_clock,
     resolve_captured_at,
+    with_zone_override,
 )
 
 from .test_profile_model import a_definition
@@ -486,3 +488,29 @@ def test_a_pathological_timestamp_pattern_falls_back_instead_of_hanging():
     assert not isinstance(got[0], BaseException), f"例外が出た: {got[0]!r}"
     assert got[0].source == "mtime"
     assert got[0].at.year == 2026
+
+
+VIETNAM = "Asia/Ho_Chi_Minh"
+
+
+def _jst(at: str = "2026-09-22T20:16:31+09:00") -> CapturedAt:
+    return CapturedAt(
+        at=datetime.fromisoformat(at), source="filename", tz="Asia/Tokyo", note="メモ"
+    )
+
+
+def test_zone_override_keeps_the_instant_and_changes_the_wall_clock():
+    """時計を JST のまま持って行った: 数字は JST の数字なので、瞬間は保つ."""
+    moved = with_zone_override(_jst(), VIETNAM)
+    assert moved.at.isoformat() == "2026-09-22T18:16:31+07:00"
+    assert moved.at == _jst().at
+    assert moved.tz == VIETNAM
+
+
+def test_zone_override_keeps_source_and_note():
+    moved = with_zone_override(_jst(), VIETNAM)
+    assert (moved.source, moved.note) == ("filename", "メモ")
+
+
+def test_no_zone_override_passes_through():
+    assert with_zone_override(_jst(), None) == _jst()
