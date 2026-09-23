@@ -4,11 +4,12 @@ from __future__ import annotations
 
 from typing import Any
 
-from fastapi import APIRouter, Depends, Request, Response
+from fastapi import APIRouter, Body, Depends, Request, Response
 from fastapi.responses import FileResponse
 
 from ..adapters.thumbnails import ThumbnailFailed, quantise
 from ..core.listing import DEFAULT_PAGE_SIZE, escape_like, page_bounds, stack_extension_ranks
+from ..db.capture_zone import ZoneOverrideInvalid, apply_zone_override, known_zones
 from ..db.media import IN_FLIGHT_STATES, MediaRepository, owner_group
 from ..db.merges import GroupNotEditable, MergeRepository
 from ..db.profiles import ProfileRegistry
@@ -619,6 +620,39 @@ def delete_media(  # noqa: ANN201
     return {"status": "ok", "rel_path": rel_path}
 
 
+@router.post("/media/timezone")
+def override_capture_zone(
+    body: dict[str, Any] = Body(...),  # noqa: B008
+    conn=Depends(get_conn),  # noqa: ANN001, B008
+    state=Depends(get_state),  # noqa: ANN001, B008
+) -> dict[str, int]:
+    """選んだファイルを撮影地のタイムゾーンへ付け替える（瞬間は変えない）.
+
+    `timezone` が `null` なら上書きを外し、カメラの時計のゾーンへ戻す。
+    """
+    ids = body.get("ids")
+    zone = body.get("timezone")
+    if not isinstance(ids, list) or not all(isinstance(i, str) for i in ids):
+        raise ApiError(400, ErrorCode.BAD_REQUEST, "ids は文字列の配列")
+    if zone is not None and not isinstance(zone, str):
+        raise ApiError(400, ErrorCode.BAD_REQUEST, "timezone は文字列か null")
+    try:
+        outcome = apply_zone_override(conn, ids, zone, state.settings.default_timezone)
+    except ZoneOverrideInvalid as exc:
+        raise ApiError(400, ErrorCode.BAD_REQUEST, str(exc)) from exc
+    return {
+        "changed": outcome.changed,
+        "unchanged": outcome.unchanged,
+        "requeued": outcome.requeued,
+    }
+
+
+@router.get("/timezones")
+def list_timezones() -> dict[str, list[str]]:
+    """撮影地として選べるゾーン名（付け替えの API が受け付ける集合と同じ）."""
+    return {"timezones": known_zones()}
+
+
 @router.get("/media/{media_id}/thumbnail")
 def get_thumbnail(  # noqa: ANN201
     media_id: str,
@@ -687,6 +721,8 @@ def _media(row) -> dict[str, Any]:  # noqa: ANN001
         # `+00:00` で保存されるので、オフセットだけでは本当に UTC で撮ったものと
         # 区別が付かない。空なら画面が `DEFAULT_TIMEZONE` とみなす。
         "captured_at_tz": row["captured_at_tz"],
+        # 利用者が付けた撮影地のゾーン. 付けていなければ `None`。
+        "captured_at_zone_override": row["captured_at_zone_override"],
         "duration_seconds": row["duration_seconds"],
         "probe_state": row["probe_state"],
         "missing_at": row["missing_at"],

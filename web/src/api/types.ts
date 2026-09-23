@@ -562,6 +562,48 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/media/timezone": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Override Capture Zone
+         * @description 選んだファイルを撮影地のタイムゾーンへ付け替える（瞬間は変えない）.
+         *
+         *     `timezone` が `null` なら上書きを外し、カメラの時計のゾーンへ戻す。
+         */
+        post: operations["override_capture_zone_api_media_timezone_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/timezones": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List Timezones
+         * @description 撮影地として選べるゾーン名（付け替えの API が受け付ける集合と同じ）.
+         */
+        get: operations["list_timezones_api_timezones_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/media/{media_id}/thumbnail": {
         parameters: {
             query?: never;
@@ -1907,6 +1949,65 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    override_capture_zone_api_media_timezone_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": {
+                    [key: string]: unknown;
+                };
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        [key: string]: number;
+                    };
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    list_timezones_api_timezones_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        [key: string]: string[];
+                    };
                 };
             };
         };
