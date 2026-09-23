@@ -367,10 +367,12 @@ h1.page.title-lg { font-size: 24px; }
 /* 箇条書きの黒丸は、`ul` のリセットで欄の外へ出る。**確認の本文だけ戻す。** */
 .dialog ul { padding-left: 1.3em; }
 /* `gap` が上の余白を作るので、`margin-top` は操作の分だけ足す。 */
-.dialog-actions { display: flex; gap: 10px; margin-top: 8px; }
+/* **狭い画面では行を折り返す。** 高さを 44px に固定したボタンは、1 行に詰めると
+   中で字が折り返して切れる（ボタンが 3 つ並ぶダイアログが 360px で起きる）。 */
+.dialog-actions { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 8px; }
 .dialog-actions button {
   height: 44px; padding: 0 18px; border: 1px solid var(--line); border-radius: 9px;
-  background: var(--surface); color: var(--ink); font-size: 14px;
+  background: var(--surface); color: var(--ink); font-size: 14px; white-space: nowrap;
 }
 .dialog-actions button:last-child {
   flex: 1; border-color: var(--accent); background: var(--accent); color: var(--accent-ink); font-weight: 650;
@@ -398,6 +400,9 @@ h1.page.title-lg { font-size: 24px; }
   font-family: inherit; font-size: 14px;
 }
 .field:disabled { background: var(--surface-2); color: var(--ink-2); cursor: not-allowed; }
+/* **ダイアログの入力欄は 16px。** iOS は 16px 未満の欄に焦点が来ると画面を拡大し、
+   覆いの上のダイアログが画面からはみ出す。 */
+.dialog .field { font-size: 16px; }
 textarea.field {
   height: auto; padding: 10px 12px; line-height: 1.55;
   font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 13px;

@@ -174,6 +174,10 @@ class Recomputer:
             # **再 probe しない。** 取り込みで生の文字列を持っている。
             container_wall=row["container_wall"],
         )
+        if profile.definition.timestamp.timezone_policy == "none":
+            # **瞬間ではない値に撮影地を載せない。** UTC の札を貼った壁時計を撮影地へ
+            # 直すと日付ごとずれる。上書きは `_write` が消す。
+            return resolved
         # **利用者が付けた撮影地を再計算で消さない。** 解き直すのはカメラの時計で、
         # 撮影地はその上に載る見せ方なので、解いた瞬間へ毎回付け直す。
         return with_zone_override(resolved, row["captured_at_zone_override"])
@@ -340,7 +344,7 @@ class Recomputer:
                     skipped += 1
                     tally.skipped += 1
                     continue
-                self._write(row, value, profile.revision_id)
+                self._write(row, value, profile)
                 if _same(row, value):
                     tally.unchanged += 1
                     continue
@@ -353,11 +357,28 @@ class Recomputer:
                 tally.reopened += reopen_skipped_stack(self._conn, row["id"])
         return skipped
 
-    def _write(self, row: sqlite3.Row, value: CapturedAt, revision_id: str) -> None:
+    def _write(self, row: sqlite3.Row, value: CapturedAt, profile: ProfileRef) -> None:
+        """日時の 5 列を書く. **`none` の版では撮影地の上書きも消す.**
+
+        残すと、その版で解いた値には付け替えが効かないのに、画面は付け替え中と
+        言い続け、API も `none` を断るので外せない。
+        """
+        drops_override = profile.definition.timestamp.timezone_policy == "none"
         self._conn.execute(
             "UPDATE media_file SET captured_at = ?, captured_at_source = ?, captured_at_tz = ?,"
-            " captured_at_note = ?, captured_at_revision_id = ? WHERE id = ?",
-            (value.at.isoformat(), value.source, value.tz, value.note, revision_id, row["id"]),
+            " captured_at_note = ?, captured_at_revision_id = ?,"
+            " captured_at_zone_override = CASE WHEN ? THEN NULL"
+            "   ELSE captured_at_zone_override END"
+            " WHERE id = ?",
+            (
+                value.at.isoformat(),
+                value.source,
+                value.tz,
+                value.note,
+                profile.revision_id,
+                drops_override,
+                row["id"],
+            ),
         )
 
 

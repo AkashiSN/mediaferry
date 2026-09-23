@@ -480,6 +480,43 @@ test("狭い画面で、下に貼り付く操作バーが隠れない", async ({
   expect(overSendbar, overSendbar.join(" / ")).toEqual([]);
 });
 
+test("撮影地のタイムゾーンのダイアログは、いちばん狭い画面でも欠けずに押せる", async ({ page }) => {
+  // **ボタンが 3 つ並ぶダイアログはこれだけ。** 360px の箱に 1 行で詰めると、
+  // 高さ 44px に固定したボタンの中で字が折り返して切れる。
+  await page.setViewportSize({ width: 360, height: 780 });
+  await signIn(page);
+  await page.goto(app.url + "/photos");
+  await settled(page);
+  const pick = page.locator("main button.pick").first();
+  await expect(pick).toBeVisible({ timeout: 60_000 });
+  await pick.click();
+  await page.getByRole("button", { name: "撮影地のタイムゾーン" }).click();
+  const dialog = page.getByRole("dialog");
+  await expect(dialog).toBeVisible();
+
+  const box = (await dialog.boundingBox())!;
+  const controls = [
+    dialog.getByLabel("撮影地のタイムゾーン"),
+    ...(await dialog.getByRole("button").all()),
+  ];
+  for (const control of controls) {
+    const rect = (await control.boundingBox())!;
+    expect(rect.height).toBeGreaterThanOrEqual(44);
+    expect(rect.x).toBeGreaterThanOrEqual(box.x);
+    expect(rect.x + rect.width).toBeLessThanOrEqual(box.x + box.width + 0.5);
+    // 字が折り返していない（中身の高さが箱に収まっている）。
+    const clipped = await control.evaluate((element) => element.scrollHeight > element.clientHeight);
+    expect(clipped).toBe(false);
+  }
+  // **iOS は 16px 未満の入力欄に焦点が来ると画面を拡大する。**
+  const fontSize = await dialog
+    .getByLabel("撮影地のタイムゾーン")
+    .evaluate((element) => parseFloat(getComputedStyle(element).fontSize));
+  expect(fontSize).toBeGreaterThanOrEqual(16);
+
+  await dialog.getByRole("button", { name: "やめる" }).click();
+});
+
 test("内部の名前と Markdown の記号を画面に出さない", async ({ page }) => {
   await signIn(page);
   for (const path of SCREENS) {

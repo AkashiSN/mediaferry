@@ -19,6 +19,17 @@ class ZoneOverrideInvalid(ValueError):
     """付け替えられない要求. 何も書かずに全体を断る."""
 
 
+class ZoneOverrideBusy(RuntimeError):
+    """いま付け替えると、走っている作業が古い日時で仕上げてしまう. 何も書かない."""
+
+
+# **送信ジョブが掴んでいる状態.** この間に読んだ日時を Immich へ書き、`complete` で
+# 終える。付け替えを通すと古い日時のまま終わり、`complete` からの差し戻しも
+# 間に合わない。`pending` / `needs_recheck` / `awaiting_datetime_approval` は
+# 誰も掴んでおらず、送る（承認する）ときに今の日時を読み直すので止めない。
+_HELD_STATES = ("checking", "uploading", "asset_known", "tagging", "fixing_datetime")
+
+
 @dataclass(frozen=True)
 class ZoneOutcome:
     changed: int
@@ -86,7 +97,9 @@ def apply_zone_override(
             if value_moved:
                 moved.append(row["id"])
                 requeued += _after_move(conn, row["id"], defn)
-        for output in _outputs_of(conn, moved):
+        outputs = _outputs_of(conn, moved)
+        _refuse_if_busy(conn, moved, outputs)
+        for output in outputs:
             requeued += _inherit(conn, output, registry)
     return ZoneOutcome(changed, unchanged, requeued)
 
@@ -118,6 +131,41 @@ def _originals_of(conn: sqlite3.Connection, media_ids: Sequence[str]) -> list[sq
         for member in members:
             rows.setdefault(member["id"], member)
     return list(rows.values())
+
+
+def _refuse_if_busy(
+    conn: sqlite3.Connection, members: Sequence[str], outputs: Sequence[str]
+) -> None:
+    """値が動くファイルを、走っている作業が掴んでいれば断る（ROLLBACK させる）.
+
+    - 送信ジョブが掴んでいる記録（`_HELD_STATES`）
+    - つないでいる最中（`merging`）のグループの active member。出力は読み終えた
+      先頭の日時で公開され、ここからは見えない（まだ `output_media_file_id` が無い）
+    """
+    targets = [*members, *outputs]
+    if not targets:
+        return
+    marks = ", ".join("?" * len(targets))
+    held = ", ".join("?" * len(_HELD_STATES))
+    if conn.execute(
+        "SELECT 1 FROM upload_record"  # noqa: S608 - 埋めるのは ? だけ
+        f" WHERE media_file_id IN ({marks}) AND state IN ({held})"
+        "   AND invalidated_at IS NULL LIMIT 1",
+        (*targets, *_HELD_STATES),
+    ).fetchone():
+        raise ZoneOverrideBusy("送っている最中のファイルがある。終わってから付け替える")
+    member_marks = ", ".join("?" * len(members))
+    if (
+        members
+        and conn.execute(
+            "SELECT 1 FROM merge_member mm"  # noqa: S608 - 埋めるのは ? だけ
+            " JOIN merge_group g ON g.id = mm.merge_group_id"
+            " WHERE mm.active = 1 AND g.status = 'merging'"
+            f"   AND mm.media_file_id IN ({member_marks}) LIMIT 1",
+            tuple(members),
+        ).fetchone()
+    ):
+        raise ZoneOverrideBusy("つないでいる最中のファイルがある。終わってから付け替える")
 
 
 def _definition_of(registry: ProfileRegistry, row: sqlite3.Row) -> ProfileDefinition:

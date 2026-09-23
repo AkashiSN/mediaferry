@@ -304,7 +304,13 @@ GUI での編集は既存定義を書き換えず、**新しいリビジョン�
 - **瞬間は変えない。** 保存済みの `captured_at` を撮影地のゾーンへ直し、
   `captured_at_tz` をそのゾーン名にする（`core/timestamps.py` の `with_zone_override`）
 - 上書きを持つのは `original` だけ。`derived` は今までどおり先頭の active member から継ぐ
-- `recompute_timestamps` は解き直した値へ毎回上書きを付け直す（再計算で消えない）
+- `recompute_timestamps` は解き直した値へ毎回上書きを付け直す（再計算で消えない）。
+  **ただし `timezone_policy: none` の版で解き直したときは上書きを消す** —— 値が瞬間では
+  ないので付け直すと日付ごとずれ、その版では API からも外せない
+- **走っている作業が掴んでいるファイルは付け替えない（409）。** 送信ジョブが掴んでいる
+  記録（`checking`〜`fixing_datetime`）は読んだ日時で `complete` まで進み、`merging` の
+  グループは読み終えた先頭の日時で出力を公開する。どちらも後から差し戻す道が無い。
+  `pending` などの誰も掴んでいない記録は、送るときに今の値を読み直すので止めない
 - 上書きを外すと、カメラの時計のゾーン（その値を解いた版の `timezone`、無ければ
   `DEFAULT_TIMEZONE`）へ戻す。これも瞬間を保つ変換
 - `timezone_policy: none` のファイルには付けられない（値が瞬間ではない）
@@ -1847,7 +1853,7 @@ claim では **(a) を必ず評価し、`selection_rule` に対応する現在�
 | GET | `/media` | 一覧。`status` / `profile` / `kind` / `from` / `to` / `q` / `page` / `collapse` / `stack`。**`status` は原則 `destination_id` と一緒に指定する**（どの宛先での状態かが決まらない要求は 400）。**例外は `status=unsent`** —— 伴わなければ「有効な宛先のどれにも送っていない」を意味し、`/dashboard` の `unsent_total` と同じ集合を返す（§10）。**並びは `captured_at DESC, rel_path DESC`** —— 同じ撮影日時の行は現実に起きる（カメラの時計が止まれば連続して起きる）ので、tie-break が決まっていないとページの境目で重複・欠落する。**`rel_path` は `UNIQUE` なので単独で足りる**。`id` は乱数なので、同じ撮影日時の並びに意味が出ない。`db/selection.py` の 3 つの断片（`_ORIGINALS` / `_DERIVED` / `_MEMBERS_OF_UNMERGED`）も同じ並びで揃える —— `limit` で切るので、順序が決まらないとどれが候補に入るかが実行ごとに変わる。`collapse=stack` は RAW+JPEG の組を 1 行に畳み、主の行に `stack.members`（`id` / `rel_path` / `size_bytes`）を添える。**曖昧な組は畳まない**（全員が別々の行として残り、`stack` は付かない）。`total` は畳んだ後の件数。**`stack=members` は隠さず、組に属する行すべて（主も従も）に同じ `stack` を添えるだけ** —— 行は減らず `total` も変わらない。**送る画面はこちらを使う**: `collapse=stack` だと未送信の従（CR2）が主の陰に隠れ、返った行をそのまま送る画面では**その 1 枚が送られない**（Immich でスタックも組まれない）。両方来たときは `collapse=stack` が勝つ（隠す）—— 片方だけを 400 にすると既存の呼び出し元が壊れる |
 | GET | `/media/{id}` | 詳細。**`stack`** も返す（一覧と同じ `_members_of` を通す。組でなければ `null`、曖昧な組でも `null`） |
 | GET | `/media/{id}/thumbnail` | サムネイル（`at` で秒指定。10 秒刻みに丸め、1 本あたり 32 枚まで） |
-| POST | `/media/timezone` | 選んだファイルを撮影地のゾーンへ付け替える（瞬間は変えない）。本文 `{ids, timezone}`、`timezone: null` で上書きを外す。`derived` の id は active member 全員へ広げる。**1 件でも付け替えられなければ 400 で全体を断る**（`timezone_policy: none`・知らないゾーン・無い id）。応答は `{changed, unchanged, requeued}` |
+| POST | `/media/timezone` | 選んだファイルを撮影地のゾーンへ付け替える（瞬間は変えない）。本文 `{ids, timezone}`、`timezone: null` で上書きを外す。`derived` の id は active member 全員へ広げる。**1 件でも付け替えられなければ 400 で全体を断る**（`timezone_policy: none`・知らないゾーン・無い id）。送信・結合の最中のファイルがあれば 409。応答は `{changed, unchanged, requeued}` |
 | GET | `/timezones` | 撮影地として選べるゾーン名（`POST /media/timezone` が受け付ける集合と同じ） |
 | GET | `/merge-groups` | 結合グループ一覧。**既定はいま操作できるものだけ**（`superseded_by_id IS NULL` かつ `status <> 'skipped'`）。履歴は `?status=skipped` で取る。**置き換えられた行は `status` を指定しても出さない**。各行に **`profile_changed`**（作ったときからカメラの種類の版が上がったか）を添える —— 上がっていると `group_is_current` が必ず断るので、画面は採用のボタンを出さない |
 | POST | `/merge-groups/detect` | 結合グループの検出ジョブを開始（プロファイルごとに 1 本） |

@@ -6,10 +6,11 @@
 
 import pytest
 
-from mediaferry.db.capture_zone import ZoneOverrideInvalid, apply_zone_override
+from mediaferry.db.capture_zone import ZoneOverrideBusy, ZoneOverrideInvalid, apply_zone_override
 
 from .test_recompute import a_sent_record, a_user_profile
 from .test_schema_artifacts import a_media_file, a_merge_group
+from .test_schema_jobs import a_job
 from .test_schema_uploads import a_destination
 
 TOKYO = "Asia/Tokyo"
@@ -25,6 +26,19 @@ def dji(db):
 def a_jst_video(db, profile, at="2026-09-22T20:16:31+09:00", **over):
     over.setdefault("captured_at_tz", TOKYO)
     return a_media_file(db, profile, captured_at=at, **over)
+
+
+HELD = ["checking", "uploading", "asset_known", "tagging", "fixing_datetime"]
+
+
+def hold(db, record, state):
+    """送信ジョブが記録を掴んだ形にする（掴んだ状態は `claim_job_id` を要する）."""
+    job = a_job(db, type="upload", status="running")
+    db.execute(
+        "UPDATE upload_record SET state = ?, claim_job_id = ?, claim_token = 't',"
+        " claim_expires_at = '2999-01-01T00:00:00+00:00' WHERE id = ?",
+        (state, job, record),
+    )
 
 
 def captured(db, media_id):
@@ -223,6 +237,62 @@ def test_an_unknown_id_is_rejected(db, dji):
 def test_no_ids_is_rejected(db):
     with pytest.raises(ZoneOverrideInvalid):
         apply_zone_override(db, [], VIETNAM, TOKYO)
+
+
+@pytest.mark.parametrize(
+    "state", ["checking", "uploading", "asset_known", "tagging", "fixing_datetime"]
+)
+def test_a_record_held_by_an_upload_refuses_the_request(db, dji, state):
+    """送信ジョブが掴んでいる記録は、読んだ日時をこの後 Immich へ書く.
+
+    付け替えを通すと、古い日時のまま `complete` で終わり、誰も送り直さない。
+    """
+    destination = a_destination(db)
+    video = a_jst_video(db, dji)
+    hold(db, a_sent_record(db, video, destination), state)
+    with pytest.raises(ZoneOverrideBusy):
+        apply_zone_override(db, [video], VIETNAM, TOKYO)
+    assert captured(db, video)[2] is None
+
+
+@pytest.mark.parametrize("state", ["pending", "needs_recheck", "awaiting_datetime_approval"])
+def test_a_record_nobody_holds_does_not_block(db, dji, state):
+    """誰も掴んでいない記録は、送るときに今の日時を読み直す."""
+    destination = a_destination(db)
+    video = a_jst_video(db, dji)
+    record = a_sent_record(db, video, destination)
+    db.execute("UPDATE upload_record SET state = ? WHERE id = ?", (state, record))
+    apply_zone_override(db, [video], VIETNAM, TOKYO)
+    assert captured(db, video)[2] == VIETNAM
+
+
+def test_an_output_held_by_an_upload_refuses_the_request(db, dji):
+    destination = a_destination(db)
+    first = a_jst_video(db, dji, at="2026-09-22T19:00:00+09:00")
+    output = a_merged(db, dji, [first])
+    hold(db, a_sent_record(db, output, destination), "uploading")
+    with pytest.raises(ZoneOverrideBusy):
+        apply_zone_override(db, [first], VIETNAM, TOKYO)
+    assert captured(db, first)[2] is None
+
+
+def test_a_member_being_merged_refuses_the_request(db, dji):
+    """つないでいる最中の出力は、読み終えた先頭の日時で公開される."""
+    first = a_jst_video(db, dji, at="2026-09-22T19:00:00+09:00")
+    group = a_merge_group(db, dji, digest="d", status="merging")
+    db.execute("INSERT INTO merge_member VALUES (?, ?, 0, 1)", (group, first))
+    with pytest.raises(ZoneOverrideBusy):
+        apply_zone_override(db, [first], VIETNAM, TOKYO)
+    assert captured(db, first)[2] is None
+
+
+def test_the_api_answers_409_while_busy(client, db, dji):
+    destination = a_destination(db)
+    video = a_jst_video(db, dji)
+    hold(db, a_sent_record(db, video, destination), "uploading")
+    response = client.post("/api/media/timezone", json={"ids": [video], "timezone": VIETNAM})
+    assert response.status_code == 409
+    assert response.json()["error"]["code"] == "conflict"
 
 
 def test_the_api_applies_and_reports(client, db, dji):

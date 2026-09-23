@@ -9,7 +9,12 @@ from fastapi.responses import FileResponse
 
 from ..adapters.thumbnails import ThumbnailFailed, quantise
 from ..core.listing import DEFAULT_PAGE_SIZE, escape_like, page_bounds, stack_extension_ranks
-from ..db.capture_zone import ZoneOverrideInvalid, apply_zone_override, known_zones
+from ..db.capture_zone import (
+    ZoneOverrideBusy,
+    ZoneOverrideInvalid,
+    apply_zone_override,
+    known_zones,
+)
 from ..db.media import IN_FLIGHT_STATES, MediaRepository, owner_group
 from ..db.merges import GroupNotEditable, MergeRepository
 from ..db.profiles import ProfileRegistry
@@ -640,6 +645,8 @@ def override_capture_zone(
         outcome = apply_zone_override(conn, ids, zone, state.settings.default_timezone)
     except ZoneOverrideInvalid as exc:
         raise ApiError(400, ErrorCode.BAD_REQUEST, str(exc)) from exc
+    except ZoneOverrideBusy as exc:
+        raise ApiError(409, ErrorCode.CONFLICT, str(exc)) from exc
     return {
         "changed": outcome.changed,
         "unchanged": outcome.unchanged,

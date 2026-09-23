@@ -50,6 +50,7 @@ export function ZoneDialog({
         <label htmlFor={inputId}>撮影地のタイムゾーン</label>
         <input
           id={inputId}
+          className="field"
           list={listId}
           value={value}
           placeholder="Asia/Ho_Chi_Minh"

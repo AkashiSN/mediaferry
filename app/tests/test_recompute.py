@@ -1203,3 +1203,33 @@ def test_recompute_keeps_the_zone_override(db, data_root, dji):
         "2026-08-17T13:00:00+07:00",
         "Asia/Ho_Chi_Minh",
     )
+
+
+def test_recompute_drops_the_zone_override_when_the_profile_stops_resolving_zones(
+    db, data_root, dji
+):
+    """`timezone_policy: none` の値は瞬間ではないので、撮影地へ直すと日付ごとずれる.
+
+    上書きは消す。残すと、その版では外せない（API が `none` を断る）。
+    """
+    profile, _, _, part2, _ = dji
+    db.execute(
+        "UPDATE media_file SET captured_at_zone_override = 'Asia/Ho_Chi_Minh' WHERE id = ?",
+        (part2,),
+    )
+    registry = ProfileRegistry(db)
+    registry.update(
+        profile.definition.slug,
+        replace(
+            profile.definition,
+            timestamp=replace(profile.definition.timestamp, timezone_policy="none", timezone=None),
+        ),
+    )
+    run(db, data_root, registry.current(profile.definition.slug))
+
+    row = db.execute(
+        "SELECT captured_at, captured_at_tz, captured_at_zone_override FROM media_file"
+        " WHERE id = ?",
+        (part2,),
+    ).fetchone()
+    assert tuple(row) == ("2026-08-17T15:00:00+00:00", None, None)
