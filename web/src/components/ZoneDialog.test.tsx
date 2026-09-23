@@ -49,11 +49,20 @@ describe("撮影地のタイムゾーンのダイアログ", () => {
     expect(await screen.findByText(/3 件/)).toBeInTheDocument();
   });
 
+  it("付け替えている最中は、そう知らせて入力も止める", async () => {
+    stubApi({ "/timezones": { timezones: ["Asia/Tokyo"] } });
+    render(<ZoneDialog count={1} onApply={vi.fn()} onClose={() => {}} busy />);
+
+    expect(await screen.findByRole("status")).toHaveTextContent("付け替えています");
+    expect(screen.getByRole("dialog")).toHaveAttribute("aria-busy", "true");
+    expect(screen.getByLabelText("撮影地のタイムゾーン")).toBeDisabled();
+  });
+
   it("送っている最中は押せない", async () => {
     stubApi({ "/timezones": { timezones: ["Asia/Tokyo"] } });
     render(<ZoneDialog count={1} onApply={vi.fn()} onClose={() => {}} busy />);
 
-    await userEvent.type(await screen.findByLabelText("撮影地のタイムゾーン"), "Asia/Tokyo");
+    await screen.findByLabelText("撮影地のタイムゾーン");
 
     expect(screen.getByRole("button", { name: "付け替える" })).toBeDisabled();
     expect(screen.getByRole("button", { name: "上書きを外す" })).toBeDisabled();

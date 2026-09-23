@@ -141,10 +141,18 @@ def _refuse_if_busy(
     - 送信ジョブが掴んでいる記録（`_HELD_STATES`）
     - つないでいる最中（`merging`）のグループの active member。出力は読み終えた
       先頭の日時で公開され、ここからは見えない（まだ `output_media_file_id` が無い）
+    - 走っている `recompute_timestamps`。排他区間の外で値を作り、読んだ時点の上書きで
+      書くので、間に入った付け替えを古い値で壊す。まだ走っていないものは、走り出した
+      ときに今の上書きを読むので止めない
     """
     targets = [*members, *outputs]
     if not targets:
         return
+    if conn.execute(
+        "SELECT 1 FROM job WHERE type = 'recompute_timestamps'"
+        " AND status IN ('running', 'cancelling') LIMIT 1"
+    ).fetchone():
+        raise ZoneOverrideBusy("撮影日時を再計算している最中。終わってから付け替える")
     marks = ", ".join("?" * len(targets))
     held = ", ".join("?" * len(_HELD_STATES))
     if conn.execute(

@@ -204,3 +204,25 @@ def test_a_cancel_during_the_approval_stops_the_commit(world, monkeypatch):
     row = record_of(db)
     assert row["state"] == "awaiting_datetime_approval"
     assert row["claim_job_id"] is None
+
+
+def test_approving_writes_the_capture_time_read_after_the_claim(world, monkeypatch):
+    """掴む前に読んだ日時を書かない.
+
+    撮影地の付け替え（`POST /media/timezone`）は、承認待ちの記録を止めない
+    （承認するときに今の日時を読み直す前提）。掴む前に読むと、読んでから掴むまでに
+    入った付け替えを飛ばして古い日時を書き、そのまま `complete` になる。
+    """
+    server, service, db, uploads, ctx = world
+    moved = "2026-08-17T12:30:00+07:00"
+    real = UploadRepository.claim_for_approval
+
+    def zone_changed_then_claim(self, *args, **kwargs):
+        # 読んでから掴むまでの間に、別の接続の付け替えが commit された形。
+        db.execute("UPDATE media_file SET captured_at = ?", (moved,))
+        return real(self, *args, **kwargs)
+
+    monkeypatch.setattr(UploadRepository, "claim_for_approval", zone_changed_then_claim)
+    service.approve(ctx, record_of(db)["id"])
+
+    assert server.datetimes["asset-1"] == moved

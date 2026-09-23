@@ -40,6 +40,7 @@ export function ZoneDialog({
         role="dialog"
         aria-modal="true"
         aria-label="撮影地のタイムゾーンを付け替える"
+        aria-busy={busy}
       >
         <h2>撮影地のタイムゾーンを付け替える</h2>
         <p>
@@ -55,6 +56,7 @@ export function ZoneDialog({
           value={value}
           placeholder="Asia/Ho_Chi_Minh"
           autoComplete="off"
+          disabled={busy}
           onChange={(event) => setValue(event.target.value)}
         />
         <datalist id={listId}>
@@ -62,6 +64,11 @@ export function ZoneDialog({
             <option key={zone} value={zone} />
           ))}
         </datalist>
+        {/* **押した後に何が起きているかを言う。** ボタンが押せなくなるだけだと、
+            読み上げでは進んでいるのか固まったのか分からない。 */}
+        <p role="status" className="muted">
+          {busy ? "付け替えています…" : ""}
+        </p>
         <div className="dialog-actions">
           <button type="button" onClick={onClose} disabled={busy}>
             やめる

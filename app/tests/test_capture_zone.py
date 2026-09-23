@@ -286,6 +286,27 @@ def test_a_member_being_merged_refuses_the_request(db, dji):
     assert captured(db, first)[2] is None
 
 
+@pytest.mark.parametrize("status", ["running", "cancelling"])
+def test_a_running_recompute_refuses_the_request(db, dji, status):
+    """再計算は排他区間の外で値を作り、読んだ時点の上書きで書く.
+
+    走っている間に付け替えを通すと、古い値で上書きが壊れる（値と上書きが食い違う）。
+    """
+    video = a_jst_video(db, dji)
+    a_job(db, type="recompute_timestamps", status=status)
+    with pytest.raises(ZoneOverrideBusy):
+        apply_zone_override(db, [video], VIETNAM, TOKYO)
+    assert captured(db, video)[2] is None
+
+
+def test_a_queued_recompute_does_not_block(db, dji):
+    """まだ走っていない再計算は、走り出したときに今の上書きを読む."""
+    video = a_jst_video(db, dji)
+    a_job(db, type="recompute_timestamps", status="queued")
+    apply_zone_override(db, [video], VIETNAM, TOKYO)
+    assert captured(db, video)[2] == VIETNAM
+
+
 def test_the_api_answers_409_while_busy(client, db, dji):
     destination = a_destination(db)
     video = a_jst_video(db, dji)

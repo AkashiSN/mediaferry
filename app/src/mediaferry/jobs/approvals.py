@@ -50,18 +50,22 @@ class ApprovalService:
 
         **claim を取ってから外部へ触る。** 取らないと、同時に走った却下が
         `complete` を commit した後にリモートを変更しうる。
+
+        **書く日時も claim の後に読む。** 撮影地の付け替えは承認待ちの記録を止めず、
+        `fixing_datetime` の記録だけを止める。先に読むと、読んでから掴むまでに入った
+        付け替えを飛ばして古い日時を書き、そのまま `complete` になる。
         """
         row = self._waiting(record_id)
         if row["remote_asset_id"] is None:
             raise ApprovalNotPossible("リモートの資産 ID が分からない")
-        media = self._conn.execute(
-            "SELECT captured_at FROM media_file WHERE id = ?", (row["media_file_id"],)
-        ).fetchone()
         revision = self._destinations.revision(row["destination_revision_id"])
         # awaiting → fixing_datetime を CAS で取る。ここで負けたら却下が先。
         self._uploads.claim_for_approval(record_id, ctx.job_id, ctx.lease_token)
         settled = False
         try:
+            media = self._conn.execute(
+                "SELECT captured_at FROM media_file WHERE id = ?", (row["media_file_id"],)
+            ).fetchone()
             self._uploads.prepare_side_effect(ctx, record_id, "fixing_datetime")
             # **所有権を確かめてから向き先を見る。** 再確認も鍵を付けた要求なので、
             # キャンセル済みのジョブから出さない（§14）。別のライブラリの資産の

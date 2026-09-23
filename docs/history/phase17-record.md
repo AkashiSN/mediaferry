@@ -41,6 +41,21 @@ Important はどれも設計が扱っていなかった経路で、3 つとも�
 約 600 件で iOS で扱いにくい、`Etc/GMT+7` などの紛らわしい名前も候補に出る、DST の
 注記が付け替え後も残る。
 
+## codex のレビューで直したもの
+
+Important 2、Minor 1。どれも並行して走る別の処理との競合で、同じ接続で直列に
+呼ぶテストでは作れない窓だった。
+
+| 指摘 | 起きること | 直し方 | テスト |
+| --- | --- | --- | --- |
+| 承認が掴む前に日時を読む | 承認待ちは付け替えを止めない前提だったが、`approve` は記録を掴む**前**に `captured_at` を読んでいた。読んでから掴むまでに入った付け替えを飛ばし、古い日時を Immich へ書いて `complete` にする | 日時を読むのを claim の後へ移した。掴んだ後は `fixing_datetime` なので、付け替えは 409 で止まる | `test_approving_writes_the_capture_time_read_after_the_claim`（掴む直前に値を変える） |
+| 再計算が古い値で上書きを壊す | 再計算は排他区間の外で値を作る。その間に付け替えが commit されると、古い値を書き、列の上書きだけが新しいまま残る（値と上書きが食い違う） | `recompute_timestamps` が `running` / `cancelling` の間は 409。`queued` は走り出したときに今の上書きを読むので止めない | `test_a_running_recompute_refuses_the_request` / `test_a_queued_recompute_does_not_block` |
+| 付け替え中が読み上げで伝わらない（Minor） | ボタンが押せなくなるだけで、進んでいるのか固まったのか分からない | `aria-busy` と `role="status"` の「付け替えています…」、入力欄も止める | `付け替えている最中は、そう知らせて入力も止める` |
+
+どれも実装の前にテストが落ちることを確かめた。codex の環境では
+`test_the_api_answers_409_while_busy` の途中で pytest が止まったと報告があったが、
+こちらでは再現しない（uv のキャッシュが読み取り専用だった環境の事情と見ている）。
+
 ## 変異試験
 
 `PYTHONDONTWRITEBYTECODE=1` を付け、控えを取ってから 1 つずつ壊した。
