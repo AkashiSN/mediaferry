@@ -611,3 +611,9 @@ def test_every_shipped_migration_leaves_the_references_intact(tmp_path):
     apply_migrations(conn)
     assert conn.execute("PRAGMA foreign_key_check").fetchall() == []
     conn.close()
+
+
+def test_capture_zone_override_is_added_and_empty(db):
+    """既存行を壊さずに列だけ足す. 上書きは利用者が付けるまで無い."""
+    columns = {row["name"] for row in db.execute("PRAGMA table_info(media_file)")}
+    assert "captured_at_zone_override" in columns

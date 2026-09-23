@@ -1,3 +1,4 @@
 # 出荷済みの版の sha256（`test_db_migrate.py` が固定する）。
 # **既存の行は書き換えない。** 直したいことがあるなら新しい版を足す。
 0001_initial.sql b527ee5696d45b7b9fc356e5cab83abd8f4bc34262b0e0cfd9e34427768691ff
+0002_capture_zone_override.sql 492ab41a35b937961e0ce9d1c6627156e1d5588069ad963fff4ae9f3a2444d8a
