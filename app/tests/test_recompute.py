@@ -581,7 +581,7 @@ def test_the_requeue_shares_the_transaction_with_the_update(dji, db, data_root, 
     def explode(*args, **kwargs):
         raise RuntimeError("差し戻しが失敗した")
 
-    monkeypatch.setattr(Recomputer, "_requeue", explode)
+    monkeypatch.setattr("mediaferry.jobs.recompute.requeue_sent", explode)
     with pytest.raises(RuntimeError):
         run(db, data_root, to_berlin(db, profile))
 
@@ -1183,3 +1183,23 @@ def test_an_invalidated_skip_is_not_reopened(dji, db, data_root):
     row = db.execute("SELECT * FROM upload_record WHERE id = ?", (record,)).fetchone()
     assert row["stack_state"] == "skipped"
     assert outcome.reopened == 0
+
+
+def test_recompute_keeps_the_zone_override(db, data_root, dji):
+    """プロファイルを保存して再計算しても、利用者の付け替えを JST へ戻さない."""
+    profile, _, _, part2, _ = dji
+    db.execute(
+        "UPDATE media_file SET captured_at_zone_override = 'Asia/Ho_Chi_Minh',"
+        " captured_at = '2026-08-17T13:00:00+07:00', captured_at_tz = 'Asia/Ho_Chi_Minh'"
+        " WHERE id = ?",
+        (part2,),
+    )
+    run(db, data_root, profile)
+
+    row = db.execute(
+        "SELECT captured_at, captured_at_tz FROM media_file WHERE id = ?", (part2,)
+    ).fetchone()
+    assert (row["captured_at"], row["captured_at_tz"]) == (
+        "2026-08-17T13:00:00+07:00",
+        "Asia/Ho_Chi_Minh",
+    )

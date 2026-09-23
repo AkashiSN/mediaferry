@@ -29,10 +29,10 @@ from pathlib import Path, PurePosixPath
 
 from ..adapters.exif import read_datetime_original
 from ..adapters.ffprobe import PHOTO_EXTENSIONS
-from ..clock import now_iso
 from ..core import lease_pulse
 from ..core.lease_pulse import with_lease_pulse
-from ..core.timestamps import CapturedAt, resolve_captured_at
+from ..core.timestamps import CapturedAt, resolve_captured_at, with_zone_override
+from ..db.capture_zone import reopen_skipped_stack, requeue_sent
 from ..db.connection import immediate
 from ..db.jobs import JobContext, LeaseLost
 from ..db.profiles import ProfileRef
@@ -122,6 +122,7 @@ class Recomputer:
             self._conn.execute(
                 "SELECT m.id, m.rel_path, m.mtime_ns, m.captured_at, m.captured_at_source,"
                 " m.captured_at_tz, m.captured_at_note, m.container_wall,"
+                " m.captured_at_zone_override,"
                 " (SELECT s.rel_path FROM source_entry s"
                 "   WHERE s.media_file_id = m.id AND s.state = 'published'"
                 "   ORDER BY s.observed_at, s.id LIMIT 1) AS source_rel_path"
@@ -164,7 +165,7 @@ class Recomputer:
         source_rel = row["source_rel_path"]
         if source_rel is None:
             return None
-        return resolve_captured_at(
+        resolved = resolve_captured_at(
             profile.definition,
             source_rel,
             row["mtime_ns"],
@@ -173,6 +174,9 @@ class Recomputer:
             # **再 probe しない。** 取り込みで生の文字列を持っている。
             container_wall=row["container_wall"],
         )
+        # **利用者が付けた撮影地を再計算で消さない。** 解き直すのはカメラの時計で、
+        # 撮影地はその上に載る見せ方なので、解いた瞬間へ毎回付け直す。
+        return with_zone_override(resolved, row["captured_at_zone_override"])
 
     def _exif_wall(
         self, ctx: JobContext, row: sqlite3.Row, source_rel: str, profile: ProfileRef
@@ -341,8 +345,12 @@ class Recomputer:
                     tally.unchanged += 1
                     continue
                 tally.changed += 1
-                tally.requeued += self._requeue(row, profile)
-                tally.reopened += self._reopen_stack(row)
+                tally.requeued += requeue_sent(
+                    self._conn,
+                    row["id"],
+                    fixes_datetime=profile.definition.immich.fix_datetime_after_upload,
+                )
+                tally.reopened += reopen_skipped_stack(self._conn, row["id"])
         return skipped
 
     def _write(self, row: sqlite3.Row, value: CapturedAt, revision_id: str) -> None:
@@ -351,47 +359,6 @@ class Recomputer:
             " captured_at_note = ?, captured_at_revision_id = ? WHERE id = ?",
             (value.at.isoformat(), value.source, value.tz, value.note, revision_id, row["id"]),
         )
-
-    def _reopen_stack(self, row: sqlite3.Row) -> int:
-        """スタックの見送りを未評価へ戻す（§6）.
-
-        抽出は未評価しか拾わないので、戻さないと二度と再評価されない。
-        **`stacked` は戻さない**（相手側に既にあるものを作り直さない）。
-
-        **組の判定は撮影時刻を見ない**（§6）ので、この戻しで結論が変わることは無い。
-        見送りを未評価へ戻すのが `captured_at` を動かす側の責任だ、という形だけを残す。
-
-        **無効化された行は触らない。** 監査履歴なので書き換えない。第 2 パスの
-        抽出も無効化を除くので、戻しても拾われない。
-        """
-        return self._conn.execute(
-            "UPDATE upload_record SET stack_state = NULL, stack_reason = NULL, updated_at = ?"
-            " WHERE media_file_id = ? AND stack_state = 'skipped' AND invalidated_at IS NULL",
-            (now_iso(), row["id"]),
-        ).rowcount
-
-    def _requeue(self, row: sqlite3.Row, profile: ProfileRef) -> int:
-        """送信済みを `needs_recheck` へ戻す（`CLAIMABLE_STATES` に入っている）.
-
-        **戻すのは「プロファイルが日時を書き戻す」ものだけ。**
-        `fix_datetime_after_upload` が偽なら、こちらがリモートの日時を書いたことが
-        無いので、ローカルが変わってもリモートに差は生じない。戻すと、何も
-        変わらない再送を全件に強いる。
-
-        条件は `state = 'complete'` の CAS。進行中のレコードを踏むと、所有者の
-        いる行を横から動かすことになる。
-
-        **無効化された行は触らない。** 無効化された `complete` は「なぜ送信を
-        許可したか」を残すための監査履歴で、送信済みの記録ではない（§2.3）。
-        claim も一覧も数え上げも無効化を除くので、戻しても誰も拾わない。
-        """
-        if not profile.definition.immich.fix_datetime_after_upload:
-            return 0
-        return self._conn.execute(
-            "UPDATE upload_record SET state = 'needs_recheck', updated_at = ?"
-            " WHERE media_file_id = ? AND state = 'complete' AND invalidated_at IS NULL",
-            (now_iso(), row["id"]),
-        ).rowcount
 
 
 def _same(row: sqlite3.Row, value: CapturedAt) -> bool:
