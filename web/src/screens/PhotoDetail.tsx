@@ -51,6 +51,8 @@ type MediaDetail = {
   captured_at: string;
   captured_at_source: string;
   captured_at_tz: string | null;
+  /** 利用者が付けた撮影地のゾーン。付けていなければ `null`。 */
+  captured_at_zone_override?: string | null;
   duration_seconds: number | null;
   probe_state: string;
   missing_at: string | null;
@@ -249,6 +251,12 @@ export function PhotoDetailScreen() {
                 : ""}
               {` ・ ${formatBytes(data.size_bytes)}`}
             </p>
+            {data.captured_at_zone_override != null && (
+              <p className="muted">
+                撮影地のタイムゾーンを {data.captured_at_zone_override}{" "}
+                に付け替えています（撮った瞬間は変えていません）。
+              </p>
+            )}
           </div>
 
           {members !== null && (

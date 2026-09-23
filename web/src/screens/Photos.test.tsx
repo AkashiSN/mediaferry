@@ -500,6 +500,80 @@ describe("写真の画面", () => {
     expect(screen.queryByText("2:05")).toBeNull();
   });
 
+  it("選んだものを撮影地のタイムゾーンへ付け替え、一覧を読み直す", async () => {
+    const bodies: unknown[] = [];
+    const { calls } = stubApi(
+      {
+        "/media": {
+          media: [
+            media("a", "2026-09-22T20:16:31+09:00"),
+            media("b", "2026-09-22T19:00:00+09:00"),
+          ],
+          total: 2,
+          page: 1,
+          page_size: 200,
+        },
+        "/destinations": { destinations: [] },
+        "/timezones": { timezones: ["Asia/Ho_Chi_Minh"] },
+        "POST /media/timezone": { changed: 2, unchanged: 0, requeued: 0 },
+      },
+      (path, init) => {
+        if (path === "/media/timezone") {
+          bodies.push(JSON.parse(String(init?.body)));
+        }
+      },
+    );
+    render(
+      <MemoryRouter>
+        <PhotosScreen />
+      </MemoryRouter>,
+    );
+
+    await userEvent.click(
+      await screen.findByRole("checkbox", { name: "2026年9月22日 をまとめて選ぶ" }),
+    );
+    const before = calls().filter((c) => c.path.startsWith("/media?")).length;
+    await userEvent.click(screen.getByRole("button", { name: "撮影地のタイムゾーン" }));
+    await userEvent.type(await screen.findByLabelText("撮影地のタイムゾーン"), "Asia/Ho_Chi_Minh");
+    await userEvent.click(screen.getByRole("button", { name: "付け替える" }));
+
+    await waitFor(() => expect(screen.queryByText(/件を選択中/)).not.toBeInTheDocument());
+    expect(bodies).toEqual([{ ids: ["a", "b"], timezone: "Asia/Ho_Chi_Minh" }]);
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+    await waitFor(() =>
+      expect(calls().filter((c) => c.path.startsWith("/media?")).length).toBeGreaterThan(before),
+    );
+  });
+
+  it("付け替えに失敗したら、選んだまま理由を出す", async () => {
+    stubApi({
+      "/media": {
+        media: [media("a", "2026-09-22T20:16:31+09:00")],
+        total: 1,
+        page: 1,
+        page_size: 200,
+      },
+      "/destinations": { destinations: [] },
+      "/timezones": { timezones: ["Asia/Ho_Chi_Minh"] },
+      // `POST /media/timezone` を登録しない: `stubApi` はエラーの本文で 404 を返す。
+    });
+    render(
+      <MemoryRouter>
+        <PhotosScreen />
+      </MemoryRouter>,
+    );
+
+    await userEvent.click(
+      await screen.findByRole("checkbox", { name: "2026年9月22日 をまとめて選ぶ" }),
+    );
+    await userEvent.click(screen.getByRole("button", { name: "撮影地のタイムゾーン" }));
+    await userEvent.type(await screen.findByLabelText("撮影地のタイムゾーン"), "Asia/Ho_Chi_Minh");
+    await userEvent.click(screen.getByRole("button", { name: "付け替える" }));
+
+    expect(await screen.findByRole("alert")).toBeInTheDocument();
+    expect(screen.getByText("1 件を選択中")).toBeInTheDocument();
+  });
+
   it("日付の丸で、その日を全部選ぶ", async () => {
     stubApi({
       "/media": {

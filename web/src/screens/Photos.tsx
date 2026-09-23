@@ -6,10 +6,12 @@
 import { useMemo, useState } from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
 
+import { request } from "../api/client";
 import { useQuery } from "../api/hooks";
 import { ErrorBanner } from "../components/ErrorBanner";
 import { Icon } from "../components/Icon";
 import { MediaTile, type Media } from "../components/MediaTile";
+import { ZoneDialog } from "../components/ZoneDialog";
 import { useEvents } from "../hooks/useEvents";
 import { useReloadOnEvents } from "../hooks/useReloadOnEvents";
 import { formatBytes } from "../utils/formatBytes";
@@ -144,6 +146,10 @@ export function PhotosScreen() {
   // **選んだものは、隠れても覚えておく。** 大きさも一緒に持つ —— 表示中の行から
   // 計算すると、絞り込みで隠した分が合計から抜けて、確認の数字が実際と食い違う。
   const [selected, setSelected] = useState<Map<string, number>>(new Map());
+  // 撮影地のタイムゾーンの付け替え（選択バーから開く）。
+  const [zoneOpen, setZoneOpen] = useState(false);
+  const [zoneBusy, setZoneBusy] = useState(false);
+  const [zoneError, setZoneError] = useState<unknown>(null);
   // **Shift の範囲の起点。** `selected` と違って、これは「並び」に属する状態
   // なので、並びが変われば無効になる（下で、並びと一緒に捨てる）。
   const [anchor, setAnchor] = useState<string | null>(null);
@@ -193,6 +199,29 @@ export function PhotosScreen() {
   // 取り込みや送信が進んだら取り直す（**画面を再読み込みせずに進む**。§13）。
   const { received } = useEvents();
   useReloadOnEvents(received, media.reload);
+
+  /**
+   * 選んだものを撮影地のゾーンへ付け替える。**失敗したら選んだまま残す** ——
+   * 選び直させない。成功したら一覧を読み直す（撮影日時と日付のまとまりが動く）。
+   */
+  async function applyZone(zone: string | null) {
+    setZoneBusy(true);
+    setZoneError(null);
+    try {
+      await request("/media/timezone", {
+        method: "POST",
+        body: { ids: [...selected.keys()], timezone: zone },
+      });
+      setZoneOpen(false);
+      setSelected(new Map());
+      media.reload();
+    } catch (error) {
+      setZoneOpen(false);
+      setZoneError(error);
+    } finally {
+      setZoneBusy(false);
+    }
+  }
 
   const rows: Media[] = useMemo(() => {
     if (needsDestination) {
@@ -389,7 +418,7 @@ export function PhotosScreen() {
         </span>
       </div>
 
-      <ErrorBanner error={media.error ?? destinations.error} />
+      <ErrorBanner error={media.error ?? destinations.error ?? zoneError} />
 
       {/* **ファイル名で探せるようにする。** 1 度に読むのは 200 件までなので、
           これが無いと古いものへは画面から辿り着けない。 */}
@@ -584,6 +613,9 @@ export function PhotosScreen() {
           >
             送る
           </button>
+          <button type="button" className="btn quiet" onClick={() => setZoneOpen(true)}>
+            撮影地のタイムゾーン
+          </button>
           <button
             type="button"
             className="btn quiet"
@@ -592,6 +624,14 @@ export function PhotosScreen() {
             やめる
           </button>
         </div>
+      )}
+      {zoneOpen && (
+        <ZoneDialog
+          count={selected.size}
+          onApply={(zone) => void applyZone(zone)}
+          onClose={() => setZoneOpen(false)}
+          busy={zoneBusy}
+        />
       )}
     </section>
   );

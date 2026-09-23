@@ -196,6 +196,19 @@ describe("1 件のくわしく", () => {
     await waitFor(() => expect(screen.getByText(expected)).toBeInTheDocument());
   });
 
+  it("撮影地のタイムゾーンを付け替えていれば、そう書く", async () => {
+    renderDetail({ captured_at_zone_override: "Asia/Ho_Chi_Minh" });
+    expect(
+      await screen.findByText(/撮影地のタイムゾーンを Asia\/Ho_Chi_Minh に付け替えています/),
+    ).toBeInTheDocument();
+  });
+
+  it("付け替えていなければ、何も書かない", async () => {
+    renderDetail({ captured_at_zone_override: null });
+    await screen.findByRole("heading", { level: 1 });
+    expect(screen.queryByText(/撮影地のタイムゾーンを/)).not.toBeInTheDocument();
+  });
+
   it("つないだ動画は、元になったファイルの本数を出す", async () => {
     renderDetail({
       sources: [
